@@ -6,16 +6,17 @@ use crate::utils::decode_base64url;
 
 use super::evidence::AzSnpEvidence;
 
-/// Output of the synchronous az-snp verification core, before the (async,
-/// collateral-dependent) CRL revocation check.
+/// A verified az-snp attestation together with the locator for its revocation
+/// collateral.
 ///
-/// The full az-snp verification splits into a synchronous part (TPM quote, AK
-/// binding, VCEK chain, SNP report signature, policy) and an asynchronous CRL
-/// revocation check that needs a [`CertProvider`]. Splitting them lets the
-/// synchronous core be shared between the native async path (which fetches the
-/// CRL and sets `collateral_verified`) and environments without an async cert
-/// provider — notably WASM — which report `collateral_verified = false`.
-pub struct AzSnpVerified {
+/// [`verify_report`] performs the full cryptographic verification (TPM quote, AK
+/// binding, VCEK chain, SNP report signature, policy) but deliberately does not
+/// fetch or check revocation collateral — that is a separate concern. It returns
+/// this struct so a caller that *does* care about revocation (notably
+/// [`verify_evidence`]) has the pieces it needs to locate and run the CRL check:
+/// the matched generation pins the AMD root, and the VCEK is what the CRL is
+/// checked against.
+pub struct VerifiedReport {
     /// Verification result with `collateral_verified = false` (no CRL checked yet).
     pub result: VerificationResult,
     /// AMD processor generation the VCEK chain validated against.
@@ -26,18 +27,22 @@ pub struct AzSnpVerified {
     pub report_version: u32,
 }
 
-/// Verify Azure SNP vTPM attestation evidence.
+/// Verify Azure SNP vTPM attestation evidence — the full flow.
+///
+/// Assembles the two halves of az-snp verification: the cryptographic core in
+/// [`verify_report`], then the revocation check. This keeps the same signature
+/// as every other platform's `verify_evidence` so call sites are uniform.
 pub async fn verify_evidence(
     evidence: &AzSnpEvidence,
     params: &VerifyParams,
     cert_provider: &dyn CertProvider,
 ) -> Result<VerificationResult> {
-    let AzSnpVerified {
+    let VerifiedReport {
         mut result,
         matched_gen,
         vcek_der,
         ..
-    } = verify_evidence_no_crl(evidence, params)?;
+    } = verify_report(evidence, params)?;
 
     // CRL revocation check (if provider supplies CRL data)
     // AMD CRLs are signed by the ARK (root), not the ASK/ASVK intermediate.
@@ -54,16 +59,20 @@ pub async fn verify_evidence(
     Ok(result)
 }
 
-/// Synchronous az-snp verification core: everything except the async CRL check.
+/// The cryptographic core of az-snp verification.
 ///
 /// Performs the TPM quote signature check, AK-to-TEE binding, VCEK certificate
 /// chain validation, SNP report signature, and all policy enforcement (VMPL,
-/// debug, TCB). Returns the still-`collateral_verified = false` result together
-/// with the matched generation and VCEK so the caller can run the CRL check.
-pub fn verify_evidence_no_crl(
+/// debug, TCB). Revocation is intentionally out of scope: it is a separate fetch
+/// (the CRL) and check that needs a [`CertProvider`], so this returns the
+/// still-`collateral_verified = false` result together with the matched
+/// generation and VCEK that locate the collateral. Callers wanting the full flow
+/// use [`verify_evidence`]; callers without an async cert provider — notably
+/// WASM — call this directly and handle revocation separately, if at all.
+pub fn verify_report(
     evidence: &AzSnpEvidence,
     params: &VerifyParams,
-) -> Result<AzSnpVerified> {
+) -> Result<VerifiedReport> {
     if evidence.version != 1 {
         return Err(AttestationError::EvidenceDeserialize(format!(
             "unsupported az_snp evidence version: {}",
@@ -214,7 +223,7 @@ pub fn verify_evidence_no_crl(
         // the synchronous core has not checked revocation.
         false,
     );
-    Ok(AzSnpVerified {
+    Ok(VerifiedReport {
         result,
         matched_gen,
         vcek_der,
@@ -392,7 +401,7 @@ mod tests {
         assert!(!evidence.vcek.is_empty());
     }
 
-    // --- Full synchronous verification core (verify_evidence_no_crl) ---
+    // --- Full cryptographic verification core (verify_report) ---
 
     fn load_az_snp_evidence(json: &str) -> AzSnpEvidence {
         let envelope: crate::types::AttestationEvidence = serde_json::from_str(json).unwrap();
@@ -402,16 +411,16 @@ mod tests {
 
     // A real recorded Azure Milan az-snp attestation (HCL report + vTPM quote +
     // VCEK), chaining to the bundled AMD Milan roots. It exercises the entire
-    // synchronous verification core: TPM signature against the AK, AK->TEE
-    // binding, PCR digest, VCEK chain, SNP report signature, and policy.
+    // verification core: TPM signature against the AK, AK->TEE binding, PCR
+    // digest, VCEK chain, SNP report signature, and policy.
     const MILAN_V3_FIXTURE: &str =
         include_str!("../../../test_data/az_snp/milan-v3-attestation.json");
 
     #[test]
-    fn test_verify_evidence_no_crl_milan_fixture() {
+    fn test_verify_report_milan_fixture() {
         let evidence = load_az_snp_evidence(MILAN_V3_FIXTURE);
 
-        let verified = verify_evidence_no_crl(&evidence, &VerifyParams::default())
+        let verified = verify_report(&evidence, &VerifyParams::default())
             .expect("Milan az-snp fixture should verify end to end");
 
         assert!(verified.result.signature_valid);
@@ -426,12 +435,12 @@ mod tests {
         );
         // No expected_report_data supplied → freshness binding is not enforced.
         assert_eq!(verified.result.report_data_match, None);
-        // The synchronous core does not run the (async) CRL revocation check.
+        // The verification core does not run the (async) CRL revocation check.
         assert!(!verified.result.collateral_verified);
     }
 
     #[test]
-    fn test_verify_evidence_no_crl_rejects_wrong_nonce() {
+    fn test_verify_report_rejects_wrong_nonce() {
         // This fixture's quote carries an empty extraData, so any non-empty
         // expected report_data must fail closed (TPM nonce length mismatch).
         let evidence = load_az_snp_evidence(MILAN_V3_FIXTURE);
@@ -441,13 +450,13 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            verify_evidence_no_crl(&evidence, &params).is_err(),
+            verify_report(&evidence, &params).is_err(),
             "non-empty expected report_data must not match an empty quote nonce"
         );
     }
 
     #[test]
-    fn test_verify_evidence_no_crl_binds_report_data() {
+    fn test_verify_report_binds_report_data() {
         // evidence-v1.json's vTPM quote binds the ASCII nonce "challenge"; the
         // core must confirm the freshness binding when that nonce is expected.
         let evidence =
@@ -457,7 +466,7 @@ mod tests {
             expected_report_data: Some(b"challenge".to_vec()),
             ..Default::default()
         };
-        let verified = verify_evidence_no_crl(&evidence, &params)
+        let verified = verify_report(&evidence, &params)
             .expect("evidence-v1 should verify with its bound nonce");
         assert_eq!(verified.result.report_data_match, Some(true));
 
@@ -466,6 +475,6 @@ mod tests {
             expected_report_data: Some(b"not-the-challenge".to_vec()),
             ..Default::default()
         };
-        assert!(verify_evidence_no_crl(&evidence, &wrong).is_err());
+        assert!(verify_report(&evidence, &wrong).is_err());
     }
 }
