@@ -69,10 +69,7 @@ pub async fn verify_evidence(
 /// generation and VCEK that locate the collateral. Callers wanting the full flow
 /// use [`verify_evidence`]; callers without an async cert provider — notably
 /// WASM — call this directly and handle revocation separately, if at all.
-pub fn verify_report(
-    evidence: &AzSnpEvidence,
-    params: &VerifyParams,
-) -> Result<VerifiedReport> {
+pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<VerifiedReport> {
     if evidence.version != 1 {
         return Err(AttestationError::EvidenceDeserialize(format!(
             "unsupported az_snp evidence version: {}",
