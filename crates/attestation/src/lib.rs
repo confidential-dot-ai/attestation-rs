@@ -27,6 +27,9 @@
 //! let evidence_json = attestation::attest(platform, b"nonce", &attestation::AttestOptions::default()).await?;
 //! ```
 
+#[cfg(all(feature = "attest", target_os = "linux"))]
+use std::sync::OnceLock;
+
 pub mod collateral;
 pub mod error;
 pub mod platforms;
@@ -61,8 +64,27 @@ pub use types::*;
 ///
 /// Order: `az-tdx` → `az-snp` → `gcp-tdx` → `gcp-snp` → `tdx` → `snp`
 ///
+/// The result is memoized: the underlying hardware probes (which open a vTPM
+/// context on vTPM-backed platforms) run once for the process, so callers on
+/// hot paths — `/health` probes, `/attest`, `/platform` — do not re-probe the
+/// device on every request.
 #[cfg(all(feature = "attest", target_os = "linux"))]
 pub fn detect() -> Result<PlatformType> {
+    // OnceLock holds Option: Some(platform) on detection, None when no platform
+    // is present. Both outcomes are static for the process — hardware does not
+    // appear or vanish at runtime — so caching either is sound. (Result is not
+    // cached directly because AttestationError is not Clone.)
+    static DETECTED: OnceLock<Option<PlatformType>> = OnceLock::new();
+    match DETECTED.get_or_init(|| detect_uncached().ok()) {
+        Some(platform) => Ok(*platform),
+        None => Err(AttestationError::NoPlatformDetected),
+    }
+}
+
+/// Probe the hardware for the current TEE platform. Uncached; [`detect`] wraps
+/// this with process-lifetime memoization.
+#[cfg(all(feature = "attest", target_os = "linux"))]
+fn detect_uncached() -> Result<PlatformType> {
     #[cfg(feature = "az-tdx")]
     if platforms::az_tdx::attest::is_available() {
         return Ok(PlatformType::AzTdx);

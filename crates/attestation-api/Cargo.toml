@@ -24,8 +24,11 @@ moka = { version = "0.12", features = ["future"] }
 p256 = { workspace = true, features = ["jwk", "ecdsa"] }
 subtle = { workspace = true }
 
-# HTTP client (cert fetching)
-reqwest = { workspace = true, features = ["rustls-tls"] }
+# HTTP client (cert fetching). Pinned directly (not `workspace = true`) so
+# default-features=false takes effect — drops reqwest's default `default-tls`
+# (native-tls → openssl-sys), which breaks the static-musl build and is
+# redundant with rustls. Matches the `attestation` crate's reqwest line.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # CLI & logging
 clap = { workspace = true }

@@ -20,6 +20,8 @@ pub struct CacheStats {
 }
 
 pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
+    // attestation::detect() memoizes the hardware probe, so calling it per
+    // request here does not re-open the vTPM context.
     let platform = {
         #[cfg(target_os = "linux")]
         {

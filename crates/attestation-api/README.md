@@ -1,6 +1,6 @@
 # Attestation Service
 
-[![CI](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml)
 
 A REST API service for generating and verifying Trusted Execution Environment (TEE) attestation evidence. Built in Rust with Axum, it wraps the `attestation-rs` library to expose attestation workflows over HTTP.
 
@@ -121,4 +121,4 @@ curl -X POST http://127.0.0.1:8400/verify \
 
 ## Container Image
 
-CI publishes the service image as `ghcr.io/lunal-dev/attestation-api`.
+CI publishes the service image as `ghcr.io/confidential-dot-ai/attestation-api`.
