@@ -1,6 +1,6 @@
 # Attestation Workspace
 
-[![CI](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml)
 
 Rust workspace for TEE attestation libraries, tools, and services.
 
@@ -35,7 +35,7 @@ cargo build -p attestation-api --release
 docker build .
 ```
 
-The service image is published as `ghcr.io/lunal-dev/attestation-api`.
+The service image is published as `ghcr.io/confidential-dot-ai/attestation-api`.
 
 ## WASM verification in the browser
 
@@ -73,6 +73,26 @@ module script:
   console.log(JSON.parse(resultJson));
 </script>
 ```
+
+The module also exports `verify_az_snp` for full **Azure SEV-SNP** (vTPM)
+verification. Unlike `verify_snp`, which checks only the bare SNP hardware report,
+it verifies the HCL-wrapped report *and* the vTPM quote — the TPM signature against
+the attestation key (AK) in the HCL runtime data, the AK→TEE binding, and the
+freshness anchor in the quote's `extraData` (not the SNP `report_data`). The
+processor generation is auto-detected from the report CPUID, so no `generation`
+argument is needed:
+
+```js
+import init, { verify_az_snp } from './pkg/attestation_wasm.js';
+await init();
+// evidence: AzSnpEvidence JSON { version, tpm_quote, hcl_report, vcek }
+// expectedReportData (optional): Uint8Array the quote's extraData must equal
+const resultJson = verify_az_snp(JSON.stringify(evidence), expectedReportData);
+```
+
+It returns the same result shape as `verify_snp` with `platform: "az-snp"`. The
+WASM path skips the async CRL revocation check (`collateral_verified: false`); the
+native async `az_snp::verify::verify_evidence` adds it via a `CertProvider`.
 
 For a Node.js end-to-end example (generate live evidence, fetch the VCEK from AMD
 KDS, verify in WASM), build with `--target nodejs` and run
