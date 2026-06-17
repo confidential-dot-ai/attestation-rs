@@ -979,4 +979,95 @@ mod tests {
             result.err()
         );
     }
+
+    // ---------------------------------------------------------------
+    // expected_launch_digest tests — closes the policy gap where the
+    // verifier can prove "this report is valid" but cannot prove
+    // "this report represents OUR published build."
+    //
+    // Uses the LIVE_REPORT_V5 (Genoa v5, VMPL=0) fixture together
+    // with LIVE_VCEK_GENOA so the full verify_evidence pipeline
+    // (cert chain → report sig → VMPL → debug → VCEK TCB) all pass.
+    // ---------------------------------------------------------------
+
+    /// Cert provider that returns the bundled live Genoa VCEK from the
+    /// fixture. No network access, no CRL (so collateral_verified=false).
+    struct StubCertProvider;
+
+    #[async_trait::async_trait]
+    impl crate::collateral::CertProvider for StubCertProvider {
+        async fn get_snp_vcek(
+            &self,
+            _processor_gen: ProcessorGeneration,
+            _chip_id: &[u8; 64],
+            _reported_tcb: &SnpTcb,
+        ) -> Result<Vec<u8>> {
+            Ok(LIVE_VCEK_GENOA.to_vec())
+        }
+
+        async fn get_snp_cert_chain(
+            &self,
+            _processor_gen: ProcessorGeneration,
+        ) -> Result<(Vec<u8>, Vec<u8>)> {
+            // Not used — the bare-metal SNP path uses bundled ARK/ASK directly.
+            Err(AttestationError::CertFetchError(
+                "stub provider does not serve full chain".to_string(),
+            ))
+        }
+    }
+
+    fn make_snp_evidence_with_vcek(report: &[u8], vcek_der: &[u8]) -> SnpEvidence {
+        use crate::platforms::snp::evidence::SnpCertChain;
+        SnpEvidence {
+            attestation_report: BASE64.encode(report),
+            cert_chain: Some(SnpCertChain {
+                vcek: BASE64.encode(vcek_der),
+                ask: None,
+                ark: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_no_expected_launch_digest_yields_none() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let r = verify_evidence(&evidence, &VerifyParams::default(), &provider)
+            .await
+            .expect("live v5 fixture should verify");
+        assert!(r.launch_digest_match.is_none(), "no expected_* → None");
+        assert!(r.mrtd_match.is_none(), "SNP never sets mrtd_match");
+        assert!(r.rtmr_matches.is_none(), "SNP never sets rtmr_matches");
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_matching_launch_digest() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut expected = [0u8; 48];
+        expected.copy_from_slice(&report.measurement[..]);
+
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            expected_launch_digest: Some(expected),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        assert_eq!(r.launch_digest_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
+        // INVARIANT: wrong launch_digest records Some(false) but verification
+        // still succeeds — policy lives in the caller.
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            expected_launch_digest: Some([0xAA; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        assert_eq!(r.launch_digest_match, Some(false));
+        assert!(r.signature_valid, "wrong digest should NOT fail signature");
+    }
 }

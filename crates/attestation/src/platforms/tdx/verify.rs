@@ -1008,4 +1008,101 @@ mod tests {
         let result = verify_evidence(&evidence, &params, None).await;
         assert!(result.is_err(), "65-byte report_data should be rejected");
     }
+
+    // ---------------------------------------------------------------
+    // expected_mrtd / expected_rtmrs tests — closes the policy gap
+    // where the verifier can prove "this quote is valid" but cannot
+    // prove "this quote represents OUR published build."
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_verify_evidence_no_expected_measurements_yields_none() {
+        // Sanity: when the caller supplies no expected_* values, the result
+        // fields are None — distinguishing "skipped" from "failed".
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert!(r.mrtd_match.is_none(), "no expected_mrtd → None");
+        assert!(r.rtmr_matches.is_none(), "no expected_rtmrs → None");
+        assert!(
+            r.launch_digest_match.is_none(),
+            "TDX never sets launch_digest_match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_matching_mrtd() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_mrtd: Some(quote.body.mr_td),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_wrong_mrtd_is_some_false() {
+        // INVARIANT: A wrong MRTD records Some(false) but DOES NOT fail the
+        // verifier. Policy lives in the caller — this test ensures we
+        // surface the mismatch rather than masking it as a hard error.
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_mrtd: Some([0xAA; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(false));
+        // Crucially the rest of the result is still populated — sig is valid.
+        assert!(r.signature_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_partial_rtmr_check() {
+        // Caller provides only rtmr0, leaving the others as inner None.
+        // rtmr_matches[0] should be Some(true); the rest remain None.
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let expected: [Option<[u8; 48]>; 4] = [Some(quote.body.rtmr_0), None, None, None];
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_rtmrs: Some(expected),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        let m = r.rtmr_matches.expect("rtmr_matches should be Some(...)");
+        assert_eq!(m[0], Some(true), "rtmr0 should match");
+        assert_eq!(m[1], None, "rtmr1 not requested → None");
+        assert_eq!(m[2], None, "rtmr2 not requested → None");
+        assert_eq!(m[3], None, "rtmr3 not requested → None");
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let expected: [Option<[u8; 48]>; 4] = [
+            Some(quote.body.rtmr_0), // match
+            Some([0xFF; 48]),        // mismatch
+            None,                    // skip
+            Some(quote.body.rtmr_3), // match
+        ];
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_rtmrs: Some(expected),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        let m = r.rtmr_matches.unwrap();
+        assert_eq!(m[0], Some(true));
+        assert_eq!(m[1], Some(false));
+        assert_eq!(m[2], None);
+        assert_eq!(m[3], Some(true));
+    }
 }
