@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: lunal-dev/attestation-api
+  IMAGE_NAME: confidential-dot-ai/attestation-api
 
 jobs:
   check:

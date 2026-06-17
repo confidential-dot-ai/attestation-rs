@@ -1,6 +1,6 @@
 # Attestation Workspace
 
-[![CI](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/lunal-dot-dev/attestation-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml)
 
 Rust workspace for TEE attestation libraries, tools, and services.
 
@@ -35,7 +35,7 @@ cargo build -p attestation-api --release
 docker build .
 ```
 
-The service image is published as `ghcr.io/lunal-dev/attestation-api`.
+The service image is published as `ghcr.io/confidential-dot-ai/attestation-api`.
 
 ## WASM verification in the browser
 
