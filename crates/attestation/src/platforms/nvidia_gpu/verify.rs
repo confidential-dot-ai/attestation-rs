@@ -12,7 +12,7 @@ use crate::types::{
 
 /// Verify a GPU bundle end-to-end:
 /// - Group devices by arch (NRAS requires one arch per request).
-/// - Derive the SPDM nonce from `params.nvidia_gpu_user_nonce` per `bundle.binding`.
+/// - Derive the SPDM nonce from `params.nvidia_gpu.user_nonce` per `bundle.binding`.
 /// - POST evidence to NRAS, JWS-verify the response, check `eat_nonce` and
 ///   `x-nvidia-overall-att-result`.
 ///
@@ -65,7 +65,8 @@ fn check_preconditions<'a>(
         ));
     }
     let user_nonce = params
-        .nvidia_gpu_user_nonce
+        .nvidia_gpu
+        .user_nonce
         .as_deref()
         .ok_or(AttestationError::NvidiaGpuUserNonceMissing)?;
     super::check_user_nonce_len(user_nonce)?;
@@ -73,14 +74,15 @@ fn check_preconditions<'a>(
     // Enforce allowed binding algorithms. Default: only Concat { Sha256 }.
     let default_allowed = [crate::types::NvidiaGpuBinding::default()];
     let allowed = params
-        .nvidia_gpu_allowed_bindings
+        .nvidia_gpu
+        .allowed_bindings
         .as_deref()
         .unwrap_or(&default_allowed);
     if !allowed.contains(&bundle.binding) {
         return Err(AttestationError::NvidiaGpuBindingNotAllowed);
     }
 
-    if let Some(whitelist) = &params.nvidia_gpu_expected_archs {
+    if let Some(whitelist) = &params.nvidia_gpu.expected_archs {
         for dev in &bundle.devices {
             if !whitelist.contains(&dev.arch) {
                 return Err(AttestationError::NvidiaGpuArchNotAllowed(
@@ -189,7 +191,7 @@ async fn verify_arch_group(
         if dc.arch.is_none() {
             dc.arch = Some(arch);
         }
-        apply_device_policy(&name, &dc, &params.nvidia_gpu_device_policy)?;
+        apply_device_policy(&name, &dc, &params.nvidia_gpu.device_policy)?;
         device_claims.push(dc);
     }
 
@@ -862,7 +864,7 @@ mod tests {
     use crate::platforms::nvidia_gpu::MIN_GPU_USER_NONCE_LEN;
     use crate::types::{
         NvidiaGpuArch, NvidiaGpuBinding, NvidiaGpuDeviceClaims, NvidiaGpuDeviceEvidence,
-        NvidiaGpuEvidenceBundle, VerifyParams,
+        NvidiaGpuEvidenceBundle, NvidiaGpuParams, VerifyParams,
     };
 
     /// `NrasProvider` whose methods panic on call. Used to prove `verify_bundle`
@@ -904,7 +906,10 @@ mod tests {
         let too_short = vec![0u8; MIN_GPU_USER_NONCE_LEN - 1];
         let bundle = one_device_bundle();
         let params = VerifyParams {
-            nvidia_gpu_user_nonce: Some(too_short.clone()),
+            nvidia_gpu: NvidiaGpuParams {
+                user_nonce: Some(too_short.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

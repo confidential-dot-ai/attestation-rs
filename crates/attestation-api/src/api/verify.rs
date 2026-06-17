@@ -84,9 +84,10 @@ pub async fn handler(
         expected_init_data_hash,
         allow_debug,
         min_tcb,
-        // Remaining fields are cfg-gated (e.g. the `nvidia-gpu` feature adds
-        // several); default them so this builds regardless of feature set.
-        ..Default::default()
+        // The HTTP API does not accept NVIDIA GPU params; default them. The whole
+        // group sits behind one feature gate, so this is the only cfg line needed.
+        #[cfg(feature = "nvidia-gpu")]
+        nvidia_gpu: attestation::NvidiaGpuParams::default(),
     };
 
     let result = state.verifier.verify(&evidence_json, &params).await?;

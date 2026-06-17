@@ -340,7 +340,7 @@ impl Verifier {
             .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
 
         #[cfg(feature = "nvidia-gpu")]
-        if let Some(un) = params.nvidia_gpu_user_nonce.as_deref() {
+        if let Some(un) = params.nvidia_gpu.user_nonce.as_deref() {
             let rd = params
                 .expected_report_data
                 .as_deref()
@@ -473,7 +473,7 @@ impl Verifier {
                 result.claims.nvidia_gpu = Some(gpu_claims);
                 Ok(result)
             }
-            None if params.nvidia_gpu_required => Err(AttestationError::NvidiaGpuRequired),
+            None if params.nvidia_gpu.required => Err(AttestationError::NvidiaGpuRequired),
             None => Ok(result),
         }
     }

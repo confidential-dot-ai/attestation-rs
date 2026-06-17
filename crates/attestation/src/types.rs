@@ -82,27 +82,34 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
+    /// NVIDIA GPU verification parameters, applied when an envelope carries a
+    /// `gpu` bundle. Grouped behind a single feature gate (see
+    /// [`NvidiaGpuParams`]).
+    #[cfg(feature = "nvidia-gpu")]
+    pub nvidia_gpu: NvidiaGpuParams,
+}
+
+/// NVIDIA GPU verification parameters, grouped so the whole set sits behind one
+/// `nvidia-gpu` feature gate rather than gating each field individually.
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone, Default)]
+pub struct NvidiaGpuParams {
     /// User nonce used to derive the GPU SPDM nonce. Required when verifying
     /// an envelope that carries a `gpu` bundle.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_user_nonce: Option<Vec<u8>>,
+    pub user_nonce: Option<Vec<u8>>,
     /// If true, reject envelopes that do not include an NVIDIA GPU bundle.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_required: bool,
+    pub required: bool,
     /// Optional whitelist of acceptable GPU/switch architectures.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_expected_archs: Option<Vec<NvidiaGpuArch>>,
+    pub expected_archs: Option<Vec<NvidiaGpuArch>>,
     /// Allowed nonce-binding algorithms. If `None`, only the default
     /// (`Concat { Sha256 }`) is accepted. Set explicitly to permit future
     /// binding variants.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_allowed_bindings: Option<Vec<NvidiaGpuBinding>>,
+    pub allowed_bindings: Option<Vec<NvidiaGpuBinding>>,
     /// Per-device security policy applied to each NRAS submodule, independent of
     /// NRAS's opaque overall boolean. Defaults reject debug-enabled devices and
     /// require secure boot, per-device report-nonce match, and a successful
     /// measurement result. See [`NvidiaGpuDevicePolicy`].
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_device_policy: NvidiaGpuDevicePolicy,
+    pub device_policy: NvidiaGpuDevicePolicy,
 }
 
 /// Per-device policy gates evaluated against each NRAS submodule's claims.
