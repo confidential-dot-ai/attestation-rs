@@ -74,6 +74,24 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
+    /// If set, verifier compares the TDX quote's MRTD (launch measurement)
+    /// against this expected 48-byte digest and records the result in
+    /// [`VerificationResult::mrtd_match`]. A mismatch does NOT fail the
+    /// signature/collateral path — callers inspect the bool to enforce policy.
+    /// Ignored for SNP platforms.
+    pub expected_mrtd: Option<[u8; 48]>,
+    /// If set, verifier compares each TDX RTMR (Runtime Measurement Register)
+    /// against the corresponding expected 48-byte digest. `None` entries are
+    /// skipped; comparison results land in [`VerificationResult::rtmr_matches`].
+    /// A mismatch does NOT fail verification — callers enforce policy.
+    /// Ignored for SNP platforms.
+    pub expected_rtmrs: Option<[Option<[u8; 48]>; 4]>,
+    /// If set, verifier compares the SNP attestation report's `measurement`
+    /// field (launch digest) against this expected 48-byte digest and records
+    /// the result in [`VerificationResult::launch_digest_match`]. A mismatch
+    /// does NOT fail verification — callers inspect the bool to enforce policy.
+    /// Ignored for TDX platforms.
+    pub expected_launch_digest: Option<[u8; 48]>,
 }
 
 /// Result of verification — the caller decides pass/fail based on this.
@@ -102,6 +120,25 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
+    /// Did the TDX MRTD (launch measurement) match the value supplied in
+    /// [`VerifyParams::expected_mrtd`]? `None` means no expected value was
+    /// provided. `Some(true)` / `Some(false)` reflect a constant-time compare.
+    /// Always `None` for SNP platforms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mrtd_match: Option<bool>,
+    /// Per-RTMR comparison results, matching the layout of
+    /// [`VerifyParams::expected_rtmrs`]. Inner `None` means no expected value
+    /// for that RTMR; `Some(bool)` is the constant-time-compare result.
+    /// The outer `None` means the caller provided no `expected_rtmrs` at all.
+    /// Always `None` for SNP platforms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr_matches: Option<[Option<bool>; 4]>,
+    /// Did the SNP launch digest (report.measurement) match the value supplied
+    /// in [`VerifyParams::expected_launch_digest`]? `None` means no expected
+    /// value was provided. `Some(bool)` reflects a constant-time compare.
+    /// Always `None` for TDX platforms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_digest_match: Option<bool>,
 }
 
 /// Normalized claims extracted from evidence.
