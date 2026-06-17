@@ -77,6 +77,9 @@ fn token_issuer_produces_valid_jwt() {
         init_data_match: None,
         collateral_verified: false,
         tcb_status: None,
+        mrtd_match: None,
+        rtmr_matches: None,
+        launch_digest_match: None,
     };
 
     let token = issuer.issue(&result).unwrap();
