@@ -157,6 +157,13 @@ pub async fn verify_evidence(
         None
     };
 
+    // 10b. Optional launch measurement comparison against a pre-computed
+    // reference. Mismatches do NOT fail verification — the result field
+    // is surfaced to the caller, who decides whether to reject.
+    let launch_digest_match = params.expected_launch_digest.as_ref().map(|expected| {
+        crate::utils::constant_time_eq(&report.measurement[..], expected)
+    });
+
     // 11. Extract claims
     let claims = extract_claims(&report);
 
@@ -168,6 +175,9 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: crl_verified,
         tcb_status: None,
+        mrtd_match: None,
+        rtmr_matches: None,
+        launch_digest_match,
     })
 }
 
