@@ -441,6 +441,30 @@ pub async fn verify_evidence(
         None
     };
 
+    // 5b. Optional launch measurement (MRTD) and RTMR comparison against
+    // pre-computed reference values. Mismatches are surfaced via the
+    // result fields rather than failing verification — policy lives in
+    // the caller. Constant-time compares to avoid leaking which byte
+    // diverged for callers that route the digests over a network.
+    let mrtd_match = params.expected_mrtd.as_ref().map(|expected| {
+        crate::utils::constant_time_eq(&quote.body.mr_td, expected)
+    });
+    let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
+        let rtmrs = [
+            &quote.body.rtmr_0,
+            &quote.body.rtmr_1,
+            &quote.body.rtmr_2,
+            &quote.body.rtmr_3,
+        ];
+        let mut out: [Option<bool>; 4] = [None, None, None, None];
+        for (i, slot) in expected.iter().enumerate() {
+            if let Some(exp) = slot {
+                out[i] = Some(crate::utils::constant_time_eq(rtmrs[i], exp));
+            }
+        }
+        out
+    });
+
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
         crate::utils::check_field_size("cc_eventlog", eventlog_b64.len())?;
@@ -467,6 +491,9 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
+        mrtd_match,
+        rtmr_matches,
+        launch_digest_match: None,
     })
 }
 
