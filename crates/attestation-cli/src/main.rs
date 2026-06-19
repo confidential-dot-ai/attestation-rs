@@ -79,6 +79,30 @@ struct VerifyArgs {
     /// Expected init data hash (hex-encoded) for init data binding verification.
     #[arg(long)]
     expected_init_data: Option<String>,
+
+    /// Expected MRTD (hex-encoded, 48 bytes). TDX-only.
+    #[arg(long)]
+    expected_mrtd: Option<String>,
+
+    /// Expected RTMR[0] (hex-encoded, 48 bytes). TDX-only.
+    #[arg(long)]
+    expected_rtmr0: Option<String>,
+
+    /// Expected RTMR[1] (hex-encoded, 48 bytes). TDX-only.
+    #[arg(long)]
+    expected_rtmr1: Option<String>,
+
+    /// Expected RTMR[2] (hex-encoded, 48 bytes). TDX-only.
+    #[arg(long)]
+    expected_rtmr2: Option<String>,
+
+    /// Expected RTMR[3] (hex-encoded, 48 bytes). TDX-only.
+    #[arg(long)]
+    expected_rtmr3: Option<String>,
+
+    /// Expected SNP launch digest (hex-encoded, 48 bytes). SNP-only.
+    #[arg(long)]
+    expected_launch_digest: Option<String>,
 }
 
 #[cfg(all(feature = "attest", target_os = "linux"))]
@@ -277,6 +301,53 @@ async fn cmd_verify(args: VerifyArgs) {
                 process::exit(1);
             }
         }
+    }
+
+    let parse_digest = |hex_str: &str, name: &str| -> [u8; 48] {
+        let bytes = match hex::decode(hex_str) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Error: invalid hex for --{name}: {e}");
+                process::exit(1);
+            }
+        };
+        match <[u8; 48]>::try_from(bytes.as_slice()) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "Error: --{name} must be 48 bytes (96 hex chars), got {} bytes",
+                    bytes.len()
+                );
+                process::exit(1);
+            }
+        }
+    };
+
+    if let Some(ref hex_str) = args.expected_mrtd {
+        params.expected_mrtd = Some(parse_digest(hex_str, "expected-mrtd"));
+    }
+    if let Some(ref hex_str) = args.expected_launch_digest {
+        params.expected_launch_digest = Some(parse_digest(hex_str, "expected-launch-digest"));
+    }
+    let any_rtmr = args.expected_rtmr0.is_some()
+        || args.expected_rtmr1.is_some()
+        || args.expected_rtmr2.is_some()
+        || args.expected_rtmr3.is_some();
+    if any_rtmr {
+        let mut rtmrs: [Option<[u8; 48]>; 4] = [None, None, None, None];
+        if let Some(ref h) = args.expected_rtmr0 {
+            rtmrs[0] = Some(parse_digest(h, "expected-rtmr0"));
+        }
+        if let Some(ref h) = args.expected_rtmr1 {
+            rtmrs[1] = Some(parse_digest(h, "expected-rtmr1"));
+        }
+        if let Some(ref h) = args.expected_rtmr2 {
+            rtmrs[2] = Some(parse_digest(h, "expected-rtmr2"));
+        }
+        if let Some(ref h) = args.expected_rtmr3 {
+            rtmrs[3] = Some(parse_digest(h, "expected-rtmr3"));
+        }
+        params.expected_rtmrs = Some(rtmrs);
     }
 
     eprintln!("Verifying evidence...");
