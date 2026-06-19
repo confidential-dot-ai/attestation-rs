@@ -98,6 +98,51 @@ For a Node.js end-to-end example (generate live evidence, fetch the VCEK from AM
 KDS, verify in WASM), build with `--target nodejs` and run
 `crates/attestation-wasm/example.mjs`.
 
+## Pinning launch measurements
+
+`VerifyParams` carries optional reference values that the verifier compares
+against the measurement registers in the quote. When the operator supplies a
+value, the corresponding `VerificationResult` field is `Some(true)`/`Some(false)`;
+when omitted the result is `None` (no check requested).
+
+```rust
+use attestation::types::VerifyParams;
+
+let params = VerifyParams {
+    // TDX policy
+    expected_mrtd: Some(mrtd_bytes),                   // [u8; 48]
+    expected_rtmrs: Some([None, Some(rtmr1), Some(rtmr2), None]),
+    // SNP policy
+    expected_launch_digest: Some(launch_digest_bytes), // [u8; 48]
+    // existing fields
+    expected_report_data: Some(nonce.to_vec()),
+    ..Default::default()
+};
+
+let result = attestation::verify(&evidence_json, &params).await?;
+assert_eq!(result.mrtd_match, Some(true));
+assert_eq!(result.rtmr_matches, Some([None, Some(true), Some(true), None]));
+```
+
+All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
+short-circuit between RTMRs — every populated reference is checked.
+`VerificationResult` carries `#[must_use]` so dropping the result without
+inspecting the policy outcomes is a compile-time warning.
+
+The CLI exposes matching flags:
+
+```bash
+attestation-cli verify \
+  --evidence evidence.json \
+  --expected-mrtd $MRTD \
+  --expected-rtmr1 $RTMR1 \
+  --expected-rtmr2 $RTMR2
+# exit 0 on full match; exit 1 on any explicit --expected-* mismatch.
+```
+
+A failing `--expected-*` check forces the process to exit non-zero, so a
+CI gate using these flags fails closed on a wrong workload.
+
 ## Documentation
 
 - Core library: `crates/attestation/README.md`
