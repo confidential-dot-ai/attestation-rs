@@ -95,7 +95,16 @@ pub struct VerifyParams {
 }
 
 /// Result of verification — the caller decides pass/fail based on this.
+///
+/// `#[must_use]`: this struct carries individual policy outcomes
+/// (`signature_valid`, `mrtd_match`, `rtmr_matches`, ...). Dropping it
+/// without inspecting those booleans means a caller asked
+/// `attestation::verify(...)` and then ignored whether the quote actually
+/// matched the policy. That is *always* a bug — the attribute makes the
+/// compiler warn at every call site that throws the result away. Add an
+/// explicit `let _ = result;` only if you genuinely don't care.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct VerificationResult {
     /// Was the hardware signature on the evidence valid?
     pub signature_valid: bool,

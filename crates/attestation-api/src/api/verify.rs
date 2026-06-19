@@ -79,6 +79,16 @@ pub async fn handler(
         ));
     }
 
+    // DEVIATION: VerifyParams gained `expected_mrtd`, `expected_rtmrs`,
+    // and `expected_launch_digest` for launch-measurement pinning, but
+    // the HTTP API does not surface them yet. Adding them needs a
+    // matching request DTO change, JSON encoding for the per-RTMR Option
+    // array, and a per-endpoint policy story about whether the server
+    // owns the reference values (e.g. fetched from a manifest registry)
+    // or the client supplies them. Until that design is settled the
+    // safe default is "no comparison" — the response's `mrtd_match` etc.
+    // will be `None`, which is correct (no check requested). The CLI is
+    // the only consumer of the new policy fields in this PR.
     let params = attestation::VerifyParams {
         expected_report_data,
         expected_init_data_hash,
