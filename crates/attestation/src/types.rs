@@ -863,6 +863,57 @@ mod tests {
         let v: VendorParams = serde_json::from_value(json).unwrap();
         assert!(matches!(v, VendorParams::Auto));
     }
+
+    #[test]
+    fn verify_params_default_serializes_with_auto_vendor() {
+        let p = VerifyParams::default();
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["vendor"]["type"], "auto");
+        assert_eq!(json["allow_debug"], false);
+    }
+
+    #[test]
+    fn verify_tdx_serializes_array_of_options() {
+        // External wire format must encode RTMR pins as a 4-element array of
+        // nullable hex strings, not Rust's structural [Option<[u8;48]>; 4].
+        let mut tdx = VerifyTdx::default();
+        tdx.mrtd = Some([0x11; 48]);
+        tdx.rtmrs = [None, Some([0x22; 48]), None, Some([0x44; 48])];
+
+        let json = serde_json::to_value(&tdx).unwrap();
+        assert_eq!(json["mrtd"], serde_json::Value::String("11".repeat(48)));
+        assert_eq!(json["rtmrs"][0], serde_json::Value::Null);
+        assert_eq!(json["rtmrs"][1], serde_json::Value::String("22".repeat(48)));
+        assert_eq!(json["rtmrs"][2], serde_json::Value::Null);
+        assert_eq!(json["rtmrs"][3], serde_json::Value::String("44".repeat(48)));
+
+        // Round-trip
+        let back: VerifyTdx = serde_json::from_value(json).unwrap();
+        assert_eq!(back.mrtd, tdx.mrtd);
+        assert_eq!(back.rtmrs, tdx.rtmrs);
+    }
+
+    #[test]
+    fn verify_tdx_rejects_wrong_length_digest() {
+        let json = serde_json::json!({
+            "mrtd": "deadbeef", // 4 bytes — not 48
+            "rtmrs": [null, null, null, null],
+            "mr_config_id": null,
+        });
+        let err = serde_json::from_value::<VerifyTdx>(json).unwrap_err();
+        assert!(err.to_string().contains("48-byte"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_result_round_trip_preserves_anchors() {
+        let r = dummy_result(Some(true), None, Some(false), false);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: VerifyResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.signature_valid, r.signature_valid);
+        assert_eq!(back.nonce_match, r.nonce_match);
+        assert_eq!(back.launch_measurement_match, r.launch_measurement_match);
+        assert_eq!(back.policy_failed(), r.policy_failed());
+    }
 }
 
 // ----------------------------------------------------------------------------
