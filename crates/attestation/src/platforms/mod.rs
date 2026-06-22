@@ -14,3 +14,4 @@ pub mod snp;
 pub mod tdx;
 #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
 pub mod tpm_common;
+pub(crate) mod vendor_helpers;

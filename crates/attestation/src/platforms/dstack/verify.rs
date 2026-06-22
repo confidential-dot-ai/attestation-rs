@@ -8,14 +8,14 @@
 //! - QE report signature and binding
 //! - QE Identity against Intel PCS (when collateral provider is available)
 //! - TCB status evaluation and CRL revocation checks
-//! - `report_data` binding (when `VerifyParams::expected_report_data` is set)
-//! - `mr_config_id` binding (when `VerifyParams::expected_init_data_hash` is set)
+//! - `nonce` / `report_data` binding (when `VerifyParams::nonce` or
+//!   `VerifyParams::report_data` is set)
+//! - `mr_config_id` binding via [`VerifyDstack::mr_config_id`]
 //!
 //! # What the caller must verify
 //!
 //! The following checks are **not** performed by this module and are the
-//! caller's responsibility (RTMR values are available in
-//! `VerificationResult::claims::platform_data`):
+//! caller's responsibility (RTMR values are available in `DstackResult::quote`):
 //!
 //! - **RTMR3 event log replay**: dstack records compose-hash, instance-id, and
 //!   key-provider events in RTMR3 via SHA-384 hash chaining. The event log is
@@ -23,7 +23,8 @@
 //!   here. dstack uses a different event log format than the ACPI CCEL CC
 //!   eventlog used by bare-metal TDX.
 //! - **RTMR0-2 OS measurements**: platform/OS identity (firmware, kernel,
-//!   initrd) is in RTMR0-2 but not compared against expected values.
+//!   initrd) is in RTMR0-2 but not compared against expected values unless
+//!   pinned via [`VerifyDstack::rtmrs`].
 //! - **Docker image digest pinning**: the compose-hash in RTMR3 covers the
 //!   docker-compose configuration; verifying that images use `@sha256:` digests
 //!   rather than mutable tags is the caller's responsibility.
@@ -32,7 +33,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use crate::collateral::TdxCollateralProvider;
 use crate::error::Result;
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::platforms::vendor_helpers;
+use crate::types::{
+    DstackResult, VendorParams, VendorResult, VerifyDstack, VerifyParams, VerifyResult, VerifyTdx,
+};
 
 use super::evidence::DstackEvidence;
 
@@ -63,12 +67,12 @@ fn normalize_quote_to_base64(quote: &str) -> String {
 ///
 /// Since dstack produces standard Intel TDX v4/v5 quotes, verification
 /// is delegated to the existing TDX DCAP verification pipeline. The only
-/// difference is that the result is tagged with `PlatformType::Dstack`.
+/// difference is that the vendor result is tagged as Dstack.
 pub async fn verify_evidence(
     evidence: &DstackEvidence,
     params: &VerifyParams,
     collateral_provider: Option<&dyn TdxCollateralProvider>,
-) -> Result<VerificationResult> {
+) -> Result<VerifyResult> {
     // Validate field sizes
     crate::utils::check_field_size("quote", evidence.quote.len())?;
 
@@ -82,14 +86,49 @@ pub async fn verify_evidence(
         cc_eventlog: None,
     };
 
-    let mut result =
-        crate::platforms::tdx::verify::verify_evidence(&tdx_evidence, params, collateral_provider)
+    let inner_params = translate_params(params)?;
+    let (quote, mut result) =
+        crate::platforms::tdx::verify::verify_evidence_inner(&tdx_evidence, &inner_params, collateral_provider)
             .await?;
 
-    // Re-tag the platform as Dstack
-    result.platform = PlatformType::Dstack;
-
+    let tcb_status = match result.vendor {
+        VendorResult::Tdx(t) => t.tcb_status,
+        _ => None,
+    };
+    let projected = vendor_helpers::project_tdx_quote(&quote);
+    result.vendor = VendorResult::Dstack(DstackResult {
+        quote: projected,
+        tcb_status,
+    });
     Ok(result)
+}
+
+fn translate_params(params: &VerifyParams) -> Result<VerifyParams> {
+    let inner_vendor = match &params.vendor {
+        VendorParams::Auto => VendorParams::Auto,
+        VendorParams::Dstack(VerifyDstack {
+            mrtd,
+            rtmrs,
+            mr_config_id,
+        }) => VendorParams::Tdx(VerifyTdx {
+            mrtd: *mrtd,
+            rtmrs: *rtmrs,
+            mr_config_id: *mr_config_id,
+        }),
+        other => {
+            return Err(crate::error::AttestationError::PlatformMismatch {
+                expected: "dstack".to_string(),
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    Ok(VerifyParams {
+        nonce: params.nonce.clone(),
+        report_data: params.report_data.clone(),
+        launch_measurement: params.launch_measurement.clone(),
+        allow_debug: params.allow_debug,
+        vendor: inner_vendor,
+    })
 }
 
 #[cfg(test)]

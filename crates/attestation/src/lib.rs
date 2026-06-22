@@ -18,7 +18,7 @@
 //! use attestation::types::VerifyParams;
 //!
 //! let result = attestation::verify(&evidence_json, &VerifyParams::default()).await?;
-//! assert!(result.signature_valid);
+//! assert!(result.signature_valid && !result.policy_failed());
 //! ```
 //!
 //! **Attester** (inside TEE, with `attest` feature):
@@ -281,7 +281,7 @@ impl Verifier {
         &self,
         evidence_json: &[u8],
         params: &VerifyParams,
-    ) -> Result<VerificationResult> {
+    ) -> Result<VerifyResult> {
         // Bounded deserialization — reject oversized evidence before parsing
         if evidence_json.len() > MAX_EVIDENCE_SIZE {
             return Err(AttestationError::EvidenceTooLarge {
@@ -290,8 +290,13 @@ impl Verifier {
             });
         }
 
-        // Validate expected_report_data size (all platforms use at most 64 bytes)
-        if let Some(ref data) = params.expected_report_data {
+        // Validate report_data / nonce sizes (all platforms cap at 64 bytes)
+        if let Some(ref data) = params.report_data {
+            if data.len() > 64 {
+                return Err(AttestationError::ReportDataTooLarge { max: 64 });
+            }
+        }
+        if let Some(ref data) = params.nonce {
             if data.len() > 64 {
                 return Err(AttestationError::ReportDataTooLarge { max: 64 });
             }
@@ -299,6 +304,18 @@ impl Verifier {
 
         let envelope: AttestationEvidence = serde_json::from_slice(evidence_json)
             .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+
+        // If the caller pinned a specific vendor, reject envelopes that
+        // disagree. Vendor-specific params would otherwise be silently
+        // ignored on an envelope-driven dispatch, which is a footgun.
+        if let Some(expected) = params.vendor.platform_tag() {
+            if expected != envelope.platform {
+                return Err(AttestationError::PlatformMismatch {
+                    expected: expected.to_string(),
+                    actual: envelope.platform.to_string(),
+                });
+            }
+        }
 
         #[allow(unreachable_patterns)]
         match envelope.platform {
@@ -394,6 +411,24 @@ impl Verifier {
     }
 }
 
+/// Cheap, side-effect-free helper that just reads the envelope `platform` tag.
+///
+/// Useful for callers that want to inspect the platform before deciding
+/// whether to fetch collateral, surface a vendor-specific UI, etc. The
+/// reading is bounded by [`MAX_EVIDENCE_SIZE`] and uses the same JSON
+/// parser as [`Verifier::verify`].
+pub fn detect_platform(evidence_json: &[u8]) -> Result<PlatformType> {
+    if evidence_json.len() > MAX_EVIDENCE_SIZE {
+        return Err(AttestationError::EvidenceTooLarge {
+            size: evidence_json.len(),
+            max: MAX_EVIDENCE_SIZE,
+        });
+    }
+    let envelope: AttestationEvidence = serde_json::from_slice(evidence_json)
+        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+    Ok(envelope.platform)
+}
+
 impl Default for Verifier {
     fn default() -> Self {
         Self::new()
@@ -409,6 +444,6 @@ impl Default for Verifier {
 ///
 /// Returns an error if the evidence is too large, malformed, targets a
 /// platform not compiled in, or fails signature/collateral verification.
-pub async fn verify(evidence_json: &[u8], params: &VerifyParams) -> Result<VerificationResult> {
+pub async fn verify(evidence_json: &[u8], params: &VerifyParams) -> Result<VerifyResult> {
     Verifier::new().verify(evidence_json, params).await
 }

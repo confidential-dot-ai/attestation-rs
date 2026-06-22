@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Once;
 
 use crate::error::{AttestationError, Result};
-use crate::types::{Claims, PlatformType, VerificationResult};
-use crate::utils::strip_trailing_nulls;
 
 /// Decoded TPM quote components: (signature, message, pcr_values).
 pub type DecodedTpmQuote = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
@@ -668,67 +666,6 @@ pub fn check_init_data(tpm_pcrs: &[Vec<u8>], expected: Option<&[u8]>) -> Result<
     Ok(Some(true))
 }
 
-/// Build a `VerificationResult` with TPM PCR values and nonce in platform claims.
-pub fn build_tpm_verification_result(
-    base_claims: Claims,
-    tpm_pcrs: &[Vec<u8>],
-    tpm_msg: &[u8],
-    platform: PlatformType,
-    report_data_match: Option<bool>,
-    init_data_match: Option<bool>,
-    collateral_verified: bool,
-) -> VerificationResult {
-    let mut platform_data = base_claims.platform_data.clone();
-
-    let pcr_map: serde_json::Value = tpm_pcrs
-        .iter()
-        .enumerate()
-        .map(|(i, pcr)| {
-            (
-                format!("pcr{i:02}"),
-                serde_json::Value::String(hex::encode(pcr)),
-            )
-        })
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
-    platform_data["tpm"] = pcr_map;
-
-    let mut signed_data = base_claims.signed_data.clone();
-    match extract_tpm_nonce(tpm_msg) {
-        Ok(nonce) => {
-            platform_data["tpm"]["nonce"] = serde_json::Value::String(hex::encode(&nonce));
-            // Safety: strip_trailing_nulls runs AFTER the constant-time comparison
-            // in check_report_data, so stripping here is not security-sensitive.
-            // The stripped nonce is only used in the public verification result.
-            signed_data = strip_trailing_nulls(&nonce).to_vec();
-        }
-        Err(e) => {
-            log::warn!("failed to extract TPM nonce for claims output: {e}");
-        }
-    }
-
-    let claims = Claims {
-        signed_data,
-        platform_data,
-        ..base_claims
-    };
-
-    VerificationResult {
-        signature_valid: true,
-        platform,
-        claims,
-        report_data_match,
-        init_data_match,
-        collateral_verified,
-        tcb_status: None,
-        // Launch-measurement comparisons are platform-specific and populated
-        // by the caller (az_snp/az_tdx) after this generic TPM-result is built.
-        mrtd_match: None,
-        rtmr_matches: None,
-        launch_digest_match: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,110 +1230,6 @@ mod tests {
         let msg = build_tpms_attest(b"any", &[3, 0xFF, 0xFF, 0xFF], &[0u8; 32]);
         let result = check_report_data(&msg, None).unwrap();
         assert_eq!(result, None, "no expected data should return None");
-    }
-
-    #[test]
-    fn test_build_tpm_verification_result_sets_signed_data_to_nonce() {
-        use crate::types::{Claims, TcbInfo};
-
-        let nonce = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let pcr_sel = &[0x03, 0x00, 0x00, 0x00];
-        let pcr_digest = vec![0u8; 32];
-        let tpm_msg = build_tpms_attest(&nonce, pcr_sel, &pcr_digest);
-        let tpm_pcrs: Vec<Vec<u8>> = (0..24).map(|_| vec![0u8; 32]).collect();
-
-        let base_claims = Claims {
-            launch_digest: "abcd".to_string(),
-            report_data: vec![0xFF; 64],
-            signed_data: vec![0xFF; 64],
-            init_data: vec![0x00; 32],
-            tcb: TcbInfo::Snp {
-                bootloader: 1,
-                tee: 0,
-                snp: 1,
-                microcode: 1,
-                fmc: None,
-            },
-            platform_data: serde_json::json!({}),
-        };
-
-        let result = build_tpm_verification_result(
-            base_claims,
-            &tpm_pcrs,
-            &tpm_msg,
-            PlatformType::AzSnp,
-            None,
-            None,
-            false,
-        );
-
-        assert_eq!(
-            result.claims.signed_data, nonce,
-            "signed_data should be the TPM nonce"
-        );
-        assert_eq!(
-            result.claims.report_data,
-            vec![0xFF; 64],
-            "report_data should be unchanged"
-        );
-        assert_eq!(
-            result.claims.platform_data["tpm"]["nonce"]
-                .as_str()
-                .unwrap(),
-            hex::encode(&nonce),
-        );
-    }
-
-    #[test]
-    fn test_build_tpm_verification_result_strips_trailing_nulls_from_signed_data() {
-        use crate::types::{Claims, TcbInfo};
-
-        // Simulate a nonce that was zero-padded to 64 bytes (as attest does)
-        let mut padded_nonce = vec![0u8; 64];
-        padded_nonce[..5].copy_from_slice(b"hello");
-
-        let pcr_sel = &[0x03, 0x00, 0x00, 0x00];
-        let pcr_digest = vec![0u8; 32];
-        let tpm_msg = build_tpms_attest(&padded_nonce, pcr_sel, &pcr_digest);
-        let tpm_pcrs: Vec<Vec<u8>> = (0..24).map(|_| vec![0u8; 32]).collect();
-
-        let base_claims = Claims {
-            launch_digest: "abcd".to_string(),
-            report_data: vec![0xFF; 64],
-            signed_data: vec![0xFF; 64],
-            init_data: vec![0x00; 32],
-            tcb: TcbInfo::Snp {
-                bootloader: 1,
-                tee: 0,
-                snp: 1,
-                microcode: 1,
-                fmc: None,
-            },
-            platform_data: serde_json::json!({}),
-        };
-
-        let result = build_tpm_verification_result(
-            base_claims,
-            &tpm_pcrs,
-            &tpm_msg,
-            PlatformType::AzSnp,
-            None,
-            None,
-            false,
-        );
-
-        assert_eq!(
-            result.claims.signed_data,
-            b"hello".to_vec(),
-            "signed_data should have trailing nulls stripped"
-        );
-        // platform_data nonce should still contain the full padded value
-        assert_eq!(
-            result.claims.platform_data["tpm"]["nonce"]
-                .as_str()
-                .unwrap(),
-            hex::encode(&padded_nonce),
-        );
     }
 
     // --- check_init_data tests ---

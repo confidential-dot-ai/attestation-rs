@@ -10,7 +10,11 @@ use sev::parser::ByteParser;
 
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
-use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams};
+use crate::platforms::vendor_helpers;
+use crate::types::{
+    ProcessorGeneration, SnpResult, SnpTcb, VendorParams, VendorResult, VerifyParams, VerifyResult,
+    VerifySnp,
+};
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -19,7 +23,6 @@ use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult
 const OID_RSA_PSS: &str = "1.2.840.113549.1.1.10";
 const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 
-use super::claims::extract_claims;
 use super::evidence::SnpEvidence;
 
 /// SNP Attestation Report version (must be >= 3 for cpuid fields).
@@ -34,7 +37,19 @@ pub async fn verify_evidence(
     evidence: &SnpEvidence,
     params: &VerifyParams,
     cert_provider: &dyn CertProvider,
-) -> Result<VerificationResult> {
+) -> Result<VerifyResult> {
+    let (_report, result) = verify_evidence_inner(evidence, params, cert_provider).await?;
+    Ok(result)
+}
+
+/// Inner pipeline for bare-metal SNP. Returns the parsed `AttestationReport`
+/// alongside the canonical [`VerifyResult`] so wrappers (GCP SNP) can rebuild
+/// the result with their own platform identity if needed.
+pub(crate) async fn verify_evidence_inner(
+    evidence: &SnpEvidence,
+    params: &VerifyParams,
+    cert_provider: &dyn CertProvider,
+) -> Result<(AttestationReport, VerifyResult)> {
     // 0. Input size validation
     crate::utils::check_field_size("attestation_report", evidence.attestation_report.len())?;
 
@@ -130,55 +145,79 @@ pub async fn verify_evidence(
     // 8c. VCEK OID cross-validation (chip_id + TCB SPLs)
     verify_vcek_tcb(&report, &vcek_der)?;
 
-    // 8d. Minimum TCB enforcement
-    if let Some(ref min_tcb) = params.min_tcb {
-        enforce_min_tcb(&report.reported_tcb, min_tcb)?;
-    }
-
-    // 9. Check report_data binding
-    let report_data_match = if let Some(expected) = &params.expected_report_data {
-        let padded = crate::utils::pad_report_data(expected, 64)?;
-        if !crate::utils::constant_time_eq(&report.report_data[..], &padded) {
-            return Err(AttestationError::ReportDataMismatch);
+    // 9. Vendor-specific pin checks
+    let vendor_policy_failed = match &params.vendor {
+        VendorParams::Auto => false,
+        VendorParams::Snp(v) => apply_snp_pins(&report, v)?,
+        other => {
+            return Err(AttestationError::PlatformMismatch {
+                expected: "snp".to_string(),
+                actual: format!("{other:?}"),
+            })
         }
-        Some(true)
-    } else {
-        None
     };
 
-    // 10. Check init_data binding (host_data, 32 bytes)
-    let init_data_match = if let Some(expected) = &params.expected_init_data_hash {
-        let padded = crate::utils::pad_report_data(expected, 32)?;
-        if !crate::utils::constant_time_eq(&report.host_data[..], &padded) {
-            return Err(AttestationError::InitDataMismatch);
-        }
-        Some(true)
-    } else {
-        None
-    };
+    // 10. Canonical anchors. Bare-metal SNP: nonce == report_data, and the
+    // canonical launch_measurement is the SNP `measurement` field verbatim.
+    let nonce_bytes = report.report_data[..].to_vec();
+    let report_data_bytes = report.report_data[..].to_vec();
+    let launch_measurement = report.measurement[..].to_vec();
 
-    // 10b. Optional launch measurement comparison against a pre-computed
-    // reference. Mismatches do NOT fail verification — the result field
-    // is surfaced to the caller, who decides whether to reject.
-    let launch_digest_match = params.expected_launch_digest.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&report.measurement[..], expected)
+    let (nonce_match, _) =
+        check_padded_report_data_snp(&report.report_data[..], params.nonce.as_deref())?;
+    let (report_data_match, _) =
+        check_padded_report_data_snp(&report.report_data[..], params.report_data.as_deref())?;
+    let launch_measurement_match = params
+        .launch_measurement
+        .as_deref()
+        .map(|exp| crate::utils::constant_time_eq(&launch_measurement, exp));
+
+    let parsed_report = vendor_helpers::project_snp_report(&report);
+    let vendor = VendorResult::Snp(SnpResult {
+        report: parsed_report,
     });
 
-    // 11. Extract claims
-    let claims = extract_claims(&report);
-
-    Ok(VerificationResult {
+    let result = VerifyResult {
         signature_valid: true,
-        platform: PlatformType::Snp,
-        claims,
-        report_data_match,
-        init_data_match,
         collateral_verified: crl_verified,
-        tcb_status: None,
-        mrtd_match: None,
-        rtmr_matches: None,
-        launch_digest_match,
-    })
+        nonce: nonce_bytes,
+        report_data: report_data_bytes,
+        launch_measurement,
+        nonce_match,
+        report_data_match,
+        launch_measurement_match,
+        vendor,
+        vendor_policy_failed,
+    };
+    Ok((report, result))
+}
+
+/// Apply SNP vendor pins (min_tcb only). Returns whether ANY pin failed.
+fn apply_snp_pins(report: &AttestationReport, v: &VerifySnp) -> Result<bool> {
+    let mut failed = false;
+    if let Some(ref min_tcb) = v.min_tcb {
+        // Constant-time-style: don't early-return on failure; record and
+        // continue so callers can layer further pins without ordering
+        // surprises.
+        if let Err(_e) = enforce_min_tcb(&report.reported_tcb, min_tcb) {
+            failed = true;
+        }
+    }
+    Ok(failed)
+}
+
+/// Constant-time-equal report_data with a zero-padded expected value.
+/// Returns `(match, mismatched)` for accumulation.
+fn check_padded_report_data_snp(
+    observed: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<(Option<bool>, bool)> {
+    let Some(expected) = expected else {
+        return Ok((None, false));
+    };
+    let padded = crate::utils::pad_report_data(expected, 64)?;
+    let ok = crate::utils::constant_time_eq(observed, &padded);
+    Ok((Some(ok), !ok))
 }
 
 /// Enforce minimum TCB version requirements.
@@ -1029,45 +1068,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_no_expected_launch_digest_yields_none() {
+    async fn test_verify_evidence_no_expected_values_yields_none() {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let provider = StubCertProvider;
         let r = verify_evidence(&evidence, &VerifyParams::default(), &provider)
             .await
             .expect("live v5 fixture should verify");
-        assert!(r.launch_digest_match.is_none(), "no expected_* → None");
-        assert!(r.mrtd_match.is_none(), "SNP never sets mrtd_match");
-        assert!(r.rtmr_matches.is_none(), "SNP never sets rtmr_matches");
+        assert!(r.nonce_match.is_none());
+        assert!(r.report_data_match.is_none());
+        assert!(r.launch_measurement_match.is_none());
+        assert!(!r.vendor_policy_failed);
+        assert!(!r.policy_failed());
+        assert!(matches!(r.vendor, VendorResult::Snp(_)));
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_matching_launch_digest() {
+    async fn test_verify_evidence_matching_launch_measurement() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let mut expected = [0u8; 48];
-        expected.copy_from_slice(&report.measurement[..]);
+        let expected = report.measurement[..].to_vec();
 
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let provider = StubCertProvider;
         let params = VerifyParams {
-            expected_launch_digest: Some(expected),
+            launch_measurement: Some(expected.clone()),
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
-        assert_eq!(r.launch_digest_match, Some(true));
+        assert_eq!(r.launch_measurement_match, Some(true));
+        assert_eq!(r.launch_measurement, expected);
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
-        // INVARIANT: wrong launch_digest records Some(false) but verification
-        // still succeeds — policy lives in the caller.
+    async fn test_verify_evidence_wrong_launch_measurement_is_some_false() {
+        // INVARIANT: wrong launch_measurement records Some(false) but
+        // signature verification still succeeds — policy lives in the
+        // caller. policy_failed() is true.
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let provider = StubCertProvider;
         let params = VerifyParams {
-            expected_launch_digest: Some([0xAA; 48]),
+            launch_measurement: Some(vec![0xAA; 48]),
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
-        assert_eq!(r.launch_digest_match, Some(false));
+        assert_eq!(r.launch_measurement_match, Some(false));
         assert!(r.signature_valid, "wrong digest should NOT fail signature");
+        assert!(r.policy_failed());
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_min_tcb_pin_pass() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            vendor: VendorParams::Snp(VerifySnp {
+                // Minimum below the actual fixture TCB → pass.
+                min_tcb: Some(SnpTcb {
+                    bootloader: 0,
+                    tee: 0,
+                    snp: 0,
+                    microcode: 0,
+                    fmc: None,
+                }),
+            }),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        assert!(!r.vendor_policy_failed);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_min_tcb_pin_fail_is_recorded() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            vendor: VendorParams::Snp(VerifySnp {
+                // Minimum above any plausible reported_tcb.
+                min_tcb: Some(SnpTcb {
+                    bootloader: 255,
+                    tee: 255,
+                    snp: 255,
+                    microcode: 255,
+                    fmc: None,
+                }),
+            }),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        assert!(r.vendor_policy_failed);
+        assert!(r.policy_failed());
+        // signature still valid — policy lives in the caller
+        assert!(r.signature_valid);
     }
 }

@@ -54,6 +54,9 @@ pub enum AttestationError {
     #[error("evidence too large: {size} bytes exceeds maximum {max} bytes")]
     EvidenceTooLarge { size: usize, max: usize },
 
+    #[error("platform mismatch: caller pinned {expected} but envelope declares {actual}")]
+    PlatformMismatch { expected: String, actual: String },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

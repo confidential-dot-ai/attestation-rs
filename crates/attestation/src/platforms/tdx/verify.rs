@@ -5,9 +5,12 @@ use scroll::Pread;
 
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::platforms::vendor_helpers;
+use crate::types::{
+    DcapVerificationStatus, TdxResult, VendorParams, VendorResult, VerifyParams, VerifyResult,
+    VerifyTdx,
+};
 
-use super::claims::extract_claims;
 use super::evidence::TdxEvidence;
 
 /// TDX Quote header (48 bytes).
@@ -344,16 +347,30 @@ pub fn verify_quote_signature(quote_bytes: &[u8], quote: &TdxQuote) -> Result<bo
     }
 }
 
-/// Verify TDX attestation evidence.
+/// Internal: run the full TDX verification pipeline and return the parsed
+/// quote together with the canonical-but-not-yet-vendor-pinned result.
 ///
-/// When `collateral_provider` is `Some`, performs full DCAP collateral verification:
-/// PCK CRL revocation check, TCB status evaluation, and QE Identity verification.
-/// When `None`, these checks are skipped (suitable for offline/testing scenarios).
-pub async fn verify_evidence(
+/// This is the shared core used by bare-metal TDX, GCP TDX, and Dstack: each
+/// of those is the same TDX DCAP pipeline; the only differences are the
+/// vendor-specific pin checks (passed in via `vendor`) and the wrapper that
+/// re-tags the platform. The function:
+///
+/// - Parses + signature-verifies the quote
+/// - Walks the DCAP chain
+/// - Enforces debug policy
+/// - Runs optional collateral checks (CRL, TCB, QE Identity)
+/// - Verifies CC eventlog integrity when present
+/// - Computes the canonical [`crate::types::VerifyResult`] (canonical anchors,
+///   synthetic launch_measurement, vendor-result populated with the parsed
+///   quote and TCB status)
+///
+/// Returns `(quote, result)` so wrappers (GCP, Dstack) can re-tag the vendor
+/// result if they need a different platform identity.
+pub(crate) async fn verify_evidence_inner(
     evidence: &TdxEvidence,
     params: &VerifyParams,
     collateral_provider: Option<&dyn TdxCollateralProvider>,
-) -> Result<VerificationResult> {
+) -> Result<(TdxQuote, VerifyResult)> {
     // 0. Input size validation
     crate::utils::check_field_size("quote", evidence.quote.len())?;
 
@@ -377,7 +394,7 @@ pub async fn verify_evidence(
     }
 
     // 3d. DCAP collateral checks (CRL, TCB, QE Identity) when provider is available
-    let tcb_status = if let Some(provider) = collateral_provider {
+    let tcb_status: Option<DcapVerificationStatus> = if let Some(provider) = collateral_provider {
         let body_end = super::dcap::compute_body_end(&quote_bytes, quote.quote_version)?;
         let auth = super::dcap::parse_auth_data(&quote_bytes, body_end)?;
 
@@ -419,53 +436,7 @@ pub async fn verify_evidence(
         None
     };
 
-    // 4. Check report_data binding
-    let report_data_match = if let Some(expected) = &params.expected_report_data {
-        let padded = crate::utils::pad_report_data(expected, 64)?;
-        if !crate::utils::constant_time_eq(&quote.body.report_data, &padded) {
-            return Err(AttestationError::ReportDataMismatch);
-        }
-        Some(true)
-    } else {
-        None
-    };
-
-    // 5. Check MRCONFIGID binding
-    let init_data_match = if let Some(expected) = &params.expected_init_data_hash {
-        let padded = crate::utils::pad_report_data(expected, 48)?;
-        if !crate::utils::constant_time_eq(&quote.body.mr_config_id, &padded) {
-            return Err(AttestationError::InitDataMismatch);
-        }
-        Some(true)
-    } else {
-        None
-    };
-
-    // 5b. Optional launch measurement (MRTD) and RTMR comparison against
-    // pre-computed reference values. Mismatches are surfaced via the
-    // result fields rather than failing verification — policy lives in
-    // the caller. Constant-time compares to avoid leaking which byte
-    // diverged for callers that route the digests over a network.
-    let mrtd_match = params.expected_mrtd.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&quote.body.mr_td, expected)
-    });
-    let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
-        let rtmrs = [
-            &quote.body.rtmr_0,
-            &quote.body.rtmr_1,
-            &quote.body.rtmr_2,
-            &quote.body.rtmr_3,
-        ];
-        let mut out: [Option<bool>; 4] = [None, None, None, None];
-        for (i, slot) in expected.iter().enumerate() {
-            if let Some(exp) = slot {
-                out[i] = Some(crate::utils::constant_time_eq(rtmrs[i], exp));
-            }
-        }
-        out
-    });
-
-    // 6. Eventlog integrity check (if present)
+    // 4. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
         crate::utils::check_field_size("cc_eventlog", eventlog_b64.len())?;
         let ccel_data = BASE64
@@ -480,21 +451,123 @@ pub async fn verify_evidence(
         )?;
     }
 
-    // 7. Extract claims
-    let claims = extract_claims(&quote);
+    // 5. Canonical anchors. For bare-metal TDX the caller's nonce IS the
+    // report_data — there is no separate vTPM layer to put it on. We expose
+    // both `nonce` and `report_data` so the result shape is uniform across
+    // bare-metal and overlay platforms.
+    let report_data = quote.body.report_data.to_vec();
+    let launch_measurement = vendor_helpers::tdx_launch_measurement(
+        &quote.body.mr_td,
+        &quote.body.rtmr_1,
+        &quote.body.rtmr_2,
+        &quote.body.rtmr_3,
+    );
 
-    Ok(VerificationResult {
-        signature_valid: sig_valid,
-        platform: PlatformType::Tdx,
-        claims,
-        report_data_match,
-        init_data_match,
-        collateral_verified: tcb_status.is_some(),
+    // 5a. Canonical anchor comparisons (constant-time, no early return).
+    let (nonce_match, _) = check_padded_report_data(&quote.body.report_data, params.nonce.as_deref())?;
+    let (report_data_match, _) =
+        check_padded_report_data(&quote.body.report_data, params.report_data.as_deref())?;
+    let launch_measurement_match = params
+        .launch_measurement
+        .as_deref()
+        .map(|exp| crate::utils::constant_time_eq(&launch_measurement, exp));
+
+    // 6. Vendor-specific pin checks. Accumulate into `vendor_policy_failed`;
+    // do NOT short-circuit — each pin runs even if an earlier one mismatched,
+    // so the caller gets a complete picture.
+    let (vendor_policy_failed, expected_mr_config_id_match) = match &params.vendor {
+        VendorParams::Auto => (false, None),
+        VendorParams::Tdx(v) => apply_tdx_pins(&quote, v),
+        // Wrappers (GCP TDX, Dstack) re-validate their own VendorParams in
+        // their respective verify_evidence — the inner core just enforces
+        // the Auto/Tdx-only contract. Other vendor variants are unreachable
+        // here because the top-level dispatcher rejected a mismatched tag.
+        other => return Err(AttestationError::PlatformMismatch {
+            expected: "tdx".to_string(),
+            actual: format!("{other:?}"),
+        }),
+    };
+
+    let _ = expected_mr_config_id_match; // already folded into vendor_policy_failed
+
+    let parsed_quote = vendor_helpers::project_tdx_quote(&quote);
+    let collateral_verified = tcb_status.is_some();
+    let vendor = VendorResult::Tdx(TdxResult {
+        quote: parsed_quote,
         tcb_status,
-        mrtd_match,
-        rtmr_matches,
-        launch_digest_match: None,
-    })
+    });
+
+    let result = VerifyResult {
+        signature_valid: sig_valid,
+        collateral_verified,
+        nonce: quote.body.report_data.to_vec(), // bare-metal: nonce == report_data
+        report_data,
+        launch_measurement,
+        nonce_match,
+        report_data_match,
+        launch_measurement_match,
+        vendor,
+        vendor_policy_failed,
+    };
+
+    Ok((quote, result))
+}
+
+/// Constant-time-equal report_data with a zero-padded expected value. Returns
+/// `(match, mismatched)` for accumulation. The expected value is padded to 64
+/// bytes (the report_data field size) — callers pass the raw nonce / hash.
+pub(crate) fn check_padded_report_data(
+    observed: &[u8; 64],
+    expected: Option<&[u8]>,
+) -> Result<(Option<bool>, bool)> {
+    let Some(expected) = expected else {
+        return Ok((None, false));
+    };
+    let padded = crate::utils::pad_report_data(expected, 64)?;
+    let ok = crate::utils::constant_time_eq(observed, &padded);
+    Ok((Some(ok), !ok))
+}
+
+/// Apply TDX vendor pin checks. Returns `(vendor_policy_failed, mr_config_id_match)`.
+fn apply_tdx_pins(quote: &TdxQuote, v: &VerifyTdx) -> (bool, Option<bool>) {
+    let mut failed = false;
+
+    // MRTD pin
+    let (_, m) = vendor_helpers::check_digest_48(&quote.body.mr_td, v.mrtd.as_ref());
+    failed |= m;
+
+    // RTMR pins
+    let rtmrs = [
+        &quote.body.rtmr_0,
+        &quote.body.rtmr_1,
+        &quote.body.rtmr_2,
+        &quote.body.rtmr_3,
+    ];
+    for (i, slot) in v.rtmrs.iter().enumerate() {
+        let (_, m) = vendor_helpers::check_digest_48(rtmrs[i], slot.as_ref());
+        failed |= m;
+    }
+
+    // MRCONFIGID pin
+    let (mr_match, m) =
+        vendor_helpers::check_digest_48(&quote.body.mr_config_id, v.mr_config_id.as_ref());
+    failed |= m;
+
+    (failed, mr_match)
+}
+
+/// Verify TDX attestation evidence.
+///
+/// When `collateral_provider` is `Some`, performs full DCAP collateral verification:
+/// PCK CRL revocation check, TCB status evaluation, and QE Identity verification.
+/// When `None`, these checks are skipped (suitable for offline/testing scenarios).
+pub async fn verify_evidence(
+    evidence: &TdxEvidence,
+    params: &VerifyParams,
+    collateral_provider: Option<&dyn TdxCollateralProvider>,
+) -> Result<VerifyResult> {
+    let (_quote, result) = verify_evidence_inner(evidence, params, collateral_provider).await?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -700,7 +773,7 @@ mod tests {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
-            expected_report_data: Some(quote.body.report_data.to_vec()),
+            nonce: Some(quote.body.report_data.to_vec()),
             allow_debug: true,
             ..Default::default()
         };
@@ -903,206 +976,187 @@ mod tests {
         let r = result.unwrap();
         assert!(r.signature_valid);
         assert!(r.collateral_verified, "collateral should be verified");
-        assert!(r.tcb_status.is_some(), "tcb_status should be populated");
+        assert!(
+            matches!(&r.vendor, VendorResult::Tdx(t) if t.tcb_status.is_some()),
+            "TDX vendor result should carry tcb_status"
+        );
+    }
+
+    fn vendor_quote(r: &VerifyResult) -> &crate::types::ParsedTdxQuote {
+        match &r.vendor {
+            VendorResult::Tdx(t) => &t.quote,
+            other => panic!("expected VendorResult::Tdx, got {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_v4_matching_report_data() {
+    async fn test_verify_evidence_v4_matching_nonce() {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
 
         let params = VerifyParams {
-            expected_report_data: Some(quote.body.report_data.to_vec()),
+            nonce: Some(quote.body.report_data.to_vec()),
             allow_debug: true,
             ..Default::default()
         };
 
-        let result = verify_evidence(&evidence, &params, None).await;
-        assert!(
-            result.is_ok(),
-            "verify with matching report_data should succeed: {:?}",
-            result.err()
-        );
-        assert_eq!(result.unwrap().report_data_match, Some(true));
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.nonce_match, Some(true));
+        assert!(!r.policy_failed());
 
         let provider = FixtureCollateralProvider::new();
-        let result = verify_evidence(&evidence, &params, Some(&provider)).await;
-        assert!(
-            result.is_ok(),
-            "verify with collateral + matching report_data should succeed: {:?}",
-            result.err()
-        );
-        let r = result.unwrap();
-        assert_eq!(r.report_data_match, Some(true));
+        let r = verify_evidence(&evidence, &params, Some(&provider))
+            .await
+            .unwrap();
+        assert_eq!(r.nonce_match, Some(true));
         assert!(r.collateral_verified);
+        assert!(matches!(&r.vendor, VendorResult::Tdx(t) if t.tcb_status.is_some()));
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_v4_wrong_report_data_fails() {
+    async fn test_verify_evidence_v4_wrong_nonce_records_some_false() {
         let evidence = make_tdx_evidence(V4_QUOTE);
-
         let params = VerifyParams {
-            expected_report_data: Some(vec![0xFF; 64]),
+            nonce: Some(vec![0xFF; 64]),
             allow_debug: true,
             ..Default::default()
         };
-        let result = verify_evidence(&evidence, &params, None).await;
-        assert!(result.is_err(), "verify with wrong report_data should fail");
-        let err = format!("{:?}", result.err().unwrap());
-        assert!(
-            err.contains("ReportDataMismatch"),
-            "error should be ReportDataMismatch, got: {err}"
-        );
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.nonce_match, Some(false));
+        assert!(r.policy_failed());
+        assert!(r.signature_valid, "wrong nonce must not fail signature");
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_v5_matching_report_data() {
+    async fn test_verify_evidence_v5_matching_nonce() {
         let quote = parse_tdx_quote(V5_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V5_QUOTE);
-
         let params = VerifyParams {
-            expected_report_data: Some(quote.body.report_data.to_vec()),
+            nonce: Some(quote.body.report_data.to_vec()),
             ..Default::default()
         };
-
-        let result = verify_evidence(&evidence, &params, None).await;
-        assert!(
-            result.is_ok(),
-            "v5 verify with matching report_data should succeed: {:?}",
-            result.err()
-        );
-        assert_eq!(result.unwrap().report_data_match, Some(true));
-
-        // NOTE: v5 fixture's PCK TCB values predate the current Intel TCB
-        // Info levels (CompSVN [1,1,...] < required [3,3,...]), so collateral
-        // verification cannot find a matching SGX TCB level. Collateral
-        // testing for the v5 code path is covered by the v4 tests above,
-        // which share the same `evaluate_tcb_status` / `verify_qe_identity`
-        // implementation.
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.nonce_match, Some(true));
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_v5_wrong_report_data_fails() {
+    async fn test_verify_evidence_v5_wrong_nonce_is_some_false() {
         let evidence = make_tdx_evidence(V5_QUOTE);
-
         let params = VerifyParams {
-            expected_report_data: Some(vec![0x00; 64]),
+            nonce: Some(vec![0x00; 64]),
             ..Default::default()
         };
-        let result = verify_evidence(&evidence, &params, None).await;
-        assert!(
-            result.is_err(),
-            "v5 verify with wrong report_data should fail"
-        );
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.nonce_match, Some(false));
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_report_data_too_large() {
+    async fn test_verify_evidence_nonce_too_large() {
         let evidence = make_tdx_evidence(V4_QUOTE);
-
         let params = VerifyParams {
-            expected_report_data: Some(vec![0xAA; 65]),
+            nonce: Some(vec![0xAA; 65]),
             allow_debug: true,
             ..Default::default()
         };
         let result = verify_evidence(&evidence, &params, None).await;
-        assert!(result.is_err(), "65-byte report_data should be rejected");
+        assert!(result.is_err(), "65-byte nonce should be rejected");
     }
 
     // ---------------------------------------------------------------
-    // expected_mrtd / expected_rtmrs tests — closes the policy gap
-    // where the verifier can prove "this quote is valid" but cannot
-    // prove "this quote represents OUR published build."
+    // Vendor-specific pin checks via VendorParams::Tdx
     // ---------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_verify_evidence_no_expected_measurements_yields_none() {
-        // Sanity: when the caller supplies no expected_* values, the result
-        // fields are None — distinguishing "skipped" from "failed".
+    async fn test_verify_evidence_no_pins_yields_none() {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert!(r.mrtd_match.is_none(), "no expected_mrtd → None");
-        assert!(r.rtmr_matches.is_none(), "no expected_rtmrs → None");
-        assert!(
-            r.launch_digest_match.is_none(),
-            "TDX never sets launch_digest_match"
+        assert!(r.nonce_match.is_none());
+        assert!(r.report_data_match.is_none());
+        assert!(r.launch_measurement_match.is_none());
+        assert!(!r.vendor_policy_failed);
+        assert!(!r.policy_failed());
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_matching_mrtd_pin() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            vendor: VendorParams::Tdx(VerifyTdx {
+                mrtd: Some(quote.body.mr_td),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert!(!r.vendor_policy_failed);
+        let parsed = vendor_quote(&r);
+        assert_eq!(parsed.mr_td, quote.body.mr_td.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_wrong_mrtd_pin_records_failure() {
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            vendor: VendorParams::Tdx(VerifyTdx {
+                mrtd: Some([0xAA; 48]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert!(r.vendor_policy_failed);
+        assert!(r.policy_failed());
+        assert!(r.signature_valid, "wrong pin must not fail signature");
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_mixed_rtmr_pins() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            vendor: VendorParams::Tdx(VerifyTdx {
+                rtmrs: [
+                    Some(quote.body.rtmr_0), // match
+                    Some([0xFF; 48]),        // mismatch
+                    None,                    // skip
+                    Some(quote.body.rtmr_3), // match
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        // At least one pin failed → vendor_policy_failed is true.
+        assert!(r.vendor_policy_failed);
+        assert!(r.policy_failed());
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_canonical_launch_measurement_matches() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let expected_lm = crate::platforms::vendor_helpers::tdx_launch_measurement(
+            &quote.body.mr_td,
+            &quote.body.rtmr_1,
+            &quote.body.rtmr_2,
+            &quote.body.rtmr_3,
         );
-    }
-
-    #[tokio::test]
-    async fn test_verify_evidence_matching_mrtd() {
-        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
-        let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,
-            expected_mrtd: Some(quote.body.mr_td),
+            launch_measurement: Some(expected_lm.clone()),
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.mrtd_match, Some(true));
-    }
-
-    #[tokio::test]
-    async fn test_verify_evidence_wrong_mrtd_is_some_false() {
-        // INVARIANT: A wrong MRTD records Some(false) but DOES NOT fail the
-        // verifier. Policy lives in the caller — this test ensures we
-        // surface the mismatch rather than masking it as a hard error.
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = VerifyParams {
-            allow_debug: true,
-            expected_mrtd: Some([0xAA; 48]),
-            ..Default::default()
-        };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.mrtd_match, Some(false));
-        // Crucially the rest of the result is still populated — sig is valid.
-        assert!(r.signature_valid);
-    }
-
-    #[tokio::test]
-    async fn test_verify_evidence_partial_rtmr_check() {
-        // Caller provides only rtmr0, leaving the others as inner None.
-        // rtmr_matches[0] should be Some(true); the rest remain None.
-        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let expected: [Option<[u8; 48]>; 4] = [Some(quote.body.rtmr_0), None, None, None];
-        let params = VerifyParams {
-            allow_debug: true,
-            expected_rtmrs: Some(expected),
-            ..Default::default()
-        };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        let m = r.rtmr_matches.expect("rtmr_matches should be Some(...)");
-        assert_eq!(m[0], Some(true), "rtmr0 should match");
-        assert_eq!(m[1], None, "rtmr1 not requested → None");
-        assert_eq!(m[2], None, "rtmr2 not requested → None");
-        assert_eq!(m[3], None, "rtmr3 not requested → None");
-    }
-
-    #[tokio::test]
-    async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
-        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let expected: [Option<[u8; 48]>; 4] = [
-            Some(quote.body.rtmr_0), // match
-            Some([0xFF; 48]),        // mismatch
-            None,                    // skip
-            Some(quote.body.rtmr_3), // match
-        ];
-        let params = VerifyParams {
-            allow_debug: true,
-            expected_rtmrs: Some(expected),
-            ..Default::default()
-        };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        let m = r.rtmr_matches.unwrap();
-        assert_eq!(m[0], Some(true));
-        assert_eq!(m[1], Some(false));
-        assert_eq!(m[2], None);
-        assert_eq!(m[3], Some(true));
+        assert_eq!(r.launch_measurement, expected_lm);
+        assert_eq!(r.launch_measurement_match, Some(true));
+        assert!(!r.policy_failed());
     }
 }

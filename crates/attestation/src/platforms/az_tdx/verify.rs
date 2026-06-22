@@ -1,8 +1,12 @@
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
-use crate::platforms::tdx::{claims::extract_claims, dcap, verify as tdx_verify};
+use crate::platforms::tdx::{dcap, verify as tdx_verify};
 use crate::platforms::tpm_common;
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::platforms::vendor_helpers;
+use crate::types::{
+    AzTdxResult, DcapVerificationStatus, VendorParams, VendorResult, VerifyAzTdx, VerifyParams,
+    VerifyResult,
+};
 use crate::utils::decode_base64url;
 
 use super::evidence::AzTdxEvidence;
@@ -15,13 +19,15 @@ pub async fn verify_evidence(
     evidence: &AzTdxEvidence,
     params: &VerifyParams,
     collateral_provider: Option<&dyn TdxCollateralProvider>,
-) -> Result<VerificationResult> {
+) -> Result<VerifyResult> {
     if evidence.version != 1 {
         return Err(AttestationError::EvidenceDeserialize(format!(
             "unsupported az_tdx evidence version: {}",
             evidence.version
         )));
     }
+
+    let vendor_params = extract_vendor(params)?;
 
     // Input size validation
     crate::utils::check_field_size("hcl_report", evidence.hcl_report.len())?;
@@ -55,13 +61,15 @@ pub async fn verify_evidence(
     // 3. The TEE report itself is signed by Intel's QE (DCAP chain for TDX).
     // Trust chain: TEE report → var_data → AK → TPM quote → nonce
     tpm_common::verify_tpm_signature(&tpm_sig, &tpm_msg, &hcl.var_data)?;
-    if params.expected_report_data.is_none() {
+    let tpm_signature_valid = true;
+
+    if params.nonce.is_none() && params.report_data.is_none() {
         log::warn!(
-            "az-tdx: no expected_report_data provided; TPM nonce binding will not be verified"
+            "az-tdx: no canonical nonce/report_data anchor provided; TPM nonce binding will not be enforced"
         );
     }
-    let report_data_match =
-        tpm_common::check_report_data(&tpm_msg, params.expected_report_data.as_deref())?;
+
+    // Verify the PCR digest cryptographically — the cheap one we always do.
     tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
 
     // TDX DCAP layer
@@ -75,7 +83,7 @@ pub async fn verify_evidence(
     }
 
     // DCAP collateral checks (CRL, TCB, QE Identity) when provider is available
-    let tcb_status = if let Some(provider) = collateral_provider {
+    let tcb_status: Option<DcapVerificationStatus> = if let Some(provider) = collateral_provider {
         let body_end = dcap::compute_body_end(&td_quote_bytes, tdx_quote.quote_version)?;
         let auth = dcap::parse_auth_data(&td_quote_bytes, body_end)?;
 
@@ -120,49 +128,116 @@ pub async fn verify_evidence(
         None
     };
 
-    // Bindings
+    // AK-to-TEE binding: inner TDX report_data[..32] == SHA-256(var_data).
     tpm_common::verify_hcl_var_data_binding(&tdx_quote.body.report_data, &hcl.var_data)?;
-    let init_data_match =
-        tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
+    let ak_to_tee_binding_valid = true;
 
-    // Optional launch-measurement (MRTD / RTMR) comparisons against the inner
-    // TDX quote. Mismatches do NOT fail verification — surfaced via the
-    // result fields for the caller's policy layer.
-    let mrtd_match = params.expected_mrtd.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected)
-    });
-    let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
+    // ---------------------------------------------------------------
+    // Canonical anchors.
+    //
+    // For az-tdx, the *nonce* is the TPM quote's extraData (qualifyingData)
+    // and the *report_data* is the inner TDX quote's report_data
+    // (which carries SHA-256(var_data) || ...). Two distinct anchors
+    // because the platform exposes them on two different layers.
+    // ---------------------------------------------------------------
+    let nonce_bytes = tpm_common::extract_tpm_nonce(&tpm_msg).unwrap_or_default();
+    let report_data_bytes = tdx_quote.body.report_data.to_vec();
+
+    let nonce_match = if let Some(expected) = params.nonce.as_deref() {
+        Some(crate::utils::constant_time_eq(&nonce_bytes, expected))
+    } else {
+        None
+    };
+    let (report_data_match, _) = tdx_verify::check_padded_report_data(
+        &tdx_quote.body.report_data,
+        params.report_data.as_deref(),
+    )?;
+    let launch_measurement = vendor_helpers::tdx_launch_measurement(
+        &tdx_quote.body.mr_td,
+        &tdx_quote.body.rtmr_1,
+        &tdx_quote.body.rtmr_2,
+        &tdx_quote.body.rtmr_3,
+    );
+    let launch_measurement_match = params
+        .launch_measurement
+        .as_deref()
+        .map(|exp| crate::utils::constant_time_eq(&launch_measurement, exp));
+
+    // ---------------------------------------------------------------
+    // Vendor-specific pin checks. Accumulate vendor_policy_failed,
+    // no short-circuit.
+    // ---------------------------------------------------------------
+    let mut vendor_policy_failed = false;
+    if let Some(v) = vendor_params {
+        let (_, m) =
+            vendor_helpers::check_digest_48(&tdx_quote.body.mr_td, v.mrtd.as_ref());
+        vendor_policy_failed |= m;
+
         let rtmrs = [
             &tdx_quote.body.rtmr_0,
             &tdx_quote.body.rtmr_1,
             &tdx_quote.body.rtmr_2,
             &tdx_quote.body.rtmr_3,
         ];
-        let mut out: [Option<bool>; 4] = [None, None, None, None];
-        for (i, slot) in expected.iter().enumerate() {
-            if let Some(exp) = slot {
-                out[i] = Some(crate::utils::constant_time_eq(rtmrs[i], exp));
-            }
+        for (i, slot) in v.rtmrs.iter().enumerate() {
+            let (_, m) = vendor_helpers::check_digest_48(rtmrs[i], slot.as_ref());
+            vendor_policy_failed |= m;
         }
-        out
+        let (_, m) =
+            vendor_helpers::check_digest_48(&tdx_quote.body.mr_config_id, v.mr_config_id.as_ref());
+        vendor_policy_failed |= m;
+
+        if let Some(expected) = v.inner_report_data.as_deref() {
+            let (_, m) =
+                vendor_helpers::check_digest_vec(&tdx_quote.body.report_data, Some(expected));
+            vendor_policy_failed |= m;
+        }
+        // AK thumbprint: the inner TDX report_data prefix is SHA-256(var_data),
+        // which IS the AK thumbprint as carried in the wire (var_data contains
+        // the AK JWK). Compare against the first 32 bytes of report_data.
+        if let Some(expected_thumbprint) = v.ak_pub_thumbprint.as_deref() {
+            let observed = &tdx_quote.body.report_data[..32];
+            let (_, m) = vendor_helpers::check_digest_vec(observed, Some(expected_thumbprint));
+            vendor_policy_failed |= m;
+        }
+    }
+
+    // Tdx parsed quote projection.
+    let inner_tdx_quote = vendor_helpers::project_tdx_quote(&tdx_quote);
+    let tpm_quote = vendor_helpers::project_tpm_quote(&tpm_sig, &tpm_msg, &tpm_pcrs);
+    let hcl_report = vendor_helpers::project_hcl_report(&hcl);
+    let vendor = VendorResult::AzTdx(AzTdxResult {
+        tpm_quote,
+        hcl_report,
+        inner_tdx_quote,
+        tcb_status: tcb_status.clone(),
+        tpm_signature_valid,
+        ak_to_tee_binding_valid,
     });
 
-    // Result
-    let tdx_claims = extract_claims(&tdx_quote);
-    let collateral_verified = tcb_status.is_some();
-    let mut result = tpm_common::build_tpm_verification_result(
-        tdx_claims,
-        &tpm_pcrs,
-        &tpm_msg,
-        PlatformType::AzTdx,
+    Ok(VerifyResult {
+        signature_valid: true,
+        collateral_verified: tcb_status.is_some(),
+        nonce: nonce_bytes,
+        report_data: report_data_bytes,
+        launch_measurement,
+        nonce_match,
         report_data_match,
-        init_data_match,
-        collateral_verified,
-    );
-    result.tcb_status = tcb_status;
-    result.mrtd_match = mrtd_match;
-    result.rtmr_matches = rtmr_matches;
-    Ok(result)
+        launch_measurement_match,
+        vendor,
+        vendor_policy_failed,
+    })
+}
+
+fn extract_vendor(params: &VerifyParams) -> Result<Option<&VerifyAzTdx>> {
+    match &params.vendor {
+        VendorParams::Auto => Ok(None),
+        VendorParams::AzTdx(v) => Ok(Some(v)),
+        other => Err(AttestationError::PlatformMismatch {
+            expected: "az-tdx".to_string(),
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 #[cfg(test)]

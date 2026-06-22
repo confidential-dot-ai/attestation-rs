@@ -265,10 +265,13 @@ impl VendorResult {
 #[serde(deny_unknown_fields)]
 pub struct VerifyTdx {
     /// Expected MRTD (TD launch measurement, 48 bytes).
+    #[serde(default, with = "hex_option_array48")]
     pub mrtd: Option<[u8; 48]>,
     /// Expected per-RTMR digests (`None` entries are skipped).
+    #[serde(default, with = "hex_array_of_option_array48")]
     pub rtmrs: [Option<[u8; 48]>; 4],
     /// Expected MRCONFIGID (48 bytes).
+    #[serde(default, with = "hex_option_array48")]
     pub mr_config_id: Option<[u8; 48]>,
 }
 
@@ -287,10 +290,13 @@ pub struct VerifySnp {
 #[serde(deny_unknown_fields)]
 pub struct VerifyAzTdx {
     /// Expected MRTD (TD launch measurement, 48 bytes).
+    #[serde(default, with = "hex_option_array48")]
     pub mrtd: Option<[u8; 48]>,
     /// Expected per-RTMR digests.
+    #[serde(default, with = "hex_array_of_option_array48")]
     pub rtmrs: [Option<[u8; 48]>; 4],
     /// Expected MRCONFIGID.
+    #[serde(default, with = "hex_option_array48")]
     pub mr_config_id: Option<[u8; 48]>,
     /// Expected report_data inside the inner TDX quote. The inner report_data
     /// for Azure vTPM platforms is `SHA-256(var_data) ‖ 32 zero bytes` (the
@@ -320,10 +326,13 @@ pub struct VerifyAzSnp {
 #[serde(deny_unknown_fields)]
 pub struct VerifyGcpTdx {
     /// Expected MRTD.
+    #[serde(default, with = "hex_option_array48")]
     pub mrtd: Option<[u8; 48]>,
     /// Expected per-RTMR digests.
+    #[serde(default, with = "hex_array_of_option_array48")]
     pub rtmrs: [Option<[u8; 48]>; 4],
     /// Expected MRCONFIGID.
+    #[serde(default, with = "hex_option_array48")]
     pub mr_config_id: Option<[u8; 48]>,
     /// Expected GCP attestation-JWT audience (`aud` claim). Set this if
     /// your evidence carries a GCP-issued attestation JWT and you want to
@@ -350,10 +359,13 @@ pub struct VerifyGcpSnp {
 #[serde(deny_unknown_fields)]
 pub struct VerifyDstack {
     /// Expected MRTD.
+    #[serde(default, with = "hex_option_array48")]
     pub mrtd: Option<[u8; 48]>,
     /// Expected per-RTMR digests.
+    #[serde(default, with = "hex_array_of_option_array48")]
     pub rtmrs: [Option<[u8; 48]>; 4],
     /// Expected MRCONFIGID.
+    #[serde(default, with = "hex_option_array48")]
     pub mr_config_id: Option<[u8; 48]>,
 }
 
@@ -911,5 +923,93 @@ pub(crate) mod hex_bytes {
     {
         let s = String::deserialize(deserializer)?;
         hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Helper module for serializing `Option<[u8; 48]>` as `Option<hex string>`.
+pub(crate) mod hex_option_array48 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<[u8; 48]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(b) => serializer.serialize_some(&hex::encode(b)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 48]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(s) => {
+                let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
+                if v.len() != 48 {
+                    return Err(serde::de::Error::custom(format!(
+                        "expected 48-byte hex digest, got {} bytes",
+                        v.len()
+                    )));
+                }
+                let mut out = [0u8; 48];
+                out.copy_from_slice(&v);
+                Ok(Some(out))
+            }
+        }
+    }
+}
+
+/// Helper module for serializing `[Option<[u8; 48]>; 4]` as an array of
+/// nullable hex strings.
+pub(crate) mod hex_array_of_option_array48 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        arr: &[Option<[u8; 48]>; 4],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let hex: [Option<String>; 4] = [
+            arr[0].as_ref().map(hex::encode),
+            arr[1].as_ref().map(hex::encode),
+            arr[2].as_ref().map(hex::encode),
+            arr[3].as_ref().map(hex::encode),
+        ];
+        hex.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[Option<[u8; 48]>; 4], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v: Vec<Option<String>> = Vec::deserialize(deserializer)?;
+        if v.len() != 4 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 4-element RTMR array, got {}",
+                v.len()
+            )));
+        }
+        let mut out: [Option<[u8; 48]>; 4] = [None, None, None, None];
+        for (i, slot) in v.into_iter().enumerate() {
+            if let Some(s) = slot {
+                let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+                if bytes.len() != 48 {
+                    return Err(serde::de::Error::custom(format!(
+                        "expected 48-byte rtmr[{i}], got {} bytes",
+                        bytes.len()
+                    )));
+                }
+                let mut a = [0u8; 48];
+                a.copy_from_slice(&bytes);
+                out[i] = Some(a);
+            }
+        }
+        Ok(out)
     }
 }
