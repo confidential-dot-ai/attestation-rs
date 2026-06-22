@@ -242,29 +242,32 @@ GCP TDX uses the same wire format as bare-metal TDX. The `platform` field in the
 ```json
 {
   "signature_valid": true,
-  "platform": "snp",
-  "claims": {
-    "launch_digest": "<96-char hex string (48 bytes)>",
-    "report_data": "<128-char hex string (64 bytes)>",
-    "signed_data": "<hex-encoded bytes>",
-    "init_data": "<hex-encoded bytes>",
-    "tcb": {
-      "type": "Snp",
-      "bootloader": 3,
-      "tee": 0,
-      "snp": 8,
-      "microcode": 115
-    },
-    "platform_data": {
-      "policy": { "abi_major": 0, "debug_allowed": false, "..." : "..." },
+  "collateral_verified": true,
+  "nonce": "<hex-encoded observed nonce>",
+  "report_data": "<128-char hex string (64 bytes)>",
+  "launch_measurement": "<96-char hex (48 bytes, canonical)>",
+  "nonce_match": true,
+  "report_data_match": null,
+  "launch_measurement_match": null,
+  "vendor_policy_failed": false,
+  "vendor": {
+    "type": "snp",
+    "report": {
+      "version": 5,
       "vmpl": 0,
-      "chip_id": "<128-char hex>"
+      "measurement": "<96-char hex>",
+      "report_data": "<128-char hex>",
+      "host_data": "<64-char hex>",
+      "chip_id": "<128-char hex>",
+      "policy_debug_allowed": false,
+      "reported_tcb": { "bootloader": 3, "tee": 0, "snp": 8, "microcode": 115 }
     }
-  },
-  "report_data_match": true,
-  "init_data_match": null
+  }
 }
 ```
+
+Call `result.policy_failed()` for the aggregated yes/no on whether ANY pin
+mismatched.
 
 ## Running Tests
 
