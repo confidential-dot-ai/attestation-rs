@@ -43,7 +43,7 @@ All six platform features are enabled by default. Verification is always compile
 ### Verifier (Server-Side or WASM)
 
 ```rust
-use attestation::{VerifyParams, VerificationResult};
+use attestation::{VerifyParams, VerifyResult};
 
 #[tokio::main]
 async fn main() {
@@ -51,16 +51,19 @@ async fn main() {
     let evidence_json: &[u8] = b"...";
 
     let params = VerifyParams {
-        expected_report_data: Some(vec![0xAA; 64]),
+        nonce: Some(vec![0xAA; 32]),
         ..Default::default()
     };
 
     let result = attestation::verify(evidence_json, &params).await.unwrap();
 
     println!("Signature valid: {}", result.signature_valid);
-    println!("Platform: {}", result.platform);
-    println!("Launch digest: {}", result.claims.launch_digest);
-    println!("Report data match: {:?}", result.report_data_match);
+    println!("Platform: {}", result.vendor.platform());
+    println!("Launch measurement: {}", hex::encode(&result.launch_measurement));
+    println!("Nonce match: {:?}", result.nonce_match);
+    if result.policy_failed() {
+        eprintln!("policy mismatch — fail closed");
+    }
 }
 ```
 

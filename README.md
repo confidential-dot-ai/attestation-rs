@@ -64,12 +64,14 @@ module script:
 
   // evidence: SNP evidence JSON with an inline cert_chain.vcek (base64 DER)
   // generation: "milan" | "genoa" | "turin"
-  // expectedReportData (optional): Uint8Array of the nonce to bind against
+  // expectedNonce (optional): Uint8Array of the nonce to bind against
   const resultJson = verify_snp(
     JSON.stringify(evidence),
     'genoa',
     new TextEncoder().encode('my-nonce'),
   );
+  // result: { signature_valid, collateral_verified, nonce_match,
+  //           launch_measurement, report_data, ... }
   console.log(JSON.parse(resultJson));
 </script>
 ```
@@ -86,8 +88,8 @@ argument is needed:
 import init, { verify_az_snp } from './pkg/attestation_wasm.js';
 await init();
 // evidence: AzSnpEvidence JSON { version, tpm_quote, hcl_report, vcek }
-// expectedReportData (optional): Uint8Array the quote's extraData must equal
-const resultJson = verify_az_snp(JSON.stringify(evidence), expectedReportData);
+// expectedNonce (optional): Uint8Array the quote's extraData must equal
+const resultJson = verify_az_snp(JSON.stringify(evidence), expectedNonce);
 ```
 
 It returns the same result shape as `verify_snp` with `platform: "az-snp"`. The
@@ -100,48 +102,75 @@ KDS, verify in WASM), build with `--target nodejs` and run
 
 ## Pinning launch measurements
 
-`VerifyParams` carries optional reference values that the verifier compares
-against the measurement registers in the quote. When the operator supplies a
-value, the corresponding `VerificationResult` field is `Some(true)`/`Some(false)`;
-when omitted the result is `None` (no check requested).
+`VerifyParams` splits policy anchors into two layers:
+
+1. **Canonical anchors** that every vendor exposes uniformly:
+   `nonce`, `report_data`, and `launch_measurement` (a 48-byte synthetic
+   digest — see [Canonical launch_measurement formula](#canonical-launch_measurement-formula)).
+2. **Vendor-specific pins** that only make sense for one TEE family
+   (MRTD/RTMRs for TDX, `min_tcb` for SNP, AK thumbprint for Azure
+   overlays). These live in the `vendor: VendorParams` enum.
 
 ```rust
-use attestation::types::VerifyParams;
+use attestation::{VerifyParams, VendorParams, VerifyTdx};
 
+// Canonical-only: works on any platform.
 let params = VerifyParams {
-    // TDX policy
-    expected_mrtd: Some(mrtd_bytes),                   // [u8; 48]
-    expected_rtmrs: Some([None, Some(rtmr1), Some(rtmr2), None]),
-    // SNP policy
-    expected_launch_digest: Some(launch_digest_bytes), // [u8; 48]
-    // existing fields
-    expected_report_data: Some(nonce.to_vec()),
+    nonce: Some(nonce.to_vec()),
+    launch_measurement: Some(canonical_lm.to_vec()), // 48-byte SHA-384
+    ..Default::default()
+};
+
+// Vendor-precise: pin per-RTMR digests on a TDX deployment.
+let params = VerifyParams {
+    nonce: Some(nonce.to_vec()),
+    vendor: VendorParams::Tdx(VerifyTdx {
+        mrtd: Some(mrtd_bytes),
+        rtmrs: [None, Some(rtmr1), Some(rtmr2), None],
+        mr_config_id: None,
+    }),
     ..Default::default()
 };
 
 let result = attestation::verify(&evidence_json, &params).await?;
-assert_eq!(result.mrtd_match, Some(true));
-assert_eq!(result.rtmr_matches, Some([None, Some(true), Some(true), None]));
+assert!(result.signature_valid);
+assert!(!result.policy_failed());
 ```
 
 All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
-short-circuit between RTMRs — every populated reference is checked.
-`VerificationResult` carries `#[must_use]` so dropping the result without
-inspecting the policy outcomes is a compile-time warning.
+short-circuit — every populated reference is checked. `VerifyResult` is
+`#[must_use]`, so dropping it without inspecting the policy outcomes is
+a compile-time warning.
 
-The CLI exposes matching flags:
+`result.policy_failed()` aggregates ALL pin outcomes (canonical and
+vendor-specific) into a single `bool`. The CLI uses it as the exit-code
+gate.
+
+### Canonical launch_measurement formula
+
+| Vendor                              | Formula                                                |
+|-------------------------------------|--------------------------------------------------------|
+| TDX / AzTdx / GcpTdx / Dstack       | `SHA-384(mrtd ‖ rtmr1 ‖ rtmr2 ‖ rtmr3)` (48 bytes)     |
+| SNP / AzSnp / GcpSnp                | `report.measurement` verbatim (48 bytes)               |
+
+RTMR3 is included because it is runtime-extendable by the guest
+(`TDG.MR.RTMR.EXTEND`), letting workloads bind application-specific data
+(model hashes, config digests) into the canonical identity. This formula
+is **locked** — changing it would invalidate every pinned reference in
+the wild.
+
+### CLI
 
 ```bash
 attestation-cli verify \
   --evidence evidence.json \
-  --expected-mrtd $MRTD \
-  --expected-rtmr1 $RTMR1 \
-  --expected-rtmr2 $RTMR2
-# exit 0 on full match; exit 1 on any explicit --expected-* mismatch.
+  --nonce $NONCE_HEX \
+  --launch-measurement $CANONICAL_LM_HEX
+# exit 0 on success; exit 1 on signature failure OR any policy mismatch.
 ```
 
-A failing `--expected-*` check forces the process to exit non-zero, so a
-CI gate using these flags fails closed on a wrong workload.
+The CLI exposes only the **canonical** anchors. Vendor-precise pinning
+is library-only; callers who need per-RTMR control write Rust.
 
 ## Documentation
 

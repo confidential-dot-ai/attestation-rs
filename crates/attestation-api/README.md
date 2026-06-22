@@ -103,7 +103,7 @@ curl -X POST http://127.0.0.1:8400/verify \
     "platform": "snp",
     "evidence": { ... },
     "params": {
-      "expected_report_data": "AQIDBA==",
+      "nonce": "AQIDBA==",
       "allow_debug": false
     },
     "issue_token": true
