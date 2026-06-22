@@ -6,7 +6,6 @@ use p256::PublicKey;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -31,7 +30,7 @@ struct JwtHeader {
     kid: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct JwtClaims {
     iss: String,
     jti: String,
@@ -52,19 +51,6 @@ struct JwtClaims {
     report_data_match: Option<bool>,
     launch_measurement_match: Option<bool>,
     vendor_policy_failed: bool,
-    /// Vendor-specific verification artifacts (parsed quote/report, etc.).
-    vendor: Value,
-}
-
-impl fmt::Debug for JwtClaims {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JwtClaims")
-            .field("iss", &self.iss)
-            .field("jti", &self.jti)
-            .field("platform", &self.platform)
-            .field("vendor", &"[redacted]")
-            .finish()
-    }
 }
 
 impl TokenIssuer {
@@ -90,9 +76,11 @@ impl TokenIssuer {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ApiError::Internal(format!("system time error: {e}")))?;
 
-        let vendor_json = serde_json::to_value(&result.vendor)
-            .map_err(|e| ApiError::Internal(format!("failed to serialize vendor: {e}")))?;
-
+        // The library's VerifyResult is not Serialize; the issuer projects the
+        // canonical anchors into JWT claims here. Vendor-specific parsed bodies
+        // (parsed quote/report) are deliberately not embedded in the token —
+        // putting them on the wire was an artifact of the old projection layer
+        // and would need a per-vendor wire-format decision the API has not made.
         let jwt_claims = JwtClaims {
             iss: self.issuer.clone(),
             jti: Uuid::new_v4().to_string(),
@@ -109,7 +97,6 @@ impl TokenIssuer {
             report_data_match: result.report_data_match,
             launch_measurement_match: result.launch_measurement_match,
             vendor_policy_failed: result.vendor_policy_failed,
-            vendor: vendor_json,
         };
 
         let header = JwtHeader {

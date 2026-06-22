@@ -35,9 +35,54 @@ pub struct VerifyParamsInput {
     pub allow_debug: bool,
 }
 
+/// Flat DTO returned to HTTP callers. The library's `VerifyResult` is not
+/// `Serialize` (it embeds raw parsed quote/report types). The API projects
+/// the canonical anchors here; vendor-specific parsed bodies stay on the
+/// Rust side and are surfaced (today) only via the JWT issuer's claim set.
+#[derive(Serialize)]
+pub struct VerifyResultDto {
+    pub signature_valid: bool,
+    pub collateral_verified: bool,
+    pub vendor: String,
+    /// Base64-encoded canonical launch measurement.
+    pub launch_measurement: String,
+    /// Base64-encoded observed nonce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// Base64-encoded observed report_data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce_match: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_data_match: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_measurement_match: Option<bool>,
+    pub vendor_policy_failed: bool,
+    pub policy_failed: bool,
+}
+
+impl VerifyResultDto {
+    fn from_result(r: &attestation::VerifyResult) -> Self {
+        Self {
+            signature_valid: r.signature_valid,
+            collateral_verified: r.collateral_verified,
+            vendor: format!("{}", r.vendor.platform()),
+            launch_measurement: BASE64.encode(&r.launch_measurement),
+            nonce: (!r.nonce.is_empty()).then(|| BASE64.encode(&r.nonce)),
+            report_data: (!r.report_data.is_empty()).then(|| BASE64.encode(&r.report_data)),
+            nonce_match: r.nonce_match,
+            report_data_match: r.report_data_match,
+            launch_measurement_match: r.launch_measurement_match,
+            vendor_policy_failed: r.vendor_policy_failed,
+            policy_failed: r.policy_failed(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct VerifyResponse {
-    pub result: attestation::VerifyResult,
+    pub result: VerifyResultDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -103,7 +148,8 @@ pub async fn handler(
         None
     };
 
-    Ok(Json(VerifyResponse { result, token }))
+    let dto = VerifyResultDto::from_result(&result);
+    Ok(Json(VerifyResponse { result: dto, token }))
 }
 
 fn build_evidence_envelope(platform: Option<String>, evidence: Value) -> Result<Vec<u8>, ApiError> {

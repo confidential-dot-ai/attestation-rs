@@ -56,6 +56,10 @@ fn token_issuer_produces_valid_jwt() {
     )
     .unwrap();
 
+    // VerifyResult no longer carries the projected `ParsedSnpReport`; the
+    // SnpResult variant embeds the raw `sev::firmware::guest::AttestationReport`
+    // directly. `default()` gives us a zero-filled report that's good enough
+    // for exercising the issuer code path here.
     let result = attestation::VerifyResult {
         signature_valid: true,
         collateral_verified: false,
@@ -67,22 +71,7 @@ fn token_issuer_produces_valid_jwt() {
         launch_measurement_match: None,
         vendor_policy_failed: false,
         vendor: attestation::VendorResult::Snp(attestation::SnpResult::new(
-            attestation::ParsedSnpReport {
-                version: 3,
-                vmpl: 0,
-                measurement: vec![0u8; 48],
-                report_data: vec![0u8; 64],
-                host_data: vec![0u8; 32],
-                chip_id: vec![0u8; 64],
-                policy_debug_allowed: false,
-                reported_tcb: attestation::SnpTcb {
-                    bootloader: 0,
-                    tee: 0,
-                    snp: 0,
-                    microcode: 0,
-                    fmc: None,
-                },
-            },
+            sev::firmware::guest::AttestationReport::default(),
         )),
     };
 

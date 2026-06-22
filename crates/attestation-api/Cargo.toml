@@ -53,6 +53,11 @@ uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
 hex = { workspace = true }
 
+[dev-dependencies]
+# Needed by the token-issuer test to build a synthetic VerifyResult — the
+# library's VendorResult::Snp now embeds the raw `sev` AttestationReport.
+sev = { workspace = true, features = ["snp", "crypto_nossl"] }
+
 [[bin]]
 name = "loadtest"
 path = "src/bin/loadtest.rs"
