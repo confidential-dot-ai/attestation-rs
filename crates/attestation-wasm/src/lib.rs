@@ -126,11 +126,23 @@ pub fn verify_az_snp(
     let verified = verify_report(&evidence, &params)
         .map_err(|e| JsError::new(&format!("az-snp verify: {e}")))?;
 
-    // Serialize the canonical VerifyResult, augmented with report_version for
-    // backward-compat with the existing JS dashboard.
-    let mut result = serde_json::to_value(&verified.result)
-        .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
-    result["report_version"] = serde_json::json!(verified.report_version);
+    // VerifyResult is not Serialize; the WASM boundary projects the canonical
+    // anchors here. Vendor-specific parsed bodies stay on the Rust side.
+    let r = &verified.result;
+    let result = serde_json::json!({
+        "signature_valid": r.signature_valid,
+        "collateral_verified": r.collateral_verified,
+        "platform": format!("{}", r.vendor.platform()),
+        "launch_measurement": hex::encode(&r.launch_measurement),
+        "nonce": hex::encode(&r.nonce),
+        "report_data": hex::encode(&r.report_data),
+        "nonce_match": r.nonce_match,
+        "report_data_match": r.report_data_match,
+        "launch_measurement_match": r.launch_measurement_match,
+        "vendor_policy_failed": r.vendor_policy_failed,
+        "policy_failed": r.policy_failed(),
+        "report_version": verified.report_version,
+    });
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
