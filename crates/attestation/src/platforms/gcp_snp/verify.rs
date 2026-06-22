@@ -25,7 +25,6 @@
 use crate::collateral::CertProvider;
 use crate::error::Result;
 use crate::platforms::snp::evidence::SnpEvidence;
-use crate::platforms::vendor_helpers;
 use crate::types::{
     GcpSnpResult, VendorParams, VendorResult, VerifyGcpSnp, VerifyParams, VerifyResult, VerifySnp,
 };
@@ -45,13 +44,14 @@ pub async fn verify_evidence(
     cert_provider: &dyn CertProvider,
 ) -> Result<VerifyResult> {
     let inner_params = translate_params(params)?;
-    let (report, mut result) =
-        crate::platforms::snp::verify::verify_evidence_inner(evidence, &inner_params, cert_provider)
-            .await?;
-    let inner_snp_report = vendor_helpers::project_snp_report(&report);
+    let (report, mut result) = crate::platforms::snp::verify::verify_evidence_inner(
+        evidence,
+        &inner_params,
+        cert_provider,
+    )
+    .await?;
     result.vendor = VendorResult::GcpSnp(GcpSnpResult {
-        jwt: None,
-        inner_snp_report,
+        inner_snp_report: report,
         jwt_signature_valid: false,
     });
     Ok(result)
@@ -63,9 +63,7 @@ fn translate_params(params: &VerifyParams) -> Result<VerifyParams> {
         VendorParams::GcpSnp(VerifyGcpSnp {
             min_tcb,
             gcp_jwt_audience: _,
-        }) => VendorParams::Snp(VerifySnp {
-            min_tcb: *min_tcb,
-        }),
+        }) => VendorParams::Snp(VerifySnp { min_tcb: *min_tcb }),
         other => {
             return Err(crate::error::AttestationError::PlatformMismatch {
                 expected: "gcp-snp".to_string(),
@@ -92,8 +90,7 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     // Same live Genoa v5 fixture used by the bare-metal SNP tests.
-    const LIVE_REPORT_V5: &[u8] =
-        include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
+    const LIVE_REPORT_V5: &[u8] = include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
     const LIVE_VCEK_GENOA: &[u8] = include_bytes!("../../../test_data/snp/live-vcek-genoa.der");
 
     /// Cert provider that returns the bundled live Genoa VCEK. No network,
@@ -142,7 +139,9 @@ mod tests {
             launch_measurement: Some(expected),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &StubCertProvider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
         assert!(matches!(r.vendor, VendorResult::GcpSnp(_)));
         assert_eq!(r.launch_measurement_match, Some(true));
     }
@@ -154,7 +153,9 @@ mod tests {
             launch_measurement: Some(vec![0x77; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &StubCertProvider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
         assert!(matches!(r.vendor, VendorResult::GcpSnp(_)));
         assert_eq!(r.launch_measurement_match, Some(false));
         assert!(r.signature_valid);

@@ -1,18 +1,9 @@
-//! Helpers shared by per-vendor verifiers for building the new
-//! [`crate::types::VerifyResult`] shape.
-//!
-//! These helpers cover the steady-state work every vendor needs:
-//! - computing the canonical synthetic launch_measurement
-//! - projecting raw parsed structs into the serializable
-//!   `ParsedTdxQuote` / `ParsedSnpReport` / `ParsedTpmQuote` / `ParsedHclReport`
-//! - constant-time comparison of canonical anchors
+//! Helpers shared by per-vendor verifiers for building
+//! [`crate::types::VerifyResult`].
 //!
 //! Every digest comparison routes through [`crate::utils::constant_time_eq`].
 //! No `==` on digest bytes — see the crate's threat model on timing leaks.
 
-use crate::types::{
-    ParsedHclReport, ParsedSnpReport, ParsedTdxQuote, ParsedTpmQuote, SnpTcb,
-};
 use crate::utils::{constant_time_eq, sha384};
 
 /// Canonical TDX launch_measurement = SHA-384(mrtd ‖ rtmr1 ‖ rtmr2 ‖ rtmr3).
@@ -41,77 +32,6 @@ pub(crate) fn tdx_launch_measurement(
     sha384(&buf)
 }
 
-/// Convert the internal [`crate::platforms::tdx::verify::TdxQuote`] into the
-/// serializable projection used by [`crate::types::VendorResult`].
-pub(crate) fn project_tdx_quote(
-    quote: &crate::platforms::tdx::verify::TdxQuote,
-) -> ParsedTdxQuote {
-    ParsedTdxQuote {
-        quote_version: quote.header.version,
-        tee_tcb_svn: quote.body.tee_tcb_svn.to_vec(),
-        mr_seam: quote.body.mr_seam.to_vec(),
-        mrsigner_seam: quote.body.mrsigner_seam.to_vec(),
-        seam_attributes: quote.body.seam_attributes.to_vec(),
-        td_attributes: quote.body.td_attributes.to_vec(),
-        xfam: quote.body.xfam.to_vec(),
-        mr_td: quote.body.mr_td.to_vec(),
-        mr_config_id: quote.body.mr_config_id.to_vec(),
-        mr_owner: quote.body.mr_owner.to_vec(),
-        mr_owner_config: quote.body.mr_owner_config.to_vec(),
-        rtmr0: quote.body.rtmr_0.to_vec(),
-        rtmr1: quote.body.rtmr_1.to_vec(),
-        rtmr2: quote.body.rtmr_2.to_vec(),
-        rtmr3: quote.body.rtmr_3.to_vec(),
-        report_data: quote.body.report_data.to_vec(),
-    }
-}
-
-/// Convert a parsed `sev` SNP attestation report into the serializable projection.
-#[cfg(feature = "snp")]
-pub(crate) fn project_snp_report(report: &sev::firmware::guest::AttestationReport) -> ParsedSnpReport {
-    ParsedSnpReport {
-        version: report.version,
-        vmpl: report.vmpl,
-        measurement: report.measurement[..].to_vec(),
-        report_data: report.report_data[..].to_vec(),
-        host_data: report.host_data[..].to_vec(),
-        chip_id: report.chip_id[..].to_vec(),
-        policy_debug_allowed: report.policy.debug_allowed(),
-        reported_tcb: SnpTcb {
-            bootloader: report.reported_tcb.bootloader,
-            tee: report.reported_tcb.tee,
-            snp: report.reported_tcb.snp,
-            microcode: report.reported_tcb.microcode,
-            fmc: report.reported_tcb.fmc,
-        },
-    }
-}
-
-/// Project a TPM quote into the serializable shape.
-#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
-pub(crate) fn project_tpm_quote(
-    signature: &[u8],
-    message: &[u8],
-    pcrs: &[Vec<u8>],
-) -> ParsedTpmQuote {
-    ParsedTpmQuote {
-        signature: signature.to_vec(),
-        message: message.to_vec(),
-        pcrs: pcrs.iter().map(hex::encode).collect(),
-    }
-}
-
-/// Project the HCL report metadata.
-#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
-pub(crate) fn project_hcl_report(
-    hcl: &crate::platforms::tpm_common::HclReportData,
-) -> ParsedHclReport {
-    ParsedHclReport {
-        report_type: hcl.report_type,
-        var_data: hcl.var_data.clone(),
-    }
-}
-
 /// Compare an observed 48-byte digest against an optional expected digest.
 /// Returns `(matched, mismatched)`:
 /// - `matched`: `Some(true)` if expected was supplied and matched, else `None`/`Some(false)`.
@@ -119,7 +39,10 @@ pub(crate) fn project_hcl_report(
 ///
 /// Used to accumulate `vendor_policy_failed` without short-circuiting — each
 /// pin check still runs and the boolean is OR'd in at the end.
-pub(crate) fn check_digest_48(observed: &[u8; 48], expected: Option<&[u8; 48]>) -> (Option<bool>, bool) {
+pub(crate) fn check_digest_48(
+    observed: &[u8; 48],
+    expected: Option<&[u8; 48]>,
+) -> (Option<bool>, bool) {
     match expected {
         Some(exp) => {
             let ok = constant_time_eq(observed, exp);

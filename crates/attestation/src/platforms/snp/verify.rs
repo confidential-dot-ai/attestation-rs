@@ -10,7 +10,6 @@ use sev::parser::ByteParser;
 
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
-use crate::platforms::vendor_helpers;
 use crate::types::{
     ProcessorGeneration, SnpResult, SnpTcb, VendorParams, VendorResult, VerifyParams, VerifyResult,
     VerifySnp,
@@ -172,10 +171,7 @@ pub(crate) async fn verify_evidence_inner(
         .as_deref()
         .map(|exp| crate::utils::constant_time_eq(&launch_measurement, exp));
 
-    let parsed_report = vendor_helpers::project_snp_report(&report);
-    let vendor = VendorResult::Snp(SnpResult {
-        report: parsed_report,
-    });
+    let vendor = VendorResult::Snp(SnpResult { report });
 
     let result = VerifyResult {
         signature_valid: true,
@@ -1093,7 +1089,9 @@ mod tests {
             launch_measurement: Some(expected.clone()),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert_eq!(r.launch_measurement_match, Some(true));
         assert_eq!(r.launch_measurement, expected);
     }
@@ -1109,7 +1107,9 @@ mod tests {
             launch_measurement: Some(vec![0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert_eq!(r.launch_measurement_match, Some(false));
         assert!(r.signature_valid, "wrong digest should NOT fail signature");
         assert!(r.policy_failed());
@@ -1132,7 +1132,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert!(!r.vendor_policy_failed);
     }
 
@@ -1153,7 +1155,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert!(r.vendor_policy_failed);
         assert!(r.policy_failed());
         // signature still valid — policy lives in the caller

@@ -214,11 +214,10 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     let report_data_bytes = snp_report.report_data[..].to_vec();
     let launch_measurement = snp_report.measurement[..].to_vec();
 
-    let nonce_match = if let Some(expected) = params.nonce.as_deref() {
-        Some(crate::utils::constant_time_eq(&nonce_bytes, expected))
-    } else {
-        None
-    };
+    let nonce_match = params
+        .nonce
+        .as_deref()
+        .map(|expected| crate::utils::constant_time_eq(&nonce_bytes, expected));
     let report_data_match = if let Some(expected) = params.report_data.as_deref() {
         let padded = crate::utils::pad_report_data(expected, 64)?;
         Some(crate::utils::constant_time_eq(
@@ -239,11 +238,8 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     let mut vendor_policy_failed = false;
     if let Some(v) = vendor_params {
         if let Some(ref min_tcb) = v.min_tcb {
-            if crate::platforms::snp::verify::enforce_min_tcb(
-                &snp_report.reported_tcb,
-                min_tcb,
-            )
-            .is_err()
+            if crate::platforms::snp::verify::enforce_min_tcb(&snp_report.reported_tcb, min_tcb)
+                .is_err()
             {
                 vendor_policy_failed = true;
             }
@@ -261,13 +257,12 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         }
     }
 
-    let inner_snp_report = vendor_helpers::project_snp_report(&snp_report);
-    let tpm_quote = vendor_helpers::project_tpm_quote(&tpm_sig, &tpm_msg, &tpm_pcrs);
-    let hcl_report = vendor_helpers::project_hcl_report(&hcl);
     let vendor = VendorResult::AzSnp(AzSnpResult {
-        tpm_quote,
-        hcl_report,
-        inner_snp_report,
+        tpm_signature: tpm_sig,
+        tpm_message: tpm_msg,
+        tpm_pcrs,
+        hcl_report: hcl,
+        inner_snp_report: snp_report,
         tpm_signature_valid,
         ak_to_tee_binding_valid,
     });

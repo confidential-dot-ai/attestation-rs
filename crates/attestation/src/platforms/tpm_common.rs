@@ -136,6 +136,7 @@ pub fn verify_hcl_var_data_binding(report_data: &[u8], var_data: &[u8]) -> Resul
 }
 
 /// Parsed HCL report data.
+#[derive(Debug, Clone)]
 pub struct HclReportData {
     /// Raw TEE report bytes (1184 bytes).
     pub tee_report: Vec<u8>,

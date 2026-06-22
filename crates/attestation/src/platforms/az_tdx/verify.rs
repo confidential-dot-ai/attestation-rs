@@ -143,11 +143,10 @@ pub async fn verify_evidence(
     let nonce_bytes = tpm_common::extract_tpm_nonce(&tpm_msg).unwrap_or_default();
     let report_data_bytes = tdx_quote.body.report_data.to_vec();
 
-    let nonce_match = if let Some(expected) = params.nonce.as_deref() {
-        Some(crate::utils::constant_time_eq(&nonce_bytes, expected))
-    } else {
-        None
-    };
+    let nonce_match = params
+        .nonce
+        .as_deref()
+        .map(|expected| crate::utils::constant_time_eq(&nonce_bytes, expected));
     let (report_data_match, _) = tdx_verify::check_padded_report_data(
         &tdx_quote.body.report_data,
         params.report_data.as_deref(),
@@ -169,8 +168,7 @@ pub async fn verify_evidence(
     // ---------------------------------------------------------------
     let mut vendor_policy_failed = false;
     if let Some(v) = vendor_params {
-        let (_, m) =
-            vendor_helpers::check_digest_48(&tdx_quote.body.mr_td, v.mrtd.as_ref());
+        let (_, m) = vendor_helpers::check_digest_48(&tdx_quote.body.mr_td, v.mrtd.as_ref());
         vendor_policy_failed |= m;
 
         let rtmrs = [
@@ -202,14 +200,12 @@ pub async fn verify_evidence(
         }
     }
 
-    // Tdx parsed quote projection.
-    let inner_tdx_quote = vendor_helpers::project_tdx_quote(&tdx_quote);
-    let tpm_quote = vendor_helpers::project_tpm_quote(&tpm_sig, &tpm_msg, &tpm_pcrs);
-    let hcl_report = vendor_helpers::project_hcl_report(&hcl);
     let vendor = VendorResult::AzTdx(AzTdxResult {
-        tpm_quote,
-        hcl_report,
-        inner_tdx_quote,
+        tpm_signature: tpm_sig,
+        tpm_message: tpm_msg,
+        tpm_pcrs,
+        hcl_report: hcl,
+        inner_tdx_quote: tdx_quote,
         tcb_status: tcb_status.clone(),
         tpm_signature_valid,
         ak_to_tee_binding_valid,

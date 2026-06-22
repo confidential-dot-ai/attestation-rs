@@ -33,7 +33,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use crate::collateral::TdxCollateralProvider;
 use crate::error::Result;
-use crate::platforms::vendor_helpers;
 use crate::types::{
     DstackResult, VendorParams, VendorResult, VerifyDstack, VerifyParams, VerifyResult, VerifyTdx,
 };
@@ -87,19 +86,18 @@ pub async fn verify_evidence(
     };
 
     let inner_params = translate_params(params)?;
-    let (quote, mut result) =
-        crate::platforms::tdx::verify::verify_evidence_inner(&tdx_evidence, &inner_params, collateral_provider)
-            .await?;
+    let (quote, mut result) = crate::platforms::tdx::verify::verify_evidence_inner(
+        &tdx_evidence,
+        &inner_params,
+        collateral_provider,
+    )
+    .await?;
 
     let tcb_status = match result.vendor {
         VendorResult::Tdx(t) => t.tcb_status,
         _ => None,
     };
-    let projected = vendor_helpers::project_tdx_quote(&quote);
-    result.vendor = VendorResult::Dstack(DstackResult {
-        quote: projected,
-        tcb_status,
-    });
+    result.vendor = VendorResult::Dstack(DstackResult { quote, tcb_status });
     Ok(result)
 }
 

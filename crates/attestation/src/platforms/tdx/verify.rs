@@ -464,7 +464,8 @@ pub(crate) async fn verify_evidence_inner(
     );
 
     // 5a. Canonical anchor comparisons (constant-time, no early return).
-    let (nonce_match, _) = check_padded_report_data(&quote.body.report_data, params.nonce.as_deref())?;
+    let (nonce_match, _) =
+        check_padded_report_data(&quote.body.report_data, params.nonce.as_deref())?;
     let (report_data_match, _) =
         check_padded_report_data(&quote.body.report_data, params.report_data.as_deref())?;
     let launch_measurement_match = params
@@ -482,18 +483,19 @@ pub(crate) async fn verify_evidence_inner(
         // their respective verify_evidence — the inner core just enforces
         // the Auto/Tdx-only contract. Other vendor variants are unreachable
         // here because the top-level dispatcher rejected a mismatched tag.
-        other => return Err(AttestationError::PlatformMismatch {
-            expected: "tdx".to_string(),
-            actual: format!("{other:?}"),
-        }),
+        other => {
+            return Err(AttestationError::PlatformMismatch {
+                expected: "tdx".to_string(),
+                actual: format!("{other:?}"),
+            })
+        }
     };
 
     let _ = expected_mr_config_id_match; // already folded into vendor_policy_failed
 
-    let parsed_quote = vendor_helpers::project_tdx_quote(&quote);
     let collateral_verified = tcb_status.is_some();
     let vendor = VendorResult::Tdx(TdxResult {
-        quote: parsed_quote,
+        quote: quote.clone(),
         tcb_status,
     });
 
@@ -982,7 +984,7 @@ mod tests {
         );
     }
 
-    fn vendor_quote(r: &VerifyResult) -> &crate::types::ParsedTdxQuote {
+    fn vendor_quote(r: &VerifyResult) -> &TdxQuote {
         match &r.vendor {
             VendorResult::Tdx(t) => &t.quote,
             other => panic!("expected VendorResult::Tdx, got {other:?}"),
@@ -1096,7 +1098,7 @@ mod tests {
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
         assert!(!r.vendor_policy_failed);
         let parsed = vendor_quote(&r);
-        assert_eq!(parsed.mr_td, quote.body.mr_td.to_vec());
+        assert_eq!(parsed.body.mr_td, quote.body.mr_td);
     }
 
     #[tokio::test]

@@ -28,7 +28,6 @@
 use crate::collateral::TdxCollateralProvider;
 use crate::error::Result;
 use crate::platforms::tdx::evidence::TdxEvidence;
-use crate::platforms::vendor_helpers;
 use crate::types::{
     GcpTdxResult, VendorParams, VendorResult, VerifyGcpTdx, VerifyParams, VerifyResult, VerifyTdx,
 };
@@ -53,9 +52,12 @@ pub async fn verify_evidence(
     // defense-in-depth).
     let inner_params = translate_params(params)?;
 
-    let (quote, mut result) =
-        crate::platforms::tdx::verify::verify_evidence_inner(evidence, &inner_params, collateral_provider)
-            .await?;
+    let (quote, mut result) = crate::platforms::tdx::verify::verify_evidence_inner(
+        evidence,
+        &inner_params,
+        collateral_provider,
+    )
+    .await?;
 
     // Re-tag the vendor result as GcpTdx.
     let tcb_status = match result.vendor {
@@ -63,11 +65,9 @@ pub async fn verify_evidence(
         // Unreachable: the inner only produces VendorResult::Tdx.
         _ => None,
     };
-    let inner_tdx_quote = vendor_helpers::project_tdx_quote(&quote);
     let jwt_signature_valid = false; // No JWT in today's GCP envelope.
     result.vendor = VendorResult::GcpTdx(GcpTdxResult {
-        jwt: None,
-        inner_tdx_quote,
+        inner_tdx_quote: quote,
         tcb_status,
         jwt_signature_valid,
     });
