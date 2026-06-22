@@ -10,6 +10,30 @@ use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 
 use attestation::types::VerifyParams;
+use serde::Serialize;
+
+/// Flat CLI output shape. The library's `VerifyResult` is intentionally not
+/// `Serialize`; the CLI projects the canonical anchors here for stdout.
+#[derive(Serialize)]
+struct CliVerifyOutput<'a> {
+    signature_valid: bool,
+    collateral_verified: bool,
+    vendor: &'a str,
+    /// Hex-encoded canonical launch measurement.
+    launch_measurement: String,
+    /// Hex-encoded observed nonce (vendor-specific source).
+    nonce: Option<String>,
+    /// Hex-encoded observed report_data.
+    report_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce_match: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_data_match: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_measurement_match: Option<bool>,
+    vendor_policy_failed: bool,
+    policy_failed: bool,
+}
 
 #[derive(Parser)]
 #[command(
@@ -342,8 +366,27 @@ async fn cmd_verify(args: VerifyArgs) {
         eprintln!("  Vendor policy: FAILED");
     }
 
-    // Structured JSON to stdout
-    let json = serde_json::to_string_pretty(&result).expect("failed to serialize result");
+    // Structured JSON to stdout. Build a flat DTO from the (non-Serialize)
+    // VerifyResult — vendor-specific parsed bodies are intentionally not
+    // surfaced here; CI gates pin canonical anchors and read the booleans.
+    let vendor_tag = format!("{}", result.vendor.platform());
+    let nonce_hex = (!result.nonce.is_empty()).then(|| hex::encode(&result.nonce));
+    let report_data_hex =
+        (!result.report_data.is_empty()).then(|| hex::encode(&result.report_data));
+    let cli_output = CliVerifyOutput {
+        signature_valid: result.signature_valid,
+        collateral_verified: result.collateral_verified,
+        vendor: &vendor_tag,
+        launch_measurement: hex::encode(&result.launch_measurement),
+        nonce: nonce_hex,
+        report_data: report_data_hex,
+        nonce_match: result.nonce_match,
+        report_data_match: result.report_data_match,
+        launch_measurement_match: result.launch_measurement_match,
+        vendor_policy_failed: result.vendor_policy_failed,
+        policy_failed: result.policy_failed(),
+    };
+    let json = serde_json::to_string_pretty(&cli_output).expect("failed to serialize result");
     println!("{json}");
 
     // Exit code: non-zero on signature failure OR any policy mismatch (canonical
