@@ -3,7 +3,7 @@
 //! Run on a TDX-enabled machine:
 //!   cargo run --example tdx --features "tdx,attest"
 
-use attestation::{PlatformType, VerifyParams};
+use attestation::{PlatformType, VendorResult, VerifyParams};
 
 #[tokio::main]
 async fn main() {
@@ -27,12 +27,17 @@ async fn main() {
         .expect("verification failed");
 
     eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Platform: {}", result.vendor.platform());
+    eprintln!(
+        "Launch measurement: {}",
+        hex::encode(&result.launch_measurement)
+    );
 
-    if let Some(tcb_status) = &result.tcb_status {
-        eprintln!("TCB status: {:?}", tcb_status.tcb_status);
-        eprintln!("FMSPC: {}", tcb_status.fmspc);
+    if let VendorResult::Tdx(ref t) = result.vendor {
+        if let Some(tcb_status) = &t.tcb_status {
+            eprintln!("TCB status: {:?}", tcb_status.tcb_status);
+            eprintln!("FMSPC: {}", tcb_status.fmspc);
+        }
     }
 
     println!("{}", String::from_utf8_lossy(&evidence_json));

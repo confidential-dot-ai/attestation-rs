@@ -38,12 +38,22 @@ struct JwtClaims {
     iat: u64,
     nbf: u64,
     exp: u64,
+    /// Vendor platform tag (e.g. "tdx", "az-snp").
     platform: String,
     signature_valid: bool,
-    claims: Value,
-    report_data_match: Option<bool>,
-    init_data_match: Option<bool>,
     collateral_verified: bool,
+    /// Hex-encoded canonical launch measurement.
+    launch_measurement: String,
+    /// Hex-encoded observed report_data.
+    report_data: String,
+    /// Hex-encoded observed nonce.
+    nonce: String,
+    nonce_match: Option<bool>,
+    report_data_match: Option<bool>,
+    launch_measurement_match: Option<bool>,
+    vendor_policy_failed: bool,
+    /// Vendor-specific verification artifacts (parsed quote/report, etc.).
+    vendor: Value,
 }
 
 impl fmt::Debug for JwtClaims {
@@ -52,7 +62,7 @@ impl fmt::Debug for JwtClaims {
             .field("iss", &self.iss)
             .field("jti", &self.jti)
             .field("platform", &self.platform)
-            .field("claims", &"[redacted]")
+            .field("vendor", &"[redacted]")
             .finish()
     }
 }
@@ -75,13 +85,13 @@ impl TokenIssuer {
         })
     }
 
-    pub fn issue(&self, result: &attestation::VerificationResult) -> Result<String, ApiError> {
+    pub fn issue(&self, result: &attestation::VerifyResult) -> Result<String, ApiError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ApiError::Internal(format!("system time error: {e}")))?;
 
-        let claims_json = serde_json::to_value(&result.claims)
-            .map_err(|e| ApiError::Internal(format!("failed to serialize claims: {e}")))?;
+        let vendor_json = serde_json::to_value(&result.vendor)
+            .map_err(|e| ApiError::Internal(format!("failed to serialize vendor: {e}")))?;
 
         let jwt_claims = JwtClaims {
             iss: self.issuer.clone(),
@@ -89,12 +99,17 @@ impl TokenIssuer {
             iat: now.as_secs(),
             nbf: now.as_secs(),
             exp: now.as_secs() + self.duration.as_secs(),
-            platform: format!("{}", result.platform),
+            platform: format!("{}", result.vendor.platform()),
             signature_valid: result.signature_valid,
-            claims: claims_json,
-            report_data_match: result.report_data_match,
-            init_data_match: result.init_data_match,
             collateral_verified: result.collateral_verified,
+            launch_measurement: hex::encode(&result.launch_measurement),
+            report_data: hex::encode(&result.report_data),
+            nonce: hex::encode(&result.nonce),
+            nonce_match: result.nonce_match,
+            report_data_match: result.report_data_match,
+            launch_measurement_match: result.launch_measurement_match,
+            vendor_policy_failed: result.vendor_policy_failed,
+            vendor: vendor_json,
         };
 
         let header = JwtHeader {

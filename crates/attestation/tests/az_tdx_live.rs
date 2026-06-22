@@ -181,22 +181,21 @@ async fn test_az_tdx_attest_then_verify_roundtrip() {
     );
 
     // Platform should be AzTdx
-    assert_eq!(result.platform, attestation::PlatformType::AzTdx);
+    assert_eq!(result.vendor.platform(), attestation::PlatformType::AzTdx);
 
     // Claims should be populated
     assert!(
-        !result.claims.launch_digest.is_empty(),
+        !hex::encode(&result.launch_measurement).is_empty(),
         "launch_digest should not be empty"
     );
     assert_eq!(
-        result.claims.report_data.len(),
+        result.report_data.len(),
         64,
         "report_data should be 64 bytes"
     );
 
     // No expected values were provided, so these should be None
     assert!(result.report_data_match.is_none());
-    assert!(result.init_data_match.is_none());
 }
 
 #[tokio::test]
@@ -214,7 +213,7 @@ async fn test_az_tdx_verify_with_expected_nonce() {
 
     // Verify with correct nonce (unpadded — TPM stores the raw qualifying data)
     let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
+        nonce: Some(nonce.to_vec()),
         ..Default::default()
     };
 
@@ -362,7 +361,7 @@ async fn test_az_tdx_wrong_nonce_fails_verification() {
 
     // Verify with WRONG nonce — should fail
     let params = VerifyParams {
-        expected_report_data: Some(b"wrong-nonce-value!!".to_vec()),
+        nonce: Some(b"wrong-nonce-value!!".to_vec()),
         ..Default::default()
     };
 
@@ -404,7 +403,7 @@ async fn test_az_tdx_top_level_api_roundtrip_with_nonce() {
 
     // Verify through top-level verify() API with matching nonce
     let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
+        nonce: Some(nonce.to_vec()),
         ..Default::default()
     };
     let result = attestation::verify(&evidence_json, &params)
@@ -412,7 +411,7 @@ async fn test_az_tdx_top_level_api_roundtrip_with_nonce() {
         .expect("verify() with correct nonce should succeed");
 
     assert!(result.signature_valid, "signature should be valid");
-    assert_eq!(result.platform, attestation::PlatformType::AzTdx);
+    assert_eq!(result.vendor.platform(), attestation::PlatformType::AzTdx);
     assert_eq!(
         result.report_data_match,
         Some(true),
@@ -421,13 +420,13 @@ async fn test_az_tdx_top_level_api_roundtrip_with_nonce() {
 
     // Print the result for visibility
     eprintln!("=== Top-level API roundtrip with nonce ===");
-    eprintln!("  Platform: {}", result.platform);
+    eprintln!("  Platform: {}", result.vendor.platform());
     eprintln!("  Signature valid: {}", result.signature_valid);
     eprintln!("  Report data match: {:?}", result.report_data_match);
-    eprintln!("  Launch digest: {}", result.claims.launch_digest);
+    eprintln!("  Launch digest: {}", hex::encode(&result.launch_measurement));
     eprintln!(
         "  Report data (hex): {}",
-        hex::encode(&result.claims.report_data)
+        hex::encode(&result.report_data)
     );
 }
 
@@ -450,7 +449,7 @@ async fn test_az_tdx_top_level_api_wrong_nonce_fails() {
 
     // Verify through top-level verify() API with WRONG nonce
     let params = VerifyParams {
-        expected_report_data: Some(b"completely-different".to_vec()),
+        nonce: Some(b"completely-different".to_vec()),
         ..Default::default()
     };
     let result = attestation::verify(&evidence_json, &params).await;
@@ -500,7 +499,7 @@ async fn test_az_tdx_32_byte_nonce() {
 
     // Verify with matching nonce
     let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
+        nonce: Some(nonce.to_vec()),
         ..Default::default()
     };
     let result = attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None)

@@ -25,9 +25,9 @@ async fn capture_tdx_evidence_fixture() {
         .expect("verify without collateral failed");
     eprintln!(
         "Verified (no collateral): signature_valid={}, platform={}",
-        result.signature_valid, result.platform
+        result.signature_valid, result.vendor.platform()
     );
-    eprintln!("Launch digest (MRTD): {}", result.claims.launch_digest);
+    eprintln!("Launch digest (MRTD): {}", hex::encode(&result.launch_measurement));
     assert!(result.signature_valid);
 
     // With collateral
@@ -40,9 +40,11 @@ async fn capture_tdx_evidence_fixture() {
                 "Verified (with collateral): collateral_verified={}",
                 r.collateral_verified
             );
-            if let Some(ref tcb) = r.tcb_status {
-                eprintln!("  TCB status: {}", tcb.tcb_status);
-                eprintln!("  FMSPC: {}", tcb.fmspc);
+            if let attestation::VendorResult::Tdx(ref t) = r.vendor {
+                if let Some(ref tcb) = t.tcb_status {
+                    eprintln!("  TCB status: {}", tcb.tcb_status);
+                    eprintln!("  FMSPC: {}", tcb.fmspc);
+                }
             }
         }
         Err(e) => {
@@ -74,9 +76,9 @@ async fn capture_az_snp_evidence_fixture() {
             .expect("verify failed");
     eprintln!(
         "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.platform
+        result.signature_valid, result.vendor.platform()
     );
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Launch digest: {}", hex::encode(&result.launch_measurement));
     assert!(result.signature_valid);
 }
 
@@ -101,8 +103,8 @@ async fn capture_az_tdx_evidence_fixture() {
         .expect("verify failed");
     eprintln!(
         "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.platform
+        result.signature_valid, result.vendor.platform()
     );
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Launch digest: {}", hex::encode(&result.launch_measurement));
     assert!(result.signature_valid);
 }

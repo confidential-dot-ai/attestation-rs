@@ -66,43 +66,38 @@ struct AttestArgs {
     output: Option<PathBuf>,
 }
 
+/// `attestation-cli verify` exposes only the canonical anchors. Vendor-specific
+/// pin policy (MRTD, individual RTMRs, min_tcb, etc.) is library-only — callers
+/// who need that finer control write Rust. The CLI is intentionally narrow so
+/// CI gates can express "this evidence matches what I deployed" without
+/// branching on which TEE produced it.
 #[derive(clap::Args)]
 struct VerifyArgs {
     /// Path to evidence JSON file. Reads from stdin if not specified.
     #[arg(short, long)]
     evidence: Option<PathBuf>,
 
-    /// Expected report data (hex-encoded) for nonce binding verification.
+    /// Expected nonce (hex-encoded). Compared against the appropriate
+    /// freshness anchor for the vendor (report_data for bare-metal, TPM
+    /// extraData for Azure overlays).
     #[arg(long)]
-    expected_report_data: Option<String>,
+    nonce: Option<String>,
 
-    /// Expected init data hash (hex-encoded) for init data binding verification.
+    /// Expected report_data (hex-encoded). Compared against the inner TEE
+    /// quote's report_data field.
     #[arg(long)]
-    expected_init_data: Option<String>,
+    report_data: Option<String>,
 
-    /// Expected MRTD (hex-encoded, 48 bytes). TDX-only.
+    /// Expected canonical launch measurement (hex-encoded, 48 bytes).
+    ///
+    /// For TDX-family vendors this is SHA-384(mrtd || rtmr1 || rtmr2 || rtmr3);
+    /// for SNP-family vendors this is the SNP report's measurement field.
     #[arg(long)]
-    expected_mrtd: Option<String>,
+    launch_measurement: Option<String>,
 
-    /// Expected RTMR[0] (hex-encoded, 48 bytes). TDX-only.
-    #[arg(long)]
-    expected_rtmr0: Option<String>,
-
-    /// Expected RTMR[1] (hex-encoded, 48 bytes). TDX-only.
-    #[arg(long)]
-    expected_rtmr1: Option<String>,
-
-    /// Expected RTMR[2] (hex-encoded, 48 bytes). TDX-only.
-    #[arg(long)]
-    expected_rtmr2: Option<String>,
-
-    /// Expected RTMR[3] (hex-encoded, 48 bytes). TDX-only.
-    #[arg(long)]
-    expected_rtmr3: Option<String>,
-
-    /// Expected SNP launch digest (hex-encoded, 48 bytes). SNP-only.
-    #[arg(long)]
-    expected_launch_digest: Option<String>,
+    /// Allow guests launched with debug policy enabled. Default: false.
+    #[arg(long, default_value_t = false)]
+    allow_debug: bool,
 }
 
 #[cfg(all(feature = "attest", target_os = "linux"))]
@@ -281,73 +276,37 @@ async fn cmd_verify(args: VerifyArgs) {
         }
     };
 
-    let mut params = VerifyParams::default();
+    let mut params = VerifyParams {
+        allow_debug: args.allow_debug,
+        ..Default::default()
+    };
 
-    if let Some(ref hex_str) = args.expected_report_data {
+    let decode_hex = |hex_str: &str, name: &str| -> Vec<u8> {
         match hex::decode(hex_str) {
-            Ok(data) => params.expected_report_data = Some(data),
-            Err(e) => {
-                eprintln!("Error: invalid hex for --expected-report-data: {e}");
-                process::exit(1);
-            }
-        }
-    }
-
-    if let Some(ref hex_str) = args.expected_init_data {
-        match hex::decode(hex_str) {
-            Ok(data) => params.expected_init_data_hash = Some(data),
-            Err(e) => {
-                eprintln!("Error: invalid hex for --expected-init-data: {e}");
-                process::exit(1);
-            }
-        }
-    }
-
-    let parse_digest = |hex_str: &str, name: &str| -> [u8; 48] {
-        let bytes = match hex::decode(hex_str) {
-            Ok(b) => b,
+            Ok(data) => data,
             Err(e) => {
                 eprintln!("Error: invalid hex for --{name}: {e}");
-                process::exit(1);
-            }
-        };
-        match <[u8; 48]>::try_from(bytes.as_slice()) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!(
-                    "Error: --{name} must be 48 bytes (96 hex chars), got {} bytes",
-                    bytes.len()
-                );
                 process::exit(1);
             }
         }
     };
 
-    if let Some(ref hex_str) = args.expected_mrtd {
-        params.expected_mrtd = Some(parse_digest(hex_str, "expected-mrtd"));
+    if let Some(ref hex_str) = args.nonce {
+        params.nonce = Some(decode_hex(hex_str, "nonce"));
     }
-    if let Some(ref hex_str) = args.expected_launch_digest {
-        params.expected_launch_digest = Some(parse_digest(hex_str, "expected-launch-digest"));
+    if let Some(ref hex_str) = args.report_data {
+        params.report_data = Some(decode_hex(hex_str, "report-data"));
     }
-    let any_rtmr = args.expected_rtmr0.is_some()
-        || args.expected_rtmr1.is_some()
-        || args.expected_rtmr2.is_some()
-        || args.expected_rtmr3.is_some();
-    if any_rtmr {
-        let mut rtmrs: [Option<[u8; 48]>; 4] = [None, None, None, None];
-        if let Some(ref h) = args.expected_rtmr0 {
-            rtmrs[0] = Some(parse_digest(h, "expected-rtmr0"));
+    if let Some(ref hex_str) = args.launch_measurement {
+        let bytes = decode_hex(hex_str, "launch-measurement");
+        if bytes.len() != 48 {
+            eprintln!(
+                "Error: --launch-measurement must be 48 bytes (96 hex chars), got {} bytes",
+                bytes.len()
+            );
+            process::exit(1);
         }
-        if let Some(ref h) = args.expected_rtmr1 {
-            rtmrs[1] = Some(parse_digest(h, "expected-rtmr1"));
-        }
-        if let Some(ref h) = args.expected_rtmr2 {
-            rtmrs[2] = Some(parse_digest(h, "expected-rtmr2"));
-        }
-        if let Some(ref h) = args.expected_rtmr3 {
-            rtmrs[3] = Some(parse_digest(h, "expected-rtmr3"));
-        }
-        params.expected_rtmrs = Some(rtmrs);
+        params.launch_measurement = Some(bytes);
     }
 
     eprintln!("Verifying evidence...");
@@ -365,48 +324,33 @@ async fn cmd_verify(args: VerifyArgs) {
     // Human-readable summary to stderr
     eprintln!("Verified in {elapsed:?}");
     eprintln!("  Signature valid: {}", result.signature_valid);
-    eprintln!("  Platform: {}", result.platform);
-    eprintln!("  Launch digest: {}", result.claims.launch_digest);
+    eprintln!("  Vendor: {}", result.vendor.platform());
+    eprintln!(
+        "  Launch measurement: {}",
+        hex::encode(&result.launch_measurement)
+    );
+    if let Some(m) = result.nonce_match {
+        eprintln!("  Nonce match: {m}");
+    }
     if let Some(m) = result.report_data_match {
         eprintln!("  Report data match: {m}");
     }
-    if let Some(m) = result.init_data_match {
-        eprintln!("  Init data match: {m}");
+    if let Some(m) = result.launch_measurement_match {
+        eprintln!("  Launch measurement match: {m}");
     }
-    if let Some(m) = result.mrtd_match {
-        eprintln!("  MRTD match: {m}");
-    }
-    if let Some(m) = result.launch_digest_match {
-        eprintln!("  Launch digest match: {m}");
-    }
-    if let Some(matches) = result.rtmr_matches {
-        for (i, m) in matches.iter().enumerate() {
-            if let Some(b) = m {
-                eprintln!("  RTMR[{i}] match: {b}");
-            }
-        }
+    if result.vendor_policy_failed {
+        eprintln!("  Vendor policy: FAILED");
     }
 
     // Structured JSON to stdout
     let json = serde_json::to_string_pretty(&result).expect("failed to serialize result");
     println!("{json}");
 
-    // Exit non-zero on ANY failure that was actually checked. The new
-    // `expected_*` fields produce `Some(false)` only when the operator
-    // explicitly asked for the check, so this is exactly the "I pinned a
-    // reference and the live measurement does not match" case — which is
-    // the entire point of the policy. Without this, `--expected-mrtd
-    // $WRONG` would still exit 0 and any CI/deployment gate that relied
-    // on the exit code would silently green-light an attacker workload.
-    let policy_failed = matches!(result.report_data_match, Some(false))
-        || matches!(result.init_data_match, Some(false))
-        || matches!(result.mrtd_match, Some(false))
-        || matches!(result.launch_digest_match, Some(false))
-        || result
-            .rtmr_matches
-            .as_ref()
-            .is_some_and(|m| m.iter().any(|x| matches!(x, Some(false))));
-    if !result.signature_valid || policy_failed {
+    // Exit code: non-zero on signature failure OR any policy mismatch (canonical
+    // or vendor). This is the entire point of the canonical anchors — CI gates
+    // can pin a launch_measurement and have the CLI exit non-zero if the
+    // measurement drifts.
+    if !result.signature_valid || result.policy_failed() {
         process::exit(1);
     }
 }

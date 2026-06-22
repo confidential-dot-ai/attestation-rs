@@ -173,22 +173,21 @@ async fn test_az_snp_attest_then_verify_roundtrip() {
     );
 
     // Platform should be AzSnp
-    assert_eq!(result.platform, attestation::PlatformType::AzSnp);
+    assert_eq!(result.vendor.platform(), attestation::PlatformType::AzSnp);
 
     // Claims should be populated
     assert!(
-        !result.claims.launch_digest.is_empty(),
+        !hex::encode(&result.launch_measurement).is_empty(),
         "launch_digest should not be empty"
     );
     assert_eq!(
-        result.claims.report_data.len(),
+        result.report_data.len(),
         64,
         "report_data should be 64 bytes"
     );
 
     // No expected values were provided, so these should be None
     assert!(result.report_data_match.is_none());
-    assert!(result.init_data_match.is_none());
 }
 
 #[tokio::test]
@@ -209,8 +208,7 @@ async fn test_az_snp_verify_with_expected_nonce() {
     padded_nonce[..nonce.len()].copy_from_slice(nonce);
 
     let params = VerifyParams {
-        expected_report_data: Some(padded_nonce),
-        expected_init_data_hash: None,
+        nonce: Some(padded_nonce),
         ..Default::default()
     };
 

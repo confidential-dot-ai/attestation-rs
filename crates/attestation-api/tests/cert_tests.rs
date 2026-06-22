@@ -56,30 +56,34 @@ fn token_issuer_produces_valid_jwt() {
     )
     .unwrap();
 
-    let result = attestation::VerificationResult {
-        platform: attestation::PlatformType::Snp,
+    let result = attestation::VerifyResult {
         signature_valid: true,
-        claims: attestation::Claims {
-            launch_digest: String::new(),
-            report_data: vec![],
-            signed_data: vec![],
-            init_data: vec![],
-            tcb: attestation::TcbInfo::Snp {
-                bootloader: 0,
-                tee: 0,
-                snp: 0,
-                microcode: 0,
-                fmc: None,
-            },
-            platform_data: serde_json::json!({}),
-        },
-        report_data_match: Some(true),
-        init_data_match: None,
         collateral_verified: false,
-        tcb_status: None,
-        mrtd_match: None,
-        rtmr_matches: None,
-        launch_digest_match: None,
+        nonce: vec![],
+        report_data: vec![],
+        launch_measurement: vec![],
+        nonce_match: None,
+        report_data_match: Some(true),
+        launch_measurement_match: None,
+        vendor_policy_failed: false,
+        vendor: attestation::VendorResult::Snp(attestation::SnpResult::new(
+            attestation::ParsedSnpReport {
+                version: 3,
+                vmpl: 0,
+                measurement: vec![0u8; 48],
+                report_data: vec![0u8; 64],
+                host_data: vec![0u8; 32],
+                chip_id: vec![0u8; 64],
+                policy_debug_allowed: false,
+                reported_tcb: attestation::SnpTcb {
+                    bootloader: 0,
+                    tee: 0,
+                    snp: 0,
+                    microcode: 0,
+                    fmc: None,
+                },
+            },
+        )),
     };
 
     let token = issuer.issue(&result).unwrap();

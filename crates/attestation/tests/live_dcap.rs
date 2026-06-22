@@ -32,7 +32,7 @@ async fn test_v4_full_dcap_live_pcs() {
 
     // V4 fixture has debug bit set
     let params = VerifyParams {
-        expected_report_data: Some(quote.body.report_data.to_vec()),
+        nonce: Some(quote.body.report_data.to_vec()),
         allow_debug: true,
         ..Default::default()
     };
@@ -45,17 +45,19 @@ async fn test_v4_full_dcap_live_pcs() {
             eprintln!("V4 DCAP verification succeeded:");
             eprintln!("  signature_valid: {}", r.signature_valid);
             eprintln!("  collateral_verified: {}", r.collateral_verified);
-            eprintln!("  report_data_match: {:?}", r.report_data_match);
-            eprintln!("  platform: {}", r.platform);
-            if let Some(ref tcb) = r.tcb_status {
-                eprintln!("  tcb_status: {}", tcb.tcb_status);
-                eprintln!("  fmspc: {}", tcb.fmspc);
-                eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
-                eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+            eprintln!("  nonce_match: {:?}", r.nonce_match);
+            eprintln!("  platform: {}", r.vendor.platform());
+            if let attestation::VendorResult::Tdx(ref t) = r.vendor {
+                if let Some(ref tcb) = t.tcb_status {
+                    eprintln!("  tcb_status: {}", tcb.tcb_status);
+                    eprintln!("  fmspc: {}", tcb.fmspc);
+                    eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
+                    eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+                }
             }
             assert!(r.signature_valid);
             assert!(r.collateral_verified);
-            assert_eq!(r.report_data_match, Some(true));
+            assert_eq!(r.nonce_match, Some(true));
         }
         Err(e) => {
             eprintln!("V4 DCAP verification error: {e:?}");
@@ -76,7 +78,7 @@ async fn test_live_quote_full_dcap() {
 
     // Live quote has zero report_data (test generation)
     let params = VerifyParams {
-        expected_report_data: Some(quote.body.report_data.to_vec()),
+        nonce: Some(quote.body.report_data.to_vec()),
         ..Default::default()
     };
 
@@ -88,17 +90,19 @@ async fn test_live_quote_full_dcap() {
             eprintln!("Live quote DCAP verification succeeded:");
             eprintln!("  signature_valid: {}", r.signature_valid);
             eprintln!("  collateral_verified: {}", r.collateral_verified);
-            eprintln!("  report_data_match: {:?}", r.report_data_match);
-            eprintln!("  platform: {}", r.platform);
-            if let Some(ref tcb) = r.tcb_status {
-                eprintln!("  tcb_status: {}", tcb.tcb_status);
-                eprintln!("  fmspc: {}", tcb.fmspc);
-                eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
-                eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+            eprintln!("  nonce_match: {:?}", r.nonce_match);
+            eprintln!("  platform: {}", r.vendor.platform());
+            if let attestation::VendorResult::Tdx(ref t) = r.vendor {
+                if let Some(ref tcb) = t.tcb_status {
+                    eprintln!("  tcb_status: {}", tcb.tcb_status);
+                    eprintln!("  fmspc: {}", tcb.fmspc);
+                    eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
+                    eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+                }
             }
             assert!(r.signature_valid, "ECDSA signature must be valid");
             assert!(r.collateral_verified, "Collateral must verify");
-            assert_eq!(r.report_data_match, Some(true));
+            assert_eq!(r.nonce_match, Some(true));
         }
         Err(e) => {
             eprintln!("Live quote DCAP verification error: {e:?}");
@@ -178,7 +182,7 @@ async fn test_v5_full_dcap_live_pcs() {
     let evidence = make_evidence(V5_QUOTE);
 
     let params = VerifyParams {
-        expected_report_data: Some(quote.body.report_data.to_vec()),
+        nonce: Some(quote.body.report_data.to_vec()),
         ..Default::default()
     };
 
@@ -190,12 +194,14 @@ async fn test_v5_full_dcap_live_pcs() {
             eprintln!("V5 DCAP verification succeeded:");
             eprintln!("  signature_valid: {}", r.signature_valid);
             eprintln!("  collateral_verified: {}", r.collateral_verified);
-            eprintln!("  report_data_match: {:?}", r.report_data_match);
-            if let Some(ref tcb) = r.tcb_status {
-                eprintln!("  tcb_status: {}", tcb.tcb_status);
-                eprintln!("  fmspc: {}", tcb.fmspc);
-                eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
-                eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+            eprintln!("  nonce_match: {:?}", r.nonce_match);
+            if let attestation::VendorResult::Tdx(ref t) = r.vendor {
+                if let Some(ref tcb) = t.tcb_status {
+                    eprintln!("  tcb_status: {}", tcb.tcb_status);
+                    eprintln!("  fmspc: {}", tcb.fmspc);
+                    eprintln!("  advisory_ids: {:?}", tcb.advisory_ids);
+                    eprintln!("  collateral_expired: {}", tcb.collateral_expired);
+                }
             }
         }
         Err(e) => {

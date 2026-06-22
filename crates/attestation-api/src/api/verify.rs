@@ -22,24 +22,22 @@ pub struct VerifyRequest {
 
 #[derive(Deserialize, Default)]
 pub struct VerifyParamsInput {
-    pub expected_report_data: Option<String>,
-    pub expected_init_data_hash: Option<String>,
+    /// Expected nonce (base64). Compared against the freshness anchor for
+    /// the vendor (report_data for bare-metal, TPM extraData for Azure
+    /// overlays).
+    pub nonce: Option<String>,
+    /// Expected report_data (base64). Compared against the inner TEE
+    /// quote's report_data field.
+    pub report_data: Option<String>,
+    /// Expected canonical launch measurement (base64, 48 bytes).
+    pub launch_measurement: Option<String>,
     #[serde(default)]
     pub allow_debug: bool,
-    pub min_tcb: Option<MinTcbInput>,
-}
-
-#[derive(Deserialize)]
-pub struct MinTcbInput {
-    pub bootloader: u8,
-    pub tee: u8,
-    pub snp: u8,
-    pub microcode: u8,
 }
 
 #[derive(Serialize)]
 pub struct VerifyResponse {
-    pub result: attestation::VerificationResult,
+    pub result: attestation::VerifyResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -50,27 +48,26 @@ pub async fn handler(
 ) -> Result<Json<VerifyResponse>, ApiError> {
     let evidence_json = build_evidence_envelope(req.platform, req.evidence)?;
 
-    let expected_report_data = req
+    let nonce = req
         .params
-        .expected_report_data
+        .nonce
+        .map(|s| BASE64.decode(&s))
+        .transpose()
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64 nonce: {e}")))?;
+
+    let report_data = req
+        .params
+        .report_data
         .map(|s| BASE64.decode(&s))
         .transpose()
         .map_err(|e| ApiError::BadRequest(format!("invalid base64 report_data: {e}")))?;
 
-    let expected_init_data_hash = req
+    let launch_measurement = req
         .params
-        .expected_init_data_hash
+        .launch_measurement
         .map(|s| BASE64.decode(&s))
         .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 init_data_hash: {e}")))?;
-
-    let min_tcb = req.params.min_tcb.map(|t| attestation::SnpTcb {
-        bootloader: t.bootloader,
-        tee: t.tee,
-        snp: t.snp,
-        microcode: t.microcode,
-        fmc: None,
-    });
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64 launch_measurement: {e}")))?;
 
     let allow_debug = req.params.allow_debug;
     if allow_debug && !state.config.attestation.allow_debug {
@@ -79,21 +76,18 @@ pub async fn handler(
         ));
     }
 
-    // DEVIATION: VerifyParams gained `expected_mrtd`, `expected_rtmrs`,
-    // and `expected_launch_digest` for launch-measurement pinning, but
-    // the HTTP API does not surface them yet. Adding them needs a
-    // matching request DTO change, JSON encoding for the per-RTMR Option
-    // array, and a per-endpoint policy story about whether the server
-    // owns the reference values (e.g. fetched from a manifest registry)
-    // or the client supplies them. Until that design is settled the
-    // safe default is "no comparison" — the response's `mrtd_match` etc.
-    // will be `None`, which is correct (no check requested). The CLI is
-    // the only consumer of the new policy fields in this PR.
+    // DEVIATION: The HTTP API exposes only the canonical anchors. Vendor-precise
+    // pinning (MRTD, individual RTMRs, mr_config_id, min_tcb, AK thumbprint, ...)
+    // is library-only. Surfacing those needs a per-endpoint policy story about
+    // whether the server owns the reference values (e.g. fetched from a manifest
+    // registry) or the client supplies them; until that design is settled the
+    // safe default is "no comparison" — `vendor` defaults to `Auto` and the
+    // response's vendor_policy_failed will be `false`.
     let params = attestation::VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
+        nonce,
+        report_data,
+        launch_measurement,
         allow_debug,
-        min_tcb,
         ..Default::default()
     };
 

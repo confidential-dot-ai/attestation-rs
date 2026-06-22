@@ -3,7 +3,6 @@ use wasm_bindgen::prelude::*;
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
 use attestation::platforms::az_snp::verify::verify_report;
 use attestation::platforms::snp::certs::get_bundled_certs;
-use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
     parse_report, verify_cert_chain, verify_report_signature,
 };
@@ -12,16 +11,22 @@ use attestation::utils::{constant_time_eq, pad_report_data};
 
 /// Verify live SNP evidence in WASM.
 ///
+/// The WASM surface is canonical-only: the caller supplies the freshness anchor
+/// as raw bytes, the verifier returns the new `VerifyResult` (canonical anchors
+/// + vendor-specific parsed report). Vendor-precise pinning (min_tcb, AK
+/// thumbprint, ...) is not surfaced — JS callers who need that build their own
+/// dispatcher on top of this.
+///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
 /// - `generation`: processor generation ("milan", "genoa", "turin")
-/// - `expected_report_data`: optional raw bytes to check against report_data in the report
+/// - `expected_nonce`: optional raw bytes to compare against report_data
 ///
-/// Returns verification result as JSON.
+/// Returns the canonical verification result as JSON.
 #[wasm_bindgen]
 pub fn verify_snp(
     evidence_json: &str,
     generation: &str,
-    expected_report_data: Option<Vec<u8>>,
+    expected_nonce: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
     let gen = match generation {
         "milan" | "Milan" => ProcessorGeneration::Milan,
@@ -59,21 +64,22 @@ pub fn verify_snp(
     verify_report_signature(&report_bytes, &vcek_der)
         .map_err(|e| JsError::new(&format!("report signature: {e}")))?;
 
-    // Check report_data binding
-    let report_data_match = expected_report_data.map(|expected| {
+    // Canonical anchor comparison: nonce vs report_data, zero-padded.
+    let nonce_match = expected_nonce.map(|expected| {
         let padded = pad_report_data(&expected, 64).unwrap_or_default();
         constant_time_eq(&report.report_data[..], &padded)
     });
 
-    // Extract claims
-    let claims = extract_claims(&report);
-
+    // Build a stable canonical result shape with the parsed report payload.
     let result = serde_json::json!({
         "signature_valid": true,
+        "collateral_verified": false,
         "platform": "snp",
         "report_version": report.version,
-        "report_data_match": report_data_match,
-        "claims": claims,
+        "nonce_match": nonce_match,
+        "launch_measurement": hex::encode(&report.measurement[..]),
+        "report_data": hex::encode(&report.report_data[..]),
+        "measurement": hex::encode(&report.measurement[..]),
     });
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
@@ -91,44 +97,37 @@ pub fn verify_snp(
 /// which needs an async cert provider — so `collateral_verified` is always
 /// `false` here):
 /// 1. Verify the TPM quote signature with the AK extracted from HCL var_data.
-/// 2. Check the quote's `extraData` equals `expected_report_data` (freshness),
-///    failing closed when an anchor is supplied and does not match.
-/// 3. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
+/// 2. Check the quote's `extraData` equals `expected_nonce` (freshness anchor).
+/// 3. Verify the PCR digest.
 /// 4. Bind the AK to the TEE: `snp.report_data[..32] == SHA-256(var_data)`.
 /// 5. Validate the VCEK chain (auto-detecting the generation from CPUID) and the
-///    SNP report signature, then enforce VMPL/debug/TCB policy.
+///    SNP report signature, then enforce VMPL/debug policy.
 ///
-/// - `evidence_json`: az-snp evidence JSON (`{ version, tpm_quote, hcl_report, vcek }`)
-/// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
-/// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
+/// - `evidence_json`: az-snp evidence JSON
+/// - `expected_nonce`: optional raw bytes the TPM quote `extraData` must equal
 ///
-/// Returns the verification result as JSON, or throws on any check failure.
+/// Returns the canonical [`VerifyResult`](attestation::VerifyResult) as JSON.
 #[wasm_bindgen]
 pub fn verify_az_snp(
     evidence_json: &str,
-    expected_report_data: Option<Vec<u8>>,
-    expected_init_data_hash: Option<Vec<u8>>,
+    expected_nonce: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
     let evidence: AzSnpEvidence = serde_json::from_str(evidence_json)
         .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
 
-    // Run the full az-snp verification core, freshness included. When an anchor is
-    // supplied, the core binds the TPM quote's extraData (qualifyingData) to it and
-    // fails closed on a mismatch — defense in depth, rather than downgrading the
-    // freshness check to a non-throwing bool for the JS policy layer to interpret.
-    // The core still populates report_data_match (Some(true) when an anchor was
-    // supplied and matched, None otherwise) for the result shape.
+    // Canonical-only on the WASM side. The verifier internally enforces
+    // freshness via constant-time equality and surfaces the outcome on
+    // `nonce_match`; no vendor-precise pinning here.
     let params = VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
+        nonce: expected_nonce,
         ..VerifyParams::default()
     };
 
     let verified = verify_report(&evidence, &params)
         .map_err(|e| JsError::new(&format!("az-snp verify: {e}")))?;
 
-    // Serialize the VerificationResult, then graft on report_version, matching the
-    // shape verify_snp returns so the JS policy layer reads it uniformly.
+    // Serialize the canonical VerifyResult, augmented with report_version for
+    // backward-compat with the existing JS dashboard.
     let mut result = serde_json::to_value(&verified.result)
         .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
     result["report_version"] = serde_json::json!(verified.report_version);

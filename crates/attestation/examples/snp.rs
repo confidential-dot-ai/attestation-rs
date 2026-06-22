@@ -27,7 +27,7 @@ async fn main() {
         .expect("verification failed");
 
     eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Platform: {}", result.vendor.platform());
+    eprintln!("Launch digest: {}", hex::encode(&result.launch_measurement));
     println!("{}", String::from_utf8_lossy(&evidence_json));
 }

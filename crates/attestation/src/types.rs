@@ -394,6 +394,17 @@ pub struct SnpResult {
     pub report: ParsedSnpReport,
 }
 
+impl SnpResult {
+    /// Builder for callers outside this crate. `#[non_exhaustive]` blocks
+    /// struct literals from foreign crates; this constructor preserves
+    /// future field-addition flexibility while letting the API crate's
+    /// test fixtures (and future external consumers) create instances.
+    #[must_use]
+    pub fn new(report: ParsedSnpReport) -> Self {
+        Self { report }
+    }
+}
+
 /// Azure TDX (vTPM-wrapped) verification artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]

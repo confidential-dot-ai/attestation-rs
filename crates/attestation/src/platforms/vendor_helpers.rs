@@ -112,13 +112,6 @@ pub(crate) fn project_hcl_report(
     }
 }
 
-/// Constant-time comparison helper that returns `None` when no expected value
-/// was supplied, mirroring the `*_match: Option<bool>` pattern used in the
-/// canonical anchors.
-pub(crate) fn match_optional(observed: &[u8], expected: Option<&[u8]>) -> Option<bool> {
-    expected.map(|e| constant_time_eq(observed, e))
-}
-
 /// Compare an observed 48-byte digest against an optional expected digest.
 /// Returns `(matched, mismatched)`:
 /// - `matched`: `Some(true)` if expected was supplied and matched, else `None`/`Some(false)`.
