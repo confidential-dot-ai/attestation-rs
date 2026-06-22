@@ -447,3 +447,66 @@ impl Default for Verifier {
 pub async fn verify(evidence_json: &[u8], params: &VerifyParams) -> Result<VerifyResult> {
     Verifier::new().verify(evidence_json, params).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(platform: PlatformType) -> Vec<u8> {
+        let env = AttestationEvidence {
+            platform,
+            evidence: serde_json::json!({}),
+        };
+        serde_json::to_vec(&env).unwrap()
+    }
+
+    #[test]
+    fn detect_platform_reads_envelope_tag() {
+        let bytes = envelope(PlatformType::Tdx);
+        let p = detect_platform(&bytes).unwrap();
+        assert_eq!(p, PlatformType::Tdx);
+    }
+
+    #[test]
+    fn detect_platform_rejects_oversized_evidence() {
+        let bytes = vec![b'{'; MAX_EVIDENCE_SIZE + 1];
+        let err = detect_platform(&bytes).unwrap_err();
+        assert!(matches!(err, AttestationError::EvidenceTooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_vendor_mismatch() {
+        // Envelope claims Snp, caller pins VendorParams::Tdx. The dispatcher
+        // must reject before invoking any per-vendor verifier so that
+        // vendor-specific params are not silently ignored.
+        let bytes = envelope(PlatformType::Snp);
+        let params = VerifyParams {
+            vendor: VendorParams::Tdx(VerifyTdx::default()),
+            ..Default::default()
+        };
+        let err = Verifier::new().verify(&bytes, &params).await.unwrap_err();
+        match err {
+            AttestationError::PlatformMismatch { expected, actual } => {
+                assert_eq!(expected, "tdx");
+                assert_eq!(actual, "snp");
+            }
+            other => panic!("expected PlatformMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_auto_dispatches_by_envelope() {
+        // VendorParams::Auto accepts whatever the envelope says — confirmed
+        // by reaching the per-vendor verifier (which will fail on the empty
+        // evidence body, but not with PlatformMismatch).
+        let bytes = envelope(PlatformType::Snp);
+        let params = VerifyParams::default();
+        let err = Verifier::new().verify(&bytes, &params).await.unwrap_err();
+        // The dispatcher passed through to the per-vendor SNP verifier, which
+        // failed on the malformed body — NOT a PlatformMismatch.
+        assert!(
+            !matches!(err, AttestationError::PlatformMismatch { .. }),
+            "Auto must not reject envelope-driven dispatch"
+        );
+    }
+}
