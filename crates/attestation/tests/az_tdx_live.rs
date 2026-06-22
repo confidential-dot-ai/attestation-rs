@@ -423,11 +423,11 @@ async fn test_az_tdx_top_level_api_roundtrip_with_nonce() {
     eprintln!("  Platform: {}", result.vendor.platform());
     eprintln!("  Signature valid: {}", result.signature_valid);
     eprintln!("  Report data match: {:?}", result.report_data_match);
-    eprintln!("  Launch digest: {}", hex::encode(&result.launch_measurement));
     eprintln!(
-        "  Report data (hex): {}",
-        hex::encode(&result.report_data)
+        "  Launch digest: {}",
+        hex::encode(&result.launch_measurement)
     );
+    eprintln!("  Report data (hex): {}", hex::encode(&result.report_data));
 }
 
 #[tokio::test]

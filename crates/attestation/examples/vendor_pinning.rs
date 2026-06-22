@@ -8,9 +8,7 @@
 //! Run a quick syntax check with:
 //!   cargo build --example vendor_pinning
 
-use attestation::{
-    SnpTcb, VendorParams, VerifyParams, VerifySnp, VerifyTdx,
-};
+use attestation::{SnpTcb, VendorParams, VerifyParams, VerifySnp, VerifyTdx};
 
 fn _example_tdx_pin(evidence_json: &[u8]) -> attestation::Result<()> {
     // Suppose `pinned_mrtd` and `pinned_rtmrs[1..]` came from a manifest the
@@ -25,10 +23,10 @@ fn _example_tdx_pin(evidence_json: &[u8]) -> attestation::Result<()> {
     let mut tdx = VerifyTdx::default();
     tdx.mrtd = Some(pinned_mrtd);
     tdx.rtmrs = [
-        None,                // RTMR0 = firmware; not pinning
-        Some(pinned_rtmr1),  // RTMR1 = OS measurements
-        Some(pinned_rtmr2),  // RTMR2 = OS measurements
-        None,                // RTMR3 = runtime; not pinning at this layer
+        None,               // RTMR0 = firmware; not pinning
+        Some(pinned_rtmr1), // RTMR1 = OS measurements
+        Some(pinned_rtmr2), // RTMR2 = OS measurements
+        None,               // RTMR3 = runtime; not pinning at this layer
     ];
 
     let params = VerifyParams {

@@ -25,9 +25,13 @@ async fn capture_tdx_evidence_fixture() {
         .expect("verify without collateral failed");
     eprintln!(
         "Verified (no collateral): signature_valid={}, platform={}",
-        result.signature_valid, result.vendor.platform()
+        result.signature_valid,
+        result.vendor.platform()
     );
-    eprintln!("Launch digest (MRTD): {}", hex::encode(&result.launch_measurement));
+    eprintln!(
+        "Launch digest (MRTD): {}",
+        hex::encode(&result.launch_measurement)
+    );
     assert!(result.signature_valid);
 
     // With collateral
@@ -76,7 +80,8 @@ async fn capture_az_snp_evidence_fixture() {
             .expect("verify failed");
     eprintln!(
         "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.vendor.platform()
+        result.signature_valid,
+        result.vendor.platform()
     );
     eprintln!("Launch digest: {}", hex::encode(&result.launch_measurement));
     assert!(result.signature_valid);
@@ -103,7 +108,8 @@ async fn capture_az_tdx_evidence_fixture() {
         .expect("verify failed");
     eprintln!(
         "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.vendor.platform()
+        result.signature_valid,
+        result.vendor.platform()
     );
     eprintln!("Launch digest: {}", hex::encode(&result.launch_measurement));
     assert!(result.signature_valid);
