@@ -176,7 +176,10 @@ pub async fn verify_evidence(
         collateral_verified: crl_verified,
         tcb_status: None,
         mrtd_match: None,
-        rtmr_matches: None,
+        rtmr0_match: None,
+        rtmr1_match: None,
+        rtmr2_match: None,
+        rtmr3_match: None,
         launch_digest_match,
     })
 }
@@ -1029,7 +1032,10 @@ mod tests {
             .expect("live v5 fixture should verify");
         assert!(r.launch_digest_match.is_none(), "no expected_* → None");
         assert!(r.mrtd_match.is_none(), "SNP never sets mrtd_match");
-        assert!(r.rtmr_matches.is_none(), "SNP never sets rtmr_matches");
+        assert!(r.rtmr0_match.is_none(), "SNP never sets rtmrN_match");
+        assert!(r.rtmr1_match.is_none());
+        assert!(r.rtmr2_match.is_none());
+        assert!(r.rtmr3_match.is_none());
     }
 
     #[tokio::test]

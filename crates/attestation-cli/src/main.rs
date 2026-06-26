@@ -329,25 +329,17 @@ async fn cmd_verify(args: VerifyArgs) {
     if let Some(ref hex_str) = args.expected_launch_digest {
         params.expected_launch_digest = Some(parse_digest(hex_str, "expected-launch-digest"));
     }
-    let any_rtmr = args.expected_rtmr0.is_some()
-        || args.expected_rtmr1.is_some()
-        || args.expected_rtmr2.is_some()
-        || args.expected_rtmr3.is_some();
-    if any_rtmr {
-        let mut rtmrs: [Option<[u8; 48]>; 4] = [None, None, None, None];
-        if let Some(ref h) = args.expected_rtmr0 {
-            rtmrs[0] = Some(parse_digest(h, "expected-rtmr0"));
-        }
-        if let Some(ref h) = args.expected_rtmr1 {
-            rtmrs[1] = Some(parse_digest(h, "expected-rtmr1"));
-        }
-        if let Some(ref h) = args.expected_rtmr2 {
-            rtmrs[2] = Some(parse_digest(h, "expected-rtmr2"));
-        }
-        if let Some(ref h) = args.expected_rtmr3 {
-            rtmrs[3] = Some(parse_digest(h, "expected-rtmr3"));
-        }
-        params.expected_rtmrs = Some(rtmrs);
+    if let Some(ref h) = args.expected_rtmr0 {
+        params.expected_rtmr0 = Some(parse_digest(h, "expected-rtmr0"));
+    }
+    if let Some(ref h) = args.expected_rtmr1 {
+        params.expected_rtmr1 = Some(parse_digest(h, "expected-rtmr1"));
+    }
+    if let Some(ref h) = args.expected_rtmr2 {
+        params.expected_rtmr2 = Some(parse_digest(h, "expected-rtmr2"));
+    }
+    if let Some(ref h) = args.expected_rtmr3 {
+        params.expected_rtmr3 = Some(parse_digest(h, "expected-rtmr3"));
     }
 
     eprintln!("Verifying evidence...");
@@ -379,11 +371,17 @@ async fn cmd_verify(args: VerifyArgs) {
     if let Some(m) = result.launch_digest_match {
         eprintln!("  Launch digest match: {m}");
     }
-    if let Some(matches) = result.rtmr_matches {
-        for (i, m) in matches.iter().enumerate() {
-            if let Some(b) = m {
-                eprintln!("  RTMR[{i}] match: {b}");
-            }
+    for (i, m) in [
+        result.rtmr0_match,
+        result.rtmr1_match,
+        result.rtmr2_match,
+        result.rtmr3_match,
+    ]
+    .iter()
+    .enumerate()
+    {
+        if let Some(b) = m {
+            eprintln!("  RTMR[{i}] match: {b}");
         }
     }
 
@@ -397,10 +395,10 @@ async fn cmd_verify(args: VerifyArgs) {
         || matches!(result.init_data_match, Some(false))
         || matches!(result.mrtd_match, Some(false))
         || matches!(result.launch_digest_match, Some(false))
-        || result
-            .rtmr_matches
-            .as_ref()
-            .is_some_and(|m| m.iter().any(|x| matches!(x, Some(false))));
+        || matches!(result.rtmr0_match, Some(false))
+        || matches!(result.rtmr1_match, Some(false))
+        || matches!(result.rtmr2_match, Some(false))
+        || matches!(result.rtmr3_match, Some(false));
     if !result.signature_valid || policy_failed {
         process::exit(1);
     }

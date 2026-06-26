@@ -77,10 +77,15 @@ pub struct VerifyParams {
     /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
     /// mismatch does not fail verification. TDX-only.
     pub expected_mrtd: Option<[u8; 48]>,
-    /// Expected RTMR[0..3] (inner `None` skips that RTMR). Results in
-    /// [`VerificationResult::rtmr_matches`]; mismatch does not fail
-    /// verification. TDX-only.
-    pub expected_rtmrs: Option<[Option<[u8; 48]>; 4]>,
+    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
+    /// does not fail verification. TDX-only.
+    pub expected_rtmr0: Option<[u8; 48]>,
+    /// Expected RTMR[1]. TDX-only.
+    pub expected_rtmr1: Option<[u8; 48]>,
+    /// Expected RTMR[2]. TDX-only.
+    pub expected_rtmr2: Option<[u8; 48]>,
+    /// Expected RTMR[3]. TDX-only.
+    pub expected_rtmr3: Option<[u8; 48]>,
     /// Expected SNP launch digest (`report.measurement`). Result in
     /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
     /// verification. SNP-only.
@@ -118,10 +123,18 @@ pub struct VerificationResult {
     /// Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mrtd_match: Option<bool>,
-    /// Per-RTMR compare results matching the layout of
-    /// [`VerifyParams::expected_rtmrs`]. Always `None` for SNP.
+    /// RTMR[0] compare result. Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmr_matches: Option<[Option<bool>; 4]>,
+    pub rtmr0_match: Option<bool>,
+    /// RTMR[1] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr1_match: Option<bool>,
+    /// RTMR[2] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr2_match: Option<bool>,
+    /// RTMR[3] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr3_match: Option<bool>,
     /// SNP launch digest compare result. `None` if no expected value was
     /// supplied. Always `None` for TDX.
     #[serde(skip_serializing_if = "Option::is_none")]

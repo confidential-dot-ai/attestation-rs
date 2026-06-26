@@ -111,7 +111,8 @@ use attestation::types::VerifyParams;
 let params = VerifyParams {
     // TDX policy
     expected_mrtd: Some(mrtd_bytes),                   // [u8; 48]
-    expected_rtmrs: Some([None, Some(rtmr1), Some(rtmr2), None]),
+    expected_rtmr1: Some(rtmr1_bytes),
+    expected_rtmr2: Some(rtmr2_bytes),
     // SNP policy
     expected_launch_digest: Some(launch_digest_bytes), // [u8; 48]
     // existing fields
@@ -121,13 +122,14 @@ let params = VerifyParams {
 
 let result = attestation::verify(&evidence_json, &params).await?;
 assert_eq!(result.mrtd_match, Some(true));
-assert_eq!(result.rtmr_matches, Some([None, Some(true), Some(true), None]));
+assert_eq!(result.rtmr1_match, Some(true));
+assert_eq!(result.rtmr2_match, Some(true));
 ```
 
 All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
-short-circuit between RTMRs — every populated reference is checked.
-`VerificationResult` carries `#[must_use]` so dropping the result without
-inspecting the policy outcomes is a compile-time warning.
+short-circuit — every populated reference is checked. `VerificationResult`
+carries `#[must_use]` so dropping the result without inspecting the policy
+outcomes is a compile-time warning.
 
 The CLI exposes matching flags:
 

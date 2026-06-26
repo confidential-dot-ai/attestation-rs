@@ -721,10 +721,12 @@ pub fn build_tpm_verification_result(
         init_data_match,
         collateral_verified,
         tcb_status: None,
-        // Launch-measurement comparisons are platform-specific and populated
-        // by the caller (az_snp/az_tdx) after this generic TPM-result is built.
+        // Launch-measurement compares are populated by the caller (az_snp/az_tdx).
         mrtd_match: None,
-        rtmr_matches: None,
+        rtmr0_match: None,
+        rtmr1_match: None,
+        rtmr2_match: None,
+        rtmr3_match: None,
         launch_digest_match: None,
     }
 }

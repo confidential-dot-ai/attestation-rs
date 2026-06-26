@@ -447,21 +447,22 @@ pub async fn verify_evidence(
         .expected_mrtd
         .as_ref()
         .map(|expected| crate::utils::constant_time_eq(&quote.body.mr_td, expected));
-    let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
-        let rtmrs = [
-            &quote.body.rtmr_0,
-            &quote.body.rtmr_1,
-            &quote.body.rtmr_2,
-            &quote.body.rtmr_3,
-        ];
-        let mut out: [Option<bool>; 4] = [None, None, None, None];
-        for (i, slot) in expected.iter().enumerate() {
-            if let Some(exp) = slot {
-                out[i] = Some(crate::utils::constant_time_eq(rtmrs[i], exp));
-            }
-        }
-        out
-    });
+    let rtmr0_match = params
+        .expected_rtmr0
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_0, expected));
+    let rtmr1_match = params
+        .expected_rtmr1
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_1, expected));
+    let rtmr2_match = params
+        .expected_rtmr2
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_2, expected));
+    let rtmr3_match = params
+        .expected_rtmr3
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_3, expected));
 
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
@@ -490,7 +491,10 @@ pub async fn verify_evidence(
         collateral_verified: tcb_status.is_some(),
         tcb_status,
         mrtd_match,
-        rtmr_matches,
+        rtmr0_match,
+        rtmr1_match,
+        rtmr2_match,
+        rtmr3_match,
         launch_digest_match: None,
     })
 }
@@ -1020,7 +1024,10 @@ mod tests {
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
         assert!(r.mrtd_match.is_none(), "no expected_mrtd → None");
-        assert!(r.rtmr_matches.is_none(), "no expected_rtmrs → None");
+        assert!(r.rtmr0_match.is_none(), "no expected_rtmr0 → None");
+        assert!(r.rtmr1_match.is_none(), "no expected_rtmr1 → None");
+        assert!(r.rtmr2_match.is_none(), "no expected_rtmr2 → None");
+        assert!(r.rtmr3_match.is_none(), "no expected_rtmr3 → None");
         assert!(
             r.launch_digest_match.is_none(),
             "TDX never sets launch_digest_match"
@@ -1057,44 +1064,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_evidence_partial_rtmr_check() {
-        // Caller provides only rtmr0, leaving the others as inner None.
-        // rtmr_matches[0] should be Some(true); the rest remain None.
+        // Caller pins only rtmr0; the other rtmrN_match fields stay None.
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
-        let expected: [Option<[u8; 48]>; 4] = [Some(quote.body.rtmr_0), None, None, None];
         let params = VerifyParams {
             allow_debug: true,
-            expected_rtmrs: Some(expected),
+            expected_rtmr0: Some(quote.body.rtmr_0),
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        let m = r.rtmr_matches.expect("rtmr_matches should be Some(...)");
-        assert_eq!(m[0], Some(true), "rtmr0 should match");
-        assert_eq!(m[1], None, "rtmr1 not requested → None");
-        assert_eq!(m[2], None, "rtmr2 not requested → None");
-        assert_eq!(m[3], None, "rtmr3 not requested → None");
+        assert_eq!(r.rtmr0_match, Some(true));
+        assert_eq!(r.rtmr1_match, None);
+        assert_eq!(r.rtmr2_match, None);
+        assert_eq!(r.rtmr3_match, None);
     }
 
     #[tokio::test]
     async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
-        let expected: [Option<[u8; 48]>; 4] = [
-            Some(quote.body.rtmr_0), // match
-            Some([0xFF; 48]),        // mismatch
-            None,                    // skip
-            Some(quote.body.rtmr_3), // match
-        ];
         let params = VerifyParams {
             allow_debug: true,
-            expected_rtmrs: Some(expected),
+            expected_rtmr0: Some(quote.body.rtmr_0), // match
+            expected_rtmr1: Some([0xFF; 48]),        // mismatch
+            expected_rtmr3: Some(quote.body.rtmr_3), // match (rtmr2 left None → skipped)
             ..Default::default()
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        let m = r.rtmr_matches.unwrap();
-        assert_eq!(m[0], Some(true));
-        assert_eq!(m[1], Some(false));
-        assert_eq!(m[2], None);
-        assert_eq!(m[3], Some(true));
+        assert_eq!(r.rtmr0_match, Some(true));
+        assert_eq!(r.rtmr1_match, Some(false));
+        assert_eq!(r.rtmr2_match, None);
+        assert_eq!(r.rtmr3_match, Some(true));
     }
 }
