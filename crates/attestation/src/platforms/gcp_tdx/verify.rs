@@ -51,12 +51,9 @@ pub async fn verify_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use crate::platforms::tdx::verify::parse_tdx_quote;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-    // Same v4 fixture the bare-metal TDX tests use — proves the GCP overlay
-    // simply forwards expected_mrtd/expected_rtmrs to the underlying TDX
-    // pipeline.
     const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
 
     fn make_tdx_evidence(quote_bytes: &[u8]) -> TdxEvidence {

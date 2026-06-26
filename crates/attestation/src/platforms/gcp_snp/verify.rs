@@ -49,15 +49,13 @@ pub async fn verify_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use crate::error::AttestationError;
     use crate::platforms::snp::evidence::SnpCertChain;
     use crate::platforms::snp::verify::parse_report;
     use crate::types::{ProcessorGeneration, SnpTcb};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-    // Same live Genoa v5 fixture used by the bare-metal SNP tests.
-    const LIVE_REPORT_V5: &[u8] =
-        include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
+    const LIVE_REPORT_V5: &[u8] = include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
     const LIVE_VCEK_GENOA: &[u8] = include_bytes!("../../../test_data/snp/live-vcek-genoa.der");
 
     /// Cert provider that returns the bundled live Genoa VCEK. No network,
@@ -107,7 +105,9 @@ mod tests {
             expected_launch_digest: Some(expected),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &StubCertProvider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
         assert_eq!(r.platform, PlatformType::GcpSnp);
         assert_eq!(r.launch_digest_match, Some(true));
     }
@@ -119,7 +119,9 @@ mod tests {
             expected_launch_digest: Some([0x77; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &StubCertProvider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
         assert_eq!(r.platform, PlatformType::GcpSnp);
         assert_eq!(r.launch_digest_match, Some(false));
         // Even with wrong digest, signature still valid — policy decision in caller

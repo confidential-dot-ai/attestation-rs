@@ -74,35 +74,20 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
-    /// If set, verifier compares the TDX quote's MRTD (launch measurement)
-    /// against this expected 48-byte digest and records the result in
-    /// [`VerificationResult::mrtd_match`]. A mismatch does NOT fail the
-    /// signature/collateral path — callers inspect the bool to enforce policy.
-    /// Ignored for SNP platforms.
+    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
+    /// mismatch does not fail verification. TDX-only.
     pub expected_mrtd: Option<[u8; 48]>,
-    /// If set, verifier compares each TDX RTMR (Runtime Measurement Register)
-    /// against the corresponding expected 48-byte digest. `None` entries are
-    /// skipped; comparison results land in [`VerificationResult::rtmr_matches`].
-    /// A mismatch does NOT fail verification — callers enforce policy.
-    /// Ignored for SNP platforms.
+    /// Expected RTMR[0..3] (inner `None` skips that RTMR). Results in
+    /// [`VerificationResult::rtmr_matches`]; mismatch does not fail
+    /// verification. TDX-only.
     pub expected_rtmrs: Option<[Option<[u8; 48]>; 4]>,
-    /// If set, verifier compares the SNP attestation report's `measurement`
-    /// field (launch digest) against this expected 48-byte digest and records
-    /// the result in [`VerificationResult::launch_digest_match`]. A mismatch
-    /// does NOT fail verification — callers inspect the bool to enforce policy.
-    /// Ignored for TDX platforms.
+    /// Expected SNP launch digest (`report.measurement`). Result in
+    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
+    /// verification. SNP-only.
     pub expected_launch_digest: Option<[u8; 48]>,
 }
 
 /// Result of verification — the caller decides pass/fail based on this.
-///
-/// `#[must_use]`: this struct carries individual policy outcomes
-/// (`signature_valid`, `mrtd_match`, `rtmr_matches`, ...). Dropping it
-/// without inspecting those booleans means a caller asked
-/// `attestation::verify(...)` and then ignored whether the quote actually
-/// matched the policy. That is *always* a bug — the attribute makes the
-/// compiler warn at every call site that throws the result away. Add an
-/// explicit `let _ = result;` only if you genuinely don't care.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct VerificationResult {
@@ -129,23 +114,16 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
-    /// Did the TDX MRTD (launch measurement) match the value supplied in
-    /// [`VerifyParams::expected_mrtd`]? `None` means no expected value was
-    /// provided. `Some(true)` / `Some(false)` reflect a constant-time compare.
-    /// Always `None` for SNP platforms.
+    /// MRTD compare result. `None` if no expected value was supplied.
+    /// Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mrtd_match: Option<bool>,
-    /// Per-RTMR comparison results, matching the layout of
-    /// [`VerifyParams::expected_rtmrs`]. Inner `None` means no expected value
-    /// for that RTMR; `Some(bool)` is the constant-time-compare result.
-    /// The outer `None` means the caller provided no `expected_rtmrs` at all.
-    /// Always `None` for SNP platforms.
+    /// Per-RTMR compare results matching the layout of
+    /// [`VerifyParams::expected_rtmrs`]. Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr_matches: Option<[Option<bool>; 4]>,
-    /// Did the SNP launch digest (report.measurement) match the value supplied
-    /// in [`VerifyParams::expected_launch_digest`]? `None` means no expected
-    /// value was provided. `Some(bool)` reflects a constant-time compare.
-    /// Always `None` for TDX platforms.
+    /// SNP launch digest compare result. `None` if no expected value was
+    /// supplied. Always `None` for TDX.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_digest_match: Option<bool>,
 }

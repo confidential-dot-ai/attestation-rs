@@ -391,13 +391,8 @@ async fn cmd_verify(args: VerifyArgs) {
     let json = serde_json::to_string_pretty(&result).expect("failed to serialize result");
     println!("{json}");
 
-    // Exit non-zero on ANY failure that was actually checked. The new
-    // `expected_*` fields produce `Some(false)` only when the operator
-    // explicitly asked for the check, so this is exactly the "I pinned a
-    // reference and the live measurement does not match" case — which is
-    // the entire point of the policy. Without this, `--expected-mrtd
-    // $WRONG` would still exit 0 and any CI/deployment gate that relied
-    // on the exit code would silently green-light an attacker workload.
+    // Exit non-zero on signature failure or any explicit policy mismatch
+    // so CI/deploy gates fail closed when a pinned reference drifts.
     let policy_failed = matches!(result.report_data_match, Some(false))
         || matches!(result.init_data_match, Some(false))
         || matches!(result.mrtd_match, Some(false))

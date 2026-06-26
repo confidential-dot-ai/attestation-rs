@@ -441,14 +441,12 @@ pub async fn verify_evidence(
         None
     };
 
-    // 5b. Optional launch measurement (MRTD) and RTMR comparison against
-    // pre-computed reference values. Mismatches are surfaced via the
-    // result fields rather than failing verification — policy lives in
-    // the caller. Constant-time compares to avoid leaking which byte
-    // diverged for callers that route the digests over a network.
-    let mrtd_match = params.expected_mrtd.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&quote.body.mr_td, expected)
-    });
+    // Optional MRTD / RTMR comparisons against caller-supplied references.
+    // Constant-time; mismatch surfaces in the result and does not fail verify.
+    let mrtd_match = params
+        .expected_mrtd
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.mr_td, expected));
     let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
         let rtmrs = [
             &quote.body.rtmr_0,
@@ -1009,11 +1007,7 @@ mod tests {
         assert!(result.is_err(), "65-byte report_data should be rejected");
     }
 
-    // ---------------------------------------------------------------
-    // expected_mrtd / expected_rtmrs tests — closes the policy gap
-    // where the verifier can prove "this quote is valid" but cannot
-    // prove "this quote represents OUR published build."
-    // ---------------------------------------------------------------
+    // expected_mrtd / expected_rtmrs tests
 
     #[tokio::test]
     async fn test_verify_evidence_no_expected_measurements_yields_none() {
@@ -1048,9 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_evidence_wrong_mrtd_is_some_false() {
-        // INVARIANT: A wrong MRTD records Some(false) but DOES NOT fail the
-        // verifier. Policy lives in the caller — this test ensures we
-        // surface the mismatch rather than masking it as a hard error.
+        // Wrong MRTD must record Some(false) without failing verification.
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,

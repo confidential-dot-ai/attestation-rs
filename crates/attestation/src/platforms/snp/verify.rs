@@ -157,12 +157,12 @@ pub async fn verify_evidence(
         None
     };
 
-    // 10b. Optional launch measurement comparison against a pre-computed
-    // reference. Mismatches do NOT fail verification — the result field
-    // is surfaced to the caller, who decides whether to reject.
-    let launch_digest_match = params.expected_launch_digest.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&report.measurement[..], expected)
-    });
+    // Optional launch-digest compare. Mismatch surfaces in the result and
+    // does not fail verification.
+    let launch_digest_match = params
+        .expected_launch_digest
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected));
 
     // 11. Extract claims
     let claims = extract_claims(&report);
@@ -980,15 +980,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------
-    // expected_launch_digest tests — closes the policy gap where the
-    // verifier can prove "this report is valid" but cannot prove
-    // "this report represents OUR published build."
-    //
-    // Uses the LIVE_REPORT_V5 (Genoa v5, VMPL=0) fixture together
-    // with LIVE_VCEK_GENOA so the full verify_evidence pipeline
-    // (cert chain → report sig → VMPL → debug → VCEK TCB) all pass.
-    // ---------------------------------------------------------------
+    // expected_launch_digest tests against the live Genoa v5 fixture.
 
     /// Cert provider that returns the bundled live Genoa VCEK from the
     /// fixture. No network access, no CRL (so collateral_verified=false).
@@ -1052,21 +1044,24 @@ mod tests {
             expected_launch_digest: Some(expected),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert_eq!(r.launch_digest_match, Some(true));
     }
 
     #[tokio::test]
     async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
-        // INVARIANT: wrong launch_digest records Some(false) but verification
-        // still succeeds — policy lives in the caller.
+        // Wrong digest must record Some(false) without failing verification.
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let provider = StubCertProvider;
         let params = VerifyParams {
             expected_launch_digest: Some([0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider).await.unwrap();
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
         assert_eq!(r.launch_digest_match, Some(false));
         assert!(r.signature_valid, "wrong digest should NOT fail signature");
     }

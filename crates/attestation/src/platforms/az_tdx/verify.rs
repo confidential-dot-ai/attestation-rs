@@ -125,12 +125,12 @@ pub async fn verify_evidence(
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
 
-    // Optional launch-measurement (MRTD / RTMR) comparisons against the inner
-    // TDX quote. Mismatches do NOT fail verification — surfaced via the
-    // result fields for the caller's policy layer.
-    let mrtd_match = params.expected_mrtd.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected)
-    });
+    // Optional MRTD / RTMR compares. Mismatches surface in the result and
+    // do not fail verification.
+    let mrtd_match = params
+        .expected_mrtd
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected));
     let rtmr_matches = params.expected_rtmrs.as_ref().map(|expected| {
         let rtmrs = [
             &tdx_quote.body.rtmr_0,

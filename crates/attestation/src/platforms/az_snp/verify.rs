@@ -209,12 +209,12 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
 
-    // Optional launch-measurement comparison against a pre-computed reference.
-    // Mismatch does NOT fail verification — surfaced via the result field for
-    // the caller's policy layer.
-    let launch_digest_match = params.expected_launch_digest.as_ref().map(|expected| {
-        crate::utils::constant_time_eq(&snp_report.measurement[..], expected)
-    });
+    // Optional launch-digest compare. Mismatch surfaces in the result and
+    // does not fail verification.
+    let launch_digest_match = params
+        .expected_launch_digest
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&snp_report.measurement[..], expected));
 
     let snp_claims = crate::platforms::snp::claims::extract_claims(&snp_report);
     let mut result = tpm_common::build_tpm_verification_result(
