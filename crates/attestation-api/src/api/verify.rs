@@ -10,6 +10,7 @@ use crate::error::ApiError;
 use crate::AppState;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyRequest {
     /// Platform for the platform-specific evidence returned by /attest.
     pub platform: Option<String>,
@@ -20,7 +21,13 @@ pub struct VerifyRequest {
     pub issue_token: bool,
 }
 
+/// `deny_unknown_fields`: a typo in any `expected_*` field name would
+/// otherwise be silently dropped, leaving the matching `*_match` result as
+/// `None` while `signature_valid` stays `true`. Callers reading just the
+/// signature flag would treat that as a successful pin when no comparison
+/// actually ran — a silent policy bypass. Reject the request instead.
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyParamsInput {
     pub expected_report_data: Option<String>,
     pub expected_init_data_hash: Option<String>,
@@ -42,6 +49,7 @@ pub struct VerifyParamsInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MinTcbInput {
     pub bootloader: u8,
     pub tee: u8,
