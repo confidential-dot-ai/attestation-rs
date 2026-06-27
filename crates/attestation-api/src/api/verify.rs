@@ -27,6 +27,18 @@ pub struct VerifyParamsInput {
     #[serde(default)]
     pub allow_debug: bool,
     pub min_tcb: Option<MinTcbInput>,
+    /// Expected MRTD (base64-encoded, 48 bytes). TDX-only.
+    pub expected_mrtd: Option<String>,
+    /// Expected RTMR[0] (base64-encoded, 48 bytes). TDX-only.
+    pub expected_rtmr0: Option<String>,
+    /// Expected RTMR[1] (base64-encoded, 48 bytes). TDX-only.
+    pub expected_rtmr1: Option<String>,
+    /// Expected RTMR[2] (base64-encoded, 48 bytes). TDX-only.
+    pub expected_rtmr2: Option<String>,
+    /// Expected RTMR[3] (base64-encoded, 48 bytes). TDX-only.
+    pub expected_rtmr3: Option<String>,
+    /// Expected SNP launch digest (base64-encoded, 48 bytes). SNP-only.
+    pub expected_launch_digest: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -79,12 +91,25 @@ pub async fn handler(
         ));
     }
 
+    let expected_mrtd = decode_digest_48("expected_mrtd", req.params.expected_mrtd)?;
+    let expected_rtmr0 = decode_digest_48("expected_rtmr0", req.params.expected_rtmr0)?;
+    let expected_rtmr1 = decode_digest_48("expected_rtmr1", req.params.expected_rtmr1)?;
+    let expected_rtmr2 = decode_digest_48("expected_rtmr2", req.params.expected_rtmr2)?;
+    let expected_rtmr3 = decode_digest_48("expected_rtmr3", req.params.expected_rtmr3)?;
+    let expected_launch_digest =
+        decode_digest_48("expected_launch_digest", req.params.expected_launch_digest)?;
+
     let params = attestation::VerifyParams {
         expected_report_data,
         expected_init_data_hash,
         allow_debug,
         min_tcb,
-        ..Default::default()
+        expected_mrtd,
+        expected_rtmr0,
+        expected_rtmr1,
+        expected_rtmr2,
+        expected_rtmr3,
+        expected_launch_digest,
     };
 
     let result = state.verifier.verify(&evidence_json, &params).await?;
@@ -100,6 +125,25 @@ pub async fn handler(
     };
 
     Ok(Json(VerifyResponse { result, token }))
+}
+
+/// Decode a base64 string into a 48-byte digest. Returns 400 on bad base64
+/// or wrong length so the caller can't silently pin against a truncated
+/// reference.
+fn decode_digest_48(field: &str, value: Option<String>) -> Result<Option<[u8; 48]>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let bytes = BASE64
+        .decode(&value)
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64 {field}: {e}")))?;
+    let arr: [u8; 48] = bytes.as_slice().try_into().map_err(|_| {
+        ApiError::BadRequest(format!(
+            "{field} must decode to exactly 48 bytes, got {}",
+            bytes.len()
+        ))
+    })?;
+    Ok(Some(arr))
 }
 
 fn build_evidence_envelope(platform: Option<String>, evidence: Value) -> Result<Vec<u8>, ApiError> {
