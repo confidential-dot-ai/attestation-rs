@@ -441,6 +441,29 @@ pub async fn verify_evidence(
         None
     };
 
+    // Optional MRTD / RTMR comparisons against caller-supplied references.
+    // Constant-time; mismatch surfaces in the result and does not fail verify.
+    let mrtd_match = params
+        .expected_mrtd
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.mr_td, expected));
+    let rtmr0_match = params
+        .expected_rtmr0
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_0, expected));
+    let rtmr1_match = params
+        .expected_rtmr1
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_1, expected));
+    let rtmr2_match = params
+        .expected_rtmr2
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_2, expected));
+    let rtmr3_match = params
+        .expected_rtmr3
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_3, expected));
+
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
         crate::utils::check_field_size("cc_eventlog", eventlog_b64.len())?;
@@ -467,6 +490,12 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
+        mrtd_match,
+        rtmr0_match,
+        rtmr1_match,
+        rtmr2_match,
+        rtmr3_match,
+        launch_digest_match: None,
     })
 }
 
@@ -980,5 +1009,91 @@ mod tests {
         };
         let result = verify_evidence(&evidence, &params, None).await;
         assert!(result.is_err(), "65-byte report_data should be rejected");
+    }
+
+    // expected_mrtd / expected_rtmrs tests
+
+    #[tokio::test]
+    async fn test_verify_evidence_no_expected_measurements_yields_none() {
+        // Sanity: when the caller supplies no expected_* values, the result
+        // fields are None — distinguishing "skipped" from "failed".
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert!(r.mrtd_match.is_none(), "no expected_mrtd → None");
+        assert!(r.rtmr0_match.is_none(), "no expected_rtmr0 → None");
+        assert!(r.rtmr1_match.is_none(), "no expected_rtmr1 → None");
+        assert!(r.rtmr2_match.is_none(), "no expected_rtmr2 → None");
+        assert!(r.rtmr3_match.is_none(), "no expected_rtmr3 → None");
+        assert!(
+            r.launch_digest_match.is_none(),
+            "TDX never sets launch_digest_match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_matching_mrtd() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_mrtd: Some(quote.body.mr_td),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_wrong_mrtd_is_some_false() {
+        // Wrong MRTD must record Some(false) without failing verification.
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_mrtd: Some([0xAA; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(false));
+        // Crucially the rest of the result is still populated — sig is valid.
+        assert!(r.signature_valid);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_partial_rtmr_check() {
+        // Caller pins only rtmr0; the other rtmrN_match fields stay None.
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_rtmr0: Some(quote.body.rtmr_0),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.rtmr0_match, Some(true));
+        assert_eq!(r.rtmr1_match, None);
+        assert_eq!(r.rtmr2_match, None);
+        assert_eq!(r.rtmr3_match, None);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_rtmr0: Some(quote.body.rtmr_0), // match
+            expected_rtmr1: Some([0xFF; 48]),        // mismatch
+            expected_rtmr3: Some(quote.body.rtmr_3), // match (rtmr2 left None → skipped)
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.rtmr0_match, Some(true));
+        assert_eq!(r.rtmr1_match, Some(false));
+        assert_eq!(r.rtmr2_match, None);
+        assert_eq!(r.rtmr3_match, Some(true));
     }
 }

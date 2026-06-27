@@ -84,6 +84,7 @@ pub async fn handler(
         expected_init_data_hash,
         allow_debug,
         min_tcb,
+        ..Default::default()
     };
 
     let result = state.verifier.verify(&evidence_json, &params).await?;

@@ -47,3 +47,46 @@ pub async fn verify_evidence(
     result.platform = PlatformType::GcpTdx;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platforms::tdx::verify::parse_tdx_quote;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
+
+    fn make_tdx_evidence(quote_bytes: &[u8]) -> TdxEvidence {
+        TdxEvidence {
+            quote: BASE64.encode(quote_bytes),
+            cc_eventlog: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gcp_tdx_propagates_expected_mrtd_match() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true, // v4 fixture has the debug bit set
+            expected_mrtd: Some(quote.body.mr_td),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.platform, PlatformType::GcpTdx);
+        assert_eq!(r.mrtd_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_gcp_tdx_propagates_wrong_mrtd_match() {
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            expected_mrtd: Some([0x55; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(r.platform, PlatformType::GcpTdx);
+        assert_eq!(r.mrtd_match, Some(false));
+    }
+}
