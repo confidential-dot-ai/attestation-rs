@@ -132,11 +132,11 @@ impl PlatformArg {
 
 #[cfg(all(feature = "attest", target_os = "linux"))]
 fn resolve_report_data(group: &ReportDataGroup) -> Result<Vec<u8>, String> {
-    if let Some(ref s) = group.report_data {
+    if let Some(s) = &group.report_data {
         Ok(s.as_bytes().to_vec())
-    } else if let Some(ref h) = group.report_data_hex {
+    } else if let Some(h) = &group.report_data_hex {
         hex::decode(h).map_err(|e| format!("invalid hex for --report-data-hex: {e}"))
-    } else if let Some(ref path) = group.report_data_file {
+    } else if let Some(path) = &group.report_data_file {
         std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
     } else {
         Ok(Vec::new())
@@ -146,7 +146,7 @@ fn resolve_report_data(group: &ReportDataGroup) -> Result<Vec<u8>, String> {
 fn read_evidence(args: &VerifyArgs) -> Result<Vec<u8>, String> {
     let max_size = attestation::MAX_EVIDENCE_SIZE;
 
-    if let Some(ref path) = args.evidence {
+    if let Some(path) = &args.evidence {
         let meta = std::fs::metadata(path)
             .map_err(|e| format!("failed to stat {}: {e}", path.display()))?;
         if meta.len() > max_size as u64 {
@@ -210,7 +210,7 @@ async fn cmd_attest(args: AttestArgs) {
         }
     };
 
-    let platform = if let Some(ref p) = args.platform {
+    let platform = if let Some(p) = &args.platform {
         p.to_platform_type()
     } else {
         match attestation::detect() {
@@ -251,7 +251,7 @@ async fn cmd_attest(args: AttestArgs) {
         evidence_json.len()
     );
 
-    if let Some(ref path) = args.output {
+    if let Some(path) = &args.output {
         if let Err(e) = std::fs::write(path, &evidence_json) {
             eprintln!("Failed to write {}: {e}", path.display());
             process::exit(1);
@@ -283,7 +283,7 @@ async fn cmd_verify(args: VerifyArgs) {
 
     let mut params = VerifyParams::default();
 
-    if let Some(ref hex_str) = args.expected_report_data {
+    if let Some(hex_str) = &args.expected_report_data {
         match hex::decode(hex_str) {
             Ok(data) => params.expected_report_data = Some(data),
             Err(e) => {
@@ -293,7 +293,7 @@ async fn cmd_verify(args: VerifyArgs) {
         }
     }
 
-    if let Some(ref hex_str) = args.expected_init_data {
+    if let Some(hex_str) = &args.expected_init_data {
         match hex::decode(hex_str) {
             Ok(data) => params.expected_init_data_hash = Some(data),
             Err(e) => {
@@ -323,22 +323,22 @@ async fn cmd_verify(args: VerifyArgs) {
         }
     };
 
-    if let Some(ref hex_str) = args.expected_mrtd {
+    if let Some(hex_str) = &args.expected_mrtd {
         params.expected_mrtd = Some(parse_digest(hex_str, "expected-mrtd"));
     }
-    if let Some(ref hex_str) = args.expected_launch_digest {
+    if let Some(hex_str) = &args.expected_launch_digest {
         params.expected_launch_digest = Some(parse_digest(hex_str, "expected-launch-digest"));
     }
-    if let Some(ref h) = args.expected_rtmr0 {
+    if let Some(h) = &args.expected_rtmr0 {
         params.expected_rtmr0 = Some(parse_digest(h, "expected-rtmr0"));
     }
-    if let Some(ref h) = args.expected_rtmr1 {
+    if let Some(h) = &args.expected_rtmr1 {
         params.expected_rtmr1 = Some(parse_digest(h, "expected-rtmr1"));
     }
-    if let Some(ref h) = args.expected_rtmr2 {
+    if let Some(h) = &args.expected_rtmr2 {
         params.expected_rtmr2 = Some(parse_digest(h, "expected-rtmr2"));
     }
-    if let Some(ref h) = args.expected_rtmr3 {
+    if let Some(h) = &args.expected_rtmr3 {
         params.expected_rtmr3 = Some(parse_digest(h, "expected-rtmr3"));
     }
 
