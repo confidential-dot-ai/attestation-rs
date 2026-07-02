@@ -208,8 +208,16 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     // Init data and result
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
+
+    // Optional launch-digest compare. Mismatch surfaces in the result and
+    // does not fail verification.
+    let launch_digest_match = params
+        .expected_launch_digest
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&snp_report.measurement[..], expected));
+
     let snp_claims = crate::platforms::snp::claims::extract_claims(&snp_report);
-    let result = tpm_common::build_tpm_verification_result(
+    let mut result = tpm_common::build_tpm_verification_result(
         snp_claims,
         &tpm_pcrs,
         &tpm_msg,
@@ -220,6 +228,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         // the synchronous core has not checked revocation.
         false,
     );
+    result.launch_digest_match = launch_digest_match;
     Ok(VerifiedReport {
         result,
         matched_gen,

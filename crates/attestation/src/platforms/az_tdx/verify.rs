@@ -125,6 +125,29 @@ pub async fn verify_evidence(
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
 
+    // Optional MRTD / RTMR compares. Mismatches surface in the result and
+    // do not fail verification.
+    let mrtd_match = params
+        .expected_mrtd
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected));
+    let rtmr0_match = params
+        .expected_rtmr0
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_0, expected));
+    let rtmr1_match = params
+        .expected_rtmr1
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_1, expected));
+    let rtmr2_match = params
+        .expected_rtmr2
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_2, expected));
+    let rtmr3_match = params
+        .expected_rtmr3
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_3, expected));
+
     // Result
     let tdx_claims = extract_claims(&tdx_quote);
     let collateral_verified = tcb_status.is_some();
@@ -138,6 +161,11 @@ pub async fn verify_evidence(
         collateral_verified,
     );
     result.tcb_status = tcb_status;
+    result.mrtd_match = mrtd_match;
+    result.rtmr0_match = rtmr0_match;
+    result.rtmr1_match = rtmr1_match;
+    result.rtmr2_match = rtmr2_match;
+    result.rtmr3_match = rtmr3_match;
     Ok(result)
 }
 

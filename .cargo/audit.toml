@@ -1,0 +1,17 @@
+# cargo-audit configuration.
+
+[advisories]
+# RUSTSEC-2023-0071 — Marvin attack on `rsa` 0.9.10 (transitive via
+# sev → az-cvm-vtpm). No fixed upgrade is published.
+#
+# Not exploitable in this codebase: the `rsa` crate's PKCS#1 v1.5
+# decryption path is the side-channel target, and we use `rsa` only
+# for RSA-PSS signature *verification* (AMD CRL signing key on the
+# bare-metal SNP path; TPM quote signatures on the Azure vTPM
+# overlays). Verification has no decryption oracle and therefore
+# no Marvin exposure.
+#
+# Watch for an upstream `sev` crate update that drops the rsa
+# dependency or migrates to a fixed version; remove this ignore
+# once the chain is clean.
+ignore = ["RUSTSEC-2023-0071"]

@@ -45,3 +45,86 @@ pub async fn verify_evidence(
     result.platform = PlatformType::GcpSnp;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AttestationError;
+    use crate::platforms::snp::evidence::SnpCertChain;
+    use crate::platforms::snp::verify::parse_report;
+    use crate::types::{ProcessorGeneration, SnpTcb};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+    const LIVE_REPORT_V5: &[u8] = include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
+    const LIVE_VCEK_GENOA: &[u8] = include_bytes!("../../../test_data/snp/live-vcek-genoa.der");
+
+    /// Cert provider that returns the bundled live Genoa VCEK. No network,
+    /// no CRL (so collateral_verified=false).
+    struct StubCertProvider;
+
+    #[async_trait::async_trait]
+    impl crate::collateral::CertProvider for StubCertProvider {
+        async fn get_snp_vcek(
+            &self,
+            _processor_gen: ProcessorGeneration,
+            _chip_id: &[u8; 64],
+            _reported_tcb: &SnpTcb,
+        ) -> crate::error::Result<Vec<u8>> {
+            Ok(LIVE_VCEK_GENOA.to_vec())
+        }
+
+        async fn get_snp_cert_chain(
+            &self,
+            _processor_gen: ProcessorGeneration,
+        ) -> crate::error::Result<(Vec<u8>, Vec<u8>)> {
+            Err(AttestationError::CertFetchError(
+                "stub provider does not serve full chain".to_string(),
+            ))
+        }
+    }
+
+    fn make_snp_evidence(report: &[u8], vcek_der: &[u8]) -> SnpEvidence {
+        SnpEvidence {
+            attestation_report: BASE64.encode(report),
+            cert_chain: Some(SnpCertChain {
+                vcek: BASE64.encode(vcek_der),
+                ask: None,
+                ark: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gcp_snp_propagates_matching_launch_digest() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut expected = [0u8; 48];
+        expected.copy_from_slice(&report.measurement[..]);
+
+        let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let params = VerifyParams {
+            expected_launch_digest: Some(expected),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
+        assert_eq!(r.platform, PlatformType::GcpSnp);
+        assert_eq!(r.launch_digest_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_gcp_snp_propagates_wrong_launch_digest() {
+        let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let params = VerifyParams {
+            expected_launch_digest: Some([0x77; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
+        assert_eq!(r.platform, PlatformType::GcpSnp);
+        assert_eq!(r.launch_digest_match, Some(false));
+        // Even with wrong digest, signature still valid — policy decision in caller
+        assert!(r.signature_valid);
+    }
+}

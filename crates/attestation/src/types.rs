@@ -82,6 +82,22 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
+    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
+    /// mismatch does not fail verification. TDX-only.
+    pub expected_mrtd: Option<[u8; 48]>,
+    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
+    /// does not fail verification. TDX-only.
+    pub expected_rtmr0: Option<[u8; 48]>,
+    /// Expected RTMR[1]. TDX-only.
+    pub expected_rtmr1: Option<[u8; 48]>,
+    /// Expected RTMR[2]. TDX-only.
+    pub expected_rtmr2: Option<[u8; 48]>,
+    /// Expected RTMR[3]. TDX-only.
+    pub expected_rtmr3: Option<[u8; 48]>,
+    /// Expected SNP launch digest (`report.measurement`). Result in
+    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
+    /// verification. SNP-only.
+    pub expected_launch_digest: Option<[u8; 48]>,
     /// NVIDIA GPU verification parameters, applied when an envelope carries a
     /// `gpu` bundle. Grouped behind a single feature gate (see
     /// [`NvidiaGpuParams`]).
@@ -154,6 +170,7 @@ impl Default for NvidiaGpuDevicePolicy {
 
 /// Result of verification — the caller decides pass/fail based on this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct VerificationResult {
     /// Was the hardware signature on the evidence valid?
     pub signature_valid: bool,
@@ -178,6 +195,26 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
+    /// MRTD compare result. `None` if no expected value was supplied.
+    /// Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mrtd_match: Option<bool>,
+    /// RTMR[0] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr0_match: Option<bool>,
+    /// RTMR[1] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr1_match: Option<bool>,
+    /// RTMR[2] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr2_match: Option<bool>,
+    /// RTMR[3] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr3_match: Option<bool>,
+    /// SNP launch digest compare result. `None` if no expected value was
+    /// supplied. Always `None` for TDX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_digest_match: Option<bool>,
 }
 
 /// Normalized claims extracted from evidence.
