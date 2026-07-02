@@ -201,6 +201,7 @@ async fn attest_endpoint() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn attest_rejects_disallowed_platform_before_hardware_access() {
     let state = test_state_with(|c| {

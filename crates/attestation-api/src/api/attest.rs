@@ -17,6 +17,10 @@ pub struct AttestRequest {
     pub report_data: Option<String>,
     #[serde(default = "default_platform")]
     pub platform: String,
+    /// If true, also collect NVIDIA GPU evidence. Requires the service to
+    /// be built with the `nvidia-gpu-attest` cargo feature.
+    #[serde(default)]
+    pub nvidia_gpu: bool,
 }
 
 fn default_platform() -> String {
@@ -27,6 +31,10 @@ fn default_platform() -> String {
 pub struct AttestResponse {
     pub platform: String,
     pub evidence: Value,
+    /// Present when the request set `nvidia_gpu: true` and GPU evidence
+    /// collection succeeded. Round-trips through `/verify` unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvidia_gpu: Option<Value>,
 }
 
 pub async fn handler(
@@ -49,16 +57,38 @@ pub async fn handler(
         let platform = resolve_platform(&req.platform)?;
         ensure_platform_allowed(&state.config.attestation.platforms, platform)?;
         let options = state.config.attestation.attest_options();
-        let evidence_bytes = attestation::attest(platform, &report_data, &options).await?;
-        let envelope: Value = serde_json::from_slice(&evidence_bytes)
+
+        let evidence_bytes = if req.nvidia_gpu {
+            #[cfg(feature = "nvidia-gpu-attest")]
+            {
+                attestation::attest_with_nvidia_gpu(platform, &report_data, &options).await?
+            }
+            #[cfg(not(feature = "nvidia-gpu-attest"))]
+            {
+                return Err(ApiError::BadRequest(
+                    "nvidia_gpu=true requires this service to be built with the \
+                     `nvidia-gpu-attest` cargo feature"
+                        .to_string(),
+                ));
+            }
+        } else {
+            attestation::attest(platform, &report_data, &options).await?
+        };
+
+        let mut envelope: Value = serde_json::from_slice(&evidence_bytes)
             .map_err(|e| ApiError::Internal(format!("failed to parse evidence: {e}")))?;
 
+        let gpu_field = envelope
+            .as_object_mut()
+            .and_then(|obj| obj.remove("nvidia_gpu"));
+
         // Keep the service response shape stable: top-level `platform` plus
-        // platform-specific `evidence`. /verify accepts this split form when
-        // clients send both fields.
+        // platform-specific `evidence` (+ optional `nvidia_gpu`). /verify
+        // accepts this split form when clients send the same fields.
         Ok(Json(AttestResponse {
             platform: format!("{platform}"),
             evidence: envelope.get("evidence").cloned().unwrap_or(envelope),
+            nvidia_gpu: gpu_field,
         }))
     }
 

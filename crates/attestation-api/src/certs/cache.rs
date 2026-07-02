@@ -29,6 +29,8 @@ pub struct CertCache {
     chain_cache: Cache<String, (Vec<u8>, Vec<u8>)>,
     tdx_cache: Cache<TdxCollateralKey, Vec<u8>>,
     crl_cache: Cache<String, CrlEntry>,
+    /// JWKS cache keyed by the full JWKS URL (NVIDIA NRAS).
+    jwks_cache: Cache<String, attestation::platforms::nvidia_gpu::Jwks>,
     last_crl_refresh: Arc<RwLock<Option<DateTime<Utc>>>>,
     http_client: Client,
     /// Normalized processor generation names from config (used for refresh operations).
@@ -59,6 +61,13 @@ impl CertCache {
             .time_to_live(hours_to_duration(config.crl_refresh_hours))
             .build();
 
+        // NRAS publishes a small key set (~5-10 keys). A handful of slots is
+        // enough even if GPU and switch endpoints diverge in the future.
+        let jwks_cache = Cache::builder()
+            .max_capacity(8)
+            .time_to_live(hours_to_duration(config.jwks_ttl_hours))
+            .build();
+
         let configured_generations = config
             .prefetch_chains
             .iter()
@@ -70,6 +79,7 @@ impl CertCache {
             chain_cache,
             tdx_cache,
             crl_cache,
+            jwks_cache,
             last_crl_refresh: Arc::new(RwLock::new(None)),
             http_client: Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -216,6 +226,37 @@ impl CertCache {
         Ok(entry)
     }
 
+    // --- NRAS JWKS operations ---
+
+    /// Fetch and cache a JWKS document.
+    ///
+    /// When `force_refresh` is true, the cache is bypassed and the freshly
+    /// fetched JWKS overwrites any existing entry (used by the verifier on
+    /// `kid` rotation).
+    pub async fn get_jwks(
+        &self,
+        url: &str,
+        force_refresh: bool,
+    ) -> anyhow::Result<attestation::platforms::nvidia_gpu::Jwks> {
+        if !force_refresh {
+            if let Some(jwks) = self.jwks_cache.get(url).await {
+                return Ok(jwks);
+            }
+        }
+        tracing::info!(%url, "fetching NRAS JWKS");
+        let jwks: attestation::platforms::nvidia_gpu::Jwks = self
+            .http_client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        // `insert` overwrites any existing entry for `url`.
+        self.jwks_cache.insert(url.to_string(), jwks.clone()).await;
+        Ok(jwks)
+    }
+
     // --- Stats ---
 
     pub fn vcek_entry_count(&self) -> u64 {
@@ -228,6 +269,10 @@ impl CertCache {
 
     pub fn tdx_entry_count(&self) -> u64 {
         self.tdx_cache.entry_count()
+    }
+
+    pub fn jwks_entry_count(&self) -> u64 {
+        self.jwks_cache.entry_count()
     }
 
     /// Returns the names of all known processor generations currently in the chain cache.
@@ -269,6 +314,7 @@ impl CertCache {
         self.chain_cache.invalidate_all();
         self.tdx_cache.invalidate_all();
         self.crl_cache.invalidate_all();
+        self.jwks_cache.invalidate_all();
 
         // Pre-fetch configured chain types, collecting any failures
         let mut failures = Vec::new();

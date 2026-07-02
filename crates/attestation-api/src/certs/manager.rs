@@ -6,12 +6,17 @@ use tokio::time::sleep;
 
 use crate::certs::cache::CertCache;
 use crate::certs::hours_to_duration;
+use crate::certs::nras_provider::JwksRefreshHandle;
 use crate::certs::revocation;
 use crate::config::{normalize_generation, CertsConfig};
 
 /// Start background cert management tasks.
 /// Returns handles that can be used to abort on shutdown.
-pub fn spawn_background_tasks(cache: Arc<CertCache>, config: &CertsConfig) -> Vec<JoinHandle<()>> {
+pub fn spawn_background_tasks(
+    cache: Arc<CertCache>,
+    config: &CertsConfig,
+    jwks_handle: Option<JwksRefreshHandle>,
+) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
     // Resolve configured generations for the refresh loop
@@ -35,6 +40,14 @@ pub fn spawn_background_tasks(cache: Arc<CertCache>, config: &CertsConfig) -> Ve
     handles.push(tokio::spawn(async move {
         crl_refresh_loop(cache_clone, crl_interval).await;
     }));
+
+    // JWKS refresh loop (NRAS) — refresh at half the TTL, only when configured.
+    if let Some(handle) = jwks_handle {
+        let jwks_interval = jwks_refresh_interval(config.jwks_ttl_hours);
+        handles.push(tokio::spawn(async move {
+            jwks_refresh_loop(handle, jwks_interval).await;
+        }));
+    }
 
     handles
 }
@@ -63,9 +76,24 @@ pub async fn prefetch(cache: &Arc<CertCache>, chains: &[String]) {
     revocation::refresh_crls(cache).await;
 }
 
+/// Pre-warm the JWKS cache for the NRAS endpoints.
+pub async fn prefetch_jwks(handle: &JwksRefreshHandle) {
+    for (url, result) in handle.prefetch().await {
+        match result {
+            Ok(()) => tracing::info!(%url, "pre-warmed NRAS JWKS"),
+            Err(e) => tracing::warn!(%url, error = %e, "failed to pre-warm NRAS JWKS"),
+        }
+    }
+}
+
 /// Compute the cert chain refresh interval: half the TTL, with a 60-second floor.
 pub(crate) fn chain_refresh_interval(chain_ttl_hours: u64) -> Duration {
     Duration::from_secs((chain_ttl_hours.saturating_mul(3600) / 2).max(60))
+}
+
+/// Compute the JWKS refresh interval: half the TTL, with a 60-second floor.
+pub(crate) fn jwks_refresh_interval(jwks_ttl_hours: u64) -> Duration {
+    Duration::from_secs((jwks_ttl_hours.saturating_mul(3600) / 2).max(60))
 }
 
 async fn cert_refresh_loop(cache: Arc<CertCache>, interval: Duration, generations: Vec<String>) {
@@ -85,5 +113,13 @@ async fn crl_refresh_loop(cache: Arc<CertCache>, interval: Duration) {
         sleep(interval).await;
         tracing::debug!("running periodic CRL refresh");
         revocation::refresh_crls(&cache).await;
+    }
+}
+
+async fn jwks_refresh_loop(handle: JwksRefreshHandle, interval: Duration) {
+    loop {
+        sleep(interval).await;
+        tracing::debug!("running periodic NRAS JWKS refresh");
+        handle.refresh().await;
     }
 }

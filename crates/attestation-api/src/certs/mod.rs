@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod manager;
+pub mod nras_provider;
 pub mod revocation;
 pub mod snp_provider;
 pub mod tdx_provider;

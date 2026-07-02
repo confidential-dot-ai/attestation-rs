@@ -7,9 +7,10 @@ use tracing_subscriber::EnvFilter;
 
 use attestation_api::certs::cache::CertCache;
 use attestation_api::certs::manager;
+use attestation_api::certs::nras_provider::CachedNrasProvider;
 use attestation_api::certs::snp_provider::CachedCertProvider;
 use attestation_api::certs::tdx_provider::CachedTdxProvider;
-use attestation_api::config::Config;
+use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Config};
 use attestation_api::token::{issuer::TokenIssuer, keys};
 use attestation_api::AppState;
 
@@ -64,8 +65,24 @@ async fn main() -> anyhow::Result<()> {
     // Pre-warm certs
     manager::prefetch(&cert_cache, &config.certs.prefetch_chains).await;
 
+    // Build cached NRAS provider (NVIDIA GPU attestation). Construction can
+    // fail if URLs are malformed — treat that as a hard config error.
+    let gpu_url = resolve_nras_gpu_url(&config.certs);
+    let switch_url = resolve_nras_switch_url(&config.certs);
+    let nras_provider =
+        CachedNrasProvider::new(cert_cache.clone(), gpu_url.clone(), switch_url.clone())?;
+    let jwks_handle = nras_provider.refresh_handle();
+    tracing::info!(gpu = %gpu_url, switch = %switch_url, "configured NRAS endpoints");
+
+    // Pre-warm NRAS JWKS so the first GPU verification doesn't pay the
+    // round-trip to NVIDIA.
+    if config.certs.prefetch_nras_jwks {
+        manager::prefetch_jwks(&jwks_handle).await;
+    }
+
     // Spawn background cert tasks and monitor for panics
-    let bg_handles = manager::spawn_background_tasks(cert_cache.clone(), &config.certs);
+    let bg_handles =
+        manager::spawn_background_tasks(cert_cache.clone(), &config.certs, Some(jwks_handle));
     for handle in bg_handles {
         tokio::spawn(async move {
             if let Err(e) = handle.await {
@@ -93,7 +110,8 @@ async fn main() -> anyhow::Result<()> {
     let verifier = Arc::new(
         attestation::Verifier::new()
             .with_cert_provider(cert_provider)
-            .with_tdx_provider(tdx_provider),
+            .with_tdx_provider(tdx_provider)
+            .with_nras_provider(nras_provider),
     );
 
     // Warm attestation::detect()'s process-lifetime cache before serving, so the

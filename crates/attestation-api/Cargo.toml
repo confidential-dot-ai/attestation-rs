@@ -5,13 +5,19 @@ edition = "2021"
 description = "REST API service wrapping the attestation library"
 
 [features]
-# Forward NVIDIA GPU verification to the attestation library. Enabling it
-# compiles in GPU bundle verification; the API applies default GPU policy
-# (it does not yet accept GPU params over HTTP).
+default = []
+# Forward NVIDIA GPU verification to the attestation library. The attestation
+# dependency below already enables `nvidia-gpu` unconditionally, so GPU bundle
+# verification is always compiled in; this feature is kept for explicitness.
 nvidia-gpu = ["attestation/nvidia-gpu"]
+# Enable the SDK-FFI path so /attest can produce NVIDIA GPU evidence on
+# CC-mode Hopper/Blackwell hosts. Builds require libclang + cmake; runtime
+# needs libnvat.so. Deployments that only verify (no attester role) should
+# leave this off.
+nvidia-gpu-attest = ["nvidia-gpu", "attestation/nvidia-gpu-attest"]
 
 [dependencies]
-attestation = { workspace = true, features = ["attest"] }
+attestation = { workspace = true, features = ["attest", "nvidia-gpu"] }
 # Web framework
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

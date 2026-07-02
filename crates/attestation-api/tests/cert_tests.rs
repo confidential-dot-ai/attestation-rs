@@ -72,7 +72,6 @@ fn token_issuer_produces_valid_jwt() {
                 fmc: None,
             },
             platform_data: serde_json::json!({}),
-            #[cfg(feature = "nvidia-gpu")]
             nvidia_gpu: None,
         },
         report_data_match: Some(true),

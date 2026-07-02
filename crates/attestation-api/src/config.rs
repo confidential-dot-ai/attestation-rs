@@ -28,6 +28,31 @@ pub fn normalize_platform(name: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// Resolve the effective NRAS GPU endpoint URL.
+///
+/// Priority: config-file value (if non-empty) > `NV_NRAS_GPU_URL` env var >
+/// library default.
+pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
+    if !certs.nras_gpu_url.is_empty() {
+        return certs.nras_gpu_url.clone();
+    }
+    std::env::var("NV_NRAS_GPU_URL")
+        .unwrap_or_else(|_| attestation::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string())
+}
+
+/// Resolve the effective NRAS switch endpoint URL.
+///
+/// Priority: config-file value (if non-empty) > `NV_NRAS_SWITCH_URL` env var >
+/// library default.
+pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
+    if !certs.nras_switch_url.is_empty() {
+        return certs.nras_switch_url.clone();
+    }
+    std::env::var("NV_NRAS_SWITCH_URL").unwrap_or_else(|_| {
+        attestation::platforms::nvidia_gpu::provider::NRAS_SWITCH_URL.to_string()
+    })
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -79,6 +104,20 @@ pub struct CertsConfig {
     /// If true, verification fails when CRL cannot be fetched (fail-closed).
     /// If false, CRL fetch failures are logged and revocation check is skipped (fail-open).
     pub require_crl: bool,
+
+    // --- NVIDIA NRAS / GPU attestation ---
+    /// TTL for cached NRAS JWKS entries (hours).
+    pub jwks_ttl_hours: u64,
+    /// If true, prefetch GPU+switch JWKS on startup and refresh in background.
+    pub prefetch_nras_jwks: bool,
+    /// Override the NRAS GPU endpoint. Falls back to library default
+    /// (`https://nras.attestation.nvidia.com/v3/attest/gpu`, honoring
+    /// `NV_NRAS_GPU_URL` env var) when empty.
+    pub nras_gpu_url: String,
+    /// Override the NRAS switch endpoint. Falls back to library default
+    /// (`https://nras.attestation.nvidia.com/v3/attest/switch`, honoring
+    /// `NV_NRAS_SWITCH_URL` env var) when empty.
+    pub nras_switch_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +165,10 @@ impl Default for CertsConfig {
             tdx_collateral_ttl_hours: 24,
             prefetch_chains: vec!["milan".to_string()],
             require_crl: false,
+            jwks_ttl_hours: 1,
+            prefetch_nras_jwks: true,
+            nras_gpu_url: String::new(),
+            nras_switch_url: String::new(),
         }
     }
 }
@@ -227,6 +270,9 @@ impl Config {
         }
         if self.certs.tdx_collateral_ttl_hours == 0 {
             return Err("certs.tdx_collateral_ttl_hours must be > 0".to_string());
+        }
+        if self.certs.jwks_ttl_hours == 0 {
+            return Err("certs.jwks_ttl_hours must be > 0".to_string());
         }
 
         // Validate tdx_quote_method
