@@ -98,6 +98,11 @@ nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev = 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 getrandom = { version = "0.2", features = ["js"] }
+# `wasmbind` routes `chrono::Utc::now()` through `js_sys::Date` on
+# wasm32-unknown-unknown. Without it chrono falls back to `SystemTime::now()`,
+# which panics on that target — trapping every real EAT/cert expiry check in
+# the browser (see verify.rs `exp`/validity enforcement).
+chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

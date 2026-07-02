@@ -721,6 +721,13 @@ pub fn build_tpm_verification_result(
         init_data_match,
         collateral_verified,
         tcb_status: None,
+        // Launch-measurement compares are populated by the caller (az_snp/az_tdx).
+        mrtd_match: None,
+        rtmr0_match: None,
+        rtmr1_match: None,
+        rtmr2_match: None,
+        rtmr3_match: None,
+        launch_digest_match: None,
     }
 }
 

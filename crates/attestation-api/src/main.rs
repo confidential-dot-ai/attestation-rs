@@ -114,6 +114,12 @@ async fn main() -> anyhow::Result<()> {
             .with_nras_provider(nras_provider),
     );
 
+    // Warm attestation::detect()'s process-lifetime cache before serving, so the
+    // first /health/attest/platform request hits the memoized value instead of
+    // racing to open the vTPM context.
+    #[cfg(target_os = "linux")]
+    let _ = attestation::detect();
+
     let state = AppState {
         config,
         cert_cache,

@@ -23,6 +23,27 @@
 //! Relying on NRAS shifts trust to NVIDIA's signing key. A future
 //! `gpu-local` feature will perform the same checks locally without NRAS.
 //!
+//! ## Submodule binding (RFC 9711 `submods`)
+//!
+//! The overall token's `submods` claim carries a detached digest per device of
+//! the form `["DIGEST", ["SHA-256", "<hex>"]]`. In principle the digest binds
+//! each submodule JWT to the overall token. In practice NVIDIA computes that
+//! digest over an *intermediate* serialization of the claims that excludes the
+//! `exp`/`nbf`/`iat`/`jti` fields later added to the issued JWT (confirmed
+//! against nvtrust's `create_detached_eat_claims`), and the algorithm label
+//! differs between code paths (`"SHA256"` vs `"SHA-256"`). The digest therefore
+//! cannot be re-derived byte-for-byte from the compact JWS NRAS returns, so we
+//! do **not** attempt detached-digest verification.
+//!
+//! Instead the verifier binds every submodule by its own `eat_nonce`, which
+//! NRAS sets to the same SPDM nonce on each submodule and which *is* covered by
+//! the submodule's signature. This rejects a submodule spliced from another
+//! session — the threat the digest would otherwise guard against — without
+//! depending on the unstable digest encoding. Per-device security state
+//! (`dbgstat`, `secboot`, `measres`, report-nonce match) is additionally gated
+//! by [`crate::types::NvidiaGpuDevicePolicy`] rather than trusting NRAS's single
+//! opaque `x-nvidia-overall-att-result` boolean.
+//!
 //! ## Endpoints
 //!
 //! Defaults match NVIDIA's production deployment and can be overridden via

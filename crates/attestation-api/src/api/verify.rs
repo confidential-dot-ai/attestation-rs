@@ -108,9 +108,16 @@ pub async fn handler(
         expected_init_data_hash,
         allow_debug,
         min_tcb,
-        nvidia_gpu_user_nonce,
-        nvidia_gpu_required: req.params.nvidia_gpu_required,
-        nvidia_gpu_expected_archs: req.params.nvidia_gpu_expected_archs,
+        // Map the HTTP GPU params into the grouped NvidiaGpuParams struct (the
+        // library moved these out of flat VerifyParams). `..Default::default()`
+        // fills the remaining GPU fields (allowed_bindings, device_policy) with
+        // their secure defaults and main's expected_mrtd/rtmr/launch fields.
+        nvidia_gpu: attestation::NvidiaGpuParams {
+            user_nonce: nvidia_gpu_user_nonce,
+            required: req.params.nvidia_gpu_required,
+            expected_archs: req.params.nvidia_gpu_expected_archs,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

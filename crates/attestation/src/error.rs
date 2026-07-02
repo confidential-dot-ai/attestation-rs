@@ -62,6 +62,14 @@ pub enum AttestationError {
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuBindingMismatch,
 
+    #[error("GPU submodule \"{name}\" eat_nonce does not bind to the derived SPDM nonce")]
+    #[cfg(feature = "nvidia-gpu")]
+    NvidiaGpuSubmoduleNonceMismatch { name: String },
+
+    #[error("GPU device \"{name}\" failed policy: {reason}")]
+    #[cfg(feature = "nvidia-gpu")]
+    NvidiaGpuDevicePolicyFailed { name: String, reason: String },
+
     #[error("GPU bundle requires VerifyParams::nvidia_gpu_user_nonce")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuUserNonceMissing,

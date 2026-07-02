@@ -128,7 +128,7 @@ pub async fn verify_evidence(
     }
 
     // 8c. VCEK OID cross-validation (chip_id + TCB SPLs)
-    verify_vcek_tcb(&report, &vcek_der)?;
+    verify_vcek_tcb(&report, &vcek_der, processor_gen)?;
 
     // 8d. Minimum TCB enforcement
     if let Some(ref min_tcb) = params.min_tcb {
@@ -157,6 +157,13 @@ pub async fn verify_evidence(
         None
     };
 
+    // Optional launch-digest compare. Mismatch surfaces in the result and
+    // does not fail verification.
+    let launch_digest_match = params
+        .expected_launch_digest
+        .as_ref()
+        .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected));
+
     // 11. Extract claims
     let claims = extract_claims(&report);
 
@@ -168,6 +175,12 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: crl_verified,
         tcb_status: None,
+        mrtd_match: None,
+        rtmr0_match: None,
+        rtmr1_match: None,
+        rtmr2_match: None,
+        rtmr3_match: None,
+        launch_digest_match,
     })
 }
 
@@ -349,7 +362,15 @@ fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
 ///
 /// - For "VCEK" certificates: validates chip_id and TCB SPL exact equality.
 /// - For "VLEK" certificates: skips chip_id check, only validates TCB SPLs.
-pub fn verify_vcek_tcb(report: &AttestationReport, vcek_der: &[u8]) -> Result<()> {
+///
+/// `processor_gen` gates the chip_id comparison: only Turin uses a short
+/// (8-byte + zero-pad) HW_ID, so the short-prefix path is taken there alone.
+/// Milan/Genoa must match the full 64-byte chip_id exactly.
+pub fn verify_vcek_tcb(
+    report: &AttestationReport,
+    vcek_der: &[u8],
+    processor_gen: ProcessorGeneration,
+) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vcek_der)
         .map_err(|e| AttestationError::CertChainError(format!("VCEK x509 parse: {e}")))?;
 
@@ -382,18 +403,26 @@ pub fn verify_vcek_tcb(report: &AttestationReport, vcek_der: &[u8]) -> Result<()
         let chip_id_bytes = get_oid_octets(ext.value).ok_or_else(|| {
             AttestationError::TcbMismatch("VCEK HW_ID OID has unparseable value".to_string())
         })?;
-        // VCEK HW_ID may be shorter than the report's 64-byte chip_id field on
-        // Turin (8 meaningful bytes + 56 zero pad). Compare the meaningful
-        // prefix in constant time and confirm the remainder is zero.
-        // Minimum 8 bytes: the smallest known AMD HW_ID (Turin).
-        const MIN_CHIP_ID_LEN: usize = 8;
+        // report.chip_id is always a fixed [u8; 64].
         let report_chip_id = &report.chip_id[..];
         let prefix_len = chip_id_bytes.len();
-        if prefix_len < MIN_CHIP_ID_LEN
-            || prefix_len > report_chip_id.len()
-            || !crate::utils::constant_time_eq(chip_id_bytes, &report_chip_id[..prefix_len])
-            || report_chip_id[prefix_len..].iter().any(|b| *b != 0)
-        {
+
+        let ok = if processor_gen == ProcessorGeneration::Turin {
+            // Turin's VCEK HW_ID is shorter than the report's 64-byte chip_id
+            // field (8 meaningful bytes + 56 zero pad). Compare the meaningful
+            // prefix in constant time and confirm the remainder is zero.
+            // Minimum 8 bytes: the smallest known AMD HW_ID (Turin).
+            const MIN_CHIP_ID_LEN: usize = 8;
+            prefix_len >= MIN_CHIP_ID_LEN
+                && prefix_len <= report_chip_id.len()
+                && crate::utils::constant_time_eq(chip_id_bytes, &report_chip_id[..prefix_len])
+                && report_chip_id[prefix_len..].iter().all(|b| *b == 0)
+        } else {
+            // Milan/Genoa: require full 64-byte chip_id equality. No short path.
+            prefix_len == report_chip_id.len()
+                && crate::utils::constant_time_eq(chip_id_bytes, report_chip_id)
+        };
+        if !ok {
             return Err(AttestationError::TcbMismatch(
                 "VCEK chip_id does not match report chip_id".to_string(),
             ));
@@ -852,7 +881,7 @@ mod tests {
     #[test]
     fn test_verify_vcek_tcb_milan() {
         let report = parse_report(TEST_REPORT).expect("parse report");
-        let result = verify_vcek_tcb(&report, TEST_VCEK);
+        let result = verify_vcek_tcb(&report, TEST_VCEK, ProcessorGeneration::Milan);
         assert!(
             result.is_ok(),
             "Milan VCEK TCB should verify: {:?}",
@@ -863,7 +892,7 @@ mod tests {
     #[test]
     fn test_verify_vcek_tcb_genoa() {
         let report = parse_report(LIVE_REPORT_V5).expect("parse report");
-        let result = verify_vcek_tcb(&report, LIVE_VCEK_GENOA);
+        let result = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Genoa);
         assert!(
             result.is_ok(),
             "Genoa VCEK TCB should verify: {:?}",
@@ -977,5 +1006,94 @@ mod tests {
             "Genoa CRL sig verify failed: {:?}",
             result.err()
         );
+    }
+
+    // expected_launch_digest tests against the live Genoa v5 fixture.
+
+    /// Cert provider that returns the bundled live Genoa VCEK from the
+    /// fixture. No network access, no CRL (so collateral_verified=false).
+    struct StubCertProvider;
+
+    #[async_trait::async_trait]
+    impl crate::collateral::CertProvider for StubCertProvider {
+        async fn get_snp_vcek(
+            &self,
+            _processor_gen: ProcessorGeneration,
+            _chip_id: &[u8; 64],
+            _reported_tcb: &SnpTcb,
+        ) -> Result<Vec<u8>> {
+            Ok(LIVE_VCEK_GENOA.to_vec())
+        }
+
+        async fn get_snp_cert_chain(
+            &self,
+            _processor_gen: ProcessorGeneration,
+        ) -> Result<(Vec<u8>, Vec<u8>)> {
+            // Not used — the bare-metal SNP path uses bundled ARK/ASK directly.
+            Err(AttestationError::CertFetchError(
+                "stub provider does not serve full chain".to_string(),
+            ))
+        }
+    }
+
+    fn make_snp_evidence_with_vcek(report: &[u8], vcek_der: &[u8]) -> SnpEvidence {
+        use crate::platforms::snp::evidence::SnpCertChain;
+        SnpEvidence {
+            attestation_report: BASE64.encode(report),
+            cert_chain: Some(SnpCertChain {
+                vcek: BASE64.encode(vcek_der),
+                ask: None,
+                ark: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_no_expected_launch_digest_yields_none() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let r = verify_evidence(&evidence, &VerifyParams::default(), &provider)
+            .await
+            .expect("live v5 fixture should verify");
+        assert!(r.launch_digest_match.is_none(), "no expected_* → None");
+        assert!(r.mrtd_match.is_none(), "SNP never sets mrtd_match");
+        assert!(r.rtmr0_match.is_none(), "SNP never sets rtmrN_match");
+        assert!(r.rtmr1_match.is_none());
+        assert!(r.rtmr2_match.is_none());
+        assert!(r.rtmr3_match.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_matching_launch_digest() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut expected = [0u8; 48];
+        expected.copy_from_slice(&report.measurement[..]);
+
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            expected_launch_digest: Some(expected),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
+        assert_eq!(r.launch_digest_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
+        // Wrong digest must record Some(false) without failing verification.
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let provider = StubCertProvider;
+        let params = VerifyParams {
+            expected_launch_digest: Some([0xAA; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &provider)
+            .await
+            .unwrap();
+        assert_eq!(r.launch_digest_match, Some(false));
+        assert!(r.signature_valid, "wrong digest should NOT fail signature");
     }
 }

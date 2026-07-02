@@ -6,11 +6,15 @@ description = "REST API service wrapping the attestation library"
 
 [features]
 default = []
+# Forward NVIDIA GPU verification to the attestation library. The attestation
+# dependency below already enables `nvidia-gpu` unconditionally, so GPU bundle
+# verification is always compiled in; this feature is kept for explicitness.
+nvidia-gpu = ["attestation/nvidia-gpu"]
 # Enable the SDK-FFI path so /attest can produce NVIDIA GPU evidence on
 # CC-mode Hopper/Blackwell hosts. Builds require libclang + cmake; runtime
 # needs libnvat.so. Deployments that only verify (no attester role) should
 # leave this off.
-nvidia-gpu-attest = ["attestation/nvidia-gpu-attest"]
+nvidia-gpu-attest = ["nvidia-gpu", "attestation/nvidia-gpu-attest"]
 
 [dependencies]
 attestation = { workspace = true, features = ["attest", "nvidia-gpu"] }
@@ -32,8 +36,11 @@ moka = { version = "0.12", features = ["future"] }
 p256 = { workspace = true, features = ["jwk", "ecdsa"] }
 subtle = { workspace = true }
 
-# HTTP client (cert fetching)
-reqwest = { workspace = true, features = ["rustls-tls"] }
+# HTTP client (cert fetching). Pinned directly (not `workspace = true`) so
+# default-features=false takes effect — drops reqwest's default `default-tls`
+# (native-tls → openssl-sys), which breaks the static-musl build and is
+# redundant with rustls. Matches the `attestation` crate's reqwest line.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # CLI & logging
 clap = { workspace = true }

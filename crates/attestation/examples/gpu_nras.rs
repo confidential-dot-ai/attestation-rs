@@ -16,7 +16,7 @@ fn main() {
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
-    use attestation::{AttestOptions, VerifyParams};
+    use attestation::{AttestOptions, NvidiaGpuParams, VerifyParams};
 
     let user_nonce: Vec<u8> = (0..32).map(|i| i as u8).collect();
 
@@ -34,8 +34,11 @@ async fn main() {
     eprintln!("Verifying via NRAS…");
     let params = VerifyParams {
         expected_report_data: Some(user_nonce.clone()),
-        nvidia_gpu_user_nonce: Some(user_nonce.clone()),
-        nvidia_gpu_required: true,
+        nvidia_gpu: NvidiaGpuParams {
+            user_nonce: Some(user_nonce.clone()),
+            required: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let result = attestation::verify(&envelope, &params)

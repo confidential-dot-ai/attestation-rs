@@ -1,11 +1,13 @@
 use wasm_bindgen::prelude::*;
 
+use attestation::platforms::az_snp::evidence::AzSnpEvidence;
+use attestation::platforms::az_snp::verify::verify_report;
 use attestation::platforms::snp::certs::get_bundled_certs;
 use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
     parse_report, verify_cert_chain, verify_report_signature,
 };
-use attestation::types::ProcessorGeneration;
+use attestation::types::{ProcessorGeneration, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
 
 /// Verify live SNP evidence in WASM.
@@ -73,6 +75,63 @@ pub fn verify_snp(
         "report_data_match": report_data_match,
         "claims": claims,
     });
+
+    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
+/// Verify Azure SEV-SNP (az-snp) vTPM attestation evidence in WASM.
+///
+/// Unlike [`verify_snp`], which only checks the bare SNP hardware report, this
+/// verifies the full az-snp evidence: the HCL-wrapped SNP report **and** the
+/// vTPM quote that binds freshness. The freshness anchor for az-snp lives in
+/// the TPM quote's `extraData` (qualifyingData), not in the SNP `report_data`
+/// — the SNP `report_data` instead binds the vTPM attestation key (AK).
+///
+/// Verification (mirrors the native async path, minus the CRL revocation check
+/// which needs an async cert provider — so `collateral_verified` is always
+/// `false` here):
+/// 1. Verify the TPM quote signature with the AK extracted from HCL var_data.
+/// 2. Check the quote's `extraData` equals `expected_report_data` (freshness),
+///    failing closed when an anchor is supplied and does not match.
+/// 3. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
+/// 4. Bind the AK to the TEE: `snp.report_data[..32] == SHA-256(var_data)`.
+/// 5. Validate the VCEK chain (auto-detecting the generation from CPUID) and the
+///    SNP report signature, then enforce VMPL/debug/TCB policy.
+///
+/// - `evidence_json`: az-snp evidence JSON (`{ version, tpm_quote, hcl_report, vcek }`)
+/// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
+/// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
+///
+/// Returns the verification result as JSON, or throws on any check failure.
+#[wasm_bindgen]
+pub fn verify_az_snp(
+    evidence_json: &str,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let evidence: AzSnpEvidence = serde_json::from_str(evidence_json)
+        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+
+    // Run the full az-snp verification core, freshness included. When an anchor is
+    // supplied, the core binds the TPM quote's extraData (qualifyingData) to it and
+    // fails closed on a mismatch — defense in depth, rather than downgrading the
+    // freshness check to a non-throwing bool for the JS policy layer to interpret.
+    // The core still populates report_data_match (Some(true) when an anchor was
+    // supplied and matched, None otherwise) for the result shape.
+    let params = VerifyParams {
+        expected_report_data,
+        expected_init_data_hash,
+        ..VerifyParams::default()
+    };
+
+    let verified = verify_report(&evidence, &params)
+        .map_err(|e| JsError::new(&format!("az-snp verify: {e}")))?;
+
+    // Serialize the VerificationResult, then graft on report_version, matching the
+    // shape verify_snp returns so the JS policy layer reads it uniformly.
+    let mut result = serde_json::to_value(&verified.result)
+        .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
+    result["report_version"] = serde_json::json!(verified.report_version);
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }

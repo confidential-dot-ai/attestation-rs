@@ -82,25 +82,95 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
+    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
+    /// mismatch does not fail verification. TDX-only.
+    pub expected_mrtd: Option<[u8; 48]>,
+    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
+    /// does not fail verification. TDX-only.
+    pub expected_rtmr0: Option<[u8; 48]>,
+    /// Expected RTMR[1]. TDX-only.
+    pub expected_rtmr1: Option<[u8; 48]>,
+    /// Expected RTMR[2]. TDX-only.
+    pub expected_rtmr2: Option<[u8; 48]>,
+    /// Expected RTMR[3]. TDX-only.
+    pub expected_rtmr3: Option<[u8; 48]>,
+    /// Expected SNP launch digest (`report.measurement`). Result in
+    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
+    /// verification. SNP-only.
+    pub expected_launch_digest: Option<[u8; 48]>,
+    /// NVIDIA GPU verification parameters, applied when an envelope carries a
+    /// `gpu` bundle. Grouped behind a single feature gate (see
+    /// [`NvidiaGpuParams`]).
+    #[cfg(feature = "nvidia-gpu")]
+    pub nvidia_gpu: NvidiaGpuParams,
+}
+
+/// NVIDIA GPU verification parameters, grouped so the whole set sits behind one
+/// `nvidia-gpu` feature gate rather than gating each field individually.
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone, Default)]
+pub struct NvidiaGpuParams {
     /// User nonce used to derive the GPU SPDM nonce. Required when verifying
     /// an envelope that carries a `gpu` bundle.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_user_nonce: Option<Vec<u8>>,
+    pub user_nonce: Option<Vec<u8>>,
     /// If true, reject envelopes that do not include an NVIDIA GPU bundle.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_required: bool,
+    pub required: bool,
     /// Optional whitelist of acceptable GPU/switch architectures.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_expected_archs: Option<Vec<NvidiaGpuArch>>,
+    pub expected_archs: Option<Vec<NvidiaGpuArch>>,
     /// Allowed nonce-binding algorithms. If `None`, only the default
     /// (`Concat { Sha256 }`) is accepted. Set explicitly to permit future
     /// binding variants.
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu_allowed_bindings: Option<Vec<NvidiaGpuBinding>>,
+    pub allowed_bindings: Option<Vec<NvidiaGpuBinding>>,
+    /// Per-device security policy applied to each NRAS submodule, independent of
+    /// NRAS's opaque overall boolean. Defaults reject debug-enabled devices and
+    /// require secure boot, per-device report-nonce match, and a successful
+    /// measurement result. See [`NvidiaGpuDevicePolicy`].
+    pub device_policy: NvidiaGpuDevicePolicy,
+}
+
+/// Per-device policy gates evaluated against each NRAS submodule's claims.
+///
+/// NRAS folds all device checks into a single opaque, `claims_version`-dependent
+/// `x-nvidia-overall-att-result` boolean. These gates let a caller enforce the
+/// individual per-device claims directly, so that (a) an unexpired NRAS-signed
+/// submodule spliced from another session is rejected via its `eat_nonce`, and
+/// (b) policy-relevant device state (debug, secure boot, measurement result) is
+/// checked locally rather than trusted blindly.
+///
+/// Defaults mirror `allow_debug`'s security posture: fail closed.
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NvidiaGpuDevicePolicy {
+    /// If true, accept devices reporting `dbgstat != "disabled"`. Default false
+    /// (debug-enabled GPUs are rejected), mirroring [`VerifyParams::allow_debug`].
+    pub allow_debug: bool,
+    /// If true, require every device's `secboot` claim to be `true`. Default true.
+    pub require_secboot: bool,
+    /// If true, require every device's
+    /// `x-nvidia-gpu-attestation-report-nonce-match` claim to be `true`. Default
+    /// true — gates per-device SPDM report-nonce binding in addition to the
+    /// overall `eat_nonce`.
+    pub require_nonce_match: bool,
+    /// If true, require every device's `measres` claim to equal `"success"`.
+    /// Default true.
+    pub require_measres_success: bool,
+}
+
+#[cfg(feature = "nvidia-gpu")]
+impl Default for NvidiaGpuDevicePolicy {
+    fn default() -> Self {
+        Self {
+            allow_debug: false,
+            require_secboot: true,
+            require_nonce_match: true,
+            require_measres_success: true,
+        }
+    }
 }
 
 /// Result of verification — the caller decides pass/fail based on this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct VerificationResult {
     /// Was the hardware signature on the evidence valid?
     pub signature_valid: bool,
@@ -125,6 +195,26 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
+    /// MRTD compare result. `None` if no expected value was supplied.
+    /// Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mrtd_match: Option<bool>,
+    /// RTMR[0] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr0_match: Option<bool>,
+    /// RTMR[1] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr1_match: Option<bool>,
+    /// RTMR[2] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr2_match: Option<bool>,
+    /// RTMR[3] compare result. Always `None` for SNP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtmr3_match: Option<bool>,
+    /// SNP launch digest compare result. `None` if no expected value was
+    /// supplied. Always `None` for TDX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_digest_match: Option<bool>,
 }
 
 /// Normalized claims extracted from evidence.
