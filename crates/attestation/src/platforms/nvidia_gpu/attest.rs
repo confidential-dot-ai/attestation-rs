@@ -14,6 +14,7 @@ use std::sync::Mutex;
 
 use nv_attestation_sdk::{GpuEvidenceSource, Nonce, NvatSdk, SdkOptions, SwitchEvidenceSource};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::{AttestationError, Result};
 use crate::platforms::nvidia_gpu::{gpu_nonce, switch_nonce};
@@ -171,19 +172,23 @@ fn sdk_entry_to_device(e: SdkEvidenceEntry) -> Result<NvidiaGpuDeviceEvidence> {
             )));
         }
     };
-    // UUID is required: the bundle is sorted by UUID and downstream verify
-    // expects per-device identity. Missing UUID means the SDK gave us a
-    // device we can't reason about — fail loudly rather than collapse
-    // multiple anonymous devices into the same key.
-    let uuid = e.uuid.ok_or_else(|| {
-        AttestationError::NvidiaGpuEvidenceCollection(
-            "SDK returned device evidence with no UUID".into(),
-        )
-    })?;
+    // The UUID is a stable, distinct per-device key used only for sorting/dedup
+    // of the bundle — NRAS keys devices by submodule order, not by UUID. NVIDIA's
+    // SDK (v1.2.0) does not serialize the GPU UUID in its evidence JSON (only
+    // arch/nonce/evidence/certificate), so when it is absent derive a stable key
+    // from the attestation cert chain, which is unique per physical GPU. This
+    // keeps distinct, deterministic per-device keys instead of collapsing
+    // multiple anonymous devices onto the same key.
+    let cert_chain_b64 = e.certificate;
+    let evidence_b64 = e.evidence;
+    let uuid = e.uuid.unwrap_or_else(|| {
+        let digest = Sha256::digest(cert_chain_b64.as_bytes());
+        format!("gpu-cert:{}", hex::encode(&digest[..16]))
+    });
     Ok(NvidiaGpuDeviceEvidence {
         arch,
         uuid,
-        evidence_b64: e.evidence,
-        cert_chain_b64: e.certificate,
+        evidence_b64,
+        cert_chain_b64,
     })
 }

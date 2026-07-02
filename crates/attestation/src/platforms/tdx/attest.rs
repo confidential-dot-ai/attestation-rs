@@ -125,6 +125,15 @@ pub async fn generate_evidence_with(
         }
     };
 
+    // Defense in depth: no quote-generation method may return an empty quote as
+    // success. Each method also checks internally, but this guard ensures the
+    // invariant holds regardless of which path produced `quote_bytes`.
+    if quote_bytes.is_empty() {
+        return Err(AttestationError::HardwareAccessFailed(
+            "quote generation returned an empty quote".to_string(),
+        ));
+    }
+
     let quote = BASE64.encode(&quote_bytes);
 
     // Read CC eventlog if available
@@ -189,6 +198,18 @@ fn generate_quote_tsm(report_data: &[u8; 64]) -> Result<Vec<u8>> {
     // Read quote from outblob
     let quote = fs::read(report_path.join("outblob"))
         .map_err(|e| AttestationError::HardwareAccessFailed(format!("read outblob: {}", e)))?;
+
+    // An empty outblob means the underlying GetQuote (QGS/TDQE) failed to produce
+    // a quote — typically because PCK provisioning collateral is unavailable. The
+    // kernel surfaces this as a zero-length read rather than an error, so guard
+    // here; otherwise we would emit "successful" evidence carrying no quote, which
+    // the verifier then rejects with a confusing "quote header too short" error.
+    if quote.is_empty() {
+        return Err(AttestationError::HardwareAccessFailed(
+            "ConfigFS TSM returned an empty quote (GetQuote failed; check QGS/PCK provisioning)"
+                .to_string(),
+        ));
+    }
 
     // Check generation counter for race detection
     let gen_str = fs::read_to_string(report_path.join("generation"))
