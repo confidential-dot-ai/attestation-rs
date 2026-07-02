@@ -3,10 +3,16 @@
 //! Run on a TDX-enabled machine:
 //!   cargo run --example tdx --features "tdx,attest"
 
-use attestation::{PlatformType, VerifyParams};
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("This example requires Linux.");
+}
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
+    use attestation::{PlatformType, VerifyParams};
+
     let nonce = b"example-tdx-nonce";
 
     eprintln!("Generating TDX attestation evidence...");

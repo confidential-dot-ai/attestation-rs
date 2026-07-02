@@ -36,6 +36,28 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace
 
+  nvidia-gpu:
+    name: NVIDIA GPU verifier (feature legs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Pure JWS/JSON verifier — no SDK, no TEE hardware, no system deps.
+      - run: cargo clippy -p attestation --no-default-features --features nvidia-gpu --all-targets -- -D warnings
+      - run: cargo test -p attestation --no-default-features --features nvidia-gpu
+      # The wasm claim: the verifier must build for wasm32 with no native deps.
+      - run: cargo check -p attestation --no-default-features --features nvidia-gpu --target wasm32-unknown-unknown
+      # NOTE: the `nvidia-gpu-attest` attest path is intentionally not built in
+      # CI. It links NVIDIA's C++ SDK (nv-attestation-sdk), whose header is
+      # CMake-generated and whose libnvat.so comes only from a from-source build
+      # (CMake + sccache + NVML) or NVIDIA's login-gated download portal — and it
+      # cannot run without a CC-mode GPU regardless. It is exercised on real
+      # confidential-compute hosts per the PR test plan. Tracked in #54.
+
   # Cross-platform release binaries for attestation-cli and attestation-api.
   # macOS targets compile to verify-only binaries automatically.
   #

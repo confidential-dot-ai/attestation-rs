@@ -3,13 +3,19 @@
 //! Run on an Azure SNP Confidential VM:
 //!   cargo run --example az_snp --features "az-snp,attest"
 
-use std::env;
-use std::time::Instant;
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("This example requires Linux.");
+}
 
-use attestation::{PlatformType, VerifyParams};
-
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
+    use std::env;
+    use std::time::Instant;
+
+    use attestation::{PlatformType, VerifyParams};
+
     let nonce: Vec<u8> = env::args()
         .nth(1)
         .map(|s| s.into_bytes())

@@ -61,6 +61,12 @@ struct AttestArgs {
     #[command(flatten)]
     data: ReportDataGroup,
 
+    /// Also collect NVIDIA GPU attestation evidence (CC-mode Hopper/Blackwell).
+    /// The report data is used as the GPU user nonce, so it must be non-empty.
+    #[cfg(feature = "nvidia-gpu-attest")]
+    #[arg(long)]
+    nvidia_gpu: bool,
+
     /// Write evidence JSON to a file instead of stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -103,6 +109,24 @@ struct VerifyArgs {
     /// Expected SNP launch digest (hex-encoded, 48 bytes). SNP-only.
     #[arg(long)]
     expected_launch_digest: Option<String>,
+
+    /// NVIDIA GPU user nonce (hex) that seeded the GPU SPDM nonce. Enables GPU
+    /// bundle verification via NRAS. If --expected-report-data is not given, it
+    /// is set to this value (the GPU binding requires them to be equal).
+    #[cfg(feature = "nvidia-gpu")]
+    #[arg(long)]
+    nvidia_gpu_user_nonce: Option<String>,
+
+    /// Fail verification if the evidence carries no NVIDIA GPU bundle.
+    #[cfg(feature = "nvidia-gpu")]
+    #[arg(long)]
+    nvidia_gpu_required: bool,
+
+    /// Comma-separated whitelist of acceptable GPU/switch archs
+    /// (HOPPER,BLACKWELL,LS10). If omitted, all known archs are accepted.
+    #[cfg(feature = "nvidia-gpu")]
+    #[arg(long, value_delimiter = ',')]
+    nvidia_gpu_expected_archs: Option<Vec<String>>,
 }
 
 #[cfg(all(feature = "attest", target_os = "linux"))]
@@ -230,13 +254,19 @@ async fn cmd_attest(args: AttestArgs) {
     }
 
     let t0 = Instant::now();
-    let evidence_json = match attestation::attest(
-        platform,
-        &report_data,
-        &attestation::AttestOptions::default(),
-    )
-    .await
-    {
+    let opts = attestation::AttestOptions::default();
+
+    #[cfg(feature = "nvidia-gpu-attest")]
+    let evidence_result = if args.nvidia_gpu {
+        eprintln!("Collecting NVIDIA GPU evidence...");
+        attestation::attest_with_nvidia_gpu(platform, &report_data, &opts).await
+    } else {
+        attestation::attest(platform, &report_data, &opts).await
+    };
+    #[cfg(not(feature = "nvidia-gpu-attest"))]
+    let evidence_result = attestation::attest(platform, &report_data, &opts).await;
+
+    let evidence_json = match evidence_result {
         Ok(json) => json,
         Err(e) => {
             eprintln!("Attestation failed: {e}");
@@ -342,6 +372,45 @@ async fn cmd_verify(args: VerifyArgs) {
         params.expected_rtmr3 = Some(parse_digest(h, "expected-rtmr3"));
     }
 
+    #[cfg(feature = "nvidia-gpu")]
+    {
+        if let Some(hex_str) = &args.nvidia_gpu_user_nonce {
+            let nonce = match hex::decode(hex_str) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("Error: invalid hex for --nvidia-gpu-user-nonce: {e}");
+                    process::exit(1);
+                }
+            };
+            // The GPU nonce binding requires expected_report_data == user_nonce;
+            // default the former to the nonce when the caller did not pin it.
+            if params.expected_report_data.is_none() {
+                params.expected_report_data = Some(nonce.clone());
+            }
+            params.nvidia_gpu.user_nonce = Some(nonce);
+        }
+        params.nvidia_gpu.required = args.nvidia_gpu_required;
+        if let Some(archs) = &args.nvidia_gpu_expected_archs {
+            let mut parsed = Vec::with_capacity(archs.len());
+            for a in archs {
+                let arch = match a.to_ascii_uppercase().as_str() {
+                    "HOPPER" => attestation::NvidiaGpuArch::Hopper,
+                    "BLACKWELL" => attestation::NvidiaGpuArch::Blackwell,
+                    "LS10" => attestation::NvidiaGpuArch::Ls10,
+                    other => {
+                        eprintln!(
+                            "Error: unknown arch for --nvidia-gpu-expected-archs: {other} \
+                             (want HOPPER, BLACKWELL, or LS10)"
+                        );
+                        process::exit(1);
+                    }
+                };
+                parsed.push(arch);
+            }
+            params.nvidia_gpu.expected_archs = Some(parsed);
+        }
+    }
+
     eprintln!("Verifying evidence...");
 
     let t0 = Instant::now();
@@ -383,6 +452,15 @@ async fn cmd_verify(args: VerifyArgs) {
         if let Some(b) = m {
             eprintln!("  RTMR[{i}] match: {b}");
         }
+    }
+    #[cfg(feature = "nvidia-gpu")]
+    if let Some(gpu) = &result.claims.nvidia_gpu {
+        eprintln!(
+            "  NVIDIA GPU: overall_ok={} nonce_binding_ok={} devices={}",
+            gpu.overall_ok,
+            gpu.nonce_binding_ok,
+            gpu.devices.len()
+        );
     }
 
     // Structured JSON to stdout

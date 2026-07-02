@@ -10,7 +10,7 @@
 //!
 //! Tests are #[ignore] by default — run with --ignored to execute on real hardware.
 
-#![cfg(all(feature = "attest", feature = "az-tdx"))]
+#![cfg(all(feature = "attest", feature = "az-tdx", target_os = "linux"))]
 
 use std::path::Path;
 

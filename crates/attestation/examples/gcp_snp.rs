@@ -11,10 +11,16 @@
 //! Always set `VerifyParams::expected_report_data` to the nonce you sent, or
 //! the freshness guarantee is meaningless.
 
-use attestation::{PlatformType, VerifyParams};
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("This example requires Linux.");
+}
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
+    use attestation::{PlatformType, VerifyParams};
+
     // PRODUCTION: replace with a fresh random challenge from the verifier.
     let nonce = b"example-gcp-snp-nonce-replace-me";
 
@@ -30,7 +36,6 @@ async fn main() {
     eprintln!("Evidence: {} bytes", evidence_json.len());
 
     eprintln!("Verifying...");
-    // Bind verification to the nonce so replay attacks are rejected.
     let params = VerifyParams {
         expected_report_data: Some(nonce.to_vec()),
         ..Default::default()

@@ -84,6 +84,9 @@ pub async fn handler(
         expected_init_data_hash,
         allow_debug,
         min_tcb,
+        // The HTTP API does not (yet) accept NVIDIA GPU params or expected
+        // launch-measurement values; default them. `..Default::default()` covers
+        // both the nvidia-gpu group and main's expected_mrtd/rtmr/launch fields.
         ..Default::default()
     };
 

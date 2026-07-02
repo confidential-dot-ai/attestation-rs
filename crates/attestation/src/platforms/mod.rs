@@ -8,6 +8,8 @@ pub mod dstack;
 pub mod gcp_snp;
 #[cfg(feature = "gcp-tdx")]
 pub mod gcp_tdx;
+#[cfg(feature = "nvidia-gpu")]
+pub mod nvidia_gpu;
 #[cfg(feature = "snp")]
 pub mod snp;
 #[cfg(feature = "tdx")]

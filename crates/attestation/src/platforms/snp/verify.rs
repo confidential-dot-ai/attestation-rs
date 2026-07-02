@@ -128,7 +128,7 @@ pub async fn verify_evidence(
     }
 
     // 8c. VCEK OID cross-validation (chip_id + TCB SPLs)
-    verify_vcek_tcb(&report, &vcek_der)?;
+    verify_vcek_tcb(&report, &vcek_der, processor_gen)?;
 
     // 8d. Minimum TCB enforcement
     if let Some(ref min_tcb) = params.min_tcb {
@@ -362,7 +362,15 @@ fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
 ///
 /// - For "VCEK" certificates: validates chip_id and TCB SPL exact equality.
 /// - For "VLEK" certificates: skips chip_id check, only validates TCB SPLs.
-pub fn verify_vcek_tcb(report: &AttestationReport, vcek_der: &[u8]) -> Result<()> {
+///
+/// `processor_gen` gates the chip_id comparison: only Turin uses a short
+/// (8-byte + zero-pad) HW_ID, so the short-prefix path is taken there alone.
+/// Milan/Genoa must match the full 64-byte chip_id exactly.
+pub fn verify_vcek_tcb(
+    report: &AttestationReport,
+    vcek_der: &[u8],
+    processor_gen: ProcessorGeneration,
+) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vcek_der)
         .map_err(|e| AttestationError::CertChainError(format!("VCEK x509 parse: {e}")))?;
 
@@ -395,9 +403,26 @@ pub fn verify_vcek_tcb(report: &AttestationReport, vcek_der: &[u8]) -> Result<()
         let chip_id_bytes = get_oid_octets(ext.value).ok_or_else(|| {
             AttestationError::TcbMismatch("VCEK HW_ID OID has unparseable value".to_string())
         })?;
-        if chip_id_bytes.len() != report.chip_id[..].len()
-            || !crate::utils::constant_time_eq(chip_id_bytes, &report.chip_id[..])
-        {
+        // report.chip_id is always a fixed [u8; 64].
+        let report_chip_id = &report.chip_id[..];
+        let prefix_len = chip_id_bytes.len();
+
+        let ok = if processor_gen == ProcessorGeneration::Turin {
+            // Turin's VCEK HW_ID is shorter than the report's 64-byte chip_id
+            // field (8 meaningful bytes + 56 zero pad). Compare the meaningful
+            // prefix in constant time and confirm the remainder is zero.
+            // Minimum 8 bytes: the smallest known AMD HW_ID (Turin).
+            const MIN_CHIP_ID_LEN: usize = 8;
+            prefix_len >= MIN_CHIP_ID_LEN
+                && prefix_len <= report_chip_id.len()
+                && crate::utils::constant_time_eq(chip_id_bytes, &report_chip_id[..prefix_len])
+                && report_chip_id[prefix_len..].iter().all(|b| *b == 0)
+        } else {
+            // Milan/Genoa: require full 64-byte chip_id equality. No short path.
+            prefix_len == report_chip_id.len()
+                && crate::utils::constant_time_eq(chip_id_bytes, report_chip_id)
+        };
+        if !ok {
             return Err(AttestationError::TcbMismatch(
                 "VCEK chip_id does not match report chip_id".to_string(),
             ));
@@ -856,7 +881,7 @@ mod tests {
     #[test]
     fn test_verify_vcek_tcb_milan() {
         let report = parse_report(TEST_REPORT).expect("parse report");
-        let result = verify_vcek_tcb(&report, TEST_VCEK);
+        let result = verify_vcek_tcb(&report, TEST_VCEK, ProcessorGeneration::Milan);
         assert!(
             result.is_ok(),
             "Milan VCEK TCB should verify: {:?}",
@@ -867,7 +892,7 @@ mod tests {
     #[test]
     fn test_verify_vcek_tcb_genoa() {
         let report = parse_report(LIVE_REPORT_V5).expect("parse report");
-        let result = verify_vcek_tcb(&report, LIVE_VCEK_GENOA);
+        let result = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Genoa);
         assert!(
             result.is_ok(),
             "Genoa VCEK TCB should verify: {:?}",

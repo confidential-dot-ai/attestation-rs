@@ -3,10 +3,16 @@
 //! Run on an SNP-enabled machine:
 //!   cargo run --example snp --features "snp,attest"
 
-use attestation::{PlatformType, VerifyParams};
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("This example requires Linux.");
+}
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
+    use attestation::{PlatformType, VerifyParams};
+
     let nonce = b"example-snp-nonce";
 
     eprintln!("Generating SNP attestation evidence...");

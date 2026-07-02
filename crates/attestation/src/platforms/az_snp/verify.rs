@@ -198,7 +198,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     }
 
     // VCEK OID cross-validation
-    crate::platforms::snp::verify::verify_vcek_tcb(&snp_report, &vcek_der)?;
+    crate::platforms::snp::verify::verify_vcek_tcb(&snp_report, &vcek_der, matched_gen)?;
 
     // Minimum TCB enforcement (including FMC for Turin)
     if let Some(ref min_tcb) = params.min_tcb {

@@ -1,7 +1,7 @@
 //! Utility to capture live attestation evidence and save as test fixture.
 //! Run with: cargo test --test capture_fixture --features "attest" -- --ignored --nocapture
 
-#![cfg(feature = "attest")]
+#![cfg(all(feature = "attest", target_os = "linux"))]
 
 #[cfg(feature = "tdx")]
 #[tokio::test]

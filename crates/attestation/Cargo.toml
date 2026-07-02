@@ -21,6 +21,14 @@ gcp-snp = ["snp"]      # GCP SNP depends on bare-metal SNP for report parsing
 gcp-tdx = ["tdx"]      # GCP TDX depends on bare-metal TDX for quote parsing
 dstack = ["tdx"]       # dstack proxies TDX quotes via Unix socket
 
+# NVIDIA GPU attestation via NRAS (Remote Attestation Service).
+# Verification is pure JWS (ES384) + JSON parsing, so it works on any target
+# including wasm32.
+nvidia-gpu = []
+# `nvidia-gpu-attest` pulls in NVIDIA's official Rust attestation SDK
+# (nv-attestation-sdk). Build prereqs documented in README.md.
+nvidia-gpu-attest = ["nvidia-gpu", "dep:nv-attestation-sdk"]
+
 # Guest-side evidence generation (Linux-only, requires TEE hardware).
 # Combine with platform features for per-platform builds:
 #   attest                 → default SEV-SNP + TDX attestation set
@@ -85,10 +93,16 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-
 # Guest-side attestation crates — Linux-only (require TEE hardware / vTPM)
 [target.'cfg(target_os = "linux")'.dependencies]
 az-cvm-vtpm = { version = "0.8.1", default-features = false, features = ["attester"], optional = true }
+nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev = "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 getrandom = { version = "0.2", features = ["js"] }
+# `wasmbind` routes `chrono::Utc::now()` through `js_sys::Date` on
+# wasm32-unknown-unknown. Without it chrono falls back to `SystemTime::now()`,
+# which panics on that target — trapping every real EAT/cert expiry check in
+# the browser (see verify.rs `exp`/validity enforcement).
+chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -144,3 +158,7 @@ required-features = ["attest", "gcp-snp"]
 [[example]]
 name = "gcp_tdx"
 required-features = ["attest", "gcp-tdx"]
+
+[[example]]
+name = "gpu_nras"
+required-features = ["nvidia-gpu-attest", "attest"]

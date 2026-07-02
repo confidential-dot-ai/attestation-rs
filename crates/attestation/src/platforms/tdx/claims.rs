@@ -52,6 +52,8 @@ pub fn extract_claims(quote: &TdxQuote) -> Claims {
             tcb_svn: quote.body.tee_tcb_svn.to_vec(),
         },
         platform_data,
+        #[cfg(feature = "nvidia-gpu")]
+        nvidia_gpu: None,
     }
 }
 

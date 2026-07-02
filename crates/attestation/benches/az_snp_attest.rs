@@ -1,8 +1,15 @@
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
+#[cfg(target_os = "linux")]
 use attestation::collateral::DefaultCertProvider;
+#[cfg(target_os = "linux")]
 use attestation::types::VerifyParams;
 
+#[cfg(target_os = "linux")]
 fn bench_generate_evidence_with_data(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let custom_data = b"benchmark-custom-report-data";
@@ -18,6 +25,7 @@ fn bench_generate_evidence_with_data(c: &mut Criterion) {
     });
 }
 
+#[cfg(target_os = "linux")]
 fn bench_generate_evidence_empty(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -32,6 +40,7 @@ fn bench_generate_evidence_empty(c: &mut Criterion) {
     });
 }
 
+#[cfg(target_os = "linux")]
 fn bench_roundtrip(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let custom_data = b"benchmark-roundtrip-data";
@@ -56,10 +65,12 @@ fn bench_roundtrip(c: &mut Criterion) {
     });
 }
 
+#[cfg(target_os = "linux")]
 criterion_group!(
     benches,
     bench_generate_evidence_with_data,
     bench_generate_evidence_empty,
     bench_roundtrip,
 );
+#[cfg(target_os = "linux")]
 criterion_main!(benches);

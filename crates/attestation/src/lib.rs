@@ -146,18 +146,11 @@ pub struct AttestOptions {
 /// Pass `AttestOptions::default()` for standard behavior (auto-detects the
 /// fastest available quote method for TDX platforms).
 #[cfg(all(feature = "attest", target_os = "linux"))]
-// When `attest` is enabled without any platform feature, every match arm
-// below is cfg'd out and the catch-all `_other` arm is the only one left,
-// making the let-binding and trailing code formally unreachable. That is
-// the intended runtime behavior (return PlatformNotEnabled), so silence
-// the warnings instead of complicating the structure.
-#[allow(unreachable_code, unused_variables)]
 pub async fn attest(
     platform: PlatformType,
     report_data: &[u8],
     options: &AttestOptions,
 ) -> Result<Vec<u8>> {
-    #[allow(unreachable_patterns)]
     let evidence_value = match platform {
         #[cfg(feature = "snp")]
         PlatformType::Snp => {
@@ -213,17 +206,51 @@ pub async fn attest(
             serde_json::to_value(&evidence)
                 .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?
         }
-        _other => {
-            let _ = (report_data, options);
-            return Err(AttestationError::PlatformNotEnabled(_other.to_string()));
-        }
+        #[cfg(not(all(
+            feature = "snp",
+            feature = "tdx",
+            feature = "az-snp",
+            feature = "az-tdx",
+            feature = "gcp-snp",
+            feature = "gcp-tdx",
+            feature = "dstack"
+        )))]
+        other => return Err(AttestationError::PlatformNotEnabled(other.to_string())),
     };
 
     let envelope = AttestationEvidence {
         platform,
         evidence: evidence_value,
+        #[cfg(feature = "nvidia-gpu")]
+        nvidia_gpu: None,
     };
 
+    serde_json::to_vec(&envelope).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
+}
+
+/// Attest a CPU TEE quote and an attached NVIDIA GPU bundle in one shot.
+///
+/// Returns a self-describing envelope where the CPU TEE `report_data` carries
+/// `user_nonce` directly and the `nvidia_gpu` field carries SPDM evidence for
+/// every CC GPU on the host.
+#[cfg(all(feature = "nvidia-gpu-attest", feature = "attest", target_os = "linux"))]
+pub async fn attest_with_nvidia_gpu(
+    platform: PlatformType,
+    user_nonce: &[u8],
+    options: &AttestOptions,
+) -> Result<Vec<u8>> {
+    // Enforce the same minimum nonce length the verifier requires so callers
+    // can't produce evidence their own verifier will reject.
+    platforms::nvidia_gpu::check_user_nonce_len(user_nonce)?;
+    let cpu_envelope_bytes = attest(platform, user_nonce, options).await?;
+    let mut envelope: AttestationEvidence = serde_json::from_slice(&cpu_envelope_bytes)
+        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+    let bundle = platforms::nvidia_gpu::attest::collect_bundle(
+        user_nonce,
+        types::NvidiaGpuBinding::default(),
+    )
+    .await?;
+    envelope.nvidia_gpu = Some(bundle);
     serde_json::to_vec(&envelope).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
 }
 
@@ -244,6 +271,8 @@ pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
 pub struct Verifier {
     cert_provider: Box<dyn CertProvider>,
     tdx_provider: Box<dyn TdxCollateralProvider>,
+    #[cfg(feature = "nvidia-gpu")]
+    nras_provider: Box<dyn platforms::nvidia_gpu::NrasProvider>,
 }
 
 impl Verifier {
@@ -252,6 +281,8 @@ impl Verifier {
         Self {
             cert_provider: Box::new(DefaultCertProvider::new()),
             tdx_provider: Box::new(DefaultTdxCollateralProvider::new()),
+            #[cfg(feature = "nvidia-gpu")]
+            nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
         }
     }
 
@@ -264,6 +295,16 @@ impl Verifier {
     #[must_use]
     pub fn with_tdx_provider(mut self, provider: impl TdxCollateralProvider + 'static) -> Self {
         self.tdx_provider = Box::new(provider);
+        self
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[must_use]
+    pub fn with_nras_provider(
+        mut self,
+        provider: impl platforms::nvidia_gpu::NrasProvider + 'static,
+    ) -> Self {
+        self.nras_provider = Box::new(provider);
         self
     }
 
@@ -282,7 +323,6 @@ impl Verifier {
         evidence_json: &[u8],
         params: &VerifyParams,
     ) -> Result<VerificationResult> {
-        // Bounded deserialization — reject oversized evidence before parsing
         if evidence_json.len() > MAX_EVIDENCE_SIZE {
             return Err(AttestationError::EvidenceTooLarge {
                 size: evidence_json.len(),
@@ -290,7 +330,6 @@ impl Verifier {
             });
         }
 
-        // Validate expected_report_data size (all platforms use at most 64 bytes)
         if let Some(ref data) = params.expected_report_data {
             if data.len() > 64 {
                 return Err(AttestationError::ReportDataTooLarge { max: 64 });
@@ -300,27 +339,50 @@ impl Verifier {
         let envelope: AttestationEvidence = serde_json::from_slice(evidence_json)
             .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
 
-        #[allow(unreachable_patterns)]
-        match envelope.platform {
+        #[cfg(feature = "nvidia-gpu")]
+        if let Some(un) = params.nvidia_gpu.user_nonce.as_deref() {
+            let rd = params
+                .expected_report_data
+                .as_deref()
+                .ok_or(AttestationError::NvidiaGpuReportDataRequired)?;
+            if rd != un {
+                return Err(AttestationError::NvidiaGpuBindingMismatch);
+            }
+        }
+
+        let result = self
+            .verify_platform(envelope.platform, envelope.evidence, params)
+            .await?;
+
+        #[cfg(feature = "nvidia-gpu")]
+        let result = self
+            .verify_nvidia_gpu(result, envelope.nvidia_gpu, params)
+            .await?;
+
+        Ok(result)
+    }
+
+    #[allow(unused_variables)]
+    async fn verify_platform(
+        &self,
+        platform: PlatformType,
+        evidence: serde_json::Value,
+        params: &VerifyParams,
+    ) -> Result<VerificationResult> {
+        match platform {
             #[cfg(feature = "snp")]
             PlatformType::Snp => {
-                let evidence: platforms::snp::evidence::SnpEvidence =
-                    serde_json::from_value(envelope.evidence)
-                        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::snp::verify::verify_evidence(
-                    &evidence,
-                    params,
-                    self.cert_provider.as_ref(),
-                )
-                .await
+                let ev: platforms::snp::evidence::SnpEvidence = serde_json::from_value(evidence)
+                    .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+                platforms::snp::verify::verify_evidence(&ev, params, self.cert_provider.as_ref())
+                    .await
             }
             #[cfg(feature = "tdx")]
             PlatformType::Tdx => {
-                let evidence: platforms::tdx::evidence::TdxEvidence =
-                    serde_json::from_value(envelope.evidence)
-                        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+                let ev: platforms::tdx::evidence::TdxEvidence = serde_json::from_value(evidence)
+                    .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
                 platforms::tdx::verify::verify_evidence(
-                    &evidence,
+                    &ev,
                     params,
                     Some(self.tdx_provider.as_ref()),
                 )
@@ -328,23 +390,19 @@ impl Verifier {
             }
             #[cfg(feature = "az-snp")]
             PlatformType::AzSnp => {
-                let evidence: platforms::az_snp::evidence::AzSnpEvidence =
-                    serde_json::from_value(envelope.evidence)
+                let ev: platforms::az_snp::evidence::AzSnpEvidence =
+                    serde_json::from_value(evidence)
                         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::az_snp::verify::verify_evidence(
-                    &evidence,
-                    params,
-                    self.cert_provider.as_ref(),
-                )
-                .await
+                platforms::az_snp::verify::verify_evidence(&ev, params, self.cert_provider.as_ref())
+                    .await
             }
             #[cfg(feature = "az-tdx")]
             PlatformType::AzTdx => {
-                let evidence: platforms::az_tdx::evidence::AzTdxEvidence =
-                    serde_json::from_value(envelope.evidence)
+                let ev: platforms::az_tdx::evidence::AzTdxEvidence =
+                    serde_json::from_value(evidence)
                         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
                 platforms::az_tdx::verify::verify_evidence(
-                    &evidence,
+                    &ev,
                     params,
                     Some(self.tdx_provider.as_ref()),
                 )
@@ -352,11 +410,10 @@ impl Verifier {
             }
             #[cfg(feature = "gcp-snp")]
             PlatformType::GcpSnp => {
-                let evidence: platforms::snp::evidence::SnpEvidence =
-                    serde_json::from_value(envelope.evidence)
-                        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+                let ev: platforms::snp::evidence::SnpEvidence = serde_json::from_value(evidence)
+                    .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
                 platforms::gcp_snp::verify::verify_evidence(
-                    &evidence,
+                    &ev,
                     params,
                     self.cert_provider.as_ref(),
                 )
@@ -364,11 +421,10 @@ impl Verifier {
             }
             #[cfg(feature = "gcp-tdx")]
             PlatformType::GcpTdx => {
-                let evidence: platforms::tdx::evidence::TdxEvidence =
-                    serde_json::from_value(envelope.evidence)
-                        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+                let ev: platforms::tdx::evidence::TdxEvidence = serde_json::from_value(evidence)
+                    .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
                 platforms::gcp_tdx::verify::verify_evidence(
-                    &evidence,
+                    &ev,
                     params,
                     Some(self.tdx_provider.as_ref()),
                 )
@@ -376,20 +432,49 @@ impl Verifier {
             }
             #[cfg(feature = "dstack")]
             PlatformType::Dstack => {
-                let evidence: platforms::dstack::evidence::DstackEvidence =
-                    serde_json::from_value(envelope.evidence)
+                let ev: platforms::dstack::evidence::DstackEvidence =
+                    serde_json::from_value(evidence)
                         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
                 platforms::dstack::verify::verify_evidence(
-                    &evidence,
+                    &ev,
                     params,
                     Some(self.tdx_provider.as_ref()),
                 )
                 .await
             }
-            other => {
-                let _ = params;
-                Err(AttestationError::PlatformNotEnabled(other.to_string()))
+            #[cfg(not(all(
+                feature = "snp",
+                feature = "tdx",
+                feature = "az-snp",
+                feature = "az-tdx",
+                feature = "gcp-snp",
+                feature = "gcp-tdx",
+                feature = "dstack"
+            )))]
+            other => Err(AttestationError::PlatformNotEnabled(other.to_string())),
+        }
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    async fn verify_nvidia_gpu(
+        &self,
+        mut result: VerificationResult,
+        gpu_bundle: Option<NvidiaGpuEvidenceBundle>,
+        params: &VerifyParams,
+    ) -> Result<VerificationResult> {
+        match gpu_bundle {
+            Some(bundle) => {
+                let gpu_claims = platforms::nvidia_gpu::verify_bundle(
+                    &bundle,
+                    params,
+                    self.nras_provider.as_ref(),
+                )
+                .await?;
+                result.claims.nvidia_gpu = Some(gpu_claims);
+                Ok(result)
             }
+            None if params.nvidia_gpu.required => Err(AttestationError::NvidiaGpuRequired),
+            None => Ok(result),
         }
     }
 }

@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "REST API service wrapping the attestation library"
 
+[features]
+# Forward NVIDIA GPU verification to the attestation library. Enabling it
+# compiles in GPU bundle verification; the API applies default GPU policy
+# (it does not yet accept GPU params over HTTP).
+nvidia-gpu = ["attestation/nvidia-gpu"]
+
 [dependencies]
 attestation = { workspace = true, features = ["attest"] }
 # Web framework

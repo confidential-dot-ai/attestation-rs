@@ -43,6 +43,8 @@ pub fn extract_claims(report: &AttestationReport) -> Claims {
             fmc: report.reported_tcb.fmc,
         },
         platform_data,
+        #[cfg(feature = "nvidia-gpu")]
+        nvidia_gpu: None,
     }
 }
 
