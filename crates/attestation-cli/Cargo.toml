@@ -8,6 +8,11 @@ license = "Apache-2.0"
 [features]
 default = []
 attest = ["attestation/attest"]
+# Verify NVIDIA GPU bundles via NRAS (pure JWS/JSON; works anywhere).
+nvidia-gpu = ["attestation/nvidia-gpu"]
+# Collect NVIDIA GPU evidence during `attest` (CC-mode Linux host; requires the
+# NVIDIA SDK / libnvat at build+run time). Implies `attest` + `nvidia-gpu`.
+nvidia-gpu-attest = ["nvidia-gpu", "attest", "attestation/nvidia-gpu-attest"]
 
 [dependencies]
 attestation = { workspace = true }
