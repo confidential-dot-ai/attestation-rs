@@ -1,0 +1,59 @@
+# attestation-api built WITH the NVIDIA GPU evidence collector.
+#
+# Unlike the stock Dockerfile (verify-only for GPU), this builds the binary with
+# `--features nvidia-gpu-attest`, so `POST /attest {nvidia_gpu:true}` collects
+# per-GPU SPDM evidence in-guest (nonce-bound to the TDX quote). It links
+# NVIDIA's libnvat (the nv-attestation-sdk C++ library), which is NOT on any apt
+# repo — the sys crate's build.rs expects a pre-built libnvat via
+# NVAT_USE_SYSTEM_LIB=1 — so the builder stage compiles libnvat from the pinned
+# SDK revision first.
+#
+# Runtime deps: the consuming confidential VM must also have the NVIDIA driver +
+# NVML present (steep's `gpu` profile provides these); this image only carries
+# the binary + libnvat + their stock library deps.
+
+FROM rust:1.94-bookworm AS builder
+
+# Build deps: libtss2 for the TDX/TPM quote path; the rest are for the libnvat
+# CMake build (it FetchContent-builds static OpenSSL + curl + xmlsec + a regorus
+# Rust component). Keep in sync with tdx-checkpoints/026.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libtss2-dev cmake clang libclang-dev build-essential pkg-config perl git \
+        libssl-dev libxml2-dev libxmlsec1-dev libxslt1-dev libicu-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# libnvat — pinned to the SAME revision as the nv-attestation-sdk Cargo dep in
+# crates/attestation/Cargo.toml (rev 0c1be386). Bumping one requires bumping the
+# other. Produces /usr/include/nvat.h + libnvat.so.1.2.0.
+ARG NVAT_REV=0c1be386a8fbb8f2766a6a556d10df86f5fed9d3
+RUN git clone https://github.com/NVIDIA/attestation-sdk /nvsdk \
+    && git -C /nvsdk checkout "$NVAT_REV" \
+    && cmake -B /nvsdk/build -S /nvsdk/nv-attestation-sdk-cpp \
+         -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+    && cmake --build /nvsdk/build -j"$(nproc)" \
+    && cp /nvsdk/build/include/nvat.h /usr/include/ \
+    && cp /nvsdk/build/libnvat.so.1.2.0 /usr/lib/x86_64-linux-gnu/ \
+    && ln -sf libnvat.so.1.2.0 /usr/lib/x86_64-linux-gnu/libnvat.so \
+    && ln -sf libnvat.so.1.2.0 /usr/lib/x86_64-linux-gnu/libnvat.so.1 \
+    && ldconfig
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+# NVAT_USE_SYSTEM_LIB=1 → the sdk-sys build.rs links the libnvat we built above
+# instead of trying (and failing) to build it itself.
+RUN NVAT_USE_SYSTEM_LIB=1 cargo build --release -p attestation-api \
+        --bin attestation-api --features nvidia-gpu-attest
+
+FROM debian:bookworm-slim
+# libnvat's runtime deps are stock (libxml2 / libicu / libstdc++); libtss2 for
+# the quote path. ca-certificates for the NRAS TLS chain at verify time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libtss2-esys-3.0.2-0 libtss2-tctildr0 ca-certificates \
+        libxml2 libicu72 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libnvat.so.1.2.0 /usr/lib/x86_64-linux-gnu/
+RUN ln -sf libnvat.so.1.2.0 /usr/lib/x86_64-linux-gnu/libnvat.so.1 && ldconfig
+COPY --from=builder /app/target/release/attestation-api /attestation-api
+EXPOSE 8400
+ENTRYPOINT ["/attestation-api"]
