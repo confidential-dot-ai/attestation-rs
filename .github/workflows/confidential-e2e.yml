@@ -1,0 +1,139 @@
+name: confidential-e2e
+# Run this library's own test suite INSIDE a real SEV-SNP CVM — the tests that
+# need genuine TEE hardware (/dev/sev-guest, configfs-tsm) and can never pass on
+# a GitHub-hosted runner:
+#   - the full workspace suite with the has_tee() branches on their REAL path
+#   - the #[ignore]d TEE tests (api_tests attest_endpoint / roundtrip)
+#   - the #[ignore]d network tests (SNP CRL verification against AMD KDS,
+#     live DCAP against Intel PCS) — the guest has egress
+# Excluded: capture_fixture (its TDX variant compiles under `attest` and cannot
+# pass on SNP); az_snp_live / az_tdx_live are cfg'd out by feature selection
+# (they need az-snp/az-tdx + an Azure CVM's vTPM/IMDS — that's the Azure lane's
+# unique coverage, not this one's).
+#
+# How: `cargo nextest archive` on ubuntu-22.04 (glibc 2.35 — the guest's must be
+# >= this) -> pushed to ghcr as an OCI artifact -> the CVM payload pulls it over
+# guest egress (anonymous; the ci-tests package is public) and executes it with
+# a standalone cargo-nextest. The CVM guest image is verity-immutable with NO
+# toolchain — the archive pattern is exactly for this.
+#
+# FLAVOR = rke2-node (not base-cpu): probed 2026-07-15, the base-cpu image is
+# console-silent after the EFI stub (no autologin -> no console delivery). The
+# rke2-node guest is the SAME genuine measured SEV-SNP CVM (/dev/sev-guest,
+# configfs-tsm) with a proven console; the k8s it boots is unused ballast here.
+# base-cpu returns when images grow an autologin console or the HTTP agent
+# transport (confidential-ci research/guest-transport.md).
+#
+# WHERE (boot/attest/teardown the CVM) is the confidential-ci primitive:
+#   confidential-dot-ai/confidential-ci/.github/workflows/cvm-e2e.yml
+# Trigger: push to main + dispatch. NEVER pull_request — this repo is public
+# and the job runs on org self-hosted hardware.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: confidential-e2e-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  NEXTEST_URL: https://get.nexte.st/0.9/linux   # same source in-guest — keep versions aligned
+  ORAS_VER: 1.2.0
+
+jobs:
+  # build the test archive OUTSIDE the TEE (the guest has no toolchain), publish
+  # it content-addressed by commit
+  archive:
+    runs-on: ubuntu-22.04   # glibc 2.35: forward-compatible with the guest's
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: build test archive (--features attest, release = small enough for guest tmpfs)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "$NEXTEST_URL" | tar -xz -C "$HOME/.local/bin" cargo-nextest
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cargo-nextest" nextest archive --workspace --features attest \
+            --release --archive-file tests.tar.zst
+          ls -la tests.tar.zst
+      - name: 'bundle tss runtime libs (probe finding: guest ships no libtss2)'
+        run: |
+          set -euo pipefail
+          # --features attest links libtss2 dynamically (via az-cvm-vtpm -> tss-esapi).
+          # The guest image doesn't ship it; ship the builder's copies alongside the
+          # archive and LD_LIBRARY_PATH them in. (libcrypto/libssl exist in-guest —
+          # curl is present and links them; the payload ldd-checks and reports.)
+          mkdir -p libs && cp -av /usr/lib/x86_64-linux-gnu/libtss2*.so* libs/
+          tar -czf libs.tar.gz libs
+      - name: push archive + libs to ghcr (ci-tests package)
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VER}/oras_${ORAS_VER}_linux_amd64.tar.gz" | tar -xz oras
+          echo "${{ github.token }}" | ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ./oras push "ghcr.io/${{ github.repository }}/ci-tests:${{ github.sha }}" tests.tar.zst libs.tar.gz
+          # ONE-TIME after the first push: set the ci-tests package public
+          # (org settings -> packages) so the in-guest pull needs no credential.
+          # Until then the in-guest anonymous pull 401s -> FAIL_GHCR_TOKEN/FAIL_MANIFEST.
+
+  # the in-guest script: pull archive + standalone nextest + source tree, run
+  payload:
+    runs-on: ubuntu-latest
+    outputs:
+      b64: ${{ steps.p.outputs.b64 }}
+    steps:
+      - id: p
+        run: |
+          set -euo pipefail
+          SHA='${{ github.sha }}'
+          REPO='${{ github.repository }}'
+          cat > p.sh <<PAYLOAD
+          dl(){ curl -fsSL --retry 3 "\$1" -o "\$2" 2>/dev/null || python3 -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "\$1" "\$2"; }
+          TOK=\$(curl -fsSL "https://ghcr.io/token?scope=repository:$REPO/ci-tests:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
+          [ -n "\$TOK" ] || { say FAIL_GHCR_TOKEN; exit 0; }
+          M=\$(curl -fsSL -H "Authorization: Bearer \$TOK" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/$REPO/ci-tests/manifests/$SHA")
+          printf '%s' "\$M" | python3 -c 'import json,sys; m=json.load(sys.stdin); [print(l.get("annotations",{}).get("org.opencontainers.image.title","blob"), l["digest"]) for l in m["layers"]]' > /tmp/layers.txt 2>/dev/null
+          [ -s /tmp/layers.txt ] || { say FAIL_MANIFEST; exit 0; }
+          while read -r name dgst; do
+            curl -fsSL -H "Authorization: Bearer \$TOK" "https://ghcr.io/v2/$REPO/ci-tests/blobs/\$dgst" -o "/tmp/\$name" || { say FAIL_ARCHIVE_PULL; exit 0; }
+            echo "@@BLOB \$name \$(wc -c </tmp/\$name | tr -d ' ') bytes@@"
+          done < /tmp/layers.txt
+          [ -f /tmp/tests.tar.zst ] || { say FAIL_ARCHIVE_PULL; exit 0; }
+          tar -xzf /tmp/libs.tar.gz -C /tmp 2>/dev/null && export LD_LIBRARY_PATH=/tmp/libs
+          mkdir -p /tmp/nx
+          dl "https://get.nexte.st/0.9/linux" /tmp/nx.tgz && tar -xzf /tmp/nx.tgz -C /tmp/nx || { say FAIL_NEXTEST_DL; exit 0; }
+          dl "https://codeload.github.com/$REPO/tar.gz/$SHA" /tmp/src.tgz && tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_SRC; exit 0; }
+          SRC=\$(echo /tmp/attestation-rs-*)
+          say TOOLS_READY
+          echo "@@DF /tmp: \$(df -h /tmp 2>/dev/null | tail -1 | tr -s ' ')@@"
+          [ -e /dev/sev-guest ] && say TEE_CONFIRMED || say TEE_MISSING
+          export TMPDIR=/tmp
+          /tmp/nx/cargo-nextest nextest run \
+            --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
+            --extract-to /tmp/x --persist-extract-tempdir \
+            --run-ignored all -E 'not binary(capture_fixture)' \
+            --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
+          RC=\$?
+          B=\$(find /tmp/x -name 'attestation*' -type f -perm -u+x 2>/dev/null | head -1)
+          if [ -n "\$B" ]; then ldd "\$B" 2>/dev/null | grep 'not found' | sed 's/^/@@LDD_MISSING /;s/\$/@@/'; fi
+          grep -E 'PASS|FAIL|Summary|passed|failed|skipped' /tmp/nx.out | tail -25 | sed 's/^/@@NX /;s/\$/@@/'
+          [ \$RC -eq 0 ] && say PAYLOAD_OK || { tail -30 /tmp/nx.out | sed 's/^/@@NXTAIL /;s/\$/@@/'; say FAIL_NEXTEST; }
+          PAYLOAD
+          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: [archive, payload]
+    uses: confidential-dot-ai/confidential-ci/.github/workflows/cvm-e2e.yml@main
+    with:
+      platform: snp-metal
+      runner: cvm-launcher
+      flavor: rke2-node
+      payload_b64: ${{ needs.payload.outputs.b64 }}
+      timeout_minutes: 40
