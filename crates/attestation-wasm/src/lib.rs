@@ -59,6 +59,28 @@ pub fn verify_snp(
     verify_report_signature(&report_bytes, &vcek_der)
         .map_err(|e| JsError::new(&format!("report signature: {e}")))?;
 
+    // Guest-policy enforcement — mirrors the native `verify_report` path
+    // (`platforms/snp/verify.rs`: VMPL==0 and debug-policy rejection). Without
+    // these, a malicious host can launch the *correctly-measured* image as a
+    // debug-enabled or non-VMPL-0 SNP guest: the launch_digest still matches a
+    // pinned allowlist, the VCEK chain and report signature are genuine, and
+    // report_data still binds the session key — yet the hypervisor can read the
+    // guest's memory (debug) or a lower-privilege VMPL can, so it extracts the
+    // session key and reads the "confidential" channel. The browser entry has no
+    // `allow_debug` opt-in: it fails closed. (SEV-SNP guest policy lives in the
+    // report, not the launch measurement, so a measurement pin cannot catch this.)
+    if report.vmpl != 0 {
+        return Err(JsError::new(&format!(
+            "VMPL check failed: report VMPL is {} (expected 0)",
+            report.vmpl
+        )));
+    }
+    if report.policy.debug_allowed() {
+        return Err(JsError::new(
+            "SNP guest policy permits debug (host can read guest memory); rejecting (fail closed)",
+        ));
+    }
+
     // Check report_data binding
     let report_data_match = expected_report_data.map(|expected| {
         let padded = pad_report_data(&expected, 64).unwrap_or_default();
