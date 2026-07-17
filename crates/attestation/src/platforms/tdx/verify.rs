@@ -442,33 +442,7 @@ pub async fn verify_evidence(
         None
     };
 
-    // MRTD / RTMR checks against caller-supplied references. Constant-time;
-    // a supplied reference that doesn't match fails verification.
-    let mrtd_match = check_expected(
-        "MRTD",
-        &quote.body.mr_td,
-        params.expected_mrtd.as_ref().map(|e| e.as_slice()),
-    )?;
-    let rtmr0_match = check_expected(
-        "RTMR[0]",
-        &quote.body.rtmr_0,
-        params.expected_rtmr0.as_ref().map(|e| e.as_slice()),
-    )?;
-    let rtmr1_match = check_expected(
-        "RTMR[1]",
-        &quote.body.rtmr_1,
-        params.expected_rtmr1.as_ref().map(|e| e.as_slice()),
-    )?;
-    let rtmr2_match = check_expected(
-        "RTMR[2]",
-        &quote.body.rtmr_2,
-        params.expected_rtmr2.as_ref().map(|e| e.as_slice()),
-    )?;
-    let rtmr3_match = check_expected(
-        "RTMR[3]",
-        &quote.body.rtmr_3,
-        params.expected_rtmr3.as_ref().map(|e| e.as_slice()),
-    )?;
+    let matches = check_expected_measurements(&quote.body, params)?;
 
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
@@ -496,12 +470,58 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
-        mrtd_match,
-        rtmr0_match,
-        rtmr1_match,
-        rtmr2_match,
-        rtmr3_match,
+        mrtd_match: matches.mrtd,
+        rtmr0_match: matches.rtmr0,
+        rtmr1_match: matches.rtmr1,
+        rtmr2_match: matches.rtmr2,
+        rtmr3_match: matches.rtmr3,
         launch_digest_match: None,
+    })
+}
+
+/// Per-register results of [`check_expected_measurements`]; semantics match
+/// the corresponding `*_match` fields on [`VerificationResult`].
+pub(crate) struct MeasurementMatches {
+    pub mrtd: Option<bool>,
+    pub rtmr0: Option<bool>,
+    pub rtmr1: Option<bool>,
+    pub rtmr2: Option<bool>,
+    pub rtmr3: Option<bool>,
+}
+
+/// Check a TDX report body against the caller-supplied MRTD / RTMR
+/// references. Constant-time; a supplied reference that doesn't match fails
+/// verification. Shared by the bare-metal and Azure vTPM TDX paths.
+pub(crate) fn check_expected_measurements(
+    body: &TdxReportBody,
+    params: &VerifyParams,
+) -> Result<MeasurementMatches> {
+    Ok(MeasurementMatches {
+        mrtd: check_expected(
+            "MRTD",
+            &body.mr_td,
+            params.expected_mrtd.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr0: check_expected(
+            "RTMR[0]",
+            &body.rtmr_0,
+            params.expected_rtmr0.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr1: check_expected(
+            "RTMR[1]",
+            &body.rtmr_1,
+            params.expected_rtmr1.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr2: check_expected(
+            "RTMR[2]",
+            &body.rtmr_2,
+            params.expected_rtmr2.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr3: check_expected(
+            "RTMR[3]",
+            &body.rtmr_3,
+            params.expected_rtmr3.as_ref().map(|e| e.as_slice()),
+        )?,
     })
 }
 
