@@ -1071,6 +1071,9 @@ mod tests {
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
         assert_eq!(r.mrtd_match, Some(true));
+        // Pins that signature verification still runs and precedes the
+        // reference checks when expected_* values are supplied.
+        assert!(r.signature_valid);
     }
 
     #[tokio::test]
@@ -1109,8 +1112,8 @@ mod tests {
         let params = VerifyParams {
             allow_debug: true,
             expected_rtmr0: Some(quote.body.rtmr_0), // match
-            expected_rtmr1: Some([0xFF; 48]),        // mismatch
-            expected_rtmr3: Some(quote.body.rtmr_3), // match (rtmr2 left None → skipped)
+            expected_rtmr1: Some([0xFF; 48]),        // first mismatch — fails here
+            expected_rtmr3: Some(quote.body.rtmr_3), // supplied but never reached
             ..Default::default()
         };
         let err = verify_evidence(&evidence, &params, None).await.unwrap_err();

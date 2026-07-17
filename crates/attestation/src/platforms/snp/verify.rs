@@ -30,6 +30,10 @@ const MIN_REPORT_VERSION: u32 = 3;
 /// Matches Trustee's upper bound — future versions may change field layout.
 pub const MAX_REPORT_VERSION: u32 = 5;
 
+/// Register label carried by `MeasurementMismatch` for the SNP launch
+/// digest; shared with the Azure vTPM SNP path.
+pub(crate) const LAUNCH_DIGEST_LABEL: &str = "launch digest";
+
 /// Verify SNP attestation evidence.
 pub async fn verify_evidence(
     evidence: &SnpEvidence,
@@ -161,7 +165,7 @@ pub async fn verify_evidence(
     // Launch-digest check against a caller-supplied reference. Constant-time;
     // a supplied reference that doesn't match fails verification.
     let launch_digest_match = check_expected(
-        "launch digest",
+        LAUNCH_DIGEST_LABEL,
         &report.measurement[..],
         params.expected_launch_digest.as_ref().map(|e| e.as_slice()),
     )?;
@@ -1081,6 +1085,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.launch_digest_match, Some(true));
+        // Pins that signature verification still runs and precedes the
+        // reference checks when expected_* values are supplied.
+        assert!(r.signature_valid);
     }
 
     #[tokio::test]
