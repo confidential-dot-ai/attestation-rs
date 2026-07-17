@@ -3,7 +3,7 @@ use crate::error::{AttestationError, Result};
 use crate::platforms::tdx::{claims::extract_claims, dcap, verify as tdx_verify};
 use crate::platforms::tpm_common;
 use crate::types::{PlatformType, VerificationResult, VerifyParams};
-use crate::utils::decode_base64url;
+use crate::utils::{check_expected, decode_base64url};
 
 use super::evidence::AzTdxEvidence;
 
@@ -125,28 +125,33 @@ pub async fn verify_evidence(
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
 
-    // Optional MRTD / RTMR compares. Mismatches surface in the result and
-    // do not fail verification.
-    let mrtd_match = params
-        .expected_mrtd
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected));
-    let rtmr0_match = params
-        .expected_rtmr0
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_0, expected));
-    let rtmr1_match = params
-        .expected_rtmr1
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_1, expected));
-    let rtmr2_match = params
-        .expected_rtmr2
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_2, expected));
-    let rtmr3_match = params
-        .expected_rtmr3
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_3, expected));
+    // MRTD / RTMR checks against caller-supplied references. Constant-time;
+    // a supplied reference that doesn't match fails verification.
+    let mrtd_match = check_expected(
+        "MRTD",
+        &tdx_quote.body.mr_td,
+        params.expected_mrtd.as_ref().map(|e| e.as_slice()),
+    )?;
+    let rtmr0_match = check_expected(
+        "RTMR[0]",
+        &tdx_quote.body.rtmr_0,
+        params.expected_rtmr0.as_ref().map(|e| e.as_slice()),
+    )?;
+    let rtmr1_match = check_expected(
+        "RTMR[1]",
+        &tdx_quote.body.rtmr_1,
+        params.expected_rtmr1.as_ref().map(|e| e.as_slice()),
+    )?;
+    let rtmr2_match = check_expected(
+        "RTMR[2]",
+        &tdx_quote.body.rtmr_2,
+        params.expected_rtmr2.as_ref().map(|e| e.as_slice()),
+    )?;
+    let rtmr3_match = check_expected(
+        "RTMR[3]",
+        &tdx_quote.body.rtmr_3,
+        params.expected_rtmr3.as_ref().map(|e| e.as_slice()),
+    )?;
 
     // Result
     let tdx_claims = extract_claims(&tdx_quote);
