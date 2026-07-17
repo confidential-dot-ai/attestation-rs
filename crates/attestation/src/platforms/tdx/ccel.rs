@@ -5,6 +5,14 @@
 //! (1-4 mapping to RTMR[0-3]) and carries a SHA-384 digest. Replaying the
 //! events from a zero-initialized state must reproduce the RTMR values in
 //! the TDX quote, proving event log integrity.
+//!
+//! Only RTMR[0-2] (boot-time registers) are subject to this check. RTMR[3]
+//! is the runtime-extendable register: the guest kernel's tdx_guest sysfs
+//! extend interface appends no CCEL entry (the log area is firmware-owned),
+//! so any legitimate runtime extend — e.g. the confidential-os operator-key
+//! binding, or a per-workload measurer — makes RTMR[3] unreplayable by
+//! construction. Relying parties verify `quote.rtmr_3` directly against
+//! their own expected value (`expected_rtmr3` / claims).
 
 use sha2::{Digest, Sha384};
 
@@ -204,7 +212,12 @@ pub fn replay_rtmrs(events: &[CcelEvent]) -> [[u8; 48]; 4] {
 
 /// Verify that replayed RTMR values from a CCEL match those in a TDX quote body.
 ///
-/// Returns `Ok(())` if all four RTMRs match, or an error describing the first mismatch.
+/// Enforces RTMR[0-2] only. RTMR[3] is runtime-extendable and such extends
+/// never appear in the CCEL (see module docs), so a mismatch there is
+/// expected on any guest that runtime-extends and only logs a warning;
+/// relying parties verify `quote.rtmr_3` directly.
+///
+/// Returns `Ok(())` if RTMR[0-2] match, or an error describing the first mismatch.
 pub fn verify_ccel_against_rtmrs(
     ccel_data: &[u8],
     rtmr_0: &[u8; 48],
@@ -215,7 +228,7 @@ pub fn verify_ccel_against_rtmrs(
     let events = parse_ccel(ccel_data)?;
     let replayed = replay_rtmrs(&events);
 
-    let expected = [rtmr_0, rtmr_1, rtmr_2, rtmr_3];
+    let expected = [rtmr_0, rtmr_1, rtmr_2];
     for (i, (got, want)) in replayed.iter().zip(expected.iter()).enumerate() {
         if !crate::utils::constant_time_eq(got, *want) {
             return Err(AttestationError::EventlogIntegrityFailed(format!(
@@ -224,6 +237,14 @@ pub fn verify_ccel_against_rtmrs(
                 hex::encode(want)
             )));
         }
+    }
+
+    if !crate::utils::constant_time_eq(&replayed[3], rtmr_3) {
+        log::warn!(
+            "RTMR[3] replay mismatch (runtime extends are not logged to the CCEL; verify quote.rtmr_3 directly): replayed={}, quote={}",
+            hex::encode(replayed[3]),
+            hex::encode(rtmr_3)
+        );
     }
 
     Ok(())
@@ -325,7 +346,27 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_ccel_tampered_fails() {
+    fn test_verify_ccel_tampered_boot_rtmr_fails() {
+        const TDINFO: usize = 512;
+        let rtmr0: [u8; 48] = LIVE_TDREPORT[TDINFO + 208..TDINFO + 256]
+            .try_into()
+            .unwrap();
+        let rtmr1: [u8; 48] = LIVE_TDREPORT[TDINFO + 256..TDINFO + 304]
+            .try_into()
+            .unwrap();
+        let rtmr3: [u8; 48] = LIVE_TDREPORT[TDINFO + 352..TDINFO + 400]
+            .try_into()
+            .unwrap();
+        // Wrong boot-time register (RTMR[2]) must hard-fail.
+        let mut rtmr2 = [0u8; 48];
+        rtmr2[0] = 0xFF;
+
+        let result = verify_ccel_against_rtmrs(LIVE_CCEL, &rtmr0, &rtmr1, &rtmr2, &rtmr3);
+        assert!(result.is_err(), "tampered RTMR[2] should fail verification");
+    }
+
+    #[test]
+    fn test_verify_ccel_runtime_extended_rtmr3_passes() {
         const TDINFO: usize = 512;
         let rtmr0: [u8; 48] = LIVE_TDREPORT[TDINFO + 208..TDINFO + 256]
             .try_into()
@@ -336,11 +377,23 @@ mod tests {
         let rtmr2: [u8; 48] = LIVE_TDREPORT[TDINFO + 304..TDINFO + 352]
             .try_into()
             .unwrap();
-        // Wrong RTMR[3] - should cause mismatch (unless it's all zeros and replay is too)
+        // A guest-side runtime extend (e.g. operator-key binding) changes
+        // RTMR[3] without a CCEL entry; replay diverges but verification
+        // must still pass (warn-only).
+        let rtmr3_base: [u8; 48] = LIVE_TDREPORT[TDINFO + 352..TDINFO + 400]
+            .try_into()
+            .unwrap();
+        let mut hasher = Sha384::new();
+        hasher.update(rtmr3_base);
+        hasher.update([0xAB; 48]);
         let mut rtmr3 = [0u8; 48];
-        rtmr3[0] = 0xFF;
+        rtmr3.copy_from_slice(&hasher.finalize());
 
         let result = verify_ccel_against_rtmrs(LIVE_CCEL, &rtmr0, &rtmr1, &rtmr2, &rtmr3);
-        assert!(result.is_err(), "tampered RTMR[3] should fail verification");
+        assert!(
+            result.is_ok(),
+            "runtime-extended RTMR[3] must not fail eventlog verification: {:?}",
+            result.err()
+        );
     }
 }
