@@ -213,6 +213,5 @@ pub async fn verify_az_tdx(
         .await
         .map_err(|e| JsError::new(&format!("az-tdx verify: {e}")))?;
 
-    serde_json::to_string_pretty(&result)
-        .map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
