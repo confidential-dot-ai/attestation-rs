@@ -96,6 +96,22 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Check a measurement register against an optional caller-supplied
+/// reference value. Not supplied → `Ok(None)`; supplied and equal →
+/// `Ok(Some(true))`; supplied and different → `MeasurementMismatch`,
+/// failing verification. `Some(false)` is never produced.
+pub(crate) fn check_expected(
+    name: &'static str,
+    actual: &[u8],
+    expected: Option<&[u8]>,
+) -> crate::error::Result<Option<bool>> {
+    match expected {
+        None => Ok(None),
+        Some(expected) if constant_time_eq(actual, expected) => Ok(Some(true)),
+        Some(_) => Err(crate::error::AttestationError::MeasurementMismatch(name)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
