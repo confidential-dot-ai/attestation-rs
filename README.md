@@ -101,9 +101,11 @@ KDS, verify in WASM), build with `--target nodejs` and run
 ## Pinning launch measurements
 
 `VerifyParams` carries optional reference values that the verifier compares
-against the measurement registers in the quote. When the operator supplies a
-value, the corresponding `VerificationResult` field is `Some(true)`/`Some(false)`;
-when omitted the result is `None` (no check requested).
+against the measurement registers in the quote. A supplied value that doesn't
+match fails verification with `AttestationError::MeasurementMismatch` naming
+the register. On success the corresponding `VerificationResult` field is
+`Some(true)`; when omitted it is `None` (no check requested) — a returned
+result never carries `Some(false)`.
 
 ```rust
 use attestation::types::VerifyParams;
@@ -126,10 +128,10 @@ assert_eq!(result.rtmr1_match, Some(true));
 assert_eq!(result.rtmr2_match, Some(true));
 ```
 
-All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
-short-circuit — every populated reference is checked. `VerificationResult`
-carries `#[must_use]` so dropping the result without inspecting the policy
-outcomes is a compile-time warning.
+All comparisons are constant-time (`subtle::ConstantTimeEq`). Verification
+fails on the first mismatching register, so the error names one register even
+if several drift. Treat `Err` from `verify` as an attestation rejection, not
+a transient failure.
 
 The CLI exposes matching flags:
 
