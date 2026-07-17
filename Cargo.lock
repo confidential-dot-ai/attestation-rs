@@ -239,6 +239,7 @@ dependencies = [
  "base64 0.22.1",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

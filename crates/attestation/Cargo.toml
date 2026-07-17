@@ -103,6 +103,14 @@ getrandom = { version = "0.2", features = ["js"] }
 # which panics on that target — trapping every real EAT/cert expiry check in
 # the browser (see verify.rs `exp`/validity enforcement).
 chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
+# `x509-parser`'s `ASN1Time::now()` (used for cert notBefore/notAfter checks in
+# the TDX DCAP chain — see `platforms/tdx/dcap.rs`) resolves through the `time`
+# crate's `OffsetDateTime::now_utc()`, which panics on wasm32-unknown-unknown
+# unless `time`'s wasm backend is enabled. `wasm-bindgen` routes it through
+# `js_sys::Date`. Without this, `verify_az_tdx` traps ("unreachable") the moment
+# it validates the PCK certificate chain. (The SNP wasm entrypoints never reach a
+# validity check, which is why only the TDX path needed this.)
+time = { version = "0.3", default-features = false, features = ["wasm-bindgen"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
