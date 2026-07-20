@@ -149,3 +149,18 @@ CI gate using these flags fails closed on a wrong workload.
 
 - Core library: `crates/attestation/README.md`
 - REST service: `crates/attestation-api/README.md`
+
+## Confidential e2e (SNP-metal)
+
+`.github/workflows/confidential-e2e.yml` runs this workspace's TEE-gated tests
+**inside a real SEV-SNP CVM** on every push to `main` (and via dispatch) — the
+`has_tee()` real paths, the `#[ignore]`d attest tests, and the network CRL/DCAP
+tests, none of which can pass on a hosted runner. It builds a `cargo nextest
+archive` outside the TEE, pulls it into a measured CVM, and runs it there via
+the confidential-ci `cvm-e2e` primitive. `az_snp_live`/`az_tdx_live` run on the
+Azure lane instead (vTPM). Never `pull_request` — org self-hosted hardware.
+
+One-time after the first run: set the auto-created `ci-tests` package **public**
+and the repo's role on it to **Write** (org → Packages). Details and the
+matrix/dispatcher pattern: confidential-dot-ai/confidential-ci
+`USING-THE-PRIMITIVE.md`.
