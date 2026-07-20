@@ -74,29 +74,58 @@ jobs:
           set -euo pipefail
           SHA='${{ github.sha }}'
           REPO='${{ github.repository }}'
+          # This heredoc builds the IN-GUEST payload (p.sh). Context: the CVM guest
+          # is a sealed, verity-measured image with NO toolchain and NO package
+          # manager, and NO credentials may enter it (delivery rides the serial
+          # console, which is logged). So the script below:
+          #   1. pulls the prebuilt test archive ANONYMOUSLY from the public
+          #      ghcr `ci-tests` package (built+pushed by the `archive` job for
+          #      this exact commit),
+          #   2. fetches a standalone cargo-nextest + this repo's source tree
+          #      (nextest needs it for --workspace-remap path fixups),
+          #   3. confirms it is really inside a TEE (/dev/sev-guest present),
+          #   4. runs the suite and reports via @@marker@@ lines that the lane
+          #      polls from the console log (@@PAYLOAD_OK@@ = the success gate).
           # Every in-guest network call is bounded: curl gets --connect-timeout/
           # --max-time/--retry; the python fallback passes urlopen(timeout=).
+          # NOTE: '#' comments below are for REVIEWERS — they are stripped before
+          # base64-encoding (every payload byte costs serial-console delivery time).
           cat > p.sh <<PAYLOAD
+          # dl(): bounded download with a python fallback (guest has curl+python3,
+          # no wget). Used for plain-HTTP fetches (nextest binary, source tarball).
           dl(){ curl -fsSL --connect-timeout 10 --max-time 300 --retry 3 --retry-all-errors "\$1" -o "\$2" 2>/dev/null || python3 -c "import urllib.request,shutil,sys; r=urllib.request.urlopen(sys.argv[1], timeout=60); f=open(sys.argv[2],'wb'); shutil.copyfileobj(r,f)" "\$1" "\$2"; }
           CURL="curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors"
+          # -- phase 1: anonymous ghcr pull of the ci-tests OCI artifact --------
+          # public package => the token endpoint hands out a pull token with NO
+          # auth; nothing secret ever enters the guest.
           TOK=\$(\$CURL "https://ghcr.io/token?scope=repository:$REPO/ci-tests:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
           [ -n "\$TOK" ] || { say FAIL_GHCR_TOKEN; exit 0; }
           M=\$(\$CURL -H "Authorization: Bearer \$TOK" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/$REPO/ci-tests/manifests/$SHA")
           printf '%s' "\$M" | python3 -c 'import json,sys; m=json.load(sys.stdin); [print(l.get("annotations",{}).get("org.opencontainers.image.title","blob"), l["digest"]) for l in m["layers"]]' > /tmp/layers.txt 2>/dev/null
           [ -s /tmp/layers.txt ] || { say FAIL_MANIFEST; exit 0; }
+          # the artifact has two layers, addressed by filename annotation:
+          #   tests.tar.zst = cargo-nextest archive of the compiled test binaries
+          #   libs.tar.gz   = the libtss2 .so's they link (guest ships none)
           while read -r name dgst; do
             \$CURL --max-time 300 -H "Authorization: Bearer \$TOK" "https://ghcr.io/v2/$REPO/ci-tests/blobs/\$dgst" -o "/tmp/\$name" || { say FAIL_ARCHIVE_PULL; exit 0; }
             echo "@@BLOB \$name \$(wc -c </tmp/\$name | tr -d ' ') bytes@@"
           done < /tmp/layers.txt
           [ -f /tmp/tests.tar.zst ] || { say FAIL_ARCHIVE_PULL; exit 0; }
           tar -xzf /tmp/libs.tar.gz -C /tmp 2>/dev/null && export LD_LIBRARY_PATH=/tmp/libs
+          # -- phase 2: standalone nextest + source tree (for --workspace-remap) --
           mkdir -p /tmp/nx
           dl "https://get.nexte.st/0.9/linux" /tmp/nx.tgz && tar -xzf /tmp/nx.tgz -C /tmp/nx || { say FAIL_NEXTEST_DL; exit 0; }
           dl "https://codeload.github.com/$REPO/tar.gz/$SHA" /tmp/src.tgz && tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_SRC; exit 0; }
           SRC=\$(echo /tmp/attestation-rs-*)
           say TOOLS_READY
+          # -- phase 3: prove we are in a real TEE before trusting any result ----
+          # /tmp is the guest's tmpfs (~7.4G) — the / overlay is only 2G.
           echo "@@DF /tmp: \$(df -h /tmp 2>/dev/null | tail -1 | tr -s ' ')@@"
           [ -e /dev/sev-guest ] && say TEE_CONFIRMED || say TEE_MISSING
+          # -- phase 4: run the suite ------------------------------------------
+          # --run-ignored all : the TEE-gated #[ignore] tests are the whole point
+          # -E excludes capture_fixture: its variants need TDX/Azure, not bare SNP
+          # --extract-to must pre-exist (nextest canonicalizes before creating)
           export TMPDIR=/tmp
           mkdir -p /tmp/x
           /tmp/nx/cargo-nextest nextest run \
@@ -105,12 +134,15 @@ jobs:
             --run-ignored all -E 'not binary(capture_fixture)' \
             --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
           RC=\$?
+          # self-diagnose linkage: if any .so is missing, name it in the log
           B=\$(find /tmp/x -name 'attestation*' -type f -perm -u+x 2>/dev/null | head -1)
           if [ -n "\$B" ]; then ldd "\$B" 2>/dev/null | grep 'not found' | sed 's/^/@@LDD_MISSING /;s/\$/@@/'; fi
           grep -E 'PASS|FAIL|Summary|passed|failed|skipped' /tmp/nx.out | tail -25 | sed 's/^/@@NX /;s/\$/@@/'
           [ \$RC -eq 0 ] && say PAYLOAD_OK || { tail -30 /tmp/nx.out | sed 's/^/@@NXTAIL /;s/\$/@@/'; say FAIL_NEXTEST; }
           PAYLOAD
-          echo "b64=$(base64 -w0 p.sh)" >> "$GITHUB_OUTPUT"
+          # strip comment/blank lines before encoding — reviewer comments must not
+          # ride the serial console into the guest (delivery time ~ payload bytes)
+          echo "b64=$(grep -vE '^[[:space:]]*(#|$)' p.sh | base64 -w0)" >> "$GITHUB_OUTPUT"
 
   e2e:
     needs: [archive, payload]
