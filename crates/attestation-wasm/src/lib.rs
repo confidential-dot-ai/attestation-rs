@@ -2,6 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
 use attestation::platforms::az_snp::verify::verify_report;
+use attestation::platforms::az_tdx::evidence::AzTdxEvidence;
+use attestation::platforms::az_tdx::verify::verify_evidence as verify_az_tdx_evidence;
 use attestation::platforms::snp::certs::get_bundled_certs;
 use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
@@ -58,6 +60,28 @@ pub fn verify_snp(
     // Verify report signature
     verify_report_signature(&report_bytes, &vcek_der)
         .map_err(|e| JsError::new(&format!("report signature: {e}")))?;
+
+    // Guest-policy enforcement — mirrors the native `verify_report` path
+    // (`platforms/snp/verify.rs`: VMPL==0 and debug-policy rejection). Without
+    // these, a malicious host can launch the *correctly-measured* image as a
+    // debug-enabled or non-VMPL-0 SNP guest: the launch_digest still matches a
+    // pinned allowlist, the VCEK chain and report signature are genuine, and
+    // report_data still binds the session key — yet the hypervisor can read the
+    // guest's memory (debug) or a lower-privilege VMPL can, so it extracts the
+    // session key and reads the "confidential" channel. The browser entry has no
+    // `allow_debug` opt-in: it fails closed. (SEV-SNP guest policy lives in the
+    // report, not the launch measurement, so a measurement pin cannot catch this.)
+    if report.vmpl != 0 {
+        return Err(JsError::new(&format!(
+            "VMPL check failed: report VMPL is {} (expected 0)",
+            report.vmpl
+        )));
+    }
+    if report.policy.debug_allowed() {
+        return Err(JsError::new(
+            "SNP guest policy permits debug (host can read guest memory); rejecting (fail closed)",
+        ));
+    }
 
     // Check report_data binding
     let report_data_match = expected_report_data.map(|expected| {
@@ -132,6 +156,62 @@ pub fn verify_az_snp(
     let mut result = serde_json::to_value(&verified.result)
         .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
     result["report_version"] = serde_json::json!(verified.report_version);
+
+    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
+/// Verify Azure TDX (az-tdx) vTPM attestation evidence in WASM.
+///
+/// The Azure TDX shape mirrors az-snp: the freshness anchor lives in the vTPM
+/// quote's `extraData` (qualifyingData), while the Intel-signed TD quote's
+/// `report_data` binds the vTPM attestation key (AK). Verification order
+/// (see `platforms/az_tdx/verify.rs`):
+/// 1. Parse the HCL report and require `report_type == TDX`.
+/// 2. Verify the vTPM quote signature with the AK extracted from HCL var_data.
+/// 3. Check the quote's `extraData` equals `expected_report_data` (freshness),
+///    failing closed when an anchor is supplied and does not match.
+/// 4. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
+/// 5. Parse the TD quote, verify its ECDSA signature, and verify the DCAP chain
+///    to the pinned Intel SGX Root CA.
+/// 6. Enforce the TD debug-attribute policy (reject debug TDs — no opt-in here).
+/// 7. Bind the AK to the TEE: `td_report.report_data[..32] == SHA-256(var_data)`.
+///
+/// Like [`verify_az_snp`], the DCAP **collateral** checks (PCK CRL, TCB status,
+/// TD-QE identity) need an async provider and are skipped in WASM, so
+/// `collateral_verified` is always `false`. The measurement surfaces as
+/// `claims.launch_digest` = hex(MRTD); MRTD/RTMR pinning is the JS policy
+/// layer's job (a mismatch is reported, not fatal, in the core).
+///
+/// - `evidence_json`: az-tdx evidence JSON (`{ version, tpm_quote, hcl_report, td_quote }`)
+/// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
+/// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
+///
+/// Returns the verification result as JSON, or throws on any check failure.
+///
+/// This is `async` (unlike `verify_az_snp`, whose core is sync) because the
+/// shared az-tdx core is `async` for its optional collateral provider; with a
+/// `None` provider it performs no actual awaiting. Callers `await` the returned
+/// Promise.
+#[wasm_bindgen]
+pub async fn verify_az_tdx(
+    evidence_json: String,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let evidence: AzTdxEvidence = serde_json::from_str(&evidence_json)
+        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+
+    let params = VerifyParams {
+        expected_report_data,
+        expected_init_data_hash,
+        ..VerifyParams::default()
+    };
+
+    // None collateral provider: CRL/TCB/QE-identity checks are skipped (same
+    // trade-off verify_az_snp documents), collateral_verified stays false.
+    let result = verify_az_tdx_evidence(&evidence, &params, None)
+        .await
+        .map_err(|e| JsError::new(&format!("az-tdx verify: {e}")))?;
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
