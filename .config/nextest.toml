@@ -1,0 +1,10 @@
+# The Azure vTPM is a single serialized device. nextest runs each test in its own
+# process, defaulting to one per vCPU, so the az_* live tests raced each other on
+# /dev/tpmrm0 and the loser got `vtpm::get_report failed: tpm error`. These tests
+# are #[ignore]d and only run on real CVM hardware, so the race stayed latent.
+[test-groups]
+vtpm = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(az_snp_live) or binary(az_tdx_live)'
+test-group = 'vtpm'
