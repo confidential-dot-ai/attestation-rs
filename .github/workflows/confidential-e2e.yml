@@ -30,7 +30,7 @@ jobs:
           [ -e /dev/sev-guest ] && echo "TEE confirmed: /dev/sev-guest present" \
             || { echo "::error::/dev/sev-guest absent — this runner is not in an SNP guest"; exit 1; }
 
-      - name: build deps (root runner pod: libtss2 for --features attest)
+      - name: "build deps (root runner pod: libtss2 for --features attest)"
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -48,7 +48,7 @@ jobs:
           curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors https://get.nexte.st/0.9/linux | tar -xz -C /usr/local/bin cargo-nextest
           cargo-nextest --version
 
-      - name: nextest --features attest (the TEE-gated #[ignore] tests run for real, in the guest)
+      - name: "nextest --features attest (the TEE-gated #[ignore] tests run for real, in the guest)"
         run: |
           cargo nextest run --workspace --features attest \
             --run-ignored all -E 'not binary(capture_fixture)' \
