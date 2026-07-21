@@ -38,6 +38,25 @@ jobs:
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
             test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
             tee_dev: /dev/tpmrm0
+          # ── Phase 2 (TDX), STAGED — uncomment each cell when its runner exists ──
+          # tdx-metal: native TDX via /dev/tdx-guest. Runner from
+          #   provision-tdx-metal-cvm.yml, pending joaosa's TDX rke2 image + a TDX CI
+          #   runner host (tdx-dev-host-1 is dev-only).
+          # - platform: tdx-metal
+          #   runs_on: tdx-metal-cvm
+          #   features: attest
+          #   filter: "binary(capture_fixture)"       # the native TDX test binary
+          #   test_threads: "2"
+          #   tee_dev: /dev/tdx-guest
+          # azure-tdx: Azure vTPM TDX (az_tdx_live). DEFERRED — Azure TDX conf VMs are
+          #   preview-only (EastUS2EUAP canary; no GA/AKS support), so no azure-cvm
+          #   variant yet.
+          # - platform: azure-tdx
+          #   runs_on: azure-tdx-cvm
+          #   features: "attest,az-tdx"
+          #   filter: "binary(az_tdx_live)"
+          #   test_threads: "1"
+          #   tee_dev: /dev/tpmrm0
     name: tee (${{ matrix.platform }})
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
