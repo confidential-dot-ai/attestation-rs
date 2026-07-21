@@ -29,12 +29,14 @@ jobs:
           - platform: snp-metal
             runs_on: snp-metal-cvm
             features: attest
-            filter: "not binary(capture_fixture)"     # capture_fixture is the TDX variant
+            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
+            test_threads: "2"
             tee_dev: /dev/sev-guest
           - platform: azure
             runs_on: azure-cvm
             features: "attest,az-snp"
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
+            test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
             tee_dev: /dev/tpmrm0
     name: tee (${{ matrix.platform }})
     runs-on: ${{ matrix.runs_on }}
@@ -74,4 +76,4 @@ jobs:
         run: |
           cargo nextest run --workspace --features ${{ matrix.features }} \
             --run-ignored all -E '${{ matrix.filter }}' \
-            --no-fail-fast --test-threads 2
+            --no-fail-fast --test-threads ${{ matrix.test_threads }}
