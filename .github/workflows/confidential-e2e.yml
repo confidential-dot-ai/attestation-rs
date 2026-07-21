@@ -1,19 +1,18 @@
 name: confidential-e2e
-# Run this library's own test suite INSIDE a real SEV-SNP CVM — the TEE-gated
-# paths (/dev/sev-guest, configfs-tsm) that can never pass on a hosted runner.
-# Build the suite as a `cargo nextest archive` outside the TEE, pull it into a
-# measured CVM over guest egress, run it there. Excludes capture_fixture (TDX
-# variant, can't pass on SNP); az_snp_live/az_tdx_live are the Azure lane's.
-# FLAVOR=rke2-node (base-cpu is console-dead) and the full rationale + the
-# one-time ci-tests package steps live in the repo README (Confidential e2e)
-# and confidential-dot-ai/confidential-ci/USING-THE-PRIMITIVE.md.
+# Run this library's TEE-gated suite DIRECTLY on the ARC runner rail — the runner
+# pod runs INSIDE a confidential VM, so the tests build + run as PLAIN STEPS (no
+# archive, no serial console, no ci-tests OCI package). ONE matrix, per-platform
+# cells because attestation-rs tests each attestation MECHANISM separately:
+#   snp-metal-cvm : native SEV-SNP via /dev/sev-guest  (--features attest)
+#   azure-cvm     : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
+#                   az_snp_live only — runnable nowhere else)
+# Adding a platform later (tdx-metal-cvm, azure-tdx-cvm) = one more include line.
 # Trigger: push:main + dispatch. NEVER pull_request (org self-hosted hardware).
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Least privilege at the top; only the archive job is granted packages: write.
 permissions:
   contents: read
 
@@ -21,136 +20,79 @@ concurrency:
   group: confidential-e2e-${{ github.sha }}
   cancel-in-progress: false
 
-env:
-  NEXTEST_URL: https://get.nexte.st/0.9/linux   # same source in-guest — keep versions aligned
-  ORAS_VER: 1.2.0
-
 jobs:
-  # build the test archive OUTSIDE the TEE (the guest has no toolchain), publish
-  # it content-addressed by commit
-  archive:
-    runs-on: ubuntu-22.04   # glibc 2.35: forward-compatible with the guest's
-    permissions:
-      contents: read
-      packages: write       # only this job pushes the ci-tests OCI artifact
+  tee:
+    strategy:
+      fail-fast: false              # one platform failing must not hide the other
+      matrix:
+        include:
+          - platform: snp-metal
+            runs_on: snp-metal-cvm
+            features: attest
+            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
+            test_threads: "2"
+            tee_dev: /dev/sev-guest
+          - platform: azure
+            runs_on: azure-cvm
+            features: "attest,az-snp"
+            filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
+            test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
+            tee_dev: /dev/tpmrm0
+          # ── Phase 2 (TDX), STAGED — uncomment each cell when its runner exists ──
+          # tdx-metal: native TDX via /dev/tdx-guest. Runner from
+          #   provision-tdx-metal-cvm.yml, pending joaosa's TDX rke2 image + a TDX CI
+          #   runner host (tdx-dev-host-1 is dev-only).
+          # - platform: tdx-metal
+          #   runs_on: tdx-metal-cvm
+          #   features: attest
+          #   filter: "binary(capture_fixture)"       # the native TDX test binary
+          #   test_threads: "2"
+          #   tee_dev: /dev/tdx-guest
+          # azure-tdx: Azure vTPM TDX (az_tdx_live). DEFERRED — Azure TDX conf VMs are
+          #   preview-only (EastUS2EUAP canary; no GA/AKS support), so no azure-cvm
+          #   variant yet.
+          # - platform: azure-tdx
+          #   runs_on: azure-tdx-cvm
+          #   features: "attest,az-tdx"
+          #   filter: "binary(az_tdx_live)"
+          #   test_threads: "1"
+          #   tee_dev: /dev/tpmrm0
+    name: tee (${{ matrix.platform }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 45
     steps:
+      - name: prove the runner is in the expected TEE before trusting any result
+        run: |
+          [ -e "${{ matrix.tee_dev }}" ] && echo "TEE confirmed: ${{ matrix.tee_dev }} present" \
+            || { echo "::error::${{ matrix.tee_dev }} absent — this runner is not the expected ${{ matrix.platform }} TEE"; exit 1; }
+
+      - name: "build deps (root runner pod: libtss2 + tpm2-tools for --features attest)"
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends libtss2-dev tpm2-tools pkg-config build-essential curl ca-certificates git
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: build test archive (--features attest, release = small enough for guest tmpfs)
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors "$NEXTEST_URL" | tar -xz -C "$HOME/.local/bin" cargo-nextest
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/cargo-nextest" nextest archive --workspace --features attest \
-            --release --archive-file tests.tar.zst
-          ls -la tests.tar.zst
-      - name: 'bundle tss runtime libs (probe finding: guest ships no libtss2)'
-        run: |
-          set -euo pipefail
-          # --features attest links libtss2 dynamically (az-cvm-vtpm -> tss-esapi);
-          # the guest ships none, so ship the builder's .so's beside the archive.
-          mkdir -p libs && cp -av /usr/lib/x86_64-linux-gnu/libtss2*.so* libs/
-          tar -czf libs.tar.gz libs
-      - name: push archive + libs to ghcr (ci-tests package)
-        run: |
-          set -euo pipefail
-          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors "https://github.com/oras-project/oras/releases/download/v${ORAS_VER}/oras_${ORAS_VER}_linux_amd64.tar.gz" | tar -xz oras
-          echo "${{ github.token }}" | ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-          ./oras push "ghcr.io/${{ github.repository }}/ci-tests:${{ github.sha }}" tests.tar.zst libs.tar.gz
-          # ONE-TIME after the first push: set the ci-tests package public + repo
-          # role Write (org -> packages). See the repo README (Confidential e2e).
 
-  # the in-guest script: pull archive + standalone nextest + source tree, run
-  payload:
-    runs-on: ubuntu-latest
-    outputs:
-      b64: ${{ steps.p.outputs.b64 }}
-    steps:
-      - id: p
+      - name: install cargo-nextest
         run: |
           set -euo pipefail
-          SHA='${{ github.sha }}'
-          REPO='${{ github.repository }}'
-          # This heredoc builds the IN-GUEST payload (p.sh). Context: the CVM guest
-          # is a sealed, verity-measured image with NO toolchain and NO package
-          # manager, and NO credentials may enter it (delivery rides the serial
-          # console, which is logged). So the script below:
-          #   1. pulls the prebuilt test archive ANONYMOUSLY from the public
-          #      ghcr `ci-tests` package (built+pushed by the `archive` job for
-          #      this exact commit),
-          #   2. fetches a standalone cargo-nextest + this repo's source tree
-          #      (nextest needs it for --workspace-remap path fixups),
-          #   3. confirms it is really inside a TEE (/dev/sev-guest present),
-          #   4. runs the suite and reports via @@marker@@ lines that the lane
-          #      polls from the console log (@@PAYLOAD_OK@@ = the success gate).
-          # Every in-guest network call is bounded: curl gets --connect-timeout/
-          # --max-time/--retry; the python fallback passes urlopen(timeout=).
-          # NOTE: '#' comments below are for REVIEWERS — they are stripped before
-          # base64-encoding (every payload byte costs serial-console delivery time).
-          cat > p.sh <<PAYLOAD
-          # dl(): bounded download with a python fallback (guest has curl+python3,
-          # no wget). Used for plain-HTTP fetches (nextest binary, source tarball).
-          dl(){ curl -fsSL --connect-timeout 10 --max-time 300 --retry 3 --retry-all-errors "\$1" -o "\$2" 2>/dev/null || python3 -c "import urllib.request,shutil,sys; r=urllib.request.urlopen(sys.argv[1], timeout=60); f=open(sys.argv[2],'wb'); shutil.copyfileobj(r,f)" "\$1" "\$2"; }
-          CURL="curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors"
-          # -- phase 1: anonymous ghcr pull of the ci-tests OCI artifact --------
-          # public package => the token endpoint hands out a pull token with NO
-          # auth; nothing secret ever enters the guest.
-          TOK=\$(\$CURL "https://ghcr.io/token?scope=repository:$REPO/ci-tests:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null)
-          [ -n "\$TOK" ] || { say FAIL_GHCR_TOKEN; exit 0; }
-          M=\$(\$CURL -H "Authorization: Bearer \$TOK" -H 'Accept: application/vnd.oci.image.manifest.v1+json' "https://ghcr.io/v2/$REPO/ci-tests/manifests/$SHA")
-          printf '%s' "\$M" | python3 -c 'import json,sys; m=json.load(sys.stdin); [print(l.get("annotations",{}).get("org.opencontainers.image.title","blob"), l["digest"]) for l in m["layers"]]' > /tmp/layers.txt 2>/dev/null
-          [ -s /tmp/layers.txt ] || { say FAIL_MANIFEST; exit 0; }
-          # the artifact has two layers, addressed by filename annotation:
-          #   tests.tar.zst = cargo-nextest archive of the compiled test binaries
-          #   libs.tar.gz   = the libtss2 .so's they link (guest ships none)
-          while read -r name dgst; do
-            \$CURL --max-time 300 -H "Authorization: Bearer \$TOK" "https://ghcr.io/v2/$REPO/ci-tests/blobs/\$dgst" -o "/tmp/\$name" || { say FAIL_ARCHIVE_PULL; exit 0; }
-            echo "@@BLOB \$name \$(wc -c </tmp/\$name | tr -d ' ') bytes@@"
-          done < /tmp/layers.txt
-          [ -f /tmp/tests.tar.zst ] || { say FAIL_ARCHIVE_PULL; exit 0; }
-          tar -xzf /tmp/libs.tar.gz -C /tmp 2>/dev/null && export LD_LIBRARY_PATH=/tmp/libs
-          # -- phase 2: standalone nextest + source tree (for --workspace-remap) --
-          mkdir -p /tmp/nx
-          dl "https://get.nexte.st/0.9/linux" /tmp/nx.tgz && tar -xzf /tmp/nx.tgz -C /tmp/nx || { say FAIL_NEXTEST_DL; exit 0; }
-          dl "https://codeload.github.com/$REPO/tar.gz/$SHA" /tmp/src.tgz && tar -xzf /tmp/src.tgz -C /tmp || { say FAIL_SRC; exit 0; }
-          SRC=\$(echo /tmp/attestation-rs-*)
-          say TOOLS_READY
-          # -- phase 3: prove we are in a real TEE before trusting any result ----
-          # /tmp is the guest's tmpfs (~7.4G) — the / overlay is only 2G.
-          echo "@@DF /tmp: \$(df -h /tmp 2>/dev/null | tail -1 | tr -s ' ')@@"
-          [ -e /dev/sev-guest ] && say TEE_CONFIRMED || say TEE_MISSING
-          # -- phase 4: run the suite ------------------------------------------
-          # --run-ignored all : the TEE-gated #[ignore] tests are the whole point
-          # -E excludes capture_fixture: its variants need TDX/Azure, not bare SNP
-          # --extract-to must pre-exist (nextest canonicalizes before creating)
-          export TMPDIR=/tmp
-          mkdir -p /tmp/x
-          /tmp/nx/cargo-nextest nextest run \
-            --archive-file /tmp/tests.tar.zst --workspace-remap "\$SRC" \
-            --extract-to /tmp/x \
-            --run-ignored all -E 'not binary(capture_fixture)' \
-            --no-fail-fast --hide-progress-bar > /tmp/nx.out 2>&1
-          RC=\$?
-          # self-diagnose linkage: if any .so is missing, name it in the log
-          B=\$(find /tmp/x -name 'attestation*' -type f -perm -u+x 2>/dev/null | head -1)
-          if [ -n "\$B" ]; then ldd "\$B" 2>/dev/null | grep 'not found' | sed 's/^/@@LDD_MISSING /;s/\$/@@/'; fi
-          grep -E 'PASS|FAIL|Summary|passed|failed|skipped' /tmp/nx.out | tail -25 | sed 's/^/@@NX /;s/\$/@@/'
-          [ \$RC -eq 0 ] && say PAYLOAD_OK || { tail -30 /tmp/nx.out | sed 's/^/@@NXTAIL /;s/\$/@@/'; say FAIL_NEXTEST; }
-          PAYLOAD
-          # strip comment/blank lines before encoding — reviewer comments must not
-          # ride the serial console into the guest (delivery time ~ payload bytes)
-          echo "b64=$(grep -vE '^[[:space:]]*(#|$)' p.sh | base64 -w0)" >> "$GITHUB_OUTPUT"
+          mkdir -p /usr/local/bin
+          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors https://get.nexte.st/0.9/linux | tar -xz -C /usr/local/bin cargo-nextest
+          cargo-nextest --version
 
-  e2e:
-    needs: [archive, payload]
-    # Reusable lane pinned by commit SHA (bump deliberately); @main is a label.
-    uses: confidential-dot-ai/confidential-ci/.github/workflows/cvm-e2e.yml@cad0dd13ac445188a3bd1641b6506c45658f274f
-    with:
-      platform: snp-metal
-      runner: cvm-launcher
-      flavor: rke2-node
-      payload_b64: ${{ needs.payload.outputs.b64 }}
-      timeout_minutes: 40
+      - name: "nextest --features ${{ matrix.features }} (TEE-gated tests run for real, in the guest)"
+        env:
+          # 4-core CVM with rke2-on-tmpfs (~5Gi free): cap parallelism + drop
+          # debuginfo so the in-guest compile fits (unconstrained rustc OOM'd,
+          # run 29801365953). Harmless on a larger node.
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          cargo nextest run --workspace --features ${{ matrix.features }} \
+            --run-ignored all -E '${{ matrix.filter }}' \
+            --no-fail-fast --test-threads ${{ matrix.test_threads }}
