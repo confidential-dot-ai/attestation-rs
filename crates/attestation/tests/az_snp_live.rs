@@ -204,12 +204,11 @@ async fn test_az_snp_verify_with_expected_nonce() {
         .await
         .expect("generate_evidence() should succeed");
 
-    // Verify with correct nonce
-    let mut padded_nonce = vec![0u8; 64];
-    padded_nonce[..nonce.len()].copy_from_slice(nonce);
-
+    // Verify with correct nonce. Pass it unpadded: attest::generate_evidence puts
+    // report_data verbatim into the TPM nonce, and verify_tpm_nonce requires the
+    // expectation to be the same length as that nonce.
     let params = VerifyParams {
-        expected_report_data: Some(padded_nonce),
+        expected_report_data: Some(nonce.to_vec()),
         expected_init_data_hash: None,
         ..Default::default()
     };
