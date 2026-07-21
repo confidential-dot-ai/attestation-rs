@@ -37,6 +37,13 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends libtss2-dev pkg-config build-essential curl ca-certificates git
 
+      - name: guest resources (diagnose the in-guest compile budget)
+        run: |
+          echo "nproc=$(nproc)"
+          echo "── memory ──"; free -h || true
+          echo "── disk ──";   df -h || true
+          echo "CARGO_HOME=${CARGO_HOME:-unset}  workdir=$(pwd)"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -49,7 +56,15 @@ jobs:
           cargo-nextest --version
 
       - name: "nextest --features attest (the TEE-gated #[ignore] tests run for real, in the guest)"
+        env:
+          # the guest is a 4-core/16Gi CVM with a small root overlay — an
+          # unconstrained parallel rustc OOM'd/filled it (run 29801365953 died
+          # mid-compile). Cap parallelism + drop debuginfo (big memory + target/
+          # disk cut) so the compile fits the TEE budget.
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
         run: |
           cargo nextest run --workspace --features attest \
             --run-ignored all -E 'not binary(capture_fixture)' \
-            --no-fail-fast
+            --no-fail-fast --test-threads 2
