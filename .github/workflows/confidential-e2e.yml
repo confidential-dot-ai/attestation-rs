@@ -48,15 +48,21 @@ jobs:
           #   filter: "binary(capture_fixture)"       # the native TDX test binary
           #   test_threads: "2"
           #   tee_dev: /dev/tdx-guest
-          # azure-tdx: Azure vTPM TDX (az_tdx_live). DEFERRED — Azure TDX conf VMs are
-          #   preview-only (EastUS2EUAP canary; no GA/AKS support), so no azure-cvm
-          #   variant yet.
-          # - platform: azure-tdx
-          #   runs_on: azure-tdx-cvm
-          #   features: "attest,az-tdx"
-          #   filter: "binary(az_tdx_live)"
-          #   test_threads: "1"
-          #   tee_dev: /dev/tpmrm0
+          # azure-tdx: Azure vTPM TDX (az_tdx_live, runnable nowhere else). Runner =
+          #   a standalone DC4es_v6 TDX CVM in westeurope (confidential-ci
+          #   provision-azure-tdx-cvm.yml): GA'd v6 sizes, but AKS still refuses TDX
+          #   node pools (Azure/AKS#5618), hence not an azure-cvm AKS twin. Attests
+          #   via vTPM + IMDS /acc/tdquote, so the device gate is /dev/tpmrm0, same
+          #   as the SNP azure cell; nextest already serialises both az binaries in
+          #   the max-1 vtpm group. Expect 14 EXECUTED tests here: az_tdx_live
+          #   skips itself silently when IMDS says the VM is not TDX, and a
+          #   skipped-green run tests nothing.
+          - platform: azure-tdx
+            runs_on: azure-tdx-cvm
+            features: "attest,az-tdx"
+            filter: "binary(az_tdx_live)"
+            test_threads: "1"
+            tee_dev: /dev/tpmrm0
     name: tee (${{ matrix.platform }})
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
