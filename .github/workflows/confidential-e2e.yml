@@ -4,7 +4,7 @@ name: confidential-e2e
 # archive, no serial console, no ci-tests OCI package). ONE matrix, per-platform
 # cells because attestation-rs tests each attestation MECHANISM separately:
 #   snp-metal-cvm : native SEV-SNP via /dev/sev-guest  (--features attest)
-#   azure-cvm     : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
+#   azure-snp-cvm : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
 #                   az_snp_live only — runnable nowhere else)
 # Adding a platform later (tdx-metal-cvm, azure-tdx-cvm) = one more include line.
 # Trigger: push:main + dispatch. NEVER pull_request (org self-hosted hardware).
@@ -32,8 +32,8 @@ jobs:
             filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
             test_threads: "2"
             tee_dev: /dev/sev-guest
-          - platform: azure
-            runs_on: azure-cvm
+          - platform: azure-snp
+            runs_on: azure-snp-cvm
             features: "attest,az-snp"
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
             test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
@@ -48,16 +48,22 @@ jobs:
           #   filter: "binary(capture_fixture)"       # the native TDX test binary
           #   test_threads: "2"
           #   tee_dev: /dev/tdx-guest
-          # azure-tdx: Azure vTPM TDX (az_tdx_live). DEFERRED — Azure TDX conf VMs are
-          #   preview-only (EastUS2EUAP canary; no GA/AKS support), so no azure-cvm
-          #   variant yet.
-          # - platform: azure-tdx
-          #   runs_on: azure-tdx-cvm
-          #   features: "attest,az-tdx"
-          #   filter: "binary(az_tdx_live)"
-          #   test_threads: "1"
-          #   tee_dev: /dev/tpmrm0
-    name: tee (${{ matrix.platform }})
+          # azure-tdx: Azure vTPM TDX (az_tdx_live, runnable nowhere else). Runner =
+          #   a standalone DC4es_v6 TDX CVM in westus (confidential-ci
+          #   provision-azure-tdx-cvm.yml): GA'd v6 sizes, but AKS still refuses TDX
+          #   node pools (Azure/AKS#5618), hence not an azure-cvm AKS twin. Attests
+          #   via vTPM + IMDS /acc/tdquote, so the device gate is /dev/tpmrm0, same
+          #   as the SNP azure cell; nextest already serialises both az binaries in
+          #   the max-1 vtpm group. Expect 14 EXECUTED tests here: az_tdx_live
+          #   skips itself silently when IMDS says the VM is not TDX, and a
+          #   skipped-green run tests nothing.
+          - platform: azure-tdx
+            runs_on: azure-tdx-cvm
+            features: "attest,az-tdx"
+            filter: "binary(az_tdx_live)"
+            test_threads: "1"
+            tee_dev: /dev/tpmrm0
+    name: tee (${{ matrix.runs_on }})   # job name == runner label, matching kettle — grep-able straight to the runner
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
     steps:
