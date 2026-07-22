@@ -11,6 +11,7 @@ use sev::parser::ByteParser;
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
 use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams};
+use crate::utils::check_expected;
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -28,6 +29,10 @@ const MIN_REPORT_VERSION: u32 = 3;
 /// Maximum supported SNP report version.
 /// Matches Trustee's upper bound — future versions may change field layout.
 pub const MAX_REPORT_VERSION: u32 = 5;
+
+/// Register label carried by `MeasurementMismatch` for the SNP launch
+/// digest; shared with the Azure vTPM SNP path.
+pub(crate) const LAUNCH_DIGEST_LABEL: &str = "launch digest";
 
 /// Verify SNP attestation evidence.
 pub async fn verify_evidence(
@@ -157,12 +162,13 @@ pub async fn verify_evidence(
         None
     };
 
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected));
+    // Launch-digest check against a caller-supplied reference. Constant-time;
+    // a supplied reference that doesn't match fails verification.
+    let launch_digest_match = check_expected(
+        LAUNCH_DIGEST_LABEL,
+        &report.measurement[..],
+        params.expected_launch_digest.as_ref().map(|e| e.as_slice()),
+    )?;
 
     // 11. Extract claims
     let claims = extract_claims(&report);
@@ -1079,21 +1085,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.launch_digest_match, Some(true));
+        // Pins that signature verification still runs and precedes the
+        // reference checks when expected_* values are supplied.
+        assert!(r.signature_valid);
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
-        // Wrong digest must record Some(false) without failing verification.
+    async fn test_verify_evidence_wrong_launch_digest_fails() {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let provider = StubCertProvider;
         let params = VerifyParams {
             expected_launch_digest: Some([0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider)
+        let err = verify_evidence(&evidence, &params, &provider)
             .await
-            .unwrap();
-        assert_eq!(r.launch_digest_match, Some(false));
-        assert!(r.signature_valid, "wrong digest should NOT fail signature");
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AttestationError::MeasurementMismatch("launch digest")
+        ));
     }
 }

@@ -82,21 +82,21 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
-    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
-    /// mismatch does not fail verification. TDX-only.
+    /// Expected MRTD. Mismatch fails verification with
+    /// [`AttestationError::MeasurementMismatch`]; a match surfaces as
+    /// `Some(true)` in [`VerificationResult::mrtd_match`]. TDX-only.
     pub expected_mrtd: Option<[u8; 48]>,
-    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
-    /// does not fail verification. TDX-only.
+    /// Expected RTMR[0]. Mismatch fails verification. TDX-only.
     pub expected_rtmr0: Option<[u8; 48]>,
-    /// Expected RTMR[1]. TDX-only.
+    /// Expected RTMR[1]. Mismatch fails verification. TDX-only.
     pub expected_rtmr1: Option<[u8; 48]>,
-    /// Expected RTMR[2]. TDX-only.
+    /// Expected RTMR[2]. Mismatch fails verification. TDX-only.
     pub expected_rtmr2: Option<[u8; 48]>,
-    /// Expected RTMR[3]. TDX-only.
+    /// Expected RTMR[3]. Mismatch fails verification. TDX-only.
     pub expected_rtmr3: Option<[u8; 48]>,
-    /// Expected SNP launch digest (`report.measurement`). Result in
-    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
-    /// verification. SNP-only.
+    /// Expected SNP launch digest (`report.measurement`). Mismatch fails
+    /// verification; a match surfaces as `Some(true)` in
+    /// [`VerificationResult::launch_digest_match`]. SNP-only.
     pub expected_launch_digest: Option<[u8; 48]>,
     /// NVIDIA GPU verification parameters, applied when an envelope carries a
     /// `gpu` bundle. Grouped behind a single feature gate (see
@@ -195,11 +195,13 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
-    /// MRTD compare result. `None` if no expected value was supplied.
-    /// Always `None` for SNP.
+    /// MRTD compare result: `Some(true)` when an expected value was supplied
+    /// (a mismatch fails verification, so `Some(false)` never appears in a
+    /// returned result), `None` when not supplied. Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mrtd_match: Option<bool>,
-    /// RTMR[0] compare result. Always `None` for SNP.
+    /// RTMR[0] compare result; same semantics as `mrtd_match`. Always `None`
+    /// for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr0_match: Option<bool>,
     /// RTMR[1] compare result. Always `None` for SNP.
@@ -211,8 +213,8 @@ pub struct VerificationResult {
     /// RTMR[3] compare result. Always `None` for SNP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr3_match: Option<bool>,
-    /// SNP launch digest compare result. `None` if no expected value was
-    /// supplied. Always `None` for TDX.
+    /// SNP launch digest compare result; same semantics as `mrtd_match`.
+    /// Always `None` for TDX.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_digest_match: Option<bool>,
 }

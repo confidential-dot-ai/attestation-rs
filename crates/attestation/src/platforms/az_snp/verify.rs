@@ -1,8 +1,9 @@
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
+use crate::platforms::snp::verify::LAUNCH_DIGEST_LABEL;
 use crate::platforms::tpm_common;
 use crate::types::{PlatformType, ProcessorGeneration, VerificationResult, VerifyParams};
-use crate::utils::decode_base64url;
+use crate::utils::{check_expected, decode_base64url};
 
 use super::evidence::AzSnpEvidence;
 
@@ -209,12 +210,13 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     let init_data_match =
         tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
 
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&snp_report.measurement[..], expected));
+    // Launch-digest check against a caller-supplied reference. Constant-time;
+    // a supplied reference that doesn't match fails verification.
+    let launch_digest_match = check_expected(
+        LAUNCH_DIGEST_LABEL,
+        &snp_report.measurement[..],
+        params.expected_launch_digest.as_ref().map(|e| e.as_slice()),
+    )?;
 
     let snp_claims = crate::platforms::snp::claims::extract_claims(&snp_report);
     let mut result = tpm_common::build_tpm_verification_result(
