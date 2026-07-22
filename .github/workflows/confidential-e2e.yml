@@ -4,7 +4,7 @@ name: confidential-e2e
 # archive, no serial console, no ci-tests OCI package). ONE matrix, per-platform
 # cells because attestation-rs tests each attestation MECHANISM separately:
 #   snp-metal-cvm : native SEV-SNP via /dev/sev-guest  (--features attest)
-#   azure-cvm     : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
+#   azure-snp-cvm : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
 #                   az_snp_live only — runnable nowhere else)
 # Adding a platform later (tdx-metal-cvm, azure-tdx-cvm) = one more include line.
 # Trigger: push:main + dispatch. NEVER pull_request (org self-hosted hardware).
@@ -33,7 +33,7 @@ jobs:
             test_threads: "2"
             tee_dev: /dev/sev-guest
           - platform: azure
-            runs_on: azure-cvm
+            runs_on: azure-snp-cvm
             features: "attest,az-snp"
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
             test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
