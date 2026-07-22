@@ -32,7 +32,7 @@ jobs:
             filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
             test_threads: "2"
             tee_dev: /dev/sev-guest
-          - platform: azure
+          - platform: azure-snp
             runs_on: azure-snp-cvm
             features: "attest,az-snp"
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
