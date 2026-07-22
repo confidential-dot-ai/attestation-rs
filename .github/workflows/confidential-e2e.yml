@@ -49,7 +49,7 @@ jobs:
           #   test_threads: "2"
           #   tee_dev: /dev/tdx-guest
           # azure-tdx: Azure vTPM TDX (az_tdx_live, runnable nowhere else). Runner =
-          #   a standalone DC4es_v6 TDX CVM in westeurope (confidential-ci
+          #   a standalone DC4es_v6 TDX CVM in westus (confidential-ci
           #   provision-azure-tdx-cvm.yml): GA'd v6 sizes, but AKS still refuses TDX
           #   node pools (Azure/AKS#5618), hence not an azure-cvm AKS twin. Attests
           #   via vTPM + IMDS /acc/tdquote, so the device gate is /dev/tpmrm0, same
