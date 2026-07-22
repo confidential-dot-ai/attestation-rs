@@ -63,7 +63,7 @@ jobs:
             filter: "binary(az_tdx_live)"
             test_threads: "1"
             tee_dev: /dev/tpmrm0
-    name: tee (${{ matrix.platform }})
+    name: tee (${{ matrix.runs_on }})   # job name == runner label, matching kettle — grep-able straight to the runner
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
     steps:
