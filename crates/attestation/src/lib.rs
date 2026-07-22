@@ -270,7 +270,10 @@ pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
 /// ```
 pub struct Verifier {
     cert_provider: Box<dyn CertProvider>,
-    tdx_provider: Box<dyn TdxCollateralProvider>,
+    /// `None` = offline: TDX collateral checks (PCK CRL, TCB status, QE
+    /// identity) are skipped and `collateral_verified` stays `false`. See
+    /// [`Verifier::offline`].
+    tdx_provider: Option<Box<dyn TdxCollateralProvider>>,
     #[cfg(feature = "nvidia-gpu")]
     nras_provider: Box<dyn platforms::nvidia_gpu::NrasProvider>,
 }
@@ -280,7 +283,7 @@ impl Verifier {
     pub fn new() -> Self {
         Self {
             cert_provider: Box::new(DefaultCertProvider::new()),
-            tdx_provider: Box::new(DefaultTdxCollateralProvider::new()),
+            tdx_provider: Some(Box::new(DefaultTdxCollateralProvider::new())),
             #[cfg(feature = "nvidia-gpu")]
             nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
         }
@@ -294,8 +297,24 @@ impl Verifier {
 
     #[must_use]
     pub fn with_tdx_provider(mut self, provider: impl TdxCollateralProvider + 'static) -> Self {
-        self.tdx_provider = Box::new(provider);
+        self.tdx_provider = Some(Box::new(provider));
         self
+    }
+
+    /// A verifier with no network-backed collateral: quote signatures and cert
+    /// chains verify against the bundled AMD/Intel roots (SNP needs an inline
+    /// VEK in the evidence), while the TDX collateral checks (PCK CRL, TCB
+    /// status, QE identity) are skipped and `collateral_verified` stays
+    /// `false`. This is the mode the WASM verifier runs in, where the default
+    /// providers cannot reach AMD KDS / Intel PCS.
+    #[must_use]
+    pub fn offline() -> Self {
+        Self {
+            cert_provider: Box::new(DefaultCertProvider::new()),
+            tdx_provider: None,
+            #[cfg(feature = "nvidia-gpu")]
+            nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
+        }
     }
 
     #[cfg(feature = "nvidia-gpu")]
@@ -362,6 +381,13 @@ impl Verifier {
         Ok(result)
     }
 
+    /// The TDX collateral provider to pass to platform verifiers (`None` in
+    /// offline mode).
+    #[allow(dead_code)]
+    fn tdx_collateral(&self) -> Option<&dyn TdxCollateralProvider> {
+        self.tdx_provider.as_deref()
+    }
+
     #[allow(unused_variables)]
     async fn verify_platform(
         &self,
@@ -381,12 +407,7 @@ impl Verifier {
             PlatformType::Tdx => {
                 let ev: platforms::tdx::evidence::TdxEvidence = serde_json::from_value(evidence)
                     .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::tdx::verify::verify_evidence(
-                    &ev,
-                    params,
-                    Some(self.tdx_provider.as_ref()),
-                )
-                .await
+                platforms::tdx::verify::verify_evidence(&ev, params, self.tdx_collateral()).await
             }
             #[cfg(feature = "az-snp")]
             PlatformType::AzSnp => {
@@ -401,12 +422,7 @@ impl Verifier {
                 let ev: platforms::az_tdx::evidence::AzTdxEvidence =
                     serde_json::from_value(evidence)
                         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::az_tdx::verify::verify_evidence(
-                    &ev,
-                    params,
-                    Some(self.tdx_provider.as_ref()),
-                )
-                .await
+                platforms::az_tdx::verify::verify_evidence(&ev, params, self.tdx_collateral()).await
             }
             #[cfg(feature = "gcp-snp")]
             PlatformType::GcpSnp => {
@@ -423,24 +439,14 @@ impl Verifier {
             PlatformType::GcpTdx => {
                 let ev: platforms::tdx::evidence::TdxEvidence = serde_json::from_value(evidence)
                     .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::gcp_tdx::verify::verify_evidence(
-                    &ev,
-                    params,
-                    Some(self.tdx_provider.as_ref()),
-                )
-                .await
+                platforms::gcp_tdx::verify::verify_evidence(&ev, params, self.tdx_collateral()).await
             }
             #[cfg(feature = "dstack")]
             PlatformType::Dstack => {
                 let ev: platforms::dstack::evidence::DstackEvidence =
                     serde_json::from_value(evidence)
                         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::dstack::verify::verify_evidence(
-                    &ev,
-                    params,
-                    Some(self.tdx_provider.as_ref()),
-                )
-                .await
+                platforms::dstack::verify::verify_evidence(&ev, params, self.tdx_collateral()).await
             }
             #[cfg(not(all(
                 feature = "snp",
