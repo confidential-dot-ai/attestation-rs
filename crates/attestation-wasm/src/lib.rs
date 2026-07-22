@@ -9,6 +9,8 @@ use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
     parse_report, verify_cert_chain, verify_report_signature,
 };
+use attestation::platforms::tdx::evidence::TdxEvidence;
+use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
 use attestation::types::{ProcessorGeneration, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
 
@@ -156,6 +158,64 @@ pub fn verify_az_snp(
     let mut result = serde_json::to_value(&verified.result)
         .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
     result["report_version"] = serde_json::json!(verified.report_version);
+
+    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
+/// Verify bare-metal Intel TDX (tdx) DCAP attestation evidence in WASM.
+///
+/// This is the direct-DCAP counterpart of [`verify_az_tdx`]: no vTPM in the
+/// path, so the freshness anchor lives directly in the TD quote's 64-byte
+/// `report_data` (zero-padded), as produced by attesters that bind
+/// `SHA-384(anchor)` — e.g. a serving-cert SPKI + nonce, or a session
+/// public key + nonce. Verification (see `platforms/tdx/verify.rs`):
+/// 1. Parse the TD quote (v4/v5) and verify its ECDSA P-256 signature.
+/// 2. Verify the full DCAP chain: PCK cert chain to the pinned Intel SGX Root
+///    CA, QE report signature, and QE report binding.
+/// 3. Enforce the TD debug-attribute policy (reject debug TDs — no opt-in here).
+/// 4. Bind `report_data` to `expected_report_data` (padded, constant-time),
+///    failing closed when an anchor is supplied and does not match.
+/// 5. Optionally bind MRCONFIGID to `expected_init_data_hash`.
+/// 6. When the evidence carries a `cc_eventlog`, replay it against RTMR0–3 and
+///    fail closed on any divergence.
+///
+/// Like the other vTPM-less entry points, the DCAP **collateral** checks (PCK
+/// CRL, TCB status, TD-QE identity) need an async provider and are skipped in
+/// WASM, so `collateral_verified` is always `false`. The measurement surfaces
+/// as `claims.launch_digest` = hex(MRTD); MRTD/RTMR pinning is the JS policy
+/// layer's job.
+///
+/// - `evidence_json`: tdx evidence JSON (`{ quote, cc_eventlog? }`, base64 std)
+/// - `expected_report_data`: optional raw bytes the TD quote `report_data`
+///   must equal after zero-padding to 64 bytes
+/// - `expected_init_data_hash`: optional bytes to bind against MRCONFIGID
+///
+/// Returns the verification result as JSON, or throws on any check failure.
+///
+/// `async` for the same reason as [`verify_az_tdx`]: the shared core is
+/// `async` for its optional collateral provider; with a `None` provider it
+/// performs no actual awaiting. Callers `await` the returned Promise.
+#[wasm_bindgen]
+pub async fn verify_tdx(
+    evidence_json: String,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let evidence: TdxEvidence = serde_json::from_str(&evidence_json)
+        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+
+    let params = VerifyParams {
+        expected_report_data,
+        expected_init_data_hash,
+        ..VerifyParams::default()
+    };
+
+    // None collateral provider: CRL/TCB/QE-identity checks are skipped (same
+    // trade-off the other WASM entry points document), collateral_verified
+    // stays false.
+    let result = verify_tdx_evidence(&evidence, &params, None)
+        .await
+        .map_err(|e| JsError::new(&format!("tdx verify: {e}")))?;
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
