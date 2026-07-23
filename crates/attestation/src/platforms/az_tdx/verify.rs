@@ -98,12 +98,13 @@ pub async fn verify_evidence(
             tcb_signing_chain.as_deref(),
         )?;
 
-        // Reject Revoked TCB status
-        if status.tcb_status == crate::types::TdxTcbStatus::Revoked {
-            return Err(AttestationError::TcbMismatch(
-                "TDX TCB status is Revoked".into(),
-            ));
-        }
+        // Enforce the caller's TCB policy: reject Revoked always, reject
+        // out-of-date TCB and expired collateral unless explicitly allowed.
+        dcap::enforce_tcb_policy(
+            &status,
+            params.allow_out_of_date_tcb,
+            params.allow_expired_collateral,
+        )?;
 
         // QE Identity verification (TDX uses TD_QE, not SGX QE)
         let qe_identity_json = provider.get_td_qe_identity().await?;

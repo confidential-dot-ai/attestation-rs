@@ -32,6 +32,14 @@ pub struct VerifyParamsInput {
     #[serde(default)]
     pub allow_debug: bool,
     pub min_tcb: Option<MinTcbInput>,
+    /// Accept out-of-date TDX TCB (rejected by default). Honored only when
+    /// the server config sets `attestation.allow_out_of_date_tcb = true`.
+    #[serde(default)]
+    pub allow_out_of_date_tcb: bool,
+    /// Accept expired TDX collateral (rejected by default). Honored only when
+    /// the server config sets `attestation.allow_expired_collateral = true`.
+    #[serde(default)]
+    pub allow_expired_collateral: bool,
 
     /// Base64-encoded user nonce that seeded the GPU SPDM nonce derivation.
     /// Required when verifying an envelope that carries a `nvidia_gpu`
@@ -96,6 +104,19 @@ pub async fn handler(
         ));
     }
 
+    let allow_out_of_date_tcb = req.params.allow_out_of_date_tcb;
+    if allow_out_of_date_tcb && !state.config.attestation.allow_out_of_date_tcb {
+        return Err(ApiError::BadRequest(
+            "allow_out_of_date_tcb is disabled by server configuration".to_string(),
+        ));
+    }
+    let allow_expired_collateral = req.params.allow_expired_collateral;
+    if allow_expired_collateral && !state.config.attestation.allow_expired_collateral {
+        return Err(ApiError::BadRequest(
+            "allow_expired_collateral is disabled by server configuration".to_string(),
+        ));
+    }
+
     let nvidia_gpu_user_nonce = req
         .params
         .nvidia_gpu_user_nonce
@@ -107,6 +128,8 @@ pub async fn handler(
         expected_report_data,
         expected_init_data_hash,
         allow_debug,
+        allow_out_of_date_tcb,
+        allow_expired_collateral,
         min_tcb,
         // Map the HTTP GPU params into the grouped NvidiaGpuParams struct (the
         // library moved these out of flat VerifyParams). `..Default::default()`

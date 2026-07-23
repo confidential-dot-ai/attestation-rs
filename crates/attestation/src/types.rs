@@ -80,6 +80,16 @@ pub struct VerifyParams {
     pub expected_init_data_hash: Option<Vec<u8>>,
     /// If true, allow guests launched with debug policy. Default: false.
     pub allow_debug: bool,
+    /// If true, accept a TDX platform whose TCB Info status is `OutOfDate` or
+    /// `OutOfDateConfigurationNeeded` (i.e. Intel has published advisories
+    /// covering this TCB). Default: false — out-of-date TCB is rejected.
+    /// `Revoked` is always rejected regardless of this flag.
+    pub allow_out_of_date_tcb: bool,
+    /// If true, accept TDX collateral (TCB Info) whose `nextUpdate` is in the
+    /// past. Default: false — expired collateral fails verification, since a
+    /// network adversary who blocks Intel PCS could otherwise pin the
+    /// verifier to stale, pre-revocation collateral indefinitely.
+    pub allow_expired_collateral: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
     /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];

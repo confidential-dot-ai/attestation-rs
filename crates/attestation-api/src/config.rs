@@ -137,6 +137,12 @@ pub struct AttestationConfig {
     pub platforms: Vec<String>,
     /// If false, requests with `allow_debug: true` are rejected.
     pub allow_debug: bool,
+    /// If false (default), requests with `allow_out_of_date_tcb: true` are
+    /// rejected, so out-of-date TDX TCB always fails verification.
+    pub allow_out_of_date_tcb: bool,
+    /// If false (default), requests with `allow_expired_collateral: true`
+    /// are rejected, so expired TDX collateral always fails verification.
+    pub allow_expired_collateral: bool,
     /// TDX quote generation method: "auto", "vsock", or "configfs".
     /// - "auto": try vsock first (~2-4ms), fall back to ConfigFS TSM (~1015ms).
     /// - "vsock": direct AF_VSOCK to QGS only. Requires vhost-vsock-pci + QGS.
@@ -197,6 +203,8 @@ impl Default for AttestationConfig {
                 "gcp-tdx".to_string(),
             ],
             allow_debug: false,
+            allow_out_of_date_tcb: false,
+            allow_expired_collateral: false,
             tdx_quote_method: "auto".to_string(),
         }
     }

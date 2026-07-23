@@ -397,12 +397,13 @@ pub async fn verify_evidence(
             tcb_signing_chain.as_deref(),
         )?;
 
-        // Reject Revoked TCB status
-        if status.tcb_status == crate::types::TdxTcbStatus::Revoked {
-            return Err(AttestationError::TcbMismatch(
-                "TDX TCB status is Revoked".into(),
-            ));
-        }
+        // Enforce the caller's TCB policy: reject Revoked always, reject
+        // out-of-date TCB and expired collateral unless explicitly allowed.
+        super::dcap::enforce_tcb_policy(
+            &status,
+            params.allow_out_of_date_tcb,
+            params.allow_expired_collateral,
+        )?;
 
         // QE Identity verification (TDX uses TD_QE, not SGX QE)
         let qe_identity_json = provider.get_td_qe_identity().await?;
@@ -704,6 +705,7 @@ mod tests {
         let params = VerifyParams {
             expected_report_data: Some(quote.body.report_data.to_vec()),
             allow_debug: true,
+            allow_expired_collateral: true,
             ..Default::default()
         };
         let result = verify_evidence(&evidence, &params, None).await;
@@ -877,9 +879,13 @@ mod tests {
     #[tokio::test]
     async fn test_verify_evidence_v4_no_expected_report_data() {
         let evidence = make_tdx_evidence(V4_QUOTE);
-        // v4 fixture has debug bit set, so allow_debug must be true
+        // v4 fixture has debug bit set, so allow_debug must be true; the
+        // fixture TCB Info is frozen in time (expired nextUpdate), so the
+        // collateral path must opt into expired collateral.
         let params = VerifyParams {
             allow_debug: true,
+            allow_expired_collateral: true,
+            allow_out_of_date_tcb: true,
             ..Default::default()
         };
 
@@ -916,6 +922,8 @@ mod tests {
         let params = VerifyParams {
             expected_report_data: Some(quote.body.report_data.to_vec()),
             allow_debug: true,
+            allow_expired_collateral: true,
+            allow_out_of_date_tcb: true,
             ..Default::default()
         };
 
@@ -937,6 +945,68 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.report_data_match, Some(true));
         assert!(r.collateral_verified);
+    }
+
+    // Regression tests for the TCB-policy finding: before the fix, only
+    // `Revoked` was rejected — a genuine out-of-date platform (like the v4
+    // fixture's) and expired collateral were silently accepted.
+
+    #[tokio::test]
+    async fn test_verify_evidence_v4_out_of_date_tcb_rejected_by_default() {
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        // allow_debug because the fixture quote has the debug bit; the TCB
+        // policy must still reject the fixture's OutOfDate status.
+        let params = VerifyParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        let provider = FixtureCollateralProvider::new();
+        let result = verify_evidence(&evidence, &params, Some(&provider)).await;
+        let err = format!("{:?}", result.err().expect("OutOfDate TCB must fail"));
+        assert!(
+            err.contains("TcbMismatch") || err.contains("CollateralExpired"),
+            "expected TCB policy rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_v4_expired_collateral_rejected_by_default() {
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        // Allow the out-of-date TCB but not the expired collateral: the
+        // fixture's TCB Info nextUpdate is in the past and must fail.
+        let params = VerifyParams {
+            allow_debug: true,
+            allow_out_of_date_tcb: true,
+            ..Default::default()
+        };
+        let provider = FixtureCollateralProvider::new();
+        let result = verify_evidence(&evidence, &params, Some(&provider)).await;
+        let err = format!(
+            "{:?}",
+            result.err().expect("expired collateral must fail")
+        );
+        assert!(
+            err.contains("CollateralExpired"),
+            "expected CollateralExpired, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_v4_opt_in_flags_accept() {
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let params = VerifyParams {
+            allow_debug: true,
+            allow_out_of_date_tcb: true,
+            allow_expired_collateral: true,
+            ..Default::default()
+        };
+        let provider = FixtureCollateralProvider::new();
+        let result = verify_evidence(&evidence, &params, Some(&provider)).await;
+        assert!(
+            result.is_ok(),
+            "explicit opt-ins should accept the fixture: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]

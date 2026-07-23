@@ -916,6 +916,38 @@ fn chrono_parse_is_past(ts: &str) -> Option<bool> {
     Some(chrono::Utc::now() > dt)
 }
 
+/// Enforce the caller's TCB policy on an evaluated status. Default (both
+/// flags false): accept only `UpToDate` / `SWHardeningNeeded` /
+/// `ConfigurationNeeded` / `ConfigurationAndSWHardeningNeeded`, reject
+/// out-of-date TCB (Intel has published advisories for it) and expired
+/// collateral. `Revoked` is always rejected.
+pub fn enforce_tcb_policy(
+    status: &DcapVerificationStatus,
+    allow_out_of_date_tcb: bool,
+    allow_expired_collateral: bool,
+) -> Result<()> {
+    if status.collateral_expired && !allow_expired_collateral {
+        return Err(AttestationError::CollateralExpired(
+            "TCB Info nextUpdate is in the past".into(),
+        ));
+    }
+    match status.tcb_status {
+        TdxTcbStatus::UpToDate
+        | TdxTcbStatus::SWHardeningNeeded
+        | TdxTcbStatus::ConfigurationNeeded
+        | TdxTcbStatus::ConfigurationAndSWHardeningNeeded => Ok(()),
+        TdxTcbStatus::OutOfDate | TdxTcbStatus::OutOfDateConfigurationNeeded
+            if allow_out_of_date_tcb =>
+        {
+            log::warn!("accepting out-of-date TDX TCB (allow_out_of_date_tcb)");
+            Ok(())
+        }
+        other => Err(AttestationError::TcbMismatch(format!(
+            "TDX TCB status is {other}"
+        ))),
+    }
+}
+
 /// Parse a TCB status string from Intel PCS into our enum.
 fn parse_tcb_status(s: &str) -> Result<TdxTcbStatus> {
     match s {

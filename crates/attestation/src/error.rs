@@ -42,6 +42,9 @@ pub enum AttestationError {
     #[error("TCB version mismatch: {0}")]
     TcbMismatch(String),
 
+    #[error("TCB collateral expired: {0}")]
+    CollateralExpired(String),
+
     #[error("report_data mismatch")]
     ReportDataMismatch,
 
