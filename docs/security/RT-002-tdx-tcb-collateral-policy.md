@@ -1,6 +1,16 @@
 # RT-002 — TDX verification accepts out-of-date TCB and expired collateral
 
-**Status:** confirmed by code audit + regression tests (this branch)
+**Status:** LIVE-VERIFIED end-to-end against Intel PCS (2026-07-23): ran the
+attestation-api binary built from `main` (pre-fix) and from this branch, and
+POSTed the genuine `tdx_quote_4.dat` hardware quote (collateral fetched live
+from Intel PCS — `collateral_verified: true`).
+
+| Server | Request | Result |
+|---|---|---|
+| pre-fix (`main`) | `allow_debug` only | **ACCEPTED** — `tcb_status: OutOfDate`, FMSPC `50806f000000`, **11 active Intel advisories** (INTEL-SA-00837, -00960, -00982, -00986, -01010, -01036, -01076, -01079, -01099, -01103, -01111) |
+| this branch | `allow_debug` only | REJECTED — `TDX TCB status is OutOfDate` |
+| this branch | client sets `allow_out_of_date_tcb`, server config default | REJECTED — `allow_out_of_date_tcb is disabled by server configuration` |
+| this branch | client + server opt-in both set | ACCEPTED (explicit operator choice) |
 **Severity:** High
 **Adversary:** operator of a genuine TDX platform with a known-vulnerable or
 revoked-in-flight TCB; network adversary able to starve the verifier of fresh
