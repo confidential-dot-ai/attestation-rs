@@ -716,7 +716,7 @@ impl Default for DefaultTdxCollateralProvider {
 /// Decodes percent-encoded bytes and pushes them as raw bytes into a `Vec<u8>`,
 /// which is then losslessly converted to a UTF-8 `String` (PEM data is ASCII).
 #[cfg(not(target_arch = "wasm32"))]
-fn percent_decode(input: &str) -> String {
+pub fn percent_decode(input: &str) -> String {
     let mut result = Vec::with_capacity(input.len());
     let mut chars = input.bytes();
     while let Some(b) = chars.next() {

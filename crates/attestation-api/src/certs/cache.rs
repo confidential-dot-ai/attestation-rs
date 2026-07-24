@@ -193,8 +193,35 @@ impl CertCache {
         };
 
         tracing::info!(%url, "fetching TDX collateral");
-        let resp = self.http_client.get(&url).send().await?;
-        let mut data = resp.error_for_status()?.bytes().await?.to_vec();
+        let resp = self.http_client.get(&url).send().await?.error_for_status()?;
+
+        // Intel signs PCS collateral so it stays authentic after transiting
+        // caches like this one. Capture the issuer-chain header alongside the
+        // body so `CachedTdxProvider` can hand it to the verifier — without
+        // it, the library skips collateral signature verification entirely.
+        let chain_header = match collateral_type {
+            "tcb_info" => Some(("tcb-info-issuer-chain", "tcb_signing_chain")),
+            "qe_identity" => Some(("sgx-enclave-identity-issuer-chain", "qe_identity_signing_chain")),
+            "td_qe_identity" => Some((
+                "sgx-enclave-identity-issuer-chain",
+                "td_qe_identity_signing_chain",
+            )),
+            _ => None,
+        };
+        if let Some((header_name, chain_type)) = chain_header {
+            match resp.headers().get(header_name).and_then(|v| v.to_str().ok()) {
+                Some(value) => {
+                    let chain_key = (chain_type.to_string(), "default".to_string());
+                    let chain_pem = attestation::collateral::percent_decode(value).into_bytes();
+                    self.tdx_cache.insert(chain_key, chain_pem).await;
+                }
+                None => {
+                    tracing::warn!(%url, "PCS response missing issuer-chain header; collateral signature verification will be skipped");
+                }
+            }
+        }
+
+        let mut data = resp.bytes().await?.to_vec();
 
         // Intel PCS returns PCK CRL as PEM; convert to DER for the library.
         if collateral_type == "pck_crl" && data.starts_with(b"-----BEGIN") {
@@ -203,6 +230,16 @@ impl CertCache {
 
         self.tdx_cache.insert(key, data.clone()).await;
         Ok(data)
+    }
+
+    /// Read cached TDX collateral without triggering a fetch. Used for the
+    /// issuer-chain PEMs captured alongside collateral bodies: there is no
+    /// standalone URL for them, so a cache miss must return `None` rather
+    /// than hit the network.
+    pub async fn get_cached_tdx_collateral(&self, collateral_type: &str) -> Option<Vec<u8>> {
+        self.tdx_cache
+            .get(&(collateral_type.to_string(), "default".to_string()))
+            .await
     }
 
     // --- CRL operations ---

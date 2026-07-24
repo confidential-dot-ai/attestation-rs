@@ -1328,6 +1328,60 @@ mod tests {
     }
 
     #[test]
+    fn test_enforce_tcb_policy_truth_table() {
+        use crate::types::TdxTcbStatus::*;
+
+        let status = |tcb_status: TdxTcbStatus, collateral_expired: bool| {
+            DcapVerificationStatus {
+                tcb_status,
+                fmspc: "000000000000".to_string(),
+                advisory_ids: vec![],
+                collateral_expired,
+            }
+        };
+
+        // Fresh collateral, default policy (Intel's lenient appraisal
+        // profile): UpToDate + hardening/config-needed statuses accepted.
+        for s in [
+            UpToDate,
+            SWHardeningNeeded,
+            ConfigurationNeeded,
+            ConfigurationAndSWHardeningNeeded,
+        ] {
+            assert!(
+                enforce_tcb_policy(&status(s, false), false, false).is_ok(),
+                "{s} must be accepted by default"
+            );
+        }
+        // OutOfDate* and Revoked rejected by default.
+        for s in [OutOfDate, OutOfDateConfigurationNeeded, Revoked] {
+            assert!(
+                enforce_tcb_policy(&status(s, false), false, false).is_err(),
+                "{s} must be rejected by default"
+            );
+        }
+        // allow_out_of_date_tcb accepts OutOfDate* but never Revoked.
+        assert!(enforce_tcb_policy(&status(OutOfDate, false), true, false).is_ok());
+        assert!(
+            enforce_tcb_policy(&status(OutOfDateConfigurationNeeded, false), true, false).is_ok()
+        );
+        assert!(
+            enforce_tcb_policy(&status(Revoked, false), true, false).is_err(),
+            "Revoked must always be rejected regardless of opt-ins"
+        );
+        // Expired collateral gates everything unless opted in — including
+        // UpToDate, and including when out-of-date is separately allowed.
+        assert!(enforce_tcb_policy(&status(UpToDate, true), false, false).is_err());
+        assert!(enforce_tcb_policy(&status(OutOfDate, true), true, false).is_err());
+        assert!(enforce_tcb_policy(&status(UpToDate, true), false, true).is_ok());
+        assert!(enforce_tcb_policy(&status(OutOfDate, true), true, true).is_ok());
+        assert!(
+            enforce_tcb_policy(&status(Revoked, true), true, true).is_err(),
+            "Revoked must always be rejected regardless of opt-ins"
+        );
+    }
+
+    #[test]
     fn test_parse_auth_data_v4() {
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).expect("should parse v4 auth data");

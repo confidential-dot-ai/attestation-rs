@@ -62,16 +62,27 @@ evaluated to "not expired".
   `ConfigurationNeeded` remain accepted (Intel's lenient profile).
 - `VerifyParams.allow_expired_collateral` (default **false**) — when false,
   a TCB Info whose `nextUpdate` is past fails with the new
-  `AttestationError::CollateralExpired`.
+  `AttestationError::CollateralExpired`. A missing or unparseable
+  `nextUpdate` is treated as expired (fail closed) — the pre-fix behavior
+  silently evaluated it to "not expired".
 - Shared enforcement in `dcap::enforce_tcb_policy`, called from both the
   bare-metal/GCP (`platforms/tdx`) and Azure (`platforms/az_tdx`) paths.
 - HTTP API: `allow_out_of_date_tcb` / `allow_expired_collateral` request
   params, each honored only when the server config enables the same flag
   (default off) — mirroring the existing `allow_debug` server gate, so the
   server operator controls the floor.
+- The attestation-api's `CachedTdxProvider` now caches the Intel PCS
+  issuer-chain response headers alongside the collateral bodies and serves
+  them to the verifier, so TCB Info / QE Identity signatures are verified in
+  the deployed service (previously the chains were dropped and collateral
+  signature verification was skipped with a log warning).
 - Regression tests: the v4 fixture (genuine OutOfDate quote + expired TCB
   Info) now fails by default and passes only with both opt-ins; the two
-  pre-existing fixture tests were updated to opt in explicitly.
+  pre-existing fixture tests were updated to opt in explicitly. The OutOfDate
+  rejection test opts into expired collateral so it exercises the TCB-status
+  gate in isolation (the expiry gate fires first otherwise), and a
+  truth-table unit test covers `enforce_tcb_policy` over all TCB statuses
+  and flag combinations.
 
 ## Consumer note (c8s)
 

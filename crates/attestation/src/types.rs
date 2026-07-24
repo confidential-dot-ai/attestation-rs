@@ -88,7 +88,10 @@ pub struct VerifyParams {
     /// If true, accept TDX collateral (TCB Info) whose `nextUpdate` is in the
     /// past. Default: false — expired collateral fails verification, since a
     /// network adversary who blocks Intel PCS could otherwise pin the
-    /// verifier to stale, pre-revocation collateral indefinitely.
+    /// verifier to stale, pre-revocation collateral indefinitely. A missing
+    /// or unparseable `nextUpdate` is treated as expired (fail closed).
+    /// Scope note: this currently gates the TCB Info only; QE Identity and
+    /// CRL freshness are not yet checked.
     pub allow_expired_collateral: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,

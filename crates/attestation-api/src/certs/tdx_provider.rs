@@ -91,5 +91,28 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
         Ok(())
     }
 
-    // get_tcb_signing_chain and get_qe_identity_signing_chain use default Ok(None)
+    // The signing chains are captured from the PCS issuer-chain response
+    // headers by `CertCache::get_tdx_collateral` when the corresponding
+    // collateral body is fetched. The verify flow always fetches the body
+    // first, so by the time these are called the chain is cached (same TTL).
+    // A miss returns None and the library logs a warning and skips collateral
+    // signature verification — that should only happen if Intel omits the
+    // header, which the cache logs as a warning at fetch time.
+    async fn get_tcb_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        Ok(self.cache.get_cached_tdx_collateral("tcb_signing_chain").await)
+    }
+
+    async fn get_qe_identity_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        Ok(self
+            .cache
+            .get_cached_tdx_collateral("qe_identity_signing_chain")
+            .await)
+    }
+
+    async fn get_td_qe_identity_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        Ok(self
+            .cache
+            .get_cached_tdx_collateral("td_qe_identity_signing_chain")
+            .await)
+    }
 }

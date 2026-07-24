@@ -319,6 +319,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attestation_config_defaults_are_fail_closed() {
+        let config = AttestationConfig::default();
+        assert!(!config.allow_debug);
+        assert!(!config.allow_out_of_date_tcb);
+        assert!(!config.allow_expired_collateral);
+
+        // A config file predating these fields must deserialize to the same
+        // fail-closed values via the struct-level #[serde(default)] — never
+        // fail to parse, never default-true.
+        let parsed: AttestationConfig =
+            toml::from_str("").expect("empty attestation config should parse via defaults");
+        assert!(!parsed.allow_debug);
+        assert!(!parsed.allow_out_of_date_tcb);
+        assert!(!parsed.allow_expired_collateral);
+    }
+
+    #[test]
     fn auth_config_debug_redacts_keys() {
         let config = AuthConfig {
             api_keys: vec![
