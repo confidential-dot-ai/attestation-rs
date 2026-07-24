@@ -954,18 +954,23 @@ mod tests {
     #[tokio::test]
     async fn test_verify_evidence_v4_out_of_date_tcb_rejected_by_default() {
         let evidence = make_tdx_evidence(V4_QUOTE);
-        // allow_debug because the fixture quote has the debug bit; the TCB
-        // policy must still reject the fixture's OutOfDate status.
+        // allow_debug because the fixture quote has the debug bit.
+        // allow_expired_collateral because the fixture's TCB Info nextUpdate
+        // is frozen in the past — without it the expiry gate fires FIRST and
+        // this test would pass via CollateralExpired even if the OutOfDate
+        // rejection were removed. The OutOfDate gate must be exercised in
+        // isolation, so the only acceptable error is TcbMismatch.
         let params = VerifyParams {
             allow_debug: true,
+            allow_expired_collateral: true,
             ..Default::default()
         };
         let provider = FixtureCollateralProvider::new();
         let result = verify_evidence(&evidence, &params, Some(&provider)).await;
         let err = format!("{:?}", result.err().expect("OutOfDate TCB must fail"));
         assert!(
-            err.contains("TcbMismatch") || err.contains("CollateralExpired"),
-            "expected TCB policy rejection, got: {err}"
+            err.contains("TcbMismatch"),
+            "expected TcbMismatch for OutOfDate TCB, got: {err}"
         );
     }
 

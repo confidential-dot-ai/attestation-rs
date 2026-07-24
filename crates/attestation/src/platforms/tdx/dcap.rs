@@ -825,7 +825,10 @@ pub fn evaluate_tcb_status(
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
 
-    // Check if collateral has expired (nextUpdate is in the past)
+    // Check if collateral has expired (nextUpdate is in the past). A missing
+    // or unparseable nextUpdate is treated as EXPIRED: freshness evaluation of
+    // a security-relevant field fails closed, so malformed or stripped
+    // collateral cannot bypass the expiry gate.
     let collateral_expired = wrapper
         .tcb_info
         .next_update
@@ -835,9 +838,9 @@ pub fn evaluate_tcb_status(
             // Try common formats
             chrono_parse_is_past(ts)
         })
-        .unwrap_or(false);
+        .unwrap_or(true);
     if collateral_expired {
-        log::warn!("TCB Info collateral has expired (nextUpdate in the past)");
+        log::warn!("TCB Info collateral has expired or nextUpdate is missing/unparseable");
     }
 
     let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components(pck_pem)?;
@@ -917,12 +920,15 @@ fn chrono_parse_is_past(ts: &str) -> Option<bool> {
 }
 
 /// Enforce the caller's TCB policy on an evaluated status. Default (both
-/// flags false) matches Intel's reference verifier policy: accept `UpToDate`
-/// plus the hardening/configuration-needed statuses (advisories exist but are
+/// flags false) is Intel's lenient appraisal profile: accept `UpToDate` plus
+/// the hardening/configuration-needed statuses (advisories exist but are
 /// addressed by software mitigations or platform configuration, not by a TCB
 /// recovery), and reject `OutOfDate` / `OutOfDateConfigurationNeeded` (a TCB
 /// recovery exists that resolves published advisories, so the platform is
 /// simply unpatched) plus expired collateral. `Revoked` is always rejected.
+/// Intel's strict profile accepts `UpToDate` only; relying parties that want
+/// it can inspect the `tcb_status` surfaced on the verification result and
+/// tighten further.
 pub fn enforce_tcb_policy(
     status: &DcapVerificationStatus,
     allow_out_of_date_tcb: bool,
