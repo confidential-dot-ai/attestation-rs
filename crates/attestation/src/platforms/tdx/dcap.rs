@@ -917,10 +917,12 @@ fn chrono_parse_is_past(ts: &str) -> Option<bool> {
 }
 
 /// Enforce the caller's TCB policy on an evaluated status. Default (both
-/// flags false): accept only `UpToDate` / `SWHardeningNeeded` /
-/// `ConfigurationNeeded` / `ConfigurationAndSWHardeningNeeded`, reject
-/// out-of-date TCB (Intel has published advisories for it) and expired
-/// collateral. `Revoked` is always rejected.
+/// flags false) matches Intel's reference verifier policy: accept `UpToDate`
+/// plus the hardening/configuration-needed statuses (advisories exist but are
+/// addressed by software mitigations or platform configuration, not by a TCB
+/// recovery), and reject `OutOfDate` / `OutOfDateConfigurationNeeded` (a TCB
+/// recovery exists that resolves published advisories, so the platform is
+/// simply unpatched) plus expired collateral. `Revoked` is always rejected.
 pub fn enforce_tcb_policy(
     status: &DcapVerificationStatus,
     allow_out_of_date_tcb: bool,
