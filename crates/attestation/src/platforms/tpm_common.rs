@@ -647,7 +647,21 @@ pub fn check_report_data(tpm_msg: &[u8], expected: Option<&[u8]>) -> Result<Opti
 /// TPM PCR extend semantics: `PCR[8] = SHA256(zeros_32 || init_data_hash)`.
 /// The guest extends PCR[8] from its initial zero state with the init_data hash,
 /// so we must replicate that extend operation before comparing.
-pub fn check_init_data(tpm_pcrs: &[Vec<u8>], expected: Option<&[u8]>) -> Result<Option<bool>> {
+///
+/// `tpm_pcrs` is attacker-supplied data carried alongside the quote: a
+/// `TPM2_Quote` signs only a `pcrDigest` over the PCRs named in its `pcrSelect`,
+/// so `verify_tpm_pcrs` authenticates `tpm_pcrs[i]` only for `i` in that
+/// selection. Any entry outside it is unauthenticated. We therefore re-derive
+/// the signed selection from the (already signature-verified) quote message and
+/// require index 8 to be present before trusting `tpm_pcrs[8]`.
+///
+/// Callers MUST have verified the quote signature and called `verify_tpm_pcrs`
+/// before calling this.
+pub fn check_init_data(
+    tpm_msg: &[u8],
+    tpm_pcrs: &[Vec<u8>],
+    expected: Option<&[u8]>,
+) -> Result<Option<bool>> {
     let Some(expected) = expected else {
         return Ok(None);
     };
@@ -657,8 +671,19 @@ pub fn check_init_data(tpm_pcrs: &[Vec<u8>], expected: Option<&[u8]>) -> Result<
             expected.len()
         )));
     }
+    let (selected_pcrs, _) = parse_quote_info(tpm_msg)?;
+    if !selected_pcrs.contains(&8) {
+        return Err(AttestationError::QuoteParseFailed(
+            "init_data check requires PCR[8], but it is not in the quote's signed PCR selection \
+             (the supplied value would be unauthenticated)"
+                .to_string(),
+        ));
+    }
     if tpm_pcrs.len() <= 8 {
-        return Err(AttestationError::InitDataMismatch);
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "init_data check requires PCR[8], but only {} PCR values were supplied",
+            tpm_pcrs.len()
+        )));
     }
     // Compute TPM PCR extend: PCR[8] = SHA256(zeros_32 || init_data_hash)
     let extended = crate::utils::sha256_two(&[0u8; 32], expected);
@@ -1407,10 +1432,16 @@ mod tests {
 
     // --- check_init_data tests ---
 
+    /// A quote message whose signed PCR selection covers PCRs 0-8.
+    fn attest_selecting_pcr8() -> Vec<u8> {
+        // sizeofSelect=3, bitmap [0xFF, 0x01, 0x00]: PCRs 0-7 plus PCR 8.
+        build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0x01, 0x00], &[0u8; 32])
+    }
+
     #[test]
     fn test_check_init_data_none_expected() {
         let pcrs = vec![vec![0u8; 32]; 16];
-        let result = check_init_data(&pcrs, None);
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
@@ -1424,7 +1455,7 @@ mod tests {
         let mut pcrs = vec![vec![0u8; 32]; 16];
         pcrs[8] = extended;
 
-        let result = check_init_data(&pcrs, Some(&init_data_hash));
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data_hash));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(true));
     }
@@ -1432,13 +1463,12 @@ mod tests {
     #[test]
     fn test_check_init_data_raw_hash_mismatch() {
         // If PCR[8] contains the raw hash (not extended), it should NOT match.
-        // This is the bug this fix corrects.
         let init_data_hash = [0xBB; 32];
 
         let mut pcrs = vec![vec![0u8; 32]; 16];
         pcrs[8] = init_data_hash.to_vec(); // raw, not extended
 
-        let result = check_init_data(&pcrs, Some(&init_data_hash));
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data_hash));
         assert!(
             result.is_err(),
             "raw hash should not match extended PCR value"
@@ -1454,21 +1484,74 @@ mod tests {
         let mut pcrs = vec![vec![0u8; 32]; 16];
         pcrs[8] = extended;
 
-        let result = check_init_data(&pcrs, Some(&init_data_hash));
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data_hash));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_check_init_data_wrong_length() {
         let pcrs = vec![vec![0u8; 32]; 16];
-        let result = check_init_data(&pcrs, Some(&[0u8; 16]));
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&[0u8; 16]));
         assert!(result.is_err(), "non-32-byte hash should be rejected");
     }
 
     #[test]
     fn test_check_init_data_too_few_pcrs() {
         let pcrs = vec![vec![0u8; 32]; 8]; // only PCR[0..7]
-        let result = check_init_data(&pcrs, Some(&[0u8; 32]));
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&[0u8; 32]));
         assert!(result.is_err(), "should fail with too few PCRs");
+    }
+
+    /// Regression PoC: an unselected PCR[8] must never be trusted.
+    ///
+    /// An attacker on a genuine Azure CVM issues a real AK-signed TPM2_Quote
+    /// whose selection excludes PCR 8, then appends a forged
+    /// pcrs[8] = SHA-256(0^32 || attacker_init_data). verify_tpm_pcrs passes
+    /// (it only hashes the selected PCRs), so before this fix check_init_data
+    /// reported InitDataMatch=true for init-data the TEE never measured.
+    #[test]
+    fn test_check_init_data_rejects_unselected_pcr8() {
+        let attacker_init_data = [0x42; 32];
+        let forged = crate::utils::sha256_two(&[0u8; 32], &attacker_init_data);
+
+        let mut pcrs = vec![vec![0u8; 32]; 24];
+        pcrs[8] = forged;
+
+        // The quote is genuine and internally consistent: its selection covers
+        // PCRs 0-7, whose values are untouched, so the PCR digest check passes.
+        let mut pcr_concat = Vec::new();
+        for pcr in pcrs.iter().take(8) {
+            pcr_concat.extend_from_slice(pcr);
+        }
+        let digest = crate::utils::sha256(&pcr_concat);
+        let msg = build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0x00, 0x00], &digest);
+
+        assert!(
+            verify_tpm_pcrs(&msg, &pcrs).is_ok(),
+            "precondition: the quote's own PCR digest must verify, so that the \
+             only thing standing between the forged PCR[8] and a true result is \
+             the selection-membership check"
+        );
+
+        let result = check_init_data(&msg, &pcrs, Some(&attacker_init_data));
+        assert!(
+            result.is_err(),
+            "PCR[8] outside the signed selection is unauthenticated and must be \
+             rejected, not reported as InitDataMatch=true"
+        );
+    }
+
+    /// The same forged value is accepted once PCR 8 is genuinely in the signed
+    /// selection — confirming the test above fails for the right reason.
+    #[test]
+    fn test_check_init_data_accepts_selected_pcr8() {
+        let init_data = [0x42; 32];
+        let extended = crate::utils::sha256_two(&[0u8; 32], &init_data);
+
+        let mut pcrs = vec![vec![0u8; 32]; 24];
+        pcrs[8] = extended;
+
+        let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data));
+        assert_eq!(result.unwrap(), Some(true));
     }
 }

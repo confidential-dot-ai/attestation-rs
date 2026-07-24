@@ -122,8 +122,11 @@ pub async fn verify_evidence(
 
     // Bindings
     tpm_common::verify_hcl_var_data_binding(&tdx_quote.body.report_data, &hcl.var_data)?;
-    let init_data_match =
-        tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
+    let init_data_match = tpm_common::check_init_data(
+        &tpm_msg,
+        &tpm_pcrs,
+        params.expected_init_data_hash.as_deref(),
+    )?;
 
     // Optional MRTD / RTMR compares. Mismatches surface in the result and
     // do not fail verification.

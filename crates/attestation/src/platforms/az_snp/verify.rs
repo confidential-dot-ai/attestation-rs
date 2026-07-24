@@ -206,8 +206,11 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     }
 
     // Init data and result
-    let init_data_match =
-        tpm_common::check_init_data(&tpm_pcrs, params.expected_init_data_hash.as_deref())?;
+    let init_data_match = tpm_common::check_init_data(
+        &tpm_msg,
+        &tpm_pcrs,
+        params.expected_init_data_hash.as_deref(),
+    )?;
 
     // Optional launch-digest compare. Mismatch surfaces in the result and
     // does not fail verification.
