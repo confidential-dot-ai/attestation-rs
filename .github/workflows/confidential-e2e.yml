@@ -6,7 +6,8 @@ name: confidential-e2e
 #   snp-metal-cvm : native SEV-SNP via /dev/sev-guest  (--features attest)
 #   azure-snp-cvm : Azure SEV-SNP via the vTPM/HCL      (--features attest,az-snp,
 #                   az_snp_live only — runnable nowhere else)
-# Adding a platform later (tdx-metal-cvm, azure-tdx-cvm) = one more include line.
+#   tdx-metal-cvm : native Intel TDX via /dev/tdx_guest (--features attest)
+# Adding a platform later = one more include line.
 # Trigger: push:main + dispatch. NEVER pull_request (org self-hosted hardware).
 on:
   push:
@@ -38,16 +39,22 @@ jobs:
             filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
             test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
             tee_dev: /dev/tpmrm0
-          # ── Phase 2 (TDX), STAGED — uncomment each cell when its runner exists ──
-          # tdx-metal: native TDX via /dev/tdx-guest. Runner from
-          #   provision-tdx-metal-cvm.yml, pending joaosa's TDX rke2 image + a TDX CI
-          #   runner host (tdx-dev-host-1 is dev-only).
-          # - platform: tdx-metal
-          #   runs_on: tdx-metal-cvm
-          #   features: attest
-          #   filter: "binary(capture_fixture)"       # the native TDX test binary
-          #   test_threads: "2"
-          #   tee_dev: /dev/tdx-guest
+          # tdx-metal: native TDX via /dev/tdx_guest (UNDERSCORE; the hyphen
+          #   spelling is qemu's -object tdx-guest, a different string). Runner is
+          #   the in-guest ARC scale set from confidential-ci provision-tdx-metal-cvm.yml,
+          #   standing on tdx-gh-runner and scaling to zero at idle.
+          #   The filter names the ONE native test rather than the whole binary:
+          #   capture_fixture also holds capture_az_snp_evidence_fixture and
+          #   capture_az_tdx_evidence_fixture, and since snp/tdx/az-snp/az-tdx are
+          #   all DEFAULT features they compile in here too. A bare
+          #   binary(capture_fixture) would run both Azure fixtures on bare metal,
+          #   where there is no Azure vTPM or IMDS, and fail.
+          - platform: tdx-metal
+            runs_on: tdx-metal-cvm
+            features: attest
+            filter: "binary(capture_fixture) & test(capture_tdx_evidence_fixture)"
+            test_threads: "2"
+            tee_dev: /dev/tdx_guest
           # azure-tdx: Azure vTPM TDX (az_tdx_live, runnable nowhere else). Runner =
           #   a standalone DC4es_v6 TDX CVM in westus (confidential-ci
           #   provision-azure-tdx-cvm.yml): GA'd v6 sizes, but AKS still refuses TDX
