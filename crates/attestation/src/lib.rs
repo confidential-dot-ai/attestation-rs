@@ -439,7 +439,8 @@ impl Verifier {
             PlatformType::GcpTdx => {
                 let ev: platforms::tdx::evidence::TdxEvidence = serde_json::from_value(evidence)
                     .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-                platforms::gcp_tdx::verify::verify_evidence(&ev, params, self.tdx_collateral()).await
+                platforms::gcp_tdx::verify::verify_evidence(&ev, params, self.tdx_collateral())
+                    .await
             }
             #[cfg(feature = "dstack")]
             PlatformType::Dstack => {
