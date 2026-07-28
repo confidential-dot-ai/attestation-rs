@@ -99,7 +99,10 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
     // signature verification — that should only happen if Intel omits the
     // header, which the cache logs as a warning at fetch time.
     async fn get_tcb_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
-        Ok(self.cache.get_cached_tdx_collateral("tcb_signing_chain").await)
+        Ok(self
+            .cache
+            .get_cached_tdx_collateral("tcb_signing_chain")
+            .await)
     }
 
     async fn get_qe_identity_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {

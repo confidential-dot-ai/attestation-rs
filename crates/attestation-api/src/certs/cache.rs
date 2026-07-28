@@ -193,7 +193,12 @@ impl CertCache {
         };
 
         tracing::info!(%url, "fetching TDX collateral");
-        let resp = self.http_client.get(&url).send().await?.error_for_status()?;
+        let resp = self
+            .http_client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?;
 
         // Intel signs PCS collateral so it stays authentic after transiting
         // caches like this one. Capture the issuer-chain header alongside the
@@ -201,7 +206,10 @@ impl CertCache {
         // it, the library skips collateral signature verification entirely.
         let chain_header = match collateral_type {
             "tcb_info" => Some(("tcb-info-issuer-chain", "tcb_signing_chain")),
-            "qe_identity" => Some(("sgx-enclave-identity-issuer-chain", "qe_identity_signing_chain")),
+            "qe_identity" => Some((
+                "sgx-enclave-identity-issuer-chain",
+                "qe_identity_signing_chain",
+            )),
             "td_qe_identity" => Some((
                 "sgx-enclave-identity-issuer-chain",
                 "td_qe_identity_signing_chain",
@@ -209,7 +217,11 @@ impl CertCache {
             _ => None,
         };
         if let Some((header_name, chain_type)) = chain_header {
-            match resp.headers().get(header_name).and_then(|v| v.to_str().ok()) {
+            match resp
+                .headers()
+                .get(header_name)
+                .and_then(|v| v.to_str().ok())
+            {
                 Some(value) => {
                     let chain_key = (chain_type.to_string(), "default".to_string());
                     let chain_pem = attestation::collateral::percent_decode(value).into_bytes();

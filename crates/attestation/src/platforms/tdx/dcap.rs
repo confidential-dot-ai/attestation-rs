@@ -1331,13 +1331,11 @@ mod tests {
     fn test_enforce_tcb_policy_truth_table() {
         use crate::types::TdxTcbStatus::*;
 
-        let status = |tcb_status: TdxTcbStatus, collateral_expired: bool| {
-            DcapVerificationStatus {
-                tcb_status,
-                fmspc: "000000000000".to_string(),
-                advisory_ids: vec![],
-                collateral_expired,
-            }
+        let status = |tcb_status: TdxTcbStatus, collateral_expired: bool| DcapVerificationStatus {
+            tcb_status,
+            fmspc: "000000000000".to_string(),
+            advisory_ids: vec![],
+            collateral_expired,
         };
 
         // Fresh collateral, default policy (Intel's lenient appraisal

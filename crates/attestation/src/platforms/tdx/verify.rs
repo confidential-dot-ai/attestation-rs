@@ -967,7 +967,7 @@ mod tests {
         };
         let provider = FixtureCollateralProvider::new();
         let result = verify_evidence(&evidence, &params, Some(&provider)).await;
-        let err = format!("{:?}", result.err().expect("OutOfDate TCB must fail"));
+        let err = format!("{:?}", result.expect_err("OutOfDate TCB must fail"));
         assert!(
             err.contains("TcbMismatch"),
             "expected TcbMismatch for OutOfDate TCB, got: {err}"
@@ -986,10 +986,7 @@ mod tests {
         };
         let provider = FixtureCollateralProvider::new();
         let result = verify_evidence(&evidence, &params, Some(&provider)).await;
-        let err = format!(
-            "{:?}",
-            result.err().expect("expired collateral must fail")
-        );
+        let err = format!("{:?}", result.expect_err("expired collateral must fail"));
         assert!(
             err.contains("CollateralExpired"),
             "expected CollateralExpired, got: {err}"
