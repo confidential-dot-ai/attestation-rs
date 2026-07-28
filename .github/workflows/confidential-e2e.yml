@@ -22,6 +22,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ── PER-RUN ATTESTATION OF THE STANDING RUNNERS ──────────────────────────
+  # These run alongside `tee`, not in front of it, so a green run means both
+  # that the suite passed and that an attested environment answered to the
+  # label for this run rather than only when it was provisioned.
+  #
+  # This suite proves a TEE is present and functional. It does not pin a
+  # measurement, so it cannot tell one image from another. That is what these
+  # add: if a standing runner is re-provisioned from a different image, or a
+  # label starts pointing somewhere else, the suite would still pass and this
+  # would not.
+  #
+  # Metal only for now. Both measurements below are published and verified.
+  attest-snp-metal:
+    uses: ./.github/workflows/attest-runner.yml
+    with:
+      runner: snp-metal-cvm
+      platform: snp
+      expected_launch_digest: '15bc995383ddcf1fee2107753e6c26bc65358602519a342b8ff8fbfdfa4b40865d90b11cef11b7d34934e6c5eed19115'
+
+  attest-tdx-metal:
+    uses: ./.github/workflows/attest-runner.yml
+    with:
+      runner: tdx-metal-cvm
+      platform: tdx
+      expected_mrtd: '9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1'
+
   tee:
     strategy:
       fail-fast: false              # one platform failing must not hide the other
