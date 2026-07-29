@@ -22,11 +22,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Build the CLI with guest-side attestation support:
+Build the CLI with guest-side CPU attestation and portable NVIDIA GPU bundle
+verification:
 
 ```bash
-cargo build -p attestation-cli --release --features attest
+cargo build -p attestation-cli --release --features attest,nvidia-gpu
 ```
+
+The released CLI uses this feature set. GPU evidence collection remains in the
+guest attestation service; the CLI verifies the returned bundle via NRAS without
+linking NVIDIA's SDK or `libnvat`.
 
 Build the REST service:
 
@@ -34,6 +39,10 @@ Build the REST service:
 cargo build -p attestation-api --release
 docker build .
 ```
+
+The default API build verifies NVIDIA bundles but does not collect them. A
+guest attester that handles `POST /attest` with `nvidia_gpu: true` must be built
+with `--features nvidia-gpu-attest` and supplied with NVIDIA's SDK and `libnvat`.
 
 The service image is published as `ghcr.io/confidential-dot-ai/attestation-api`.
 
