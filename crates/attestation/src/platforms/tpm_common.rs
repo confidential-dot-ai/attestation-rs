@@ -9,10 +9,13 @@ use std::sync::Once;
 
 use crate::error::{AttestationError, Result};
 use crate::types::{Claims, PlatformType, VerificationResult};
-use crate::utils::strip_trailing_nulls;
+use crate::utils::{constant_time_eq, sha256, sha256_two, strip_trailing_nulls};
 
 /// Decoded TPM quote components: (signature, message, pcr_values).
 pub type DecodedTpmQuote = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
+
+/// The PCR index that init-data is measured into (PCR[8] = SHA256(0^32 || init_data_hash)).
+const INIT_DATA_PCR: usize = 8;
 
 /// The vTPM device path `az_cvm_vtpm` opens (`TctiNameConf::Device` default).
 #[cfg(all(feature = "attest", target_os = "linux"))]
@@ -125,11 +128,11 @@ pub const HCL_REPORT_TYPE_TDX: u32 = 4;
 ///
 /// Shared between Azure SNP and Azure TDX verification paths.
 pub fn verify_hcl_var_data_binding(report_data: &[u8], var_data: &[u8]) -> Result<()> {
-    let hash = crate::utils::sha256(var_data);
+    let hash = sha256(var_data);
     let report_data_prefix = report_data.get(..32).ok_or_else(|| {
         AttestationError::QuoteParseFailed("report_data shorter than 32 bytes".to_string())
     })?;
-    if !crate::utils::constant_time_eq(report_data_prefix, &hash) {
+    if !constant_time_eq(report_data_prefix, &hash) {
         return Err(AttestationError::SignatureVerificationFailed(
             "HCL var_data binding failed: report_data[..32] != SHA-256(var_data)".to_string(),
         ));
@@ -471,7 +474,7 @@ pub fn verify_tpm_nonce(message: &[u8], expected: &[u8]) -> Result<()> {
             "TPM nonce length mismatch".to_string(),
         ));
     }
-    if !crate::utils::constant_time_eq(&nonce, expected) {
+    if !constant_time_eq(&nonce, expected) {
         return Err(AttestationError::ReportDataMismatch);
     }
     Ok(())
@@ -526,9 +529,9 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
         pcr_concat.extend_from_slice(&pcrs[idx]);
     }
 
-    let computed_digest = crate::utils::sha256(&pcr_concat);
+    let computed_digest = sha256(&pcr_concat);
 
-    if !crate::utils::constant_time_eq(&computed_digest, &expected_digest) {
+    if !constant_time_eq(&computed_digest, &expected_digest) {
         return Err(AttestationError::QuoteParseFailed(
             "PCR digest in TPM quote does not match hash of PCR values".to_string(),
         ));
@@ -672,22 +675,21 @@ pub fn check_init_data(
         )));
     }
     let (selected_pcrs, _) = parse_quote_info(tpm_msg)?;
-    if !selected_pcrs.contains(&8) {
-        return Err(AttestationError::QuoteParseFailed(
-            "init_data check requires PCR[8], but it is not in the quote's signed PCR selection \
-             (the supplied value would be unauthenticated)"
-                .to_string(),
-        ));
-    }
-    if tpm_pcrs.len() <= 8 {
+    if !selected_pcrs.contains(&INIT_DATA_PCR) {
         return Err(AttestationError::QuoteParseFailed(format!(
-            "init_data check requires PCR[8], but only {} PCR values were supplied",
+            "init_data check requires PCR[{INIT_DATA_PCR}], but it is not in the quote's signed \
+             PCR selection (the supplied value would be unauthenticated)"
+        )));
+    }
+    if tpm_pcrs.len() <= INIT_DATA_PCR {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "init_data check requires PCR[{INIT_DATA_PCR}], but only {} PCR values were supplied",
             tpm_pcrs.len()
         )));
     }
     // Compute TPM PCR extend: PCR[8] = SHA256(zeros_32 || init_data_hash)
-    let extended = crate::utils::sha256_two(&[0u8; 32], expected);
-    if !crate::utils::constant_time_eq(&tpm_pcrs[8], &extended) {
+    let extended = sha256_two(&[0u8; 32], expected);
+    if !constant_time_eq(&tpm_pcrs[INIT_DATA_PCR], &extended) {
         return Err(AttestationError::InitDataMismatch);
     }
     Ok(Some(true))
