@@ -321,9 +321,11 @@ async fn verify_tdx_impl(
         .await
         .map_err(|e| format!("tdx verify: {e}"))?;
 
-    // The core records the comparison without acting on it. Enforce here so a
-    // supplied pin cannot be a no-op. `None` means the core never performed the
-    // comparison at all — treat that as a failure, not an absence.
+    // The core now hard-fails a supplied pin on mismatch (MeasurementMismatch),
+    // so a mismatch never reaches this point. This gate stays as defense in
+    // depth: it guards a future core regression back to record-only semantics,
+    // and `None`-despite-a-pin (the core never performed the comparison) must
+    // still fail rather than read as absence.
     if rtmr3_pinned && result.rtmr3_match != Some(true) {
         return Err("tdx verify: RTMR[3] does not match expected_rtmr3 \
              (the guest was not launched with the pinned operator key, \
@@ -443,9 +445,13 @@ mod tests {
         let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]))
             .await
             .expect_err("wrong RTMR[3] pin must fail");
+        // The core's MeasurementMismatch names the register; the wrapper's own
+        // defense-in-depth gate names the parameter. Either way the register
+        // must be named — c8s-verify-js keys its rtmr3-denial classification
+        // on the "RTMR[3] does not match" prefix, so treat it as a contract.
         assert!(
-            err.contains("RTMR[3] does not match expected_rtmr3"),
-            "failure must name the pin, got: {err}"
+            err.contains("RTMR[3] does not match"),
+            "failure must name the register, got: {err}"
         );
     }
 

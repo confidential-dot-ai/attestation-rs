@@ -100,6 +100,11 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// reference value. Not supplied → `Ok(None)`; supplied and equal →
 /// `Ok(Some(true))`; supplied and different → `MeasurementMismatch`,
 /// failing verification. `Some(false)` is never produced.
+///
+/// Gated on the platform features that consume it: an embedder building only
+/// `nvidia-gpu` compiles no platform verifiers, and this helper would be dead
+/// code there (the CI feature legs build with `-D warnings`).
+#[cfg(any(feature = "snp", feature = "tdx"))]
 pub(crate) fn check_expected(
     name: &'static str,
     actual: &[u8],
