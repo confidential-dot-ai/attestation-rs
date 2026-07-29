@@ -14,6 +14,60 @@ use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
 use attestation::types::{ProcessorGeneration, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
 
+/// Verify attestation evidence from a self-describing envelope — the generic,
+/// platform-dispatching entry point and the preferred API for JS embedders.
+///
+/// `envelope_json` is the core [`attestation::AttestationEvidence`] envelope:
+/// `{ "platform": "<tag>", "evidence": { ... } }`, where `platform` is one of
+/// the compiled-in platform tags (`snp`, `tdx`, `az-snp`, `az-tdx`, `gcp-snp`,
+/// `gcp-tdx` with default features) and `evidence` is that platform's evidence
+/// payload, verbatim. Dispatch happens in the Rust core
+/// (`Verifier::verify_platform`), so JS callers need no per-platform routing —
+/// but they MUST assert the platform themselves by comparing the result's
+/// `platform` field against the one they expect, never trusting a
+/// server-chosen tag to pick the verification path.
+///
+/// Runs in offline mode ([`attestation::Verifier::offline`]): quote signatures
+/// and cert chains verify against the bundled AMD/Intel roots (SNP evidence
+/// must carry its VEK inline, as c8s evidence does), the SNP processor
+/// generation is auto-detected from the report's CPUID fields (v3+ reports),
+/// and the network-backed collateral checks (PCK CRL, TCB status, QE identity)
+/// are skipped — `collateral_verified` stays `false`. Debug guests are always
+/// rejected (`allow_debug` is never exposed to the browser; fail closed).
+///
+/// The freshness semantics of `expected_report_data` are per-platform, handled
+/// inside each core verifier: for bare-metal platforms it is checked against
+/// the hardware quote's `report_data` (zero-padded, constant-time); for the
+/// Azure vTPM platforms it is checked against the vTPM quote's `extraData`.
+/// Either way a supplied-but-mismatched anchor fails closed.
+///
+/// - `envelope_json`: `{ platform, evidence }` envelope JSON
+/// - `expected_report_data`: optional freshness anchor bytes
+/// - `expected_init_data_hash`: optional init-data binding (SNP HOST_DATA /
+///   TDX MRCONFIGID / vTPM PCR[8])
+///
+/// Returns the [`attestation::types::VerificationResult`] as JSON, or throws
+/// on any check failure.
+#[wasm_bindgen]
+pub async fn verify(
+    envelope_json: String,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let params = VerifyParams {
+        expected_report_data,
+        expected_init_data_hash,
+        ..VerifyParams::default()
+    };
+
+    let result = attestation::Verifier::offline()
+        .verify(envelope_json.as_bytes(), &params)
+        .await
+        .map_err(|e| JsError::new(&format!("verify: {e}")))?;
+
+    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
 /// Verify live SNP evidence in WASM.
 ///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
