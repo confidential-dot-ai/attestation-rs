@@ -179,16 +179,33 @@ pub fn verify_az_snp(
 /// 6. When the evidence carries a `cc_eventlog`, replay it against RTMR0–3 and
 ///    fail closed on any divergence.
 ///
+/// 7. When `expected_rtmr3` is supplied, require the TD's RTMR[3] to match it.
+///
 /// Like the other vTPM-less entry points, the DCAP **collateral** checks (PCK
 /// CRL, TCB status, TD-QE identity) need an async provider and are skipped in
 /// WASM, so `collateral_verified` is always `false`. The measurement surfaces
-/// as `claims.launch_digest` = hex(MRTD); MRTD/RTMR pinning is the JS policy
+/// as `claims.launch_digest` = hex(MRTD); MRTD pinning is the JS policy
 /// layer's job.
 ///
 /// - `evidence_json`: tdx evidence JSON (`{ quote, cc_eventlog? }`, base64 std)
 /// - `expected_report_data`: optional raw bytes the TD quote `report_data`
 ///   must equal after zero-padding to 64 bytes
 /// - `expected_init_data_hash`: optional bytes to bind against MRCONFIGID
+/// - `expected_rtmr3`: optional 48 raw bytes the TD's RTMR[3] must equal
+///
+/// RTMR[3] is the runtime measurement register: unlike MRTD it is extended
+/// after launch, so it can carry deployment identity a launch measurement
+/// cannot — on a c8s node, the operator-key seed plus any per-workload
+/// extends. Pinning it is what distinguishes *this* cluster from anyone
+/// else's genuine instance of the same audited image. It is not replayable
+/// from the CCEL by construction (see `platforms/tdx/ccel.rs`), which is why
+/// it must be supplied rather than derived.
+///
+/// Unlike [`VerifyParams::expected_rtmr3`], which only *reports* the
+/// comparison via `rtmr3_match`, this entry point **fails closed**: a
+/// mismatch throws, matching how `expected_report_data` behaves here. A
+/// browser policy layer that forwarded the pin but forgot to inspect
+/// `rtmr3_match` would otherwise silently accept any node.
 ///
 /// Returns the verification result as JSON, or throws on any check failure.
 ///
@@ -200,13 +217,28 @@ pub async fn verify_tdx(
     evidence_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
+    expected_rtmr3: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
     let evidence: TdxEvidence = serde_json::from_str(&evidence_json)
         .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
 
+    // Reject a wrong-sized pin rather than truncating or dropping it: a pin
+    // that silently does not apply is worse than no pin at all.
+    let expected_rtmr3: Option<[u8; 48]> = match expected_rtmr3 {
+        None => None,
+        Some(bytes) => Some(<[u8; 48]>::try_from(bytes.as_slice()).map_err(|_| {
+            JsError::new(&format!(
+                "expected_rtmr3 is {} bytes, want 48",
+                bytes.len()
+            ))
+        })?),
+    };
+    let rtmr3_pinned = expected_rtmr3.is_some();
+
     let params = VerifyParams {
         expected_report_data,
         expected_init_data_hash,
+        expected_rtmr3,
         ..VerifyParams::default()
     };
 
@@ -216,6 +248,17 @@ pub async fn verify_tdx(
     let result = verify_tdx_evidence(&evidence, &params, None)
         .await
         .map_err(|e| JsError::new(&format!("tdx verify: {e}")))?;
+
+    // The core records the comparison without acting on it. Enforce here so a
+    // supplied pin cannot be a no-op. `None` means the core never performed the
+    // comparison at all — treat that as a failure, not an absence.
+    if rtmr3_pinned && result.rtmr3_match != Some(true) {
+        return Err(JsError::new(
+            "tdx verify: RTMR[3] does not match expected_rtmr3 \
+             (the guest was not launched with the pinned operator key, \
+             or it measured workloads the pin does not account for)",
+        ));
+    }
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
