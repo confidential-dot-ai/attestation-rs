@@ -176,9 +176,10 @@ pub fn verify_az_snp(
 /// 4. Bind `report_data` to `expected_report_data` (padded, constant-time),
 ///    failing closed when an anchor is supplied and does not match.
 /// 5. Optionally bind MRCONFIGID to `expected_init_data_hash`.
-/// 6. When the evidence carries a `cc_eventlog`, replay it against RTMR0–3 and
-///    fail closed on any divergence.
-///
+/// 6. When the evidence carries a `cc_eventlog`, replay it against the RTMRs:
+///    RTMR[0-2] divergence fails closed; RTMR[3] divergence only warns, because
+///    runtime extends after the log was captured are expected there (see
+///    `platforms/tdx/ccel.rs`).
 /// 7. When `expected_rtmr3` is supplied, require the TD's RTMR[3] to match it.
 ///
 /// Like the other vTPM-less entry points, the DCAP **collateral** checks (PCK
@@ -219,19 +220,36 @@ pub async fn verify_tdx(
     expected_init_data_hash: Option<Vec<u8>>,
     expected_rtmr3: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    let evidence: TdxEvidence = serde_json::from_str(&evidence_json)
-        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+    verify_tdx_impl(
+        evidence_json,
+        expected_report_data,
+        expected_init_data_hash,
+        expected_rtmr3,
+    )
+    .await
+    .map_err(|e| JsError::new(&e))
+}
+
+// The whole entry point behind the wasm-bindgen boundary, so the enforcement
+// gate is exercisable by native tests (JsError carries no readable message off
+// the wasm target). Behavior-identical to the wrapper.
+async fn verify_tdx_impl(
+    evidence_json: String,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+    expected_rtmr3: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let evidence: TdxEvidence =
+        serde_json::from_str(&evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
 
     // Reject a wrong-sized pin rather than truncating or dropping it: a pin
     // that silently does not apply is worse than no pin at all.
     let expected_rtmr3: Option<[u8; 48]> = match expected_rtmr3 {
         None => None,
-        Some(bytes) => Some(<[u8; 48]>::try_from(bytes.as_slice()).map_err(|_| {
-            JsError::new(&format!(
-                "expected_rtmr3 is {} bytes, want 48",
-                bytes.len()
-            ))
-        })?),
+        Some(bytes) => Some(
+            <[u8; 48]>::try_from(bytes.as_slice())
+                .map_err(|_| format!("expected_rtmr3 is {} bytes, want 48", bytes.len()))?,
+        ),
     };
     let rtmr3_pinned = expected_rtmr3.is_some();
 
@@ -247,20 +265,19 @@ pub async fn verify_tdx(
     // stays false.
     let result = verify_tdx_evidence(&evidence, &params, None)
         .await
-        .map_err(|e| JsError::new(&format!("tdx verify: {e}")))?;
+        .map_err(|e| format!("tdx verify: {e}"))?;
 
     // The core records the comparison without acting on it. Enforce here so a
     // supplied pin cannot be a no-op. `None` means the core never performed the
     // comparison at all — treat that as a failure, not an absence.
     if rtmr3_pinned && result.rtmr3_match != Some(true) {
-        return Err(JsError::new(
-            "tdx verify: RTMR[3] does not match expected_rtmr3 \
+        return Err("tdx verify: RTMR[3] does not match expected_rtmr3 \
              (the guest was not launched with the pinned operator key, \
-             or it measured workloads the pin does not account for)",
-        ));
+             or it measured workloads the pin does not account for)"
+            .to_string());
     }
 
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
 }
 
 /// Verify Azure TDX (az-tdx) vTPM attestation evidence in WASM.
@@ -317,4 +334,83 @@ pub async fn verify_az_tdx(
         .map_err(|e| JsError::new(&format!("az-tdx verify: {e}")))?;
 
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
+// Native tests for the RTMR[3] enforcement gate. They run on the host target
+// (`cargo test -p attestation-wasm`), not under wasm — which is exactly why
+// the gate lives in verify_tdx_impl rather than inside the #[wasm_bindgen]
+// wrapper: JsError exposes no readable message off-wasm, and the fail-closed
+// property ("only Some(true) passes") deserves CI coverage rather than
+// by-inspection assurance.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attestation::platforms::tdx::verify::parse_tdx_quote;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+
+    // The v5 fixture verifies fully under default params (no debug bit — the
+    // v4 fixture has it set and would fail the debug policy before the gate).
+    const V5_QUOTE: &[u8] = include_bytes!("../../attestation/test_data/tdx_quote_5.dat");
+
+    fn v5_evidence_json() -> String {
+        serde_json::to_string(&TdxEvidence {
+            quote: BASE64.encode(V5_QUOTE),
+            cc_eventlog: None,
+        })
+        .unwrap()
+    }
+
+    fn v5_rtmr3() -> [u8; 48] {
+        parse_tdx_quote(V5_QUOTE).unwrap().body.rtmr_3
+    }
+
+    #[tokio::test]
+    async fn rtmr3_pin_matching_register_passes() {
+        let out = verify_tdx_impl(v5_evidence_json(), None, None, Some(v5_rtmr3().to_vec()))
+            .await
+            .expect("matching RTMR[3] pin must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            json["rtmr3_match"],
+            serde_json::json!(true),
+            "result must record the comparison"
+        );
+    }
+
+    #[tokio::test]
+    async fn rtmr3_pin_mismatch_fails_closed() {
+        let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]))
+            .await
+            .expect_err("wrong RTMR[3] pin must fail");
+        assert!(
+            err.contains("RTMR[3] does not match expected_rtmr3"),
+            "failure must name the pin, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rtmr3_pin_wrong_length_rejected_before_verification() {
+        for len in [0usize, 47, 49, 96] {
+            let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; len]))
+                .await
+                .expect_err("wrong-length pin must be rejected");
+            assert!(
+                err.contains("want 48"),
+                "length {len}: error must name the size contract, got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_pin_verifies_and_omits_rtmr3_match() {
+        let out = verify_tdx_impl(v5_evidence_json(), None, None, None)
+            .await
+            .expect("unpinned verification must still pass");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            json.get("rtmr3_match").is_none(),
+            "no pin ⇒ no rtmr3_match field, so \"never checked\" cannot read as \"held\""
+        );
+    }
 }
