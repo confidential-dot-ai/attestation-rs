@@ -306,6 +306,12 @@ async fn verify_tdx_impl(
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
 /// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
 ///
+/// Unlike [`verify_tdx`], this entry point has **no `expected_rtmr3`
+/// parameter and enforces no RTMR[3] pin** — do not assume parity. The az-tdx
+/// core computes `rtmr3_match` the same way, so extending this entry point is
+/// a known follow-up; until then an az-tdx caller cannot pin deployment
+/// identity here.
+///
 /// Returns the verification result as JSON, or throws on any check failure.
 ///
 /// This is `async` (unlike `verify_az_snp`, whose core is sync) because the
