@@ -41,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - run: sudo apt-get update && sudo apt-get install -y libtss2-dev
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
@@ -51,6 +52,18 @@ jobs:
       - run: cargo test -p attestation --no-default-features --features nvidia-gpu
       # The wasm claim: the verifier must build for wasm32 with no native deps.
       - run: cargo check -p attestation --no-default-features --features nvidia-gpu --target wasm32-unknown-unknown
+      # Exercise the exact feature set shipped in release binaries. The CLI
+      # needs only the portable NRAS verifier; `nvidia-gpu-attest` remains out
+      # because it links the NVIDIA SDK and libnvat evidence collector.
+      - run: cargo clippy -p attestation-cli --features attest,nvidia-gpu --all-targets -- -D warnings
+      - run: cargo test -p attestation-cli --features attest,nvidia-gpu
+      - name: Check released GPU verification flags
+        shell: bash
+        run: |
+          cargo run --quiet -p attestation-cli --features attest,nvidia-gpu -- verify --help > cli-help.txt
+          grep -F -- '--nvidia-gpu-user-nonce' cli-help.txt
+          grep -F -- '--nvidia-gpu-required' cli-help.txt
+          grep -F -- '--nvidia-gpu-expected-archs' cli-help.txt
       # NOTE: the `nvidia-gpu-attest` attest path is intentionally not built in
       # CI. It links NVIDIA's C++ SDK (nv-attestation-sdk), whose header is
       # CMake-generated and whose libnvat.so comes only from a from-source build
@@ -60,13 +73,11 @@ jobs:
 
   # Cross-platform release binaries for attestation-cli and attestation-api.
   # macOS targets compile to verify-only binaries automatically.
-  #
-  # Only runs on push to main, so PRs don't pay the matrix cost.
+  # Build on PRs so the exact release artifacts are validated before merge;
+  # only the release job below publishes on pushes to main.
   release-build:
     name: Release Build ${{ matrix.target }}
     needs: [check, test]
-    # TEMP: dropped the push/main guard so the matrix runs on PRs for testing.
-    # Restore before merge: if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,15 +109,17 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      # attestation-cli: all features via --features attest.
-      # attestation-api: built plain (--features would error — the crate has no
-      # features table; `attest` is baked in via its hardcoded dep). --bin
+      # attestation-cli: CPU evidence generation plus portable NVIDIA GPU
+      # bundle verification. Do not enable nvidia-gpu-attest here: it links the
+      # NVIDIA SDK/libnvat collector and is not needed by relying parties.
+      # attestation-api: built plain; `attest` and GPU verification are baked in
+      # through its hardcoded dependency. --bin
       # attestation-api skips the loadtest binary the package also defines.
       - name: Build binaries
         shell: bash
         run: |
-          cargo build -p attestation-cli --release --target ${{ matrix.target }} --features attest --bin attestation-cli
-          cargo build -p attestation-api --release --target ${{ matrix.target }} --bin attestation-api
+          cargo build --locked -p attestation-cli --release --target ${{ matrix.target }} --features attest,nvidia-gpu --bin attestation-cli
+          cargo build --locked -p attestation-api --release --target ${{ matrix.target }} --bin attestation-api
 
       - name: Strip binaries
         shell: bash
@@ -131,12 +144,19 @@ jobs:
             [ -f LICENSE ] && cp LICENSE "$STAGE/"
             tar -C "$STAGE_PARENT" -czf "$OUT_DIR/${bin}-${VERSION}-${TARGET}.tar.gz" "$(basename "$STAGE")"
           done
+          # Preserve the raw x86_64 Linux asset consumed by existing host
+          # installers while also publishing target-qualified tarballs.
+          if [ "$TARGET" = x86_64-unknown-linux-gnu ]; then
+            cp "$BIN_DIR/attestation-cli" "$OUT_DIR/attestation-cli"
+          fi
           ls -la "$OUT_DIR"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/attestation-cli
           if-no-files-found: error
 
   docker-build:
@@ -217,7 +237,7 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         run: |
           cd artifacts
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz attestation-cli > SHA256SUMS
           cat SHA256SUMS
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists == 'false'
@@ -226,6 +246,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           files: |
             artifacts/*.tar.gz
+            artifacts/attestation-cli
             artifacts/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
