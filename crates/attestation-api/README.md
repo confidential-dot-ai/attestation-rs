@@ -74,7 +74,6 @@ key_path = ""                   # Empty = ephemeral key
 [attestation]
 enabled = true                  # Set to false to disable /attest
 platforms = ["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"]
-gpu_attestation_evidence_enabled = false # Evidence collection only; disabled by default
 ```
 
 ## Authentication
@@ -84,19 +83,6 @@ When `auth.api_keys` contains one or more Bearer tokens, all endpoints except `/
 ## Attestation
 
 The `/attest` endpoint is available when `attestation.enabled = true` (the default). Set it to `false` on verification-only deployments. The `attestation.platforms` list controls which platforms the service is allowed to generate evidence for.
-
-### NVIDIA GPU evidence status
-
-`/attest` always returns a machine-readable `gpu_attested` field. Its default
-value is `"unknown"`: the service did not collect or verify GPU evidence. Set
-`attestation.gpu_attestation_evidence_enabled = true` and request
-`"nvidia_gpu": true` to collect raw GPU evidence. The response then says
-`"evidence_collected"`, which is **not** an attestation pass. A caller must
-send that evidence to `/verify` with GPU verification required and accept only
-a successful NVIDIA verification result before it reports a GPU as attested.
-
-This configuration switch does not issue credentials, change c8s policy, or
-release an encrypted volume. It only controls evidence collection at `/attest`.
 
 ## Usage Examples
 
