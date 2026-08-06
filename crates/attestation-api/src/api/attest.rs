@@ -12,6 +12,18 @@ use crate::config::normalize_platform;
 use crate::error::ApiError;
 use crate::AppState;
 
+/// The `/attest` endpoint only creates evidence. It never verifies NVIDIA GPU
+/// evidence, so it never reports a positive GPU-attestation result.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuAttestedStatus {
+    /// GPU evidence collection is disabled, or the caller did not request it.
+    Unknown,
+    /// Raw GPU evidence was collected. The caller must submit it to `/verify`
+    /// and require NVIDIA GPU verification before treating it as attested.
+    EvidenceCollected,
+}
+
 #[derive(Deserialize)]
 pub struct AttestRequest {
     pub report_data: Option<String>,
@@ -31,6 +43,8 @@ fn default_platform() -> String {
 pub struct AttestResponse {
     pub platform: String,
     pub evidence: Value,
+    /// `unknown` by default. `evidence_collected` is not a verification pass.
+    pub gpu_attested: GpuAttestedStatus,
     /// Present when the request set `nvidia_gpu: true` and GPU evidence
     /// collection succeeded. Round-trips through `/verify` unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,7 +72,9 @@ pub async fn handler(
         ensure_platform_allowed(&state.config.attestation.platforms, platform)?;
         let options = state.config.attestation.attest_options();
 
-        let evidence_bytes = if req.nvidia_gpu {
+        let collect_gpu_evidence =
+            req.nvidia_gpu && state.config.attestation.gpu_attestation_evidence_enabled;
+        let evidence_bytes = if collect_gpu_evidence {
             #[cfg(feature = "nvidia-gpu-attest")]
             {
                 attestation::attest_with_nvidia_gpu(platform, &report_data, &options).await?
@@ -88,6 +104,11 @@ pub async fn handler(
         Ok(Json(AttestResponse {
             platform: format!("{platform}"),
             evidence: envelope.get("evidence").cloned().unwrap_or(envelope),
+            gpu_attested: if collect_gpu_evidence {
+                GpuAttestedStatus::EvidenceCollected
+            } else {
+                GpuAttestedStatus::Unknown
+            },
             nvidia_gpu: gpu_field,
         }))
     }
@@ -130,5 +151,39 @@ fn ensure_platform_allowed(
         Err(ApiError::BadRequest(format!(
             "platform '{platform_name}' is not allowed by attestation.platforms"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AttestResponse, GpuAttestedStatus};
+    use serde_json::json;
+
+    #[test]
+    fn disabled_gpu_attestation_serializes_as_unknown() {
+        let response = AttestResponse {
+            platform: "tdx".to_string(),
+            evidence: json!({}),
+            gpu_attested: GpuAttestedStatus::Unknown,
+            nvidia_gpu: None,
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["gpu_attested"], "unknown");
+        assert!(json.get("nvidia_gpu").is_none());
+    }
+
+    #[test]
+    fn evidence_collection_is_not_serialized_as_a_pass() {
+        let response = AttestResponse {
+            platform: "tdx".to_string(),
+            evidence: json!({}),
+            gpu_attested: GpuAttestedStatus::EvidenceCollected,
+            nvidia_gpu: Some(json!({"bundle": "raw"})),
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["gpu_attested"], "evidence_collected");
+        assert_ne!(json["gpu_attested"], "true");
     }
 }

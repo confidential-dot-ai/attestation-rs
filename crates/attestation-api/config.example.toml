@@ -29,3 +29,7 @@ key_path = ""                     # Empty = ephemeral EC key
 [attestation]
 enabled = true                    # Set to false to disable the /attest endpoint
 platforms = ["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"]
+# Disabled by default. When false, /attest always returns
+# `"gpu_attested":"unknown"` and never collects GPU evidence. When true,
+# the caller must also send `"nvidia_gpu":true`; collection is not verification.
+gpu_attestation_evidence_enabled = false
