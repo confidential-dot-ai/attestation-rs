@@ -142,6 +142,11 @@ pub struct AttestationConfig {
     /// - "vsock": direct AF_VSOCK to QGS only. Requires vhost-vsock-pci + QGS.
     /// - "configfs": kernel ConfigFS TSM only. Use on GCP and other cloud platforms.
     pub tdx_quote_method: String,
+    /// If true, `/attest` may collect raw NVIDIA GPU evidence when the caller
+    /// also sets `nvidia_gpu: true`. This is disabled by default. Enabling
+    /// collection does not verify the evidence and does not change credential
+    /// issuance or any c8s authorization decision.
+    pub gpu_attestation_evidence_enabled: bool,
 }
 
 // --- Defaults ---
@@ -198,6 +203,7 @@ impl Default for AttestationConfig {
             ],
             allow_debug: false,
             tdx_quote_method: "auto".to_string(),
+            gpu_attestation_evidence_enabled: false,
         }
     }
 }
@@ -357,6 +363,15 @@ mod tests {
         assert!(
             config.validate().is_err(),
             "tdx_collateral_ttl_hours = 0 should be rejected"
+        );
+    }
+
+    #[test]
+    fn gpu_evidence_collection_is_disabled_by_default() {
+        assert!(
+            !Config::default()
+                .attestation
+                .gpu_attestation_evidence_enabled
         );
     }
 }
