@@ -108,28 +108,30 @@ async fn fetch_imds_certs(
     })
 }
 
-async fn get_imds_certs() -> Result<ImdsCertificates> {
-    // Same budget as the az_tdx IMDS call, which this one previously lacked
-    // entirely: without a timeout a stalled connect blocks evidence generation.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| AttestationError::CertFetchError(format!("build HTTP client: {}", e)))?;
-
-    let mut delay = IMDS_RETRY_DELAY;
+/// Calls `attempt_fn` until it succeeds, returns an error it marked
+/// non-retryable, or spends the attempt budget. `base_delay` doubles per retry.
+async fn retry_transient<T, F, Fut>(
+    attempts: u32,
+    base_delay: Duration,
+    mut attempt_fn: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, (AttestationError, bool)>>,
+{
+    let mut delay = base_delay;
     let mut attempt = 1;
     loop {
-        match fetch_imds_certs(&client).await {
-            Ok(certs) => return Ok(certs),
+        match attempt_fn().await {
+            Ok(value) => return Ok(value),
             Err((err, retryable)) => {
-                if !retryable || attempt == IMDS_ATTEMPTS {
+                if !retryable || attempt >= attempts {
                     return Err(err);
                 }
                 log::warn!(
                     "IMDS VCEK fetch attempt {}/{} failed, retrying in {:?}: {}",
                     attempt,
-                    IMDS_ATTEMPTS,
+                    attempts,
                     delay,
                     err
                 );
@@ -139,6 +141,21 @@ async fn get_imds_certs() -> Result<ImdsCertificates> {
             }
         }
     }
+}
+
+async fn get_imds_certs() -> Result<ImdsCertificates> {
+    // Same budget as the az_tdx IMDS call, which this one previously lacked
+    // entirely: without a timeout a stalled connect blocks evidence generation.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AttestationError::CertFetchError(format!("build HTTP client: {}", e)))?;
+
+    retry_transient(IMDS_ATTEMPTS, IMDS_RETRY_DELAY, || {
+        fetch_imds_certs(&client)
+    })
+    .await
 }
 
 /// Generate Azure SNP attestation evidence.
@@ -180,6 +197,7 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<AzSnpEvidence> {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+    use std::cell::Cell;
 
     #[test]
     fn throttling_and_server_faults_are_retryable() {
@@ -198,14 +216,65 @@ mod tests {
         assert!(!status_is_retryable(StatusCode::FORBIDDEN));
     }
 
-    #[test]
-    fn retry_budget_is_bounded() {
-        // Three tries with 200ms doubling keeps the added worst-case wait under
-        // a second on top of the request timeouts.
-        assert_eq!(IMDS_ATTEMPTS, 3);
-        let total: Duration = (0..IMDS_ATTEMPTS - 1)
-            .map(|i| IMDS_RETRY_DELAY * 2u32.pow(i))
-            .sum();
-        assert_eq!(total, Duration::from_millis(600));
+    fn transient() -> (AttestationError, bool) {
+        (
+            AttestationError::CertFetchError("IMDS unreachable".into()),
+            true,
+        )
+    }
+
+    fn fatal() -> (AttestationError, bool) {
+        (
+            AttestationError::CertFetchError("IMDS returned 400".into()),
+            false,
+        )
+    }
+
+    // Zero delay keeps these instant; the backoff schedule is a tuning knob,
+    // the loop's stop conditions are the behaviour worth pinning.
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_until_it_succeeds() {
+        let calls = Cell::new(0);
+        let out = retry_transient(3, Duration::ZERO, || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            async move {
+                if n < 3 {
+                    Err(transient())
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(out.unwrap(), 3);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_attempt_budget_is_the_cap() {
+        let calls = Cell::new(0);
+        let out: Result<u32> = retry_transient(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { Err(transient()) }
+        })
+        .await;
+
+        assert!(out.is_err());
+        assert_eq!(calls.get(), 3, "must not exceed the budget");
+    }
+
+    #[tokio::test]
+    async fn a_non_retryable_error_returns_on_the_first_attempt() {
+        let calls = Cell::new(0);
+        let out: Result<u32> = retry_transient(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { Err(fatal()) }
+        })
+        .await;
+
+        assert!(out.is_err());
+        assert_eq!(calls.get(), 1, "a stable answer must not be retried");
     }
 }
