@@ -1,12 +1,22 @@
-FROM rust:1.94-bookworm AS builder
-
-RUN apt-get update && apt-get install -y libtss2-dev && rm -rf /var/lib/apt/lists/*
-
+FROM rust:1.94-bookworm AS chef
+# Compiled once; the layer is reused until the base image or the pin changes.
+RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /app
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+RUN apt-get update && apt-get install -y libtss2-dev && rm -rf /var/lib/apt/lists/*
+# Dependency layer: keyed on the recipe (Cargo.toml/lock graph), so it is
+# reused across source-only changes instead of rebuilding every crate.
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-
 RUN cargo build --release -p attestation-api --bin attestation-api
 
 FROM debian:bookworm-slim
