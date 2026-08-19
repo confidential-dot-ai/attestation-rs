@@ -117,6 +117,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 async-trait = "0.1"
 tempfile = "3"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
+time = { version = "0.3", features = ["std", "macros"] }
 
 [[bench]]
 name = "snp"
