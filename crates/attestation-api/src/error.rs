@@ -35,6 +35,11 @@ struct ErrorBody {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, error_key) = match &self {
+            // Collateral this service could not fetch, so it is the upstream that
+            // failed and not the submitted evidence.
+            ApiError::Verification(attestation::AttestationError::CertFetchError(_)) => {
+                (StatusCode::BAD_GATEWAY, "cert_fetch_failed")
+            }
             ApiError::Verification(_) => (StatusCode::UNPROCESSABLE_ENTITY, "verification_failed"),
             ApiError::NoPlatform => (StatusCode::SERVICE_UNAVAILABLE, "no_platform"),
             ApiError::AttestNotAvailable => (StatusCode::BAD_REQUEST, "attest_not_available"),
@@ -49,6 +54,11 @@ impl IntoResponse for ApiError {
                 tracing::error!(detail, "internal error");
                 "an internal error occurred".to_string()
             }
+            // The inner error alone: `Verification`'s "verification failed" prefix
+            // would name the evidence this status exists to stop naming.
+            ApiError::Verification(inner @ attestation::AttestationError::CertFetchError(_)) => {
+                inner.to_string()
+            }
             other => other.to_string(),
         };
 
@@ -58,5 +68,42 @@ impl IntoResponse for ApiError {
         };
 
         (status, axum::Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attestation::AttestationError;
+
+    async fn error_key(resp: Response) -> String {
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read error body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
+        json["error"].as_str().expect("error key").to_string()
+    }
+
+    #[tokio::test]
+    async fn collateral_this_service_could_not_fetch_is_an_upstream_failure() {
+        let resp = ApiError::Verification(AttestationError::CertFetchError(
+            "cached VCEK fetch: error sending request for url (https://kdsintf.amd.com/vcek/v1/Genoa/…)"
+                .to_string(),
+        ))
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error_key(resp).await, "cert_fetch_failed");
+    }
+
+    #[tokio::test]
+    async fn a_chain_that_does_not_validate_is_still_a_verdict() {
+        let resp = ApiError::Verification(AttestationError::CertChainError(
+            "VCEK is not signed by the ASK".to_string(),
+        ))
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error_key(resp).await, "verification_failed");
     }
 }
