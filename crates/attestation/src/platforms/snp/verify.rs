@@ -285,7 +285,7 @@ pub fn verify_report_signature(report_bytes: &[u8], vcek_der: &[u8]) -> Result<(
 }
 
 /// Verify a VEK (VCEK/VLEK) certificate's validity period (notBefore/notAfter).
-fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
+pub fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vek_der).map_err(|e| {
         AttestationError::CertChainError(format!("VEK x509 parse for validity: {e}"))
     })?;
@@ -303,6 +303,30 @@ fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
             validity.not_after
         )));
     }
+    Ok(())
+}
+
+/// Verify the full endorsement-key policy for an inline VEK against the
+/// bundled AMD roots: the ARK → ASK/ASVK → VEK chain (VLEK auto-detected from
+/// the certificate CN), the VEK validity period, and the VEK's chip-id/TCB OID
+/// cross-validation against the report. This is steps 6–6b and 8c of
+/// [`verify_evidence`] as one unit, for callers that resolve the VEK
+/// themselves (notably the WASM `verify_snp` entry point). Revocation is out
+/// of scope — pair with [`check_vcek_not_revoked`] when CRL data is available.
+pub fn verify_vek_endorsement(
+    report: &AttestationReport,
+    vek_der: &[u8],
+    processor_gen: ProcessorGeneration,
+) -> Result<()> {
+    let ark_der = super::certs::get_ark(processor_gen);
+    let intermediate_der = if is_vlek_cert(vek_der)? {
+        super::certs::get_asvk(processor_gen)
+    } else {
+        super::certs::get_ask(processor_gen)
+    };
+    verify_cert_chain(ark_der, intermediate_der, vek_der)?;
+    verify_vek_validity_period(vek_der)?;
+    verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
 }
 
@@ -508,6 +532,32 @@ pub fn check_vcek_not_revoked(vcek_der: &[u8], crl_der: &[u8], issuer_der: &[u8]
     // We use our own implementation because x509-parser's verify_signature
     // doesn't support RSA-PSS (used by Milan ASK for CRL signing).
     verify_crl_signature(&crl, crl_der, &issuer_cert)?;
+
+    // 3b. Freshness: a genuine but stale CRL must not vouch for a VEK that a
+    // newer list may have revoked. AMD CRLs always carry nextUpdate; one
+    // without it has no defined shelf life, so it is rejected rather than
+    // trusted forever.
+    let now = x509_parser::time::ASN1Time::now();
+    if crl.last_update() > now {
+        return Err(AttestationError::CertChainError(format!(
+            "AMD CRL thisUpdate {} is in the future",
+            crl.last_update()
+        )));
+    }
+    match crl.next_update() {
+        None => {
+            return Err(AttestationError::CertChainError(
+                "AMD CRL has no nextUpdate; refusing a revocation list with no defined freshness"
+                    .into(),
+            ));
+        }
+        Some(next_update) if next_update < now => {
+            return Err(AttestationError::CertChainError(format!(
+                "AMD CRL is stale: nextUpdate {next_update} has passed; fetch a current CRL"
+            )));
+        }
+        Some(_) => {}
+    }
 
     // 4. Check serial number against revocation list
     let (_, cert) = X509Certificate::from_der(vcek_der)
@@ -1079,6 +1129,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.launch_digest_match, Some(true));
+    }
+
+    // ---------------------------------------------------------------
+    // Endorsement policy negative tests: VEK validity, TCB floor, and
+    // CRL revocation/freshness, with rcgen-minted certificates and CRLs
+    // (an ARK-signed CRL naming a fixture serial cannot be produced, so
+    // the CRL contract is proven against a test issuer instead).
+    // ---------------------------------------------------------------
+
+    use time::macros::datetime;
+    use time::{Duration as TimeDuration, OffsetDateTime};
+
+    fn mint_issuer(cn: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
+        (params.self_signed(&key).unwrap(), key)
+    }
+
+    fn mint_leaf(serial: &[u8], not_before: OffsetDateTime, not_after: OffsetDateTime) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(serial));
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    fn mint_crl(
+        issuer: &(rcgen::Certificate, rcgen::KeyPair),
+        revoked_serial: Option<&[u8]>,
+        this_update: OffsetDateTime,
+        next_update: OffsetDateTime,
+    ) -> Vec<u8> {
+        let params = rcgen::CertificateRevocationListParams {
+            this_update,
+            next_update,
+            crl_number: rcgen::SerialNumber::from(1234u64),
+            issuing_distribution_point: None,
+            revoked_certs: revoked_serial
+                .map(|serial| {
+                    vec![rcgen::RevokedCertParams {
+                        serial_number: rcgen::SerialNumber::from_slice(serial),
+                        revocation_time: this_update,
+                        reason_code: None,
+                        invalidity_date: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        };
+        params
+            .signed_by(&issuer.0, &issuer.1)
+            .unwrap()
+            .der()
+            .to_vec()
+    }
+
+    const LEAF_SERIAL: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+
+    fn valid_window() -> (OffsetDateTime, OffsetDateTime) {
+        let now = OffsetDateTime::now_utc();
+        (now - TimeDuration::days(1), now + TimeDuration::days(1))
+    }
+
+    #[test]
+    fn test_vek_expired_rejected() {
+        let leaf = mint_leaf(
+            LEAF_SERIAL,
+            datetime!(2020-01-01 0:00 UTC),
+            datetime!(2021-01-01 0:00 UTC),
+        );
+        let err = verify_vek_validity_period(&leaf).expect_err("expired VEK must be rejected");
+        assert!(err.to_string().contains("expired"), "got: {err}");
+    }
+
+    #[test]
+    fn test_vek_not_yet_valid_rejected() {
+        let leaf = mint_leaf(
+            LEAF_SERIAL,
+            datetime!(2100-01-01 0:00 UTC),
+            datetime!(2101-01-01 0:00 UTC),
+        );
+        let err = verify_vek_validity_period(&leaf).expect_err("future VEK must be rejected");
+        assert!(err.to_string().contains("not yet valid"), "got: {err}");
+    }
+
+    #[test]
+    fn test_vek_current_accepted() {
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        verify_vek_validity_period(&leaf).expect("current VEK must pass");
+    }
+
+    #[test]
+    fn test_crl_revoked_vek_rejected() {
+        let issuer = mint_issuer("TEST-ARK");
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        let crl = mint_crl(&issuer, Some(LEAF_SERIAL), not_before, not_after);
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+            .expect_err("revoked serial must be rejected");
+        assert!(err.to_string().contains("revoked"), "got: {err}");
+    }
+
+    #[test]
+    fn test_crl_fresh_nonrevoked_accepted() {
+        let issuer = mint_issuer("TEST-ARK");
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        let crl = mint_crl(&issuer, Some(&[0xEE; 4]), not_before, not_after);
+        check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+            .expect("fresh CRL not naming the serial must pass");
+    }
+
+    #[test]
+    fn test_crl_stale_rejected() {
+        let issuer = mint_issuer("TEST-ARK");
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        let now = OffsetDateTime::now_utc();
+        // nextUpdate already passed: a genuine but stale list must not vouch.
+        let crl = mint_crl(
+            &issuer,
+            None,
+            now - TimeDuration::days(30),
+            now - TimeDuration::days(1),
+        );
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+            .expect_err("stale CRL must be rejected");
+        assert!(err.to_string().contains("stale"), "got: {err}");
+    }
+
+    #[test]
+    fn test_crl_from_future_rejected() {
+        let issuer = mint_issuer("TEST-ARK");
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        let now = OffsetDateTime::now_utc();
+        let crl = mint_crl(
+            &issuer,
+            None,
+            now + TimeDuration::days(1),
+            now + TimeDuration::days(30),
+        );
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+            .expect_err("future-dated CRL must be rejected");
+        assert!(err.to_string().contains("future"), "got: {err}");
+    }
+
+    #[test]
+    fn test_crl_wrong_issuer_rejected() {
+        let signer = mint_issuer("TEST-ARK");
+        let impostor = mint_issuer("OTHER-ARK");
+        let (not_before, not_after) = valid_window();
+        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
+        // An empty CRL signed by a key the verifier does not trust must not
+        // clear the check — this is exactly the forged-empty-CRL bypass.
+        let crl = mint_crl(&signer, None, not_before, not_after);
+        let err = check_vcek_not_revoked(&leaf, &crl, impostor.0.der())
+            .expect_err("CRL signed by the wrong issuer must be rejected");
+        assert!(
+            err.to_string().contains("signature verification failed"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_vcek_tcb_report_mismatch_rejected() {
+        let mut report = parse_report(LIVE_REPORT_V5).expect("parse report");
+        report.reported_tcb.microcode = report.reported_tcb.microcode.wrapping_add(1);
+        let err = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Genoa)
+            .expect_err("VEK/report TCB disagreement must be rejected");
+        assert!(
+            matches!(err, AttestationError::TcbMismatch(_)),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_enforce_min_tcb_at_floor_passes() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let tcb = &report.reported_tcb;
+        let floor = SnpTcb {
+            bootloader: tcb.bootloader,
+            tee: tcb.tee,
+            snp: tcb.snp,
+            microcode: tcb.microcode,
+            fmc: None,
+        };
+        enforce_min_tcb(tcb, &floor).expect("reported TCB at the floor must pass");
+    }
+
+    #[test]
+    fn test_enforce_min_tcb_below_floor_rejected() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let tcb = &report.reported_tcb;
+        let floor = SnpTcb {
+            bootloader: tcb.bootloader,
+            tee: tcb.tee,
+            snp: tcb.snp,
+            microcode: tcb.microcode + 1,
+            fmc: None,
+        };
+        let err = enforce_min_tcb(tcb, &floor).expect_err("below-floor TCB must be rejected");
+        assert!(err.to_string().contains("below minimum"), "got: {err}");
+    }
+
+    #[test]
+    fn test_enforce_min_tcb_fmc_required_but_absent_rejected() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let tcb = &report.reported_tcb;
+        assert!(tcb.fmc.is_none(), "Genoa reports carry no FMC");
+        let floor = SnpTcb {
+            bootloader: 0,
+            tee: 0,
+            snp: 0,
+            microcode: 0,
+            fmc: Some(1),
+        };
+        enforce_min_tcb(tcb, &floor)
+            .expect_err("a floor requiring FMC must reject a report without it");
     }
 
     #[tokio::test]

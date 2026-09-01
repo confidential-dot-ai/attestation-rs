@@ -184,6 +184,9 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         })
     })?;
 
+    // VCEK/VLEK validity period — same check as the bare-metal SNP path (6b).
+    crate::platforms::snp::verify::verify_vek_validity_period(&vcek_der)?;
+
     // SNP report signature against VCEK
     crate::platforms::snp::verify::verify_report_signature(&hcl.tee_report, &vcek_der)?;
 

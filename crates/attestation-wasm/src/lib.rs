@@ -1,18 +1,71 @@
 use wasm_bindgen::prelude::*;
 
+use attestation::collateral::{CertProvider, DefaultCertProvider};
+use attestation::error::Result as AttestationResult;
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
-use attestation::platforms::az_snp::verify::verify_report;
+use attestation::platforms::az_snp::verify::{verify_report, VerifiedReport};
 use attestation::platforms::az_tdx::evidence::AzTdxEvidence;
 use attestation::platforms::az_tdx::verify::verify_evidence as verify_az_tdx_evidence;
-use attestation::platforms::snp::certs::get_bundled_certs;
+use attestation::platforms::snp::certs::get_ark;
 use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
-    parse_report, verify_cert_chain, verify_report_signature,
+    check_vcek_not_revoked, enforce_min_tcb, parse_report, verify_report_signature,
+    verify_vek_endorsement, MAX_REPORT_VERSION,
 };
 use attestation::platforms::tdx::evidence::TdxEvidence;
 use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
-use attestation::types::{ProcessorGeneration, VerifyParams};
+use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
+
+/// Parse the optional minimum-TCB policy JSON (the [`SnpTcb`] shape:
+/// `{ "bootloader": u8, "tee": u8, "snp": u8, "microcode": u8, "fmc"?: u8 }`).
+fn parse_min_tcb(min_tcb_json: Option<String>) -> Result<Option<SnpTcb>, String> {
+    match min_tcb_json {
+        None => Ok(None),
+        Some(s) => serde_json::from_str(&s)
+            .map(Some)
+            .map_err(|e| format!("min_tcb deserialize: {e}")),
+    }
+}
+
+/// Cert provider for the generic offline entry point: VEK resolution and the
+/// ARK/ASK chain behave exactly like [`DefaultCertProvider`] on wasm (inline
+/// VEK required, bundled roots), but the SNP CRL is the caller-supplied DER
+/// blob instead of a network fetch. The core verifies the CRL's signature
+/// against the bundled ARK and its freshness before trusting it, so the bytes
+/// themselves need no transport trust.
+struct StaticSnpCollateral {
+    inner: DefaultCertProvider,
+    crl_der: Option<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl CertProvider for StaticSnpCollateral {
+    async fn get_snp_vcek(
+        &self,
+        processor_gen: ProcessorGeneration,
+        chip_id: &[u8; 64],
+        reported_tcb: &SnpTcb,
+    ) -> AttestationResult<Vec<u8>> {
+        self.inner
+            .get_snp_vcek(processor_gen, chip_id, reported_tcb)
+            .await
+    }
+
+    async fn get_snp_cert_chain(
+        &self,
+        processor_gen: ProcessorGeneration,
+    ) -> AttestationResult<(Vec<u8>, Vec<u8>)> {
+        self.inner.get_snp_cert_chain(processor_gen).await
+    }
+
+    async fn get_snp_crl(
+        &self,
+        _processor_gen: ProcessorGeneration,
+    ) -> AttestationResult<Option<Vec<u8>>> {
+        Ok(self.crl_der.clone())
+    }
+}
 
 /// Verify attestation evidence from a self-describing envelope — the generic,
 /// platform-dispatching entry point and the preferred API for JS embedders.
@@ -29,11 +82,25 @@ use attestation::utils::{constant_time_eq, pad_report_data};
 ///
 /// Runs in offline mode ([`attestation::Verifier::offline`]): quote signatures
 /// and cert chains verify against the bundled AMD/Intel roots (SNP evidence
-/// must carry its VEK inline, as c8s evidence does), the SNP processor
-/// generation is auto-detected from the report's CPUID fields (v3+ reports),
-/// and the network-backed collateral checks (PCK CRL, TCB status, QE identity)
-/// are skipped — `collateral_verified` stays `false`. Debug guests are always
-/// rejected (`allow_debug` is never exposed to the browser; fail closed).
+/// must carry its VEK inline, as c8s evidence does), and the SNP processor
+/// generation is auto-detected from the report's CPUID fields (v3+ reports).
+/// Debug guests are always rejected (`allow_debug` is never exposed to the
+/// browser; fail closed).
+///
+/// Collateral: the TDX network-backed checks (PCK CRL, TCB status, QE
+/// identity) need an async provider and are skipped. For SNP, the caller may
+/// staple the AMD KDS CRL as `snp_crl_der` — its signature is verified against
+/// the bundled ARK and its thisUpdate/nextUpdate window against the current
+/// time before it is trusted, then the VEK is checked against it and
+/// `collateral_verified` becomes `true`. Without it, revocation is skipped and
+/// `collateral_verified` stays `false` — the caller's policy layer decides
+/// whether that qualifies as verified.
+///
+/// `min_tcb_json`, when supplied, is the minimum SNP TCB policy as
+/// [`SnpTcb`] JSON (`{ "bootloader": u8, "tee": u8, "snp": u8,
+/// "microcode": u8, "fmc"?: u8 }`); a report whose reported TCB is below any
+/// component fails closed. SNP platforms only — it is ignored by the TDX
+/// verifiers, so TDX callers must not rely on it.
 ///
 /// The freshness semantics of `expected_report_data` are per-platform, handled
 /// inside each core verifier: for bare-metal platforms it is checked against
@@ -45,6 +112,8 @@ use attestation::utils::{constant_time_eq, pad_report_data};
 /// - `expected_report_data`: optional freshness anchor bytes
 /// - `expected_init_data_hash`: optional init-data binding (SNP HOST_DATA /
 ///   TDX MRCONFIGID / vTPM PCR[8])
+/// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON)
+/// - `snp_crl_der`: optional DER AMD KDS CRL for the report's generation
 ///
 /// Returns the [`attestation::types::VerificationResult`] as JSON, or throws
 /// on any check failure.
@@ -53,14 +122,22 @@ pub async fn verify(
     envelope_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    snp_crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
+    let min_tcb = parse_min_tcb(min_tcb_json).map_err(|e| JsError::new(&e))?;
     let params = VerifyParams {
         expected_report_data,
         expected_init_data_hash,
+        min_tcb,
         ..VerifyParams::default()
     };
 
     let result = attestation::Verifier::offline()
+        .with_cert_provider(StaticSnpCollateral {
+            inner: DefaultCertProvider::new(),
+            crl_der: snp_crl_der,
+        })
         .verify(envelope_json.as_bytes(), &params)
         .await
         .map_err(|e| JsError::new(&format!("verify: {e}")))?;
@@ -70,9 +147,35 @@ pub async fn verify(
 
 /// Verify live SNP evidence in WASM.
 ///
+/// Enforces the same endorsement-key and platform-security policy as the
+/// native SNP verifier (`platforms/snp/verify.rs`), minus only VEK fetching
+/// (the VEK must be inline). The one intentional difference from the generic
+/// [`verify`] entry point is the explicit `generation` argument: v2 reports
+/// (Azure HCL evidence unwrapped to a bare report) carry no CPUID fields to
+/// auto-detect from, so the caller declares the generation and the VEK chain
+/// check authenticates it — a wrong declaration fails its own chain.
+///
+/// Checks, in native order: ARK → ASK/ASVK → VEK chain against the bundled
+/// roots (VLEK auto-detected), VEK validity period, optional CRL revocation,
+/// report signature, VMPL == 0, debug-policy rejection (no opt-in here; fail
+/// closed), VEK chip-id/TCB OID cross-validation against the report, and the
+/// optional minimum-TCB floor.
+///
+/// Collateral: when `crl_der` carries the AMD KDS CRL for this generation,
+/// its signature is verified against the bundled ARK and its
+/// thisUpdate/nextUpdate window against the current time, then the VEK is
+/// checked against it and the result's `collateral_verified` is `true`.
+/// Without it, revocation is skipped and `collateral_verified` is `false` —
+/// surfaced, never silently upgraded.
+///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
 /// - `generation`: processor generation ("milan", "genoa", "turin")
-/// - `expected_report_data`: optional raw bytes to check against report_data in the report
+/// - `expected_report_data`: optional raw bytes to check against report_data
+///   in the report (comparison reported as `report_data_match`, not fatal —
+///   the policy layer decides)
+/// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON); a
+///   reported TCB below any component fails closed
+/// - `crl_der`: optional DER AMD KDS CRL for this generation
 ///
 /// Returns verification result as JSON.
 #[wasm_bindgen]
@@ -80,42 +183,86 @@ pub fn verify_snp(
     evidence_json: &str,
     generation: &str,
     expected_report_data: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
+    verify_snp_impl(
+        evidence_json,
+        generation,
+        expected_report_data,
+        min_tcb_json,
+        crl_der,
+    )
+    .map_err(|e| JsError::new(&e))
+}
+
+// The whole entry point behind the wasm-bindgen boundary, so every enforcement
+// gate is exercisable by native tests (JsError carries no readable message off
+// the wasm target). Behavior-identical to the wrapper.
+fn verify_snp_impl(
+    evidence_json: &str,
+    generation: &str,
+    expected_report_data: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    crl_der: Option<Vec<u8>>,
+) -> Result<String, String> {
     let gen = match generation {
         "milan" | "Milan" => ProcessorGeneration::Milan,
         "genoa" | "Genoa" => ProcessorGeneration::Genoa,
         "turin" | "Turin" => ProcessorGeneration::Turin,
-        _ => return Err(JsError::new(&format!("unknown generation: {generation}"))),
+        _ => return Err(format!("unknown generation: {generation}")),
     };
+    let min_tcb = parse_min_tcb(min_tcb_json)?;
 
     let evidence: attestation::platforms::snp::evidence::SnpEvidence =
-        serde_json::from_str(evidence_json)
-            .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+        serde_json::from_str(evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
 
     use base64::Engine;
     let report_bytes = base64::engine::general_purpose::STANDARD
         .decode(&evidence.attestation_report)
-        .map_err(|e| JsError::new(&format!("base64 decode report: {e}")))?;
+        .map_err(|e| format!("base64 decode report: {e}"))?;
 
-    let report =
-        parse_report(&report_bytes).map_err(|e| JsError::new(&format!("parse report: {e}")))?;
+    let report = parse_report(&report_bytes).map_err(|e| format!("parse report: {e}"))?;
+
+    // Same version window as the native az-snp path: v2 (HCL-unwrapped, no
+    // CPUID fields) up to the shared maximum.
+    const MIN_REPORT_VERSION: u32 = 2;
+    if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
+        return Err(format!(
+            "report version {} not supported (min: {MIN_REPORT_VERSION}, max: {MAX_REPORT_VERSION})",
+            report.version
+        ));
+    }
 
     // Get VCEK from evidence
-    let vcek_der = match &evidence.cert_chain {
+    let vek_der = match &evidence.cert_chain {
         Some(chain) => base64::engine::general_purpose::STANDARD
             .decode(&chain.vcek)
-            .map_err(|e| JsError::new(&format!("base64 decode vcek: {e}")))?,
-        None => return Err(JsError::new("evidence missing cert_chain.vcek")),
+            .map_err(|e| format!("base64 decode vcek: {e}"))?,
+        None => return Err("evidence missing cert_chain.vcek".to_string()),
     };
 
-    // Verify cert chain (bundled ARK/ASK -> VCEK)
-    let (ark, ask) = get_bundled_certs(gen);
-    verify_cert_chain(ark, ask, &vcek_der)
-        .map_err(|e| JsError::new(&format!("cert chain verify: {e}")))?;
+    // Endorsement-key policy: bundled ARK → ASK/ASVK → VEK chain, VEK validity
+    // period, and VEK chip-id/TCB OID cross-validation against the report —
+    // the checks whose absence let an expired or wrong-platform VEK vouch for
+    // a report here while the native verifier rejected it.
+    verify_vek_endorsement(&report, &vek_der, gen).map_err(|e| format!("VEK endorsement: {e}"))?;
+
+    // CRL revocation check — caller-supplied collateral, ARK-signature- and
+    // freshness-verified before it is trusted (AMD CRLs are signed by the
+    // ARK, not the ASK/ASVK intermediate).
+    let collateral_verified = match crl_der {
+        Some(crl) => {
+            check_vcek_not_revoked(&vek_der, &crl, get_ark(gen))
+                .map_err(|e| format!("CRL check: {e}"))?;
+            true
+        }
+        None => false,
+    };
 
     // Verify report signature
-    verify_report_signature(&report_bytes, &vcek_der)
-        .map_err(|e| JsError::new(&format!("report signature: {e}")))?;
+    verify_report_signature(&report_bytes, &vek_der)
+        .map_err(|e| format!("report signature: {e}"))?;
 
     // Guest-policy enforcement — mirrors the native `verify_report` path
     // (`platforms/snp/verify.rs`: VMPL==0 and debug-policy rejection). Without
@@ -128,15 +275,21 @@ pub fn verify_snp(
     // `allow_debug` opt-in: it fails closed. (SEV-SNP guest policy lives in the
     // report, not the launch measurement, so a measurement pin cannot catch this.)
     if report.vmpl != 0 {
-        return Err(JsError::new(&format!(
+        return Err(format!(
             "VMPL check failed: report VMPL is {} (expected 0)",
             report.vmpl
-        )));
+        ));
     }
     if report.policy.debug_allowed() {
-        return Err(JsError::new(
-            "SNP guest policy permits debug (host can read guest memory); rejecting (fail closed)",
-        ));
+        return Err(
+            "SNP guest policy permits debug (host can read guest memory); rejecting (fail closed)"
+                .to_string(),
+        );
+    }
+
+    // Minimum-TCB floor
+    if let Some(ref min) = min_tcb {
+        enforce_min_tcb(&report.reported_tcb, min).map_err(|e| format!("minimum TCB: {e}"))?;
     }
 
     // Check report_data binding
@@ -153,10 +306,11 @@ pub fn verify_snp(
         "platform": "snp",
         "report_version": report.version,
         "report_data_match": report_data_match,
+        "collateral_verified": collateral_verified,
         "claims": claims,
     });
 
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
 }
 
 /// Verify Azure SEV-SNP (az-snp) vTPM attestation evidence in WASM.
@@ -167,20 +321,25 @@ pub fn verify_snp(
 /// the TPM quote's `extraData` (qualifyingData), not in the SNP `report_data`
 /// — the SNP `report_data` instead binds the vTPM attestation key (AK).
 ///
-/// Verification (mirrors the native async path, minus the CRL revocation check
-/// which needs an async cert provider — so `collateral_verified` is always
-/// `false` here):
+/// Verification (mirrors the native async path):
 /// 1. Verify the TPM quote signature with the AK extracted from HCL var_data.
 /// 2. Check the quote's `extraData` equals `expected_report_data` (freshness),
 ///    failing closed when an anchor is supplied and does not match.
 /// 3. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
 /// 4. Bind the AK to the TEE: `snp.report_data[..32] == SHA-256(var_data)`.
 /// 5. Validate the VCEK chain (auto-detecting the generation from CPUID) and the
-///    SNP report signature, then enforce VMPL/debug/TCB policy.
+///    SNP report signature, then enforce VMPL/debug/TCB policy and the optional
+///    minimum-TCB floor.
+/// 6. When `crl_der` carries the AMD KDS CRL for the matched generation, verify
+///    its ARK signature and freshness, then check the VCEK against it —
+///    `collateral_verified` becomes `true`. Without it, revocation is skipped
+///    and `collateral_verified` stays `false`.
 ///
 /// - `evidence_json`: az-snp evidence JSON (`{ version, tpm_quote, hcl_report, vcek }`)
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
 /// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
+/// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON)
+/// - `crl_der`: optional DER AMD KDS CRL for the report's generation
 ///
 /// Returns the verification result as JSON, or throws on any check failure.
 #[wasm_bindgen]
@@ -188,9 +347,30 @@ pub fn verify_az_snp(
     evidence_json: &str,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    let evidence: AzSnpEvidence = serde_json::from_str(evidence_json)
-        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
+    verify_az_snp_impl(
+        evidence_json,
+        expected_report_data,
+        expected_init_data_hash,
+        min_tcb_json,
+        crl_der,
+    )
+    .map_err(|e| JsError::new(&e))
+}
+
+// Off-wasm-testable body, same rationale as verify_snp_impl / verify_tdx_impl.
+fn verify_az_snp_impl(
+    evidence_json: &str,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    crl_der: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let evidence: AzSnpEvidence =
+        serde_json::from_str(evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
+    let min_tcb = parse_min_tcb(min_tcb_json)?;
 
     // Run the full az-snp verification core, freshness included. When an anchor is
     // supplied, the core binds the TPM quote's extraData (qualifyingData) to it and
@@ -201,19 +381,34 @@ pub fn verify_az_snp(
     let params = VerifyParams {
         expected_report_data,
         expected_init_data_hash,
+        min_tcb,
         ..VerifyParams::default()
     };
 
-    let verified = verify_report(&evidence, &params)
-        .map_err(|e| JsError::new(&format!("az-snp verify: {e}")))?;
+    let VerifiedReport {
+        mut result,
+        matched_gen,
+        vcek_der,
+        report_version,
+    } = verify_report(&evidence, &params).map_err(|e| format!("az-snp verify: {e}"))?;
+
+    // CRL revocation check — caller-supplied collateral, exactly the check the
+    // native async wrapper (`az_snp::verify::verify_evidence`) runs with a
+    // provider-fetched CRL. AMD CRLs are signed by the ARK, not the ASK/ASVK
+    // intermediate, and the CRL's signature and freshness are verified before
+    // it is trusted.
+    if let Some(crl) = crl_der {
+        check_vcek_not_revoked(&vcek_der, &crl, get_ark(matched_gen))
+            .map_err(|e| format!("CRL check: {e}"))?;
+        result.collateral_verified = true;
+    }
 
     // Serialize the VerificationResult, then graft on report_version, matching the
     // shape verify_snp returns so the JS policy layer reads it uniformly.
-    let mut result = serde_json::to_value(&verified.result)
-        .map_err(|e| JsError::new(&format!("json serialize: {e}")))?;
-    result["report_version"] = serde_json::json!(verified.report_version);
+    let mut result = serde_json::to_value(&result).map_err(|e| format!("json serialize: {e}"))?;
+    result["report_version"] = serde_json::json!(report_version);
 
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
 }
 
 /// Verify bare-metal Intel TDX (tdx) DCAP attestation evidence in WASM.
@@ -460,6 +655,141 @@ mod tests {
                 "length {len}: error must name the size contract, got: {err}"
             );
         }
+    }
+
+    // --- bare-SNP entry point: endorsement parity, min-TCB floor, CRL ---
+
+    const SNP_REPORT_V5: &[u8] =
+        include_bytes!("../../attestation/test_data/snp/live-report-v5-genoa.bin");
+    const SNP_VCEK_GENOA: &[u8] =
+        include_bytes!("../../attestation/test_data/snp/live-vcek-genoa.der");
+    const AZ_SNP_MILAN_V3: &str =
+        include_str!("../../attestation/test_data/az_snp/milan-v3-attestation.json");
+
+    fn snp_evidence_json() -> String {
+        serde_json::json!({
+            "attestation_report": BASE64.encode(SNP_REPORT_V5),
+            "cert_chain": { "vcek": BASE64.encode(SNP_VCEK_GENOA) },
+        })
+        .to_string()
+    }
+
+    fn reported_tcb_json(microcode_bump: u8) -> String {
+        let report = parse_report(SNP_REPORT_V5).unwrap();
+        let tcb = report.reported_tcb;
+        serde_json::json!({
+            "bootloader": tcb.bootloader,
+            "tee": tcb.tee,
+            "snp": tcb.snp,
+            "microcode": tcb.microcode + microcode_bump,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn snp_valid_evidence_passes_without_collateral() {
+        let out = verify_snp_impl(&snp_evidence_json(), "genoa", None, None, None)
+            .expect("live genoa fixture must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["signature_valid"], serde_json::json!(true));
+        assert_eq!(json["report_version"], serde_json::json!(5));
+        assert_eq!(
+            json["collateral_verified"],
+            serde_json::json!(false),
+            "no CRL supplied ⇒ revocation was not checked, and the result must say so"
+        );
+    }
+
+    #[test]
+    fn snp_wrong_generation_fails_chain() {
+        let err = verify_snp_impl(&snp_evidence_json(), "milan", None, None, None)
+            .expect_err("declared generation must be authenticated by the VEK chain");
+        assert!(err.contains("VEK endorsement"), "got: {err}");
+    }
+
+    #[test]
+    fn snp_min_tcb_at_floor_passes() {
+        verify_snp_impl(
+            &snp_evidence_json(),
+            "genoa",
+            None,
+            Some(reported_tcb_json(0)),
+            None,
+        )
+        .expect("reported TCB at the floor must pass");
+    }
+
+    #[test]
+    fn snp_min_tcb_below_floor_fails_closed() {
+        let err = verify_snp_impl(
+            &snp_evidence_json(),
+            "genoa",
+            None,
+            Some(reported_tcb_json(1)),
+            None,
+        )
+        .expect_err("below-floor TCB must fail closed");
+        assert!(err.contains("below minimum"), "got: {err}");
+    }
+
+    #[test]
+    fn snp_malformed_min_tcb_rejected_before_verification() {
+        for bad in ["not json", "{}", r#"{"bootloader": 3}"#] {
+            let err = verify_snp_impl(
+                &snp_evidence_json(),
+                "genoa",
+                None,
+                Some(bad.to_string()),
+                None,
+            )
+            .expect_err("malformed min_tcb must be rejected, not dropped");
+            assert!(err.contains("min_tcb deserialize"), "{bad}: got {err}");
+        }
+    }
+
+    #[test]
+    fn snp_garbage_crl_rejected() {
+        let err = verify_snp_impl(
+            &snp_evidence_json(),
+            "genoa",
+            None,
+            None,
+            Some(vec![0xAB; 64]),
+        )
+        .expect_err("unparseable CRL must fail closed, never read as checked");
+        assert!(err.contains("CRL check"), "got: {err}");
+    }
+
+    // --- az-snp entry point: min-TCB floor and CRL pass-through ---
+
+    #[test]
+    fn az_snp_min_tcb_below_floor_fails_closed() {
+        let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
+        let evidence = evidence["evidence"].to_string();
+        // A floor above any real Milan microcode SPL.
+        let floor = r#"{"bootloader":0,"tee":0,"snp":0,"microcode":255}"#;
+        let err = verify_az_snp_impl(&evidence, None, None, Some(floor.to_string()), None)
+            .expect_err("below-floor TCB must fail closed on az-snp too");
+        assert!(err.contains("below minimum"), "got: {err}");
+    }
+
+    #[test]
+    fn az_snp_garbage_crl_rejected() {
+        let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
+        let evidence = evidence["evidence"].to_string();
+        let err = verify_az_snp_impl(&evidence, None, None, None, Some(vec![0xAB; 64]))
+            .expect_err("unparseable CRL must fail closed");
+        assert!(err.contains("CRL check"), "got: {err}");
+    }
+
+    #[test]
+    fn az_snp_no_collateral_surfaces_false() {
+        let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
+        let evidence = evidence["evidence"].to_string();
+        let out = verify_az_snp_impl(&evidence, None, None, None, None)
+            .expect("milan v3 fixture must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["collateral_verified"], serde_json::json!(false));
     }
 
     #[tokio::test]
