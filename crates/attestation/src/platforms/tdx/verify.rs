@@ -6,6 +6,7 @@ use scroll::Pread;
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
 use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::utils::check_expected;
 
 use super::claims::extract_claims;
 use super::evidence::TdxEvidence;
@@ -441,28 +442,7 @@ pub async fn verify_evidence(
         None
     };
 
-    // Optional MRTD / RTMR comparisons against caller-supplied references.
-    // Constant-time; mismatch surfaces in the result and does not fail verify.
-    let mrtd_match = params
-        .expected_mrtd
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.mr_td, expected));
-    let rtmr0_match = params
-        .expected_rtmr0
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_0, expected));
-    let rtmr1_match = params
-        .expected_rtmr1
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_1, expected));
-    let rtmr2_match = params
-        .expected_rtmr2
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_2, expected));
-    let rtmr3_match = params
-        .expected_rtmr3
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_3, expected));
+    let matches = check_expected_measurements(&quote.body, params)?;
 
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
@@ -490,12 +470,58 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
-        mrtd_match,
-        rtmr0_match,
-        rtmr1_match,
-        rtmr2_match,
-        rtmr3_match,
+        mrtd_match: matches.mrtd,
+        rtmr0_match: matches.rtmr0,
+        rtmr1_match: matches.rtmr1,
+        rtmr2_match: matches.rtmr2,
+        rtmr3_match: matches.rtmr3,
         launch_digest_match: None,
+    })
+}
+
+/// Per-register results of [`check_expected_measurements`]; semantics match
+/// the corresponding `*_match` fields on [`VerificationResult`].
+pub(crate) struct MeasurementMatches {
+    pub mrtd: Option<bool>,
+    pub rtmr0: Option<bool>,
+    pub rtmr1: Option<bool>,
+    pub rtmr2: Option<bool>,
+    pub rtmr3: Option<bool>,
+}
+
+/// Check a TDX report body against the caller-supplied MRTD / RTMR
+/// references. Constant-time; a supplied reference that doesn't match fails
+/// verification. Shared by the bare-metal and Azure vTPM TDX paths.
+pub(crate) fn check_expected_measurements(
+    body: &TdxReportBody,
+    params: &VerifyParams,
+) -> Result<MeasurementMatches> {
+    Ok(MeasurementMatches {
+        mrtd: check_expected(
+            "MRTD",
+            &body.mr_td,
+            params.expected_mrtd.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr0: check_expected(
+            "RTMR[0]",
+            &body.rtmr_0,
+            params.expected_rtmr0.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr1: check_expected(
+            "RTMR[1]",
+            &body.rtmr_1,
+            params.expected_rtmr1.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr2: check_expected(
+            "RTMR[2]",
+            &body.rtmr_2,
+            params.expected_rtmr2.as_ref().map(|e| e.as_slice()),
+        )?,
+        rtmr3: check_expected(
+            "RTMR[3]",
+            &body.rtmr_3,
+            params.expected_rtmr3.as_ref().map(|e| e.as_slice()),
+        )?,
     })
 }
 
@@ -1045,21 +1071,21 @@ mod tests {
         };
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
         assert_eq!(r.mrtd_match, Some(true));
+        // Pins that signature verification still runs and precedes the
+        // reference checks when expected_* values are supplied.
+        assert!(r.signature_valid);
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_wrong_mrtd_is_some_false() {
-        // Wrong MRTD must record Some(false) without failing verification.
+    async fn test_verify_evidence_wrong_mrtd_fails() {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,
             expected_mrtd: Some([0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.mrtd_match, Some(false));
-        // Crucially the rest of the result is still populated — sig is valid.
-        assert!(r.signature_valid);
+        let err = verify_evidence(&evidence, &params, None).await.unwrap_err();
+        assert!(matches!(err, AttestationError::MeasurementMismatch("MRTD")));
     }
 
     #[tokio::test]
@@ -1080,20 +1106,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
+    async fn test_verify_evidence_one_wrong_rtmr_fails() {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,
             expected_rtmr0: Some(quote.body.rtmr_0), // match
-            expected_rtmr1: Some([0xFF; 48]),        // mismatch
-            expected_rtmr3: Some(quote.body.rtmr_3), // match (rtmr2 left None → skipped)
+            expected_rtmr1: Some([0xFF; 48]),        // first mismatch — fails here
+            expected_rtmr3: Some(quote.body.rtmr_3), // supplied but never reached
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.rtmr0_match, Some(true));
-        assert_eq!(r.rtmr1_match, Some(false));
-        assert_eq!(r.rtmr2_match, None);
-        assert_eq!(r.rtmr3_match, Some(true));
+        let err = verify_evidence(&evidence, &params, None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AttestationError::MeasurementMismatch("RTMR[1]")
+        ));
     }
 }
