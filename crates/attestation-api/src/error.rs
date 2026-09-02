@@ -16,6 +16,9 @@ pub enum ApiError {
     #[error("invalid request: {0}")]
     BadRequest(String),
 
+    #[error("expected measurement check failed: {0}")]
+    MeasurementMismatch(String),
+
     #[error("cert fetch failed: {0}")]
     CertFetch(String),
 
@@ -44,6 +47,9 @@ impl IntoResponse for ApiError {
             ApiError::NoPlatform => (StatusCode::SERVICE_UNAVAILABLE, "no_platform"),
             ApiError::AttestNotAvailable => (StatusCode::BAD_REQUEST, "attest_not_available"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            ApiError::MeasurementMismatch(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "verification_failed")
+            }
             ApiError::CertFetch(_) => (StatusCode::BAD_GATEWAY, "cert_fetch_failed"),
             ApiError::TokenNotConfigured => (StatusCode::BAD_REQUEST, "token_not_configured"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),

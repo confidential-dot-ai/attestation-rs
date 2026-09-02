@@ -44,6 +44,18 @@ pub struct VerifyParamsInput {
     /// (`"HOPPER"`, `"BLACKWELL"`, `"LS10"`). If absent, all known archs
     /// are accepted.
     pub nvidia_gpu_expected_archs: Option<Vec<attestation::NvidiaGpuArch>>,
+
+    /// Base64 48-byte SEV-SNP launch measurement (`report.measurement`) the
+    /// evidence must carry. SNP evidence only.
+    pub expected_launch_digest: Option<String>,
+    /// Base64 48-byte TDX MRTD the evidence must carry. TDX evidence only.
+    pub expected_mrtd: Option<String>,
+    /// Base64 48-byte TDX RTMR[0..3] values the evidence must carry. TDX
+    /// evidence only.
+    pub expected_rtmr0: Option<String>,
+    pub expected_rtmr1: Option<String>,
+    pub expected_rtmr2: Option<String>,
+    pub expected_rtmr3: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -108,20 +120,29 @@ pub async fn handler(
         expected_init_data_hash,
         allow_debug,
         min_tcb,
+        expected_launch_digest: decode_digest(
+            req.params.expected_launch_digest,
+            "expected_launch_digest",
+        )?,
+        expected_mrtd: decode_digest(req.params.expected_mrtd, "expected_mrtd")?,
+        expected_rtmr0: decode_digest(req.params.expected_rtmr0, "expected_rtmr0")?,
+        expected_rtmr1: decode_digest(req.params.expected_rtmr1, "expected_rtmr1")?,
+        expected_rtmr2: decode_digest(req.params.expected_rtmr2, "expected_rtmr2")?,
+        expected_rtmr3: decode_digest(req.params.expected_rtmr3, "expected_rtmr3")?,
         // Map the HTTP GPU params into the grouped NvidiaGpuParams struct (the
         // library moved these out of flat VerifyParams). `..Default::default()`
         // fills the remaining GPU fields (allowed_bindings, device_policy) with
-        // their secure defaults and main's expected_mrtd/rtmr/launch fields.
+        // their secure defaults.
         nvidia_gpu: attestation::NvidiaGpuParams {
             user_nonce: nvidia_gpu_user_nonce,
             required: req.params.nvidia_gpu_required,
             expected_archs: req.params.nvidia_gpu_expected_archs,
             ..Default::default()
         },
-        ..Default::default()
     };
 
     let result = state.verifier.verify(&evidence_json, &params).await?;
+    enforce_expected_measurements(&params, &result)?;
 
     let token = if req.issue_token {
         let issuer = state
@@ -134,6 +155,74 @@ pub async fn handler(
     };
 
     Ok(Json(VerifyResponse { result, token }))
+}
+
+/// Decodes a base64 measurement parameter, which must be exactly 48 bytes.
+fn decode_digest(value: Option<String>, name: &str) -> Result<Option<[u8; 48]>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let bytes = BASE64
+        .decode(&value)
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64 {name}: {e}")))?;
+    let digest: [u8; 48] = bytes.try_into().map_err(|b: Vec<u8>| {
+        ApiError::BadRequest(format!("{name} must be 48 bytes, got {}", b.len()))
+    })?;
+    Ok(Some(digest))
+}
+
+/// Refuses a result that does not affirmatively satisfy every expected
+/// measurement the caller supplied. The library records a mismatch as
+/// `Some(false)` and an expectation the platform cannot answer (an RTMR pin
+/// against SEV-SNP evidence, which has no RTMRs) as `None`; both are refusals
+/// here, so a pin never reads as a pass on evidence that could not be checked
+/// against it. Callers that supply no expectation are unaffected.
+fn enforce_expected_measurements(
+    params: &attestation::VerifyParams,
+    result: &attestation::VerificationResult,
+) -> Result<(), ApiError> {
+    check_expected(
+        "expected_launch_digest",
+        params.expected_launch_digest.is_some(),
+        result.launch_digest_match,
+    )?;
+    check_expected(
+        "expected_mrtd",
+        params.expected_mrtd.is_some(),
+        result.mrtd_match,
+    )?;
+    check_expected(
+        "expected_rtmr0",
+        params.expected_rtmr0.is_some(),
+        result.rtmr0_match,
+    )?;
+    check_expected(
+        "expected_rtmr1",
+        params.expected_rtmr1.is_some(),
+        result.rtmr1_match,
+    )?;
+    check_expected(
+        "expected_rtmr2",
+        params.expected_rtmr2.is_some(),
+        result.rtmr2_match,
+    )?;
+    check_expected(
+        "expected_rtmr3",
+        params.expected_rtmr3.is_some(),
+        result.rtmr3_match,
+    )
+}
+
+fn check_expected(name: &str, supplied: bool, matched: Option<bool>) -> Result<(), ApiError> {
+    match (supplied, matched) {
+        (false, _) | (true, Some(true)) => Ok(()),
+        (true, Some(false)) => Err(ApiError::MeasurementMismatch(format!(
+            "{name} does not match the verified evidence"
+        ))),
+        (true, None) => Err(ApiError::MeasurementMismatch(format!(
+            "{name} cannot be checked: the verified evidence carries no such measurement"
+        ))),
+    }
 }
 
 fn build_evidence_envelope(
@@ -177,7 +266,10 @@ fn is_attestation_envelope(evidence: &Value) -> bool {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::build_evidence_envelope;
+    use super::{build_evidence_envelope, check_expected, decode_digest};
+    use crate::error::ApiError;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
 
     #[test]
     fn build_evidence_envelope_wraps_split_form_with_canonical_platform() {
@@ -241,6 +333,43 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown platform"));
+    }
+
+    #[test]
+    fn decode_digest_accepts_48_bytes_and_absent() {
+        assert_eq!(decode_digest(None, "expected_mrtd").unwrap(), None);
+        let digest = [0xabu8; 48];
+        let got = decode_digest(Some(BASE64.encode(digest)), "expected_mrtd").unwrap();
+        assert_eq!(got, Some(digest));
+    }
+
+    #[test]
+    fn decode_digest_rejects_wrong_length_and_bad_base64() {
+        let short = decode_digest(Some(BASE64.encode([0u8; 47])), "expected_rtmr1").unwrap_err();
+        assert!(
+            matches!(short, ApiError::BadRequest(m) if m.contains("expected_rtmr1 must be 48 bytes"))
+        );
+        let junk = decode_digest(Some("!!not-base64".to_string()), "expected_rtmr1").unwrap_err();
+        assert!(
+            matches!(junk, ApiError::BadRequest(m) if m.contains("invalid base64 expected_rtmr1"))
+        );
+    }
+
+    #[test]
+    fn check_expected_passes_only_an_affirmative_match() {
+        assert!(check_expected("expected_rtmr0", false, None).is_ok());
+        assert!(check_expected("expected_rtmr0", false, Some(false)).is_ok());
+        assert!(check_expected("expected_rtmr0", true, Some(true)).is_ok());
+        let mismatch = check_expected("expected_rtmr0", true, Some(false)).unwrap_err();
+        assert!(
+            matches!(mismatch, ApiError::MeasurementMismatch(m) if m.contains("does not match"))
+        );
+        // An RTMR pin against SEV-SNP evidence: the verifier reports no
+        // verdict, and that must refuse rather than pass.
+        let inapplicable = check_expected("expected_rtmr0", true, None).unwrap_err();
+        assert!(
+            matches!(inapplicable, ApiError::MeasurementMismatch(m) if m.contains("carries no such measurement"))
+        );
     }
 
     #[test]
