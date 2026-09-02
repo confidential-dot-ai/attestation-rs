@@ -132,6 +132,41 @@ async fn verify_rejects_invalid_evidence() {
 }
 
 #[tokio::test]
+async fn verify_rejects_expected_measurement_of_wrong_length() {
+    let state = test_state();
+    let app = build_api_router(state);
+
+    let body = serde_json::json!({
+        "platform": "snp",
+        "evidence": {},
+        "params": { "expected_launch_digest": "AAAA" }
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "bad_request");
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("expected_launch_digest must be 48 bytes"));
+}
+
+#[tokio::test]
 async fn verify_rejects_full_envelope_evidence() {
     let state = test_state();
     let app = build_api_router(state);
