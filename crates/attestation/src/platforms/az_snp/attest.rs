@@ -121,25 +121,26 @@ where
 {
     let mut delay = base_delay;
     let mut attempt = 1;
+
     loop {
-        match attempt_fn().await {
+        // Three outcomes, and only the last one continues: success and a
+        // give-up both leave here, so the tail below is purely the backoff.
+        let err = match attempt_fn().await {
             Ok(value) => return Ok(value),
-            Err((err, retryable)) => {
-                if !retryable || attempt >= attempts {
-                    return Err(err);
-                }
-                log::warn!(
-                    "IMDS VCEK fetch attempt {}/{} failed, retrying in {:?}: {}",
-                    attempt,
-                    attempts,
-                    delay,
-                    err
-                );
-                tokio::time::sleep(delay).await;
-                delay *= 2;
-                attempt += 1;
-            }
-        }
+            Err((err, retryable)) if !retryable || attempt >= attempts => return Err(err),
+            Err((err, _)) => err,
+        };
+
+        log::warn!(
+            "IMDS VCEK fetch attempt {}/{} failed, retrying in {:?}: {}",
+            attempt,
+            attempts,
+            delay,
+            err
+        );
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+        attempt += 1;
     }
 }
 
