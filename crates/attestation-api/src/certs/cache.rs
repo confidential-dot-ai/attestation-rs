@@ -161,38 +161,40 @@ impl CertCache {
             tcb_str.clone(),
         );
 
-        if let Some(cert) = self.vcek_cache.get(&key).await {
-            return Ok(cert);
-        }
+        // try_get_with coalesces concurrent misses into one disk probe and
+        // (on a store miss) one KDS fetch
+        // (AMD rate-limits VCEK fetches to ~1 per 10s per IP).
+        self.vcek_cache
+            .try_get_with(key, async move {
+                // A VCEK never changes for this key, so a stored copy is
+                // authoritative and lets a cold process verify while KDS is
+                // unreachable.
+                if let Some(store) = &self.store {
+                    if let Some(cert) = store.get_vcek(processor_gen, &chip_id_hex, &tcb_str) {
+                        return anyhow::Ok(cert);
+                    }
+                }
 
-        // A VCEK never changes for this key, so a stored copy is authoritative
-        // and lets a cold process verify while KDS is unreachable.
-        if let Some(store) = &self.store {
-            if let Some(cert) = store.get_vcek(processor_gen, &chip_id_hex, &tcb_str) {
-                self.vcek_cache.insert(key, cert.clone()).await;
-                return Ok(cert);
-            }
-        }
-
-        let url = format!(
-            "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
-            attestation::AMD_KDS_VCEK_BASE,
-            processor_gen,
-            chip_id_hex,
-            tcb.bootloader,
-            tcb.tee,
-            tcb.snp,
-            tcb.microcode
-        );
-
-        tracing::info!(%url, "fetching VCEK from AMD KDS");
-        let resp = self.http_client.get(&url).send().await?;
-        let cert = resp.error_for_status()?.bytes().await?.to_vec();
-        if let Some(store) = &self.store {
-            store.put_vcek(processor_gen, &chip_id_hex, &tcb_str, &cert);
-        }
-        self.vcek_cache.insert(key, cert.clone()).await;
-        Ok(cert)
+                let url = format!(
+                    "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
+                    attestation::AMD_KDS_VCEK_BASE,
+                    processor_gen,
+                    chip_id_hex,
+                    tcb.bootloader,
+                    tcb.tee,
+                    tcb.snp,
+                    tcb.microcode
+                );
+                tracing::info!(%url, "fetching VCEK from AMD KDS");
+                let resp = self.http_client.get(&url).send().await?;
+                let cert = resp.error_for_status()?.bytes().await?.to_vec();
+                if let Some(store) = &self.store {
+                    store.put_vcek(processor_gen, &chip_id_hex, &tcb_str, &cert);
+                }
+                anyhow::Ok(cert)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("VCEK fetch: {e}"))
     }
 
     pub async fn get_cert_chain(&self, processor_gen: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {

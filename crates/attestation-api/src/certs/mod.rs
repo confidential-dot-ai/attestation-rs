@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod enrich;
 pub mod manager;
 pub mod nras_provider;
 pub mod revocation;

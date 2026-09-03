@@ -85,9 +85,22 @@ pub async fn handler(
         // Keep the service response shape stable: top-level `platform` plus
         // platform-specific `evidence` (+ optional `nvidia_gpu`). /verify
         // accepts this split form when clients send the same fields.
+        let mut evidence = envelope.get("evidence").cloned().unwrap_or(envelope);
+
+        // Bare-metal hypervisors may leave the cert table empty; fill in the
+        // VCEK from the service cert cache so offline verifiers get a chain.
+        if matches!(platform, attestation::PlatformType::Snp) {
+            let provider =
+                std::sync::Arc::new(crate::certs::snp_provider::CachedCertProvider::new(
+                    state.cert_cache.clone(),
+                    state.config.certs.require_crl,
+                ));
+            evidence = crate::certs::enrich::enrich_snp_evidence(provider, evidence).await;
+        }
+
         Ok(Json(AttestResponse {
             platform: format!("{platform}"),
-            evidence: envelope.get("evidence").cloned().unwrap_or(envelope),
+            evidence,
             nvidia_gpu: gpu_field,
         }))
     }
