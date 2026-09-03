@@ -114,6 +114,9 @@ pub struct CertsConfig {
     pub crl_backoff_base_secs: u64,
     /// Ceiling for the CRL failure backoff, in seconds.
     pub crl_backoff_max_secs: u64,
+    /// Directory holding VCEKs and AMD cert chains across restarts. Unset keeps
+    /// collateral in memory only, so a cold process must reach AMD KDS.
+    pub local_collateral_dir: Option<String>,
 
     // --- NVIDIA NRAS / GPU attestation ---
     /// TTL for cached NRAS JWKS entries (hours).
@@ -177,6 +180,7 @@ impl Default for CertsConfig {
             require_crl: false,
             crl_backoff_base_secs: 1,
             crl_backoff_max_secs: 300,
+            local_collateral_dir: None,
             jwks_ttl_hours: 1,
             prefetch_nras_jwks: true,
             nras_gpu_url: String::new(),

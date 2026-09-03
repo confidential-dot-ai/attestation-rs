@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::certs::hours_to_duration;
+use crate::certs::store::CollateralStore;
 use crate::config::{normalize_generation, CertsConfig, KNOWN_GENERATIONS};
 
 /// Key for VCEK cache: (processor_gen, chip_id_hex, tcb_version)
@@ -44,10 +45,21 @@ pub struct CertCache {
     crl_refresh_hours: u64,
     crl_backoff_base_secs: u64,
     crl_backoff_max_secs: u64,
+    /// Disk-backed VCEK/chain store. `None` keeps collateral in memory only.
+    store: Option<CollateralStore>,
 }
 
 impl CertCache {
     pub fn new(config: &CertsConfig) -> Self {
+        let http_client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+        Self::with_client(config, http_client)
+    }
+
+    pub(crate) fn with_client(config: &CertsConfig, http_client: Client) -> Self {
         let vcek_cache = Cache::builder()
             .max_capacity(config.cache_max_entries)
             .time_to_live(hours_to_duration(config.vcek_ttl_hours))
@@ -112,15 +124,16 @@ impl CertCache {
             crl_failure_cache,
             jwks_cache,
             last_crl_refresh: Arc::new(RwLock::new(None)),
-            http_client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
+            http_client,
             configured_generations,
             crl_refresh_hours: config.crl_refresh_hours,
             crl_backoff_base_secs,
             crl_backoff_max_secs: config.crl_backoff_max_secs,
+            store: config
+                .local_collateral_dir
+                .as_ref()
+                .filter(|d| !d.is_empty())
+                .map(CollateralStore::new),
         }
     }
 
@@ -152,6 +165,15 @@ impl CertCache {
             return Ok(cert);
         }
 
+        // A VCEK never changes for this key, so a stored copy is authoritative
+        // and lets a cold process verify while KDS is unreachable.
+        if let Some(store) = &self.store {
+            if let Some(cert) = store.get_vcek(processor_gen, &chip_id_hex, &tcb_str) {
+                self.vcek_cache.insert(key, cert.clone()).await;
+                return Ok(cert);
+            }
+        }
+
         let url = format!(
             "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
             attestation::AMD_KDS_VCEK_BASE,
@@ -166,6 +188,9 @@ impl CertCache {
         tracing::info!(%url, "fetching VCEK from AMD KDS");
         let resp = self.http_client.get(&url).send().await?;
         let cert = resp.error_for_status()?.bytes().await?.to_vec();
+        if let Some(store) = &self.store {
+            store.put_vcek(processor_gen, &chip_id_hex, &tcb_str, &cert);
+        }
         self.vcek_cache.insert(key, cert.clone()).await;
         Ok(cert)
     }
@@ -173,6 +198,15 @@ impl CertCache {
     pub async fn get_cert_chain(&self, processor_gen: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         if let Some(chain) = self.chain_cache.get(processor_gen).await {
             return Ok(chain);
+        }
+
+        if let Some(store) = &self.store {
+            if let Some(chain) = store.get_chain(processor_gen) {
+                self.chain_cache
+                    .insert(processor_gen.to_string(), chain.clone())
+                    .await;
+                return Ok(chain);
+            }
         }
 
         let url = format!(
@@ -187,6 +221,9 @@ impl CertCache {
 
         // The cert chain PEM contains two certificates: ASK then ARK
         let chain = parse_cert_chain_pem(&pem_data)?;
+        if let Some(store) = &self.store {
+            store.put_chain(processor_gen, &chain.0, &chain.1);
+        }
         self.chain_cache
             .insert(processor_gen.to_string(), chain.clone())
             .await;
@@ -468,6 +505,120 @@ pub(crate) fn parse_cert_chain_pem(pem_data: &[u8]) -> anyhow::Result<(Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every request is routed through a closed local port, so any code path that
+    /// reaches for the network fails. A call that still succeeds provably did not.
+    fn offline_client() -> Client {
+        Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    }
+
+    fn cfg_with_store(dir: Option<&std::path::Path>) -> CertsConfig {
+        CertsConfig {
+            local_collateral_dir: dir.map(|d| d.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+    }
+
+    const TEST_CHIP: [u8; 64] = [0xAB; 64];
+
+    fn test_tcb() -> attestation::SnpTcb {
+        attestation::SnpTcb {
+            fmc: None,
+            bootloader: 3,
+            tee: 0,
+            snp: 10,
+            microcode: 27,
+        }
+    }
+
+    #[tokio::test]
+    async fn vcek_is_served_from_the_store_with_no_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
+
+        // Seed through the same key derivation the lookup uses.
+        let tcb = test_tcb();
+        let store = crate::certs::store::CollateralStore::new(dir.path());
+        store.put_vcek(
+            "Genoa",
+            &hex::encode(TEST_CHIP),
+            &format!(
+                "{:02X}{:02X}{:02X}{:02X}",
+                tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
+            ),
+            b"stored-vcek",
+        );
+
+        let cert = cache
+            .get_vcek("Genoa", &TEST_CHIP, &tcb)
+            .await
+            .expect("a stored VCEK must be served while the network is unreachable");
+        assert_eq!(cert, b"stored-vcek");
+    }
+
+    #[tokio::test]
+    async fn vcek_without_a_stored_copy_needs_the_network() {
+        // Control for the test above: same offline client, empty store. If this
+        // ever passes, the network block is not blocking and the test above proves
+        // nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
+        assert!(cache
+            .get_vcek("Genoa", &TEST_CHIP, &test_tcb())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_second_cold_process_reads_the_stored_vcek() {
+        let dir = tempfile::tempdir().unwrap();
+        let tcb = test_tcb();
+        let tcb_str = format!(
+            "{:02X}{:02X}{:02X}{:02X}",
+            tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
+        );
+
+        // Populate via one cache, then read with a second one that shares only the
+        // directory: that is exactly the cold-process path.
+        let first = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
+        crate::certs::store::CollateralStore::new(dir.path()).put_vcek(
+            "Genoa",
+            &hex::encode(TEST_CHIP),
+            &tcb_str,
+            b"written-back",
+        );
+        drop(first);
+
+        let second = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
+        assert_eq!(
+            second.get_vcek("Genoa", &TEST_CHIP, &tcb).await.unwrap(),
+            b"written-back"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_configured_directory_nothing_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CertCache::with_client(&cfg_with_store(None), offline_client());
+        assert!(cache
+            .get_vcek("Genoa", &TEST_CHIP, &test_tcb())
+            .await
+            .is_err());
+        assert_eq!(
+            fs_count(dir.path()),
+            0,
+            "an unset collateral dir must leave the filesystem untouched"
+        );
+    }
+
+    fn fs_count(p: &std::path::Path) -> usize {
+        std::fs::read_dir(p).map(|d| d.count()).unwrap_or(0)
+    }
 
     // Minimal PEM with valid base64 body (content is arbitrary, just needs to decode)
     const FAKE_CERT: &str = "-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n";

@@ -65,6 +65,9 @@ uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
 hex = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [[bin]]
 name = "loadtest"
 path = "src/bin/loadtest.rs"

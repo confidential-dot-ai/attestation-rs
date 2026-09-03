@@ -3,6 +3,7 @@ pub mod manager;
 pub mod nras_provider;
 pub mod revocation;
 pub mod snp_provider;
+pub mod store;
 pub mod tdx_provider;
 
 use std::time::Duration;
