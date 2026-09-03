@@ -29,6 +29,11 @@ pub struct CertCache {
     chain_cache: Cache<String, (Vec<u8>, Vec<u8>)>,
     tdx_cache: Cache<TdxCollateralKey, Vec<u8>>,
     crl_cache: Cache<String, CrlEntry>,
+    /// Issuers whose CRL fetch failed recently. Only successes were cached
+    /// before, so an unreachable distribution point was re-dialled on every
+    /// verify and each one paid the full connect timeout.
+    /// Consecutive-failure state per issuer, driving the retry backoff.
+    crl_failure_cache: Cache<String, CrlBackoff>,
     /// JWKS cache keyed by the full JWKS URL (NVIDIA NRAS).
     jwks_cache: Cache<String, attestation::platforms::nvidia_gpu::Jwks>,
     last_crl_refresh: Arc<RwLock<Option<DateTime<Utc>>>>,
@@ -37,6 +42,8 @@ pub struct CertCache {
     configured_generations: Vec<String>,
     /// Configured CRL refresh interval in hours (used for CrlEntry.next_refresh).
     crl_refresh_hours: u64,
+    crl_backoff_base_secs: u64,
+    crl_backoff_max_secs: u64,
 }
 
 impl CertCache {
@@ -63,6 +70,29 @@ impl CertCache {
 
         // NRAS publishes a small key set (~5-10 keys). A handful of slots is
         // enough even if GPU and switch endpoints diverge in the future.
+        // Fail-closed deployments do NOT get the negative cache. Under
+        // require_crl a remembered failure refuses verification outright, so a
+        // one-second blip would become a full-backoff outage even after
+        // the endpoint recovers. Fail-open is the case worth caching: the CRL
+        // result is discarded anyway, so the only thing repeated dialling buys
+        // is the stall this fixes.
+        // 0 disables it; moka treats a zero TTL as "expire immediately".
+        // Under require_crl a suppressed retry means a refused verification, so
+        // fail-closed always dials.
+        let crl_backoff_base_secs = if config.require_crl {
+            0
+        } else {
+            config.crl_backoff_base_secs
+        };
+        // Outlive the longest backoff so an outage does not keep resetting the
+        // consecutive count back to the base delay.
+        let crl_failure_cache = Cache::builder()
+            .max_capacity(64)
+            .time_to_live(Duration::from_secs(
+                config.crl_backoff_max_secs.saturating_mul(4).max(60),
+            ))
+            .build();
+
         let jwks_cache = Cache::builder()
             .max_capacity(8)
             .time_to_live(hours_to_duration(config.jwks_ttl_hours))
@@ -79,6 +109,7 @@ impl CertCache {
             chain_cache,
             tdx_cache,
             crl_cache,
+            crl_failure_cache,
             jwks_cache,
             last_crl_refresh: Arc::new(RwLock::new(None)),
             http_client: Client::builder()
@@ -88,6 +119,8 @@ impl CertCache {
                 .expect("failed to build HTTP client"),
             configured_generations,
             crl_refresh_hours: config.crl_refresh_hours,
+            crl_backoff_base_secs,
+            crl_backoff_max_secs: config.crl_backoff_max_secs,
         }
     }
 
@@ -212,9 +245,54 @@ impl CertCache {
             return Ok(entry);
         }
 
+        // Suppression is best-effort: moka applies writes asynchronously, so a
+        // verify racing the failure that recorded it may still dial. The cost of
+        // a miss is one extra connect, never a wrong verification result.
+        let prior = self.crl_failure_cache.get(issuer).await;
+        if let Some(state) = &prior {
+            let now = Utc::now();
+            if now < state.retry_at {
+                anyhow::bail!(
+                    "CRL fetch for {issuer} is backing off after {} consecutive failures; next retry in {}s (certs.crl_backoff_*)",
+                    state.consecutive,
+                    (state.retry_at - now).num_seconds().max(0)
+                );
+            }
+        }
+
         tracing::info!(%url, %issuer, "fetching CRL");
-        let resp = self.http_client.get(url).send().await?;
-        let data = resp.error_for_status()?.bytes().await?.to_vec();
+        let fetched = async {
+            let resp = self.http_client.get(url).send().await?;
+            let data = resp.error_for_status()?.bytes().await?.to_vec();
+            Ok::<Vec<u8>, anyhow::Error>(data)
+        }
+        .await;
+
+        let data = match fetched {
+            Ok(data) => data,
+            Err(e) => {
+                // Grow the retry window per consecutive failure so a blip costs
+                // one base delay and a real outage stops being dialled.
+                let consecutive = prior.map_or(0, |s| s.consecutive).saturating_add(1);
+                let delay = backoff_delay(
+                    self.crl_backoff_base_secs,
+                    self.crl_backoff_max_secs,
+                    consecutive,
+                );
+                if !delay.is_zero() {
+                    self.crl_failure_cache
+                        .insert(
+                            issuer.to_string(),
+                            CrlBackoff {
+                                consecutive,
+                                retry_at: Utc::now() + delay,
+                            },
+                        )
+                        .await;
+                }
+                return Err(e);
+            }
+        };
 
         let now = Utc::now();
         let entry = build_crl_entry(data, now, self.crl_refresh_hours);
@@ -222,6 +300,7 @@ impl CertCache {
         self.crl_cache
             .insert(issuer.to_string(), entry.clone())
             .await;
+        self.crl_failure_cache.invalidate(issuer).await;
         *self.last_crl_refresh.write().await = Some(now);
         Ok(entry)
     }
@@ -336,6 +415,26 @@ impl CertCache {
     }
 }
 
+/// Retry state for a CRL distribution point that is currently failing.
+#[derive(Debug, Clone)]
+pub(crate) struct CrlBackoff {
+    pub consecutive: u32,
+    pub retry_at: DateTime<Utc>,
+}
+
+/// Doubles from `base` per consecutive failure, capped at `max`. A zero base
+/// disables the backoff entirely.
+pub(crate) fn backoff_delay(base_secs: u64, max_secs: u64, consecutive: u32) -> ChronoDuration {
+    if base_secs == 0 {
+        return ChronoDuration::zero();
+    }
+    let shift = consecutive.saturating_sub(1).min(63);
+    let secs = base_secs
+        .saturating_mul(1u64 << shift)
+        .min(max_secs.max(base_secs));
+    ChronoDuration::seconds(secs as i64)
+}
+
 /// Build a CRL entry with the given refresh interval (in hours).
 pub(crate) fn build_crl_entry(data: Vec<u8>, now: DateTime<Utc>, refresh_hours: u64) -> CrlEntry {
     CrlEntry {
@@ -414,6 +513,102 @@ mod tests {
     }
 
     #[test]
+    fn backoff_doubles_from_the_base_then_holds_at_the_cap() {
+        let seq: Vec<i64> = (1..=12)
+            .map(|n| backoff_delay(1, 300, n).num_seconds())
+            .collect();
+        assert_eq!(
+            seq,
+            vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300],
+            "delay must double per consecutive failure and then hold at the cap"
+        );
+    }
+
+    #[test]
+    fn a_zero_base_yields_no_delay() {
+        assert!(backoff_delay(0, 300, 9).is_zero());
+    }
+
+    #[test]
+    fn a_cap_below_the_base_never_shrinks_the_base() {
+        assert_eq!(backoff_delay(30, 5, 1).num_seconds(), 30);
+    }
+
+    #[test]
+    fn a_huge_failure_count_does_not_overflow() {
+        assert_eq!(backoff_delay(1, 300, u32::MAX).num_seconds(), 300);
+    }
+
+    // The property the flat TTL got wrong: once a window passes the endpoint must
+    // be dialled again, so a brief outage is not held open for the full cap.
+    // Drives the clock by seeding an already-elapsed window instead of sleeping,
+    // so the test cannot flake on a loaded machine.
+    #[tokio::test]
+    async fn a_window_that_has_elapsed_is_re_dialled() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 300,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(hits_of(&hits), 1);
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(hits_of(&hits), 1, "a retry inside the window must not dial");
+
+        // Same state the code would hold once the window has passed.
+        cache
+            .crl_failure_cache
+            .insert(
+                "snp_genoa".to_string(),
+                CrlBackoff {
+                    consecutive: 1,
+                    retry_at: Utc::now() - ChronoDuration::seconds(1),
+                },
+            )
+            .await;
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(
+            hits_of(&hits),
+            2,
+            "once the window passes the endpoint must be dialled again"
+        );
+    }
+
+    // A repeated failure must lengthen the window rather than reset it.
+    #[tokio::test]
+    async fn consecutive_failures_accumulate() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 1,
+            crl_backoff_max_secs: 300,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        for expected in 2..=4u32 {
+            cache
+                .crl_failure_cache
+                .insert(
+                    "snp_genoa".to_string(),
+                    CrlBackoff {
+                        consecutive: expected - 1,
+                        retry_at: Utc::now() - ChronoDuration::seconds(1),
+                    },
+                )
+                .await;
+            assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+            // moka writes are asynchronous; settle them before reading back so the
+            // assertion tests the counter and not the write buffer.
+            cache.crl_failure_cache.run_pending_tasks().await;
+            let state = cache.crl_failure_cache.get("snp_genoa").await.unwrap();
+            assert_eq!(state.consecutive, expected);
+        }
+        assert_eq!(hits_of(&hits), 4);
+    }
+
+    #[test]
     fn build_crl_entry_uses_configured_refresh_interval() {
         let now = Utc::now();
         let entry = build_crl_entry(vec![1, 2, 3], now, 6);
@@ -429,5 +624,115 @@ mod tests {
         let entry12 = build_crl_entry(vec![], now, 12);
         let diff12 = entry12.next_refresh - entry12.last_fetched;
         assert_eq!(diff12.num_hours(), 12);
+    }
+
+    // The property under test is "does it dial the distribution point again",
+    // not what the error says. So stand up a listener that COUNTS connections
+    // and answers 500: the negative cache is working iff the second get_crl
+    // adds no connection. Asserting on the error text would pass even if the
+    // fetch were repeated.
+    async fn counting_crl_endpoint() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // 500 so the fetch fails without the connect timeout. Connection:
+                // close stops reqwest pooling the socket, which would let a second
+                // request reuse one accept() and undercount the dials.
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+
+        (format!("http://{addr}/crl"), hits)
+    }
+
+    fn hits_of(c: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        c.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_failed_crl_fetch_is_dialled_once_not_once_per_verify() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 300,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(hits_of(&hits), 1, "the first fetch should dial once");
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(
+            hits_of(&hits),
+            1,
+            "the second verify must be served by the negative cache, not re-dialled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_base_dials_every_time() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 0,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(
+            hits_of(&hits),
+            2,
+            "base=0 must disable the backoff and retry per request"
+        );
+    }
+
+    // Guards the regression the negative cache would otherwise introduce: under
+    // require_crl a remembered failure REFUSES verification, so caching it would
+    // extend a momentary blip into a full-TTL outage. Fail-closed must keep
+    // retrying.
+    #[tokio::test]
+    async fn fail_closed_keeps_retrying_and_is_never_negatively_cached() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            require_crl: true,
+            crl_backoff_base_secs: 300,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(
+            hits_of(&hits),
+            2,
+            "require_crl must re-dial so recovery is picked up immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_negative_cache_is_per_issuer() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 300,
+            ..Default::default()
+        });
+
+        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
+        assert!(cache.get_crl("snp_milan", &url).await.is_err());
+        assert_eq!(
+            hits_of(&hits),
+            2,
+            "a failure for one generation must not suppress another's fetch"
+        );
     }
 }

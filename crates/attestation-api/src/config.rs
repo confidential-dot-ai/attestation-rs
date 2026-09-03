@@ -104,6 +104,16 @@ pub struct CertsConfig {
     /// If true, verification fails when CRL cannot be fetched (fail-closed).
     /// If false, CRL fetch failures are logged and revocation check is skipped (fail-open).
     pub require_crl: bool,
+    /// Backoff for a CRL distribution point that is failing. Without it a dead
+    /// endpoint costs every verify a fresh connect timeout, because only
+    /// successes were cached. Doubles per consecutive failure from the base up
+    /// to the max, so a blip is retried almost immediately while a real outage
+    /// stops being dialled. 0 disables the backoff and restores per-request
+    /// retries. Ignored under require_crl, where suppressing a retry means
+    /// refusing verification.
+    pub crl_backoff_base_secs: u64,
+    /// Ceiling for the CRL failure backoff, in seconds.
+    pub crl_backoff_max_secs: u64,
 
     // --- NVIDIA NRAS / GPU attestation ---
     /// TTL for cached NRAS JWKS entries (hours).
@@ -165,6 +175,8 @@ impl Default for CertsConfig {
             tdx_collateral_ttl_hours: 24,
             prefetch_chains: vec!["milan".to_string()],
             require_crl: false,
+            crl_backoff_base_secs: 1,
+            crl_backoff_max_secs: 300,
             jwks_ttl_hours: 1,
             prefetch_nras_jwks: true,
             nras_gpu_url: String::new(),
