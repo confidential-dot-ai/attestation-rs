@@ -78,15 +78,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gcp_tdx_propagates_wrong_mrtd_match() {
+    async fn test_gcp_tdx_wrong_mrtd_fails() {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = VerifyParams {
             allow_debug: true,
             expected_mrtd: Some([0x55; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.platform, PlatformType::GcpTdx);
-        assert_eq!(r.mrtd_match, Some(false));
+        let err = verify_evidence(&evidence, &params, None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::AttestationError::MeasurementMismatch("MRTD")
+        ));
     }
 }

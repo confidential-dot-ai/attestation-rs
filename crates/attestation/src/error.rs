@@ -48,6 +48,9 @@ pub enum AttestationError {
     #[error("init_data / host_data mismatch")]
     InitDataMismatch,
 
+    #[error("{0} does not match the supplied expected value")]
+    MeasurementMismatch(&'static str),
+
     #[error("guest launched with debug policy enabled")]
     DebugPolicyViolation,
 
