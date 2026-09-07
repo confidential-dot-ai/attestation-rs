@@ -128,7 +128,7 @@ pub async fn verify_evidence(
         params.expected_init_data_hash.as_deref(),
     )?;
 
-    let matches = tdx_verify::check_expected_measurements(&tdx_quote.body, params)?;
+    let register_match_checks = tdx_verify::check_expected_measurements(&tdx_quote.body, params)?;
 
     // Result
     let tdx_claims = extract_claims(&tdx_quote);
@@ -143,11 +143,11 @@ pub async fn verify_evidence(
         collateral_verified,
     );
     result.tcb_status = tcb_status;
-    result.mrtd_match = matches.mrtd;
-    result.rtmr0_match = matches.rtmr0;
-    result.rtmr1_match = matches.rtmr1;
-    result.rtmr2_match = matches.rtmr2;
-    result.rtmr3_match = matches.rtmr3;
+    result.mrtd_match = register_match_checks.mrtd;
+    result.rtmr0_match = register_match_checks.rtmr0;
+    result.rtmr1_match = register_match_checks.rtmr1;
+    result.rtmr2_match = register_match_checks.rtmr2;
+    result.rtmr3_match = register_match_checks.rtmr3;
     Ok(result)
 }
 

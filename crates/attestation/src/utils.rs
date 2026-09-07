@@ -105,7 +105,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// `nvidia-gpu` compiles no platform verifiers, and this helper would be dead
 /// code there (the CI feature legs build with `-D warnings`).
 #[cfg(any(feature = "snp", feature = "tdx"))]
-pub(crate) fn check_expected(
+pub(crate) fn check_expected_measurements_match(
     name: &'static str,
     actual: &[u8],
     expected: Option<&[u8]>,

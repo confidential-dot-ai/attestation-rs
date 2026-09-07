@@ -6,7 +6,7 @@ use scroll::Pread;
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
 use crate::types::{PlatformType, VerificationResult, VerifyParams};
-use crate::utils::check_expected;
+use crate::utils::check_expected_measurements_match;
 
 use super::claims::extract_claims;
 use super::evidence::TdxEvidence;
@@ -442,7 +442,7 @@ pub async fn verify_evidence(
         None
     };
 
-    let matches = check_expected_measurements(&quote.body, params)?;
+    let register_match_checks = check_expected_measurements(&quote.body, params)?;
 
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
@@ -470,11 +470,11 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
-        mrtd_match: matches.mrtd,
-        rtmr0_match: matches.rtmr0,
-        rtmr1_match: matches.rtmr1,
-        rtmr2_match: matches.rtmr2,
-        rtmr3_match: matches.rtmr3,
+        mrtd_match: register_match_checks.mrtd,
+        rtmr0_match: register_match_checks.rtmr0,
+        rtmr1_match: register_match_checks.rtmr1,
+        rtmr2_match: register_match_checks.rtmr2,
+        rtmr3_match: register_match_checks.rtmr3,
         launch_digest_match: None,
     })
 }
@@ -497,27 +497,27 @@ pub(crate) fn check_expected_measurements(
     params: &VerifyParams,
 ) -> Result<MeasurementMatches> {
     Ok(MeasurementMatches {
-        mrtd: check_expected(
+        mrtd: check_expected_measurements_match(
             "MRTD",
             &body.mr_td,
             params.expected_mrtd.as_ref().map(|e| e.as_slice()),
         )?,
-        rtmr0: check_expected(
+        rtmr0: check_expected_measurements_match(
             "RTMR[0]",
             &body.rtmr_0,
             params.expected_rtmr0.as_ref().map(|e| e.as_slice()),
         )?,
-        rtmr1: check_expected(
+        rtmr1: check_expected_measurements_match(
             "RTMR[1]",
             &body.rtmr_1,
             params.expected_rtmr1.as_ref().map(|e| e.as_slice()),
         )?,
-        rtmr2: check_expected(
+        rtmr2: check_expected_measurements_match(
             "RTMR[2]",
             &body.rtmr_2,
             params.expected_rtmr2.as_ref().map(|e| e.as_slice()),
         )?,
-        rtmr3: check_expected(
+        rtmr3: check_expected_measurements_match(
             "RTMR[3]",
             &body.rtmr_3,
             params.expected_rtmr3.as_ref().map(|e| e.as_slice()),

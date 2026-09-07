@@ -11,7 +11,7 @@ use sev::parser::ByteParser;
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
 use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams};
-use crate::utils::check_expected;
+use crate::utils::check_expected_measurements_match;
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -164,7 +164,7 @@ pub async fn verify_evidence(
 
     // Launch-digest check against a caller-supplied reference. Constant-time;
     // a supplied reference that doesn't match fails verification.
-    let launch_digest_match = check_expected(
+    let launch_digest_match = check_expected_measurements_match(
         LAUNCH_DIGEST_LABEL,
         &report.measurement[..],
         params.expected_launch_digest.as_ref().map(|e| e.as_slice()),

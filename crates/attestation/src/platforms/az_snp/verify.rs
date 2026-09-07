@@ -3,7 +3,7 @@ use crate::error::{AttestationError, Result};
 use crate::platforms::snp::verify::LAUNCH_DIGEST_LABEL;
 use crate::platforms::tpm_common;
 use crate::types::{PlatformType, ProcessorGeneration, VerificationResult, VerifyParams};
-use crate::utils::{check_expected, decode_base64url};
+use crate::utils::{check_expected_measurements_match, decode_base64url};
 
 use super::evidence::AzSnpEvidence;
 
@@ -215,7 +215,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
 
     // Launch-digest check against a caller-supplied reference. Constant-time;
     // a supplied reference that doesn't match fails verification.
-    let launch_digest_match = check_expected(
+    let launch_digest_match = check_expected_measurements_match(
         LAUNCH_DIGEST_LABEL,
         &snp_report.measurement[..],
         params.expected_launch_digest.as_ref().map(|e| e.as_slice()),
