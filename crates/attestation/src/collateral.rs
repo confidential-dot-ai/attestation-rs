@@ -30,6 +30,12 @@ pub const INTEL_TD_QE_IDENTITY_URL: &str =
 /// Intel SGX Root CA CRL (DER format).
 pub const INTEL_ROOT_CA_CRL_URL: &str =
     "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der";
+/// Intel PCS response header carrying the TCB Info signing chain
+/// (percent-encoded PEM). Decode with [`pcs_issuer_chain_from_header`].
+pub const INTEL_TCB_INFO_ISSUER_CHAIN_HEADER: &str = "tcb-info-issuer-chain";
+/// Intel PCS response header carrying the Enclave Identity signing chain
+/// (percent-encoded PEM). Decode with [`pcs_issuer_chain_from_header`].
+pub const INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER: &str = "sgx-enclave-identity-issuer-chain";
 
 /// Build the AMD KDS CRL URL for a given processor generation.
 pub fn snp_crl_url(processor_gen: ProcessorGeneration) -> String {
@@ -583,7 +589,11 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
     async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
         let url = Self::tcb_info_url(fmspc);
         let (body, chain) = self
-            .fetch_with_signing_chain(&url, "tcb-info-issuer-chain", "tcb_signing_chain")
+            .fetch_with_signing_chain(
+                &url,
+                INTEL_TCB_INFO_ISSUER_CHAIN_HEADER,
+                "tcb_signing_chain",
+            )
             .await?;
         if let Some(ref chain_pem) = chain {
             self.set_cached("tcb_signing_chain".to_string(), chain_pem.clone());
@@ -596,7 +606,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         let (body, chain) = self
             .fetch_with_signing_chain(
                 &url,
-                "sgx-enclave-identity-issuer-chain",
+                INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER,
                 "qe_identity_signing_chain",
             )
             .await?;
@@ -611,7 +621,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         let (body, chain) = self
             .fetch_with_signing_chain(
                 &url,
-                "sgx-enclave-identity-issuer-chain",
+                INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER,
                 "td_qe_identity_signing_chain",
             )
             .await?;
@@ -711,11 +721,18 @@ impl Default for DefaultTdxCollateralProvider {
     }
 }
 
+/// Decode an Intel PCS issuer-chain header value
+/// ([`INTEL_TCB_INFO_ISSUER_CHAIN_HEADER`],
+/// [`INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER`]) into the PEM bytes it
+/// carries. PCS percent-encodes the PEM; this reverses that and nothing else.
+pub fn pcs_issuer_chain_from_header(value: &str) -> Vec<u8> {
+    percent_decode(value).into_bytes()
+}
+
 /// Simple percent-decoding for URL-encoded PEM strings from Intel PCS headers.
 ///
 /// Decodes percent-encoded bytes and pushes them as raw bytes into a `Vec<u8>`,
 /// which is then losslessly converted to a UTF-8 `String` (PEM data is ASCII).
-#[cfg(not(target_arch = "wasm32"))]
 fn percent_decode(input: &str) -> String {
     let mut result = Vec::with_capacity(input.len());
     let mut chars = input.bytes();
@@ -737,7 +754,6 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(result).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -812,6 +828,13 @@ mod tests {
         let cached = provider.get_cached("test-key");
         assert!(cached.is_some());
         assert_eq!(cached.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pcs_issuer_chain_header_decodes_to_the_pem_it_carried() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB+zCC\n-----END CERTIFICATE-----\n";
+        let encoded = "-----BEGIN%20CERTIFICATE-----%0AMIIB%2BzCC%0A-----END%20CERTIFICATE-----%0A";
+        assert_eq!(pcs_issuer_chain_from_header(encoded), pem.as_bytes());
     }
 
     #[test]
