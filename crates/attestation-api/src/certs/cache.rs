@@ -3,6 +3,8 @@ use moka::future::Cache;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -16,6 +18,10 @@ type VcekKey = (String, String, String);
 
 /// Key for TDX collateral cache
 type TdxCollateralKey = (String, String);
+
+/// In-flight fetches during a refresh. Small enough to stay under vendor
+/// rate limits, large enough that a refresh is one round trip deep.
+const REFRESH_CONCURRENCY: usize = 8;
 
 /// TDX cache entries holding the Intel signing chain captured with a body:
 /// the TCB Info chain and the (SGX and TD) QE Identity chains.
@@ -434,7 +440,7 @@ impl CertCache {
     ) -> anyhow::Result<CrlEntry> {
         tracing::info!(%url, %issuer, "fetching CRL");
         let fetched = async {
-            let resp = self.http_client.get(url).send().await?;
+            let resp = self.http_client.get(self.upstream_url(url)).send().await?;
             let data = resp.error_for_status()?.bytes().await?.to_vec();
             Ok::<Vec<u8>, anyhow::Error>(data)
         }
@@ -546,6 +552,7 @@ impl CertCache {
                 status.insert(
                     issuer.to_string(),
                     json!({
+                        "url": entry.url,
                         "last_fetched": entry.last_fetched.to_rfc3339(),
                         "next_refresh": entry.next_refresh.to_rfc3339(),
                     }),
@@ -563,9 +570,14 @@ impl CertCache {
     /// succeeds. Nothing is invalidated up front: a failed refresh keeps the
     /// previous copy until its own TTL runs out, so a refresh never leaves the
     /// service with less collateral than it had. VCEKs are immutable per key
-    /// and are left alone. Every failure is reported.
+    /// and are left alone. Fetches run concurrently (bounded), so a refresh
+    /// costs about one round trip or one timeout rather than their sum. Every
+    /// failure is reported.
     pub async fn refresh_all(&self) -> anyhow::Result<()> {
-        let mut failures = Vec::new();
+        use futures_util::stream::{self, StreamExt};
+
+        type Job<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+        let mut jobs: Vec<Job<'_>> = Vec::new();
 
         // AMD cert chains: the configured generations plus any other held one.
         let mut generations = self.configured_generations.clone();
@@ -574,54 +586,61 @@ impl CertCache {
                 generations.push((*gen).clone());
             }
         }
-        for gen in &generations {
-            if let Err(e) = self.refresh_cert_chain(gen).await {
-                tracing::warn!(gen = gen.as_str(), error = %e, "cert chain refresh failed; keeping the cached copy");
-                failures.push(format!("chain {gen}: {e}"));
-            }
+        for gen in generations {
+            jobs.push(Box::pin(async move {
+                self.refresh_cert_chain(&gen)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("chain {gen}: {e}"))
+            }));
         }
 
         // CRLs: every held entry, from the distribution point it came from.
-        let crls: Vec<(String, String)> = self
-            .crl_cache
-            .iter()
-            .map(|(issuer, entry)| ((*issuer).clone(), entry.url))
-            .collect();
-        for (issuer, url) in crls {
-            if let Err(e) = self.refresh_crl(&issuer, &url).await {
-                tracing::warn!(%issuer, error = %e, "CRL refresh failed; keeping the cached copy");
-                failures.push(format!("crl {issuer}: {e}"));
-            }
+        for (issuer, entry) in self.crl_cache.iter() {
+            let issuer = (*issuer).clone();
+            let url = entry.url;
+            jobs.push(Box::pin(async move {
+                self.refresh_crl(&issuer, &url)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("crl {issuer}: {e}"))
+            }));
         }
 
         // TDX collateral: every held body; the signing chains refresh with them.
-        let held: Vec<TdxCollateralKey> = self
+        for (key, _) in self
             .tdx_cache
             .iter()
-            .map(|(key, _)| (*key).clone())
-            .filter(|(collateral_type, _)| !is_signing_chain_key(collateral_type))
-            .collect();
-        for (collateral_type, identifier) in held {
-            if let Err(e) = self
-                .refresh_tdx_collateral(&collateral_type, &identifier)
-                .await
-            {
-                tracing::warn!(collateral_type, identifier, error = %e, "TDX collateral refresh failed; keeping the cached copy");
-                failures.push(format!("tdx {collateral_type}/{identifier}: {e}"));
-            }
+            .filter(|(key, _)| !is_signing_chain_key(&key.0))
+        {
+            let (collateral_type, identifier) = (*key).clone();
+            jobs.push(Box::pin(async move {
+                self.refresh_tdx_collateral(&collateral_type, &identifier)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("tdx {collateral_type}/{identifier}: {e}"))
+            }));
         }
 
         // NRAS JWKS: force-refetch overwrites on success and keeps on failure.
-        let jwks_urls: Vec<String> = self
-            .jwks_cache
-            .iter()
-            .map(|(url, _)| (*url).clone())
-            .collect();
-        for url in jwks_urls {
-            if let Err(e) = self.get_jwks(&url, true).await {
-                tracing::warn!(%url, error = %e, "JWKS refresh failed; keeping the cached copy");
-                failures.push(format!("jwks {url}: {e}"));
-            }
+        for (url, _) in self.jwks_cache.iter() {
+            let url = (*url).clone();
+            jobs.push(Box::pin(async move {
+                self.get_jwks(&url, true)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("jwks {url}: {e}"))
+            }));
+        }
+
+        let mut failures: Vec<String> = stream::iter(jobs)
+            .buffer_unordered(REFRESH_CONCURRENCY)
+            .filter_map(|outcome| async move { outcome.err() })
+            .collect()
+            .await;
+        failures.sort();
+        for failure in &failures {
+            tracing::warn!(%failure, "collateral refresh failed; keeping the cached copy");
         }
 
         anyhow::ensure!(
@@ -1490,6 +1509,64 @@ mod tests {
         let err = cache.refresh_all().await.expect_err("still failing");
         assert!(err.to_string().contains("crl snp_genoa"), "{err}");
         assert_eq!(hits_of(&hits), 2);
+    }
+
+    /// Answers 500 after holding the connection for `hold`, and records the peak
+    /// number of connections open at once.
+    async fn slow_endpoint(
+        hold: Duration,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak_w = peak.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let in_flight = in_flight.clone();
+                let peak_w = peak_w.clone();
+                tokio::spawn(async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak_w.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(hold).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        (format!("http://{addr}/crl"), peak)
+    }
+
+    #[tokio::test]
+    async fn a_refresh_runs_its_fetches_concurrently() {
+        let (url, peak) = slow_endpoint(Duration::from_millis(500)).await;
+        let cache = CertCache::new(&CertsConfig {
+            prefetch_chains: vec![],
+            ..Default::default()
+        });
+        for issuer in ["snp_milan", "snp_genoa", "snp_turin", "tdx_root_ca"] {
+            cache
+                .crl_cache
+                .insert(
+                    issuer.to_string(),
+                    build_crl_entry(b"held".to_vec(), &url, Utc::now(), 6),
+                )
+                .await;
+        }
+
+        let err = cache.refresh_all().await.expect_err("every fetch fails");
+        assert_eq!(err.to_string().matches("crl ").count(), 4, "{err}");
+        assert!(
+            peak.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the held CRLs must be refetched concurrently, not one after another"
+        );
     }
 
     #[tokio::test]
