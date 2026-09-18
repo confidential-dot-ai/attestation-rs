@@ -101,8 +101,10 @@ async fn cert_refresh_loop(cache: Arc<CertCache>, interval: Duration, generation
         sleep(interval).await;
         tracing::debug!("running periodic cert chain refresh");
         for gen in &generations {
-            if let Err(e) = cache.get_cert_chain(gen).await {
-                tracing::warn!(gen = gen.as_str(), error = %e, "periodic cert refresh failed");
+            // Refetch and replace: get_cert_chain would just return the copy
+            // already held and refresh nothing.
+            if let Err(e) = cache.refresh_cert_chain(gen).await {
+                tracing::warn!(gen = gen.as_str(), error = %e, "periodic cert refresh failed; keeping the cached copy");
             }
         }
     }
