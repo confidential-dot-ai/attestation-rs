@@ -19,6 +19,12 @@ type VcekKey = (String, String, String);
 /// Key for TDX collateral cache
 type TdxCollateralKey = (String, String);
 
+/// TDX cache entries holding the Intel signing chain captured with a body:
+/// the TCB Info chain and the (SGX and TD) QE Identity chains.
+pub(crate) const TCB_SIGNING_CHAIN: &str = "tcb_signing_chain";
+pub(crate) const QE_IDENTITY_SIGNING_CHAIN: &str = "qe_identity_signing_chain";
+pub(crate) const TD_QE_IDENTITY_SIGNING_CHAIN: &str = "td_qe_identity_signing_chain";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CrlEntry {
     pub data: Vec<u8>,
@@ -49,6 +55,9 @@ pub struct CertCache {
     crl_backoff_max_secs: u64,
     /// Disk-backed VCEK/chain store. `None` keeps collateral in memory only.
     store: Option<CollateralStore>,
+    /// Test-only stand-in for the vendor hosts: when set, fetches are rebased
+    /// onto this origin. Production never sets it.
+    upstream_override: Option<String>,
 }
 
 impl CertCache {
@@ -62,6 +71,14 @@ impl CertCache {
     }
 
     pub(crate) fn with_client(config: &CertsConfig, http_client: Client) -> Self {
+        Self::with_client_and_upstream(config, http_client, None)
+    }
+
+    pub(crate) fn with_client_and_upstream(
+        config: &CertsConfig,
+        http_client: Client,
+        upstream_override: Option<String>,
+    ) -> Self {
         let vcek_cache = Cache::builder()
             .max_capacity(config.cache_max_entries)
             .time_to_live(hours_to_duration(config.vcek_ttl_hours))
@@ -136,12 +153,27 @@ impl CertCache {
                 .as_ref()
                 .filter(|d| !d.is_empty())
                 .map(CollateralStore::new),
+            upstream_override,
         }
     }
 
     /// Returns the list of configured processor generations (normalized to canonical form).
     pub fn configured_generations(&self) -> &[String] {
         &self.configured_generations
+    }
+
+    /// `url` with its scheme and host replaced by the test upstream, when one
+    /// is configured; otherwise `url` unchanged.
+    fn upstream_url(&self, url: &str) -> String {
+        let Some(base) = &self.upstream_override else {
+            return url.to_string();
+        };
+        let path_start = url
+            .find("://")
+            .map(|i| i + 3)
+            .and_then(|i| url[i..].find('/').map(|j| i + j))
+            .unwrap_or(url.len());
+        format!("{}{}", base.trim_end_matches('/'), &url[path_start..])
     }
 
     // --- SNP cert operations ---
@@ -232,36 +264,96 @@ impl CertCache {
             return Ok(data);
         }
 
-        let url = match collateral_type {
-            "tcb_info" => {
-                attestation::collateral::DefaultTdxCollateralProvider::tcb_info_url(identifier)
-            }
-            "qe_identity" => {
-                attestation::collateral::DefaultTdxCollateralProvider::qe_identity_url()
-            }
-            "td_qe_identity" => {
-                attestation::collateral::DefaultTdxCollateralProvider::td_qe_identity_url()
-            }
-            "root_ca_crl" => {
-                attestation::collateral::DefaultTdxCollateralProvider::root_ca_crl_url()
-            }
-            "pck_crl" => {
-                attestation::collateral::DefaultTdxCollateralProvider::pck_crl_url(identifier)
-            }
+        use attestation::collateral::{
+            pcs_issuer_chain_from_header, DefaultTdxCollateralProvider,
+            INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER, INTEL_TCB_INFO_ISSUER_CHAIN_HEADER,
+        };
+
+        // Signed collateral arrives with its Intel signing chain in a response
+        // header. The library verifies the signature only when handed that
+        // chain, so it is captured here with the body and cached beside it.
+        let (url, signing_chain) = match collateral_type {
+            "tcb_info" => (
+                DefaultTdxCollateralProvider::tcb_info_url(identifier),
+                Some((INTEL_TCB_INFO_ISSUER_CHAIN_HEADER, TCB_SIGNING_CHAIN)),
+            ),
+            "qe_identity" => (
+                DefaultTdxCollateralProvider::qe_identity_url(),
+                Some((
+                    INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER,
+                    QE_IDENTITY_SIGNING_CHAIN,
+                )),
+            ),
+            "td_qe_identity" => (
+                DefaultTdxCollateralProvider::td_qe_identity_url(),
+                Some((
+                    INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER,
+                    TD_QE_IDENTITY_SIGNING_CHAIN,
+                )),
+            ),
+            "root_ca_crl" => (DefaultTdxCollateralProvider::root_ca_crl_url(), None),
+            "pck_crl" => (DefaultTdxCollateralProvider::pck_crl_url(identifier), None),
             other => anyhow::bail!("unknown collateral type: {other}"),
         };
 
         tracing::info!(%url, "fetching TDX collateral");
-        let resp = self.http_client.get(&url).send().await?;
-        let mut data = resp.error_for_status()?.bytes().await?.to_vec();
+        let resp = self
+            .http_client
+            .get(self.upstream_url(&url))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        // Without the chain the library would evaluate the body unsigned.
+        // Intel always sends it, so its absence means something between us
+        // and PCS stripped it: refuse, rather than trust what cannot be checked.
+        let chain = match signing_chain {
+            Some((header, chain_key)) => {
+                let value = resp
+                    .headers()
+                    .get(header)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Intel PCS response for {collateral_type} carries no {header} header; \
+                             refusing unsigned collateral"
+                        )
+                    })?;
+                Some((chain_key, pcs_issuer_chain_from_header(value)))
+            }
+            None => None,
+        };
+
+        let mut data = resp.bytes().await?.to_vec();
 
         // Intel PCS returns PCK CRL as PEM; convert to DER for the library.
         if collateral_type == "pck_crl" && data.starts_with(b"-----BEGIN") {
             data = pem::parse(&data)?.into_contents();
         }
 
+        if let Some((chain_key, chain)) = chain {
+            self.tdx_cache
+                .insert((chain_key.to_string(), "default".to_string()), chain)
+                .await;
+        }
         self.tdx_cache.insert(key, data.clone()).await;
         Ok(data)
+    }
+
+    /// The Intel signing chain captured with the last fetch of the matching
+    /// collateral (one of the `*_SIGNING_CHAIN` keys). It is inserted together
+    /// with that body, so a miss means the body expired or was evicted in
+    /// between: refuse, so the library never evaluates unsigned TCB Info or QE
+    /// Identity, and let the retry refetch both.
+    pub async fn get_tdx_signing_chain(&self, kind: &str) -> anyhow::Result<Vec<u8>> {
+        self.tdx_cache
+            .get(&(kind.to_string(), "default".to_string()))
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{kind} is not cached alongside its collateral; retry the verification to refetch both"
+                )
+            })
     }
 
     // --- CRL operations ---
@@ -913,6 +1005,318 @@ mod tests {
             hits_of(&hits),
             2,
             "require_crl must re-dial so recovery is picked up immediately"
+        );
+    }
+
+    // ---- Intel PCS signing chains ----
+
+    const TEST_CHAIN_PEM: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIB+zCC/signing\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIC/root=\n-----END CERTIFICATE-----\n";
+    const TCB_INFO_BODY: &str = r#"{"tcbInfo":{"fmspc":"00806f050000"}}"#;
+    const QE_IDENTITY_BODY: &str = r#"{"enclaveIdentity":{"id":"TD_QE"}}"#;
+
+    /// The encoding Intel applies to the PEM in its issuer-chain headers.
+    fn percent_encode(s: &str) -> String {
+        s.bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect()
+    }
+
+    /// What the loopback PCS serves per route. `chain` is the PEM sent in the
+    /// issuer-chain headers with TCB Info and identity bodies; `None` sends
+    /// no header.
+    #[derive(Clone)]
+    struct FakePcs {
+        tcb_info: Vec<u8>,
+        td_qe_identity: Vec<u8>,
+        pck_crl: Vec<u8>,
+        root_ca_crl: Vec<u8>,
+        chain: Option<String>,
+    }
+
+    const V4_QUOTE: &[u8] = include_bytes!("../../../attestation/test_data/tdx_quote_4.dat");
+    const INTEL_TCB_INFO: &[u8] =
+        include_bytes!("../../../attestation/test_data/collateral/tcb_info_50806f000000.json");
+    const INTEL_TD_QE_IDENTITY: &[u8] =
+        include_bytes!("../../../attestation/test_data/collateral/td_qe_identity.json");
+    const INTEL_TCB_SIGNING_CHAIN: &[u8] =
+        include_bytes!("../../../attestation/test_data/collateral/tcb_signing_chain.pem");
+    const INTEL_PCK_CRL: &[u8] =
+        include_bytes!("../../../attestation/test_data/collateral/pck_crl_platform.der");
+    const INTEL_ROOT_CA_CRL: &[u8] =
+        include_bytes!("../../../attestation/test_data/collateral/root_ca_crl.der");
+
+    impl FakePcs {
+        fn synthetic(with_chain: bool) -> Self {
+            Self {
+                tcb_info: TCB_INFO_BODY.as_bytes().to_vec(),
+                td_qe_identity: QE_IDENTITY_BODY.as_bytes().to_vec(),
+                pck_crl: Vec::new(),
+                root_ca_crl: Vec::new(),
+                chain: with_chain.then(|| TEST_CHAIN_PEM.to_string()),
+            }
+        }
+
+        /// Real Intel-signed collateral for the v4 quote fixture's FMSPC.
+        fn intel_fixtures() -> Self {
+            Self {
+                tcb_info: INTEL_TCB_INFO.to_vec(),
+                td_qe_identity: INTEL_TD_QE_IDENTITY.to_vec(),
+                pck_crl: INTEL_PCK_CRL.to_vec(),
+                root_ca_crl: INTEL_ROOT_CA_CRL.to_vec(),
+                chain: Some(String::from_utf8(INTEL_TCB_SIGNING_CHAIN.to_vec()).unwrap()),
+            }
+        }
+    }
+
+    /// Intel PCS on loopback, routed by path.
+    async fn fake_pcs(routes: FakePcs) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let (rd, mut wr) = sock.into_split();
+                let mut lines = BufReader::new(rd).lines();
+                let request_line = lines.next_line().await.ok().flatten().unwrap_or_default();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    if l.is_empty() {
+                        break;
+                    }
+                }
+                let path = request_line.split(' ').nth(1).unwrap_or("");
+                let (status, header, body): (&str, Option<&str>, &[u8]) =
+                    if path.starts_with("/tdx/certification/v4/tcb") {
+                        ("200 OK", Some("TCB-Info-Issuer-Chain"), &routes.tcb_info)
+                    } else if path.starts_with("/tdx/certification/v4/qe/identity") {
+                        (
+                            "200 OK",
+                            Some("SGX-Enclave-Identity-Issuer-Chain"),
+                            &routes.td_qe_identity,
+                        )
+                    } else if path.starts_with("/sgx/certification/v4/pckcrl") {
+                        ("200 OK", None, &routes.pck_crl)
+                    } else if path.starts_with("/IntelSGXRootCA.der") {
+                        ("200 OK", None, &routes.root_ca_crl)
+                    } else {
+                        ("404 Not Found", None, &[])
+                    };
+                let mut head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let (Some(h), Some(chain)) = (header, &routes.chain) {
+                    head.push_str(&format!("{h}: {}\r\n", percent_encode(chain)));
+                }
+                head.push_str("\r\n");
+                let _ = wr.write_all(head.as_bytes()).await;
+                let _ = wr.write_all(body).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn cache_at(upstream: String) -> CertCache {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        CertCache::with_client_and_upstream(&CertsConfig::default(), client, Some(upstream))
+    }
+
+    #[test]
+    fn upstream_override_rebases_scheme_and_host_only() {
+        let cache = cache_at("http://127.0.0.1:9/".to_string());
+        assert_eq!(
+            cache.upstream_url(
+                "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=00"
+            ),
+            "http://127.0.0.1:9/tdx/certification/v4/tcb?fmspc=00"
+        );
+        let plain = CertCache::new(&CertsConfig::default());
+        assert_eq!(
+            plain.upstream_url("https://a.example/x"),
+            "https://a.example/x"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcb_info_is_cached_with_the_signing_chain_that_came_with_it() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(true)).await);
+
+        let body = cache
+            .get_tdx_collateral("tcb_info", "00806f050000")
+            .await
+            .unwrap();
+        assert_eq!(body, TCB_INFO_BODY.as_bytes());
+        assert_eq!(
+            cache
+                .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
+                .await
+                .unwrap(),
+            TEST_CHAIN_PEM.as_bytes(),
+            "the header must decode back to the PEM the library verifies with"
+        );
+    }
+
+    #[tokio::test]
+    async fn td_qe_identity_is_cached_with_its_signing_chain() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(true)).await);
+
+        let body = cache
+            .get_tdx_collateral("td_qe_identity", "default")
+            .await
+            .unwrap();
+        assert_eq!(body, QE_IDENTITY_BODY.as_bytes());
+        assert_eq!(
+            cache
+                .get_tdx_signing_chain(TD_QE_IDENTITY_SIGNING_CHAIN)
+                .await
+                .unwrap(),
+            TEST_CHAIN_PEM.as_bytes()
+        );
+    }
+
+    // The fail-open this fixes: a body without its chain used to be cached and
+    // handed to the library, which then skipped the signature check.
+    #[tokio::test]
+    async fn a_response_without_the_issuer_chain_is_refused_and_not_cached() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(false)).await);
+
+        let err = cache
+            .get_tdx_collateral("tcb_info", "00806f050000")
+            .await
+            .expect_err("unsigned TCB Info must be refused");
+        assert!(
+            err.to_string().contains("refusing unsigned collateral"),
+            "{err}"
+        );
+        cache.tdx_cache.run_pending_tasks().await;
+        assert_eq!(
+            cache.tdx_entry_count(),
+            0,
+            "nothing may be cached from a refused fetch"
+        );
+        assert!(cache
+            .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_signing_chain_never_fetched_fails_closed() {
+        let cache = CertCache::with_client(&CertsConfig::default(), offline_client());
+        assert!(cache
+            .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
+            .await
+            .is_err());
+    }
+
+    // The provider is what the library calls; it must hand over Some(chain),
+    // because Ok(None) is the value that makes the library skip verification.
+    #[tokio::test]
+    async fn the_cached_provider_hands_the_library_the_chain() {
+        use attestation::TdxCollateralProvider;
+
+        let cache = Arc::new(cache_at(fake_pcs(FakePcs::synthetic(true)).await));
+        let provider = crate::certs::tdx_provider::CachedTdxProvider::new(cache);
+
+        provider.get_tcb_info("00806f050000").await.unwrap();
+        assert_eq!(
+            provider.get_tcb_signing_chain().await.unwrap().as_deref(),
+            Some(TEST_CHAIN_PEM.as_bytes())
+        );
+        provider.get_td_qe_identity().await.unwrap();
+        assert_eq!(
+            provider
+                .get_td_qe_identity_signing_chain()
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(TEST_CHAIN_PEM.as_bytes())
+        );
+    }
+
+    fn v4_envelope() -> Vec<u8> {
+        use base64::Engine;
+        serde_json::to_vec(&serde_json::json!({
+            "platform": "tdx",
+            "evidence": {
+                "quote": base64::engine::general_purpose::STANDARD.encode(V4_QUOTE),
+            },
+        }))
+        .unwrap()
+    }
+
+    /// The real verifier, wired the way main.rs wires it, against a loopback PCS.
+    async fn verify_v4_through_service(
+        pcs: FakePcs,
+    ) -> attestation::Result<attestation::VerificationResult> {
+        let cache = Arc::new(cache_at(fake_pcs(pcs).await));
+        let verifier = attestation::Verifier::new()
+            .with_tdx_provider(crate::certs::tdx_provider::CachedTdxProvider::new(cache));
+        // The v4 fixture was minted with the TD debug attribute set.
+        let params = attestation::VerifyParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        verifier.verify(&v4_envelope(), &params).await
+    }
+
+    #[tokio::test]
+    async fn intel_signed_collateral_verifies_through_the_service_provider() {
+        let result = verify_v4_through_service(FakePcs::intel_fixtures())
+            .await
+            .expect("the v4 quote with Intel's own collateral must verify");
+        assert!(result.collateral_verified);
+        assert!(result.tcb_status.is_some());
+    }
+
+    // The fail-open this closes. Before, the provider handed the library no
+    // chain, the signature check was skipped, and a TCB Info that Intel never
+    // signed was evaluated as if it had been. One byte inside the signed
+    // region is enough to fail it now.
+    #[tokio::test]
+    async fn tampered_tcb_info_is_rejected_through_the_service_provider() {
+        let mut pcs = FakePcs::intel_fixtures();
+        let tampered = String::from_utf8(pcs.tcb_info.clone())
+            .unwrap()
+            .replacen("\"pceId\":\"0000\"", "\"pceId\":\"0001\"", 1)
+            .into_bytes();
+        assert_ne!(
+            tampered, pcs.tcb_info,
+            "the tamper must change the signed bytes"
+        );
+        pcs.tcb_info = tampered;
+
+        let err = verify_v4_through_service(pcs)
+            .await
+            .expect_err("a TCB Info Intel did not sign must be rejected");
+        assert!(
+            err.to_string()
+                .contains("TCB Info signature verification failed"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collateral_served_without_a_chain_fails_the_verification() {
+        let mut pcs = FakePcs::intel_fixtures();
+        pcs.chain = None;
+        let err = verify_v4_through_service(pcs)
+            .await
+            .expect_err("unsigned collateral must fail closed");
+        assert!(
+            err.to_string().contains("refusing unsigned collateral"),
+            "{err}"
         );
     }
 
