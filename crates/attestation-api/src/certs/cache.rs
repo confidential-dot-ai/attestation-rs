@@ -172,7 +172,7 @@ impl CertCache {
 
         // The library owns the KDS URL rules (Turin's 8-byte chip id and FMC
         // SPL); building it here again is how the service drifted before.
-        let url = snp_vcek_url(processor_gen, chip_id, tcb);
+        let url = snp_vcek_url(processor_gen, chip_id, tcb)?;
 
         tracing::info!(%url, "fetching VCEK from AMD KDS");
         let resp = self.http_client.get(&url).send().await?;

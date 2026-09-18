@@ -47,13 +47,20 @@ pub fn snp_cert_chain_url(processor_gen: ProcessorGeneration) -> String {
 
 /// Build the AMD KDS VCEK URL for a report's generation, chip id and TCB.
 ///
-/// Turin keys the lookup on the first 8 bytes of `chip_id` and adds the FMC
-/// SPL. Every VCEK fetch must build its URL here so those rules live once.
+/// Turin keys the lookup on the first 8 bytes of `chip_id` and requires the
+/// FMC SPL: a Turin TCB without one cannot name a VCEK, so it is refused
+/// rather than looked up without the parameter. Every VCEK fetch must build
+/// its URL here so those rules live once.
 pub fn snp_vcek_url(
     processor_gen: ProcessorGeneration,
     chip_id: &[u8; 64],
     tcb: &SnpTcb,
-) -> String {
+) -> Result<String> {
+    if processor_gen == ProcessorGeneration::Turin && tcb.fmc.is_none() {
+        return Err(crate::error::AttestationError::QuoteParseFailed(
+            "Turin TCB carries no FMC SPL; cannot build the VCEK lookup".to_string(),
+        ));
+    }
     let chip_id_hex = if processor_gen == ProcessorGeneration::Turin {
         hex::encode(&chip_id[..8])
     } else {
@@ -72,7 +79,7 @@ pub fn snp_vcek_url(
     if let Some(fmc) = tcb.fmc {
         url.push_str(&format!("&fmcSPL={fmc:02}"));
     }
-    url
+    Ok(url)
 }
 
 /// Default HTTP request timeout (total).
@@ -195,7 +202,11 @@ impl DefaultCertProvider {
     }
 
     /// Build AMD KDS URL for VCEK certificate. See [`snp_vcek_url`].
-    fn vcek_url(processor_gen: ProcessorGeneration, chip_id: &[u8; 64], tcb: &SnpTcb) -> String {
+    fn vcek_url(
+        processor_gen: ProcessorGeneration,
+        chip_id: &[u8; 64],
+        tcb: &SnpTcb,
+    ) -> Result<String> {
         snp_vcek_url(processor_gen, chip_id, tcb)
     }
 
@@ -269,7 +280,7 @@ impl CertProvider for DefaultCertProvider {
         chip_id: &[u8; 64],
         reported_tcb: &SnpTcb,
     ) -> Result<Vec<u8>> {
-        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb);
+        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb)?;
         self.fetch_cert(&url).await
     }
 
@@ -333,7 +344,7 @@ impl CertProvider for DefaultCertProvider {
         reported_tcb: &SnpTcb,
     ) -> Result<Vec<u8>> {
         // Check cache first
-        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb);
+        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb)?;
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
@@ -776,7 +787,8 @@ mod tests {
             microcode: 115,
             fmc: None,
         };
-        let url = DefaultCertProvider::vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb);
+        let url =
+            DefaultCertProvider::vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb).unwrap();
 
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Milan/"));
         assert!(url.contains(&hex::encode(chip_id)));
@@ -797,7 +809,8 @@ mod tests {
             microcode: 0,
             fmc: Some(10),
         };
-        let url = DefaultCertProvider::vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb);
+        let url =
+            DefaultCertProvider::vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb).unwrap();
 
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Turin/"));
         // Turin uses only first 8 bytes of chip_id
@@ -811,6 +824,23 @@ mod tests {
         assert!(url.contains("snpSPL=00"));
         assert!(url.contains("ucodeSPL=00"));
         assert!(url.contains("fmcSPL=10"), "Turin should include fmcSPL");
+    }
+
+    // The sev crate always parses an FMC SPL for a Turin report and AMD's own
+    // snpguest refuses a Turin lookup without one; a URL missing fmcSPL names
+    // no cert, so the builder must refuse rather than drop the parameter.
+    #[test]
+    fn turin_vcek_url_requires_the_fmc_spl() {
+        let tcb = SnpTcb {
+            bootloader: 0,
+            tee: 0,
+            snp: 0,
+            microcode: 0,
+            fmc: None,
+        };
+        let err = snp_vcek_url(ProcessorGeneration::Turin, &[0xCC; 64], &tcb).unwrap_err();
+        assert!(err.to_string().contains("FMC SPL"), "{err}");
+        assert!(snp_vcek_url(ProcessorGeneration::Genoa, &[0xCC; 64], &tcb).is_ok());
     }
 
     #[test]
