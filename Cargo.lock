@@ -202,6 +202,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "futures-util",
  "hex",
  "moka",
  "p256",
