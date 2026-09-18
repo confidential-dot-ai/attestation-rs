@@ -36,6 +36,45 @@ pub fn snp_crl_url(processor_gen: ProcessorGeneration) -> String {
     format!("{}/{}/crl", AMD_KDS_VCEK_BASE, processor_gen.product_name())
 }
 
+/// Build the AMD KDS cert chain (ASK + ARK) URL for a processor generation.
+pub fn snp_cert_chain_url(processor_gen: ProcessorGeneration) -> String {
+    format!(
+        "{}/{}/cert_chain",
+        AMD_KDS_VCEK_BASE,
+        processor_gen.product_name()
+    )
+}
+
+/// Build the AMD KDS VCEK URL for a report's generation, chip id and TCB.
+///
+/// Turin keys the lookup on the first 8 bytes of `chip_id` and adds the FMC
+/// SPL. Every VCEK fetch must build its URL here so those rules live once.
+pub fn snp_vcek_url(
+    processor_gen: ProcessorGeneration,
+    chip_id: &[u8; 64],
+    tcb: &SnpTcb,
+) -> String {
+    let chip_id_hex = if processor_gen == ProcessorGeneration::Turin {
+        hex::encode(&chip_id[..8])
+    } else {
+        hex::encode(chip_id)
+    };
+    let mut url = format!(
+        "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
+        AMD_KDS_VCEK_BASE,
+        processor_gen.product_name(),
+        chip_id_hex,
+        tcb.bootloader,
+        tcb.tee,
+        tcb.snp,
+        tcb.microcode,
+    );
+    if let Some(fmc) = tcb.fmc {
+        url.push_str(&format!("&fmcSPL={fmc:02}"));
+    }
+    url
+}
+
 /// Default HTTP request timeout (total).
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -155,38 +194,14 @@ impl DefaultCertProvider {
         }
     }
 
-    /// Build AMD KDS URL for VCEK certificate.
+    /// Build AMD KDS URL for VCEK certificate. See [`snp_vcek_url`].
     fn vcek_url(processor_gen: ProcessorGeneration, chip_id: &[u8; 64], tcb: &SnpTcb) -> String {
-        // Turin uses only the first 8 bytes of chip_id for KDS lookup
-        let chip_id_hex = if processor_gen == ProcessorGeneration::Turin {
-            hex::encode(&chip_id[..8])
-        } else {
-            hex::encode(chip_id)
-        };
-        let mut url = format!(
-            "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
-            AMD_KDS_VCEK_BASE,
-            processor_gen.product_name(),
-            chip_id_hex,
-            tcb.bootloader,
-            tcb.tee,
-            tcb.snp,
-            tcb.microcode,
-        );
-        // Turin processors have an additional FMC SPL parameter
-        if let Some(fmc) = tcb.fmc {
-            url.push_str(&format!("&fmcSPL={fmc:02}"));
-        }
-        url
+        snp_vcek_url(processor_gen, chip_id, tcb)
     }
 
-    /// Build AMD KDS URL for cert chain (ARK + ASK).
+    /// Build AMD KDS URL for cert chain (ARK + ASK). See [`snp_cert_chain_url`].
     pub fn cert_chain_url(processor_gen: ProcessorGeneration) -> String {
-        format!(
-            "{}/{}/cert_chain",
-            AMD_KDS_VCEK_BASE,
-            processor_gen.product_name()
-        )
+        snp_cert_chain_url(processor_gen)
     }
 }
 
