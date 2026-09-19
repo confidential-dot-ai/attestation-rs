@@ -8,6 +8,7 @@ use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
 use crate::platforms::tdx::dcap;
 use crate::platforms::tdx::verify::{parse_tdx_quote, verify_quote_signature};
+use crate::profile::cel;
 use crate::profile::{
     AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
     CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
@@ -280,12 +281,35 @@ pub(crate) async fn appraise(
                 )?;
                 replayed = [true, true, true, false];
             }
+            LogFormat::TcgCelCbor | LogFormat::TcgCelJson | LogFormat::DstackJson => {
+                // Runtime logs replay from zero into the RTMRs they name,
+                // which must reproduce the signed values.
+                let records = match log.format {
+                    LogFormat::TcgCelCbor => cel::parse_cbor(log.data.as_slice())?,
+                    LogFormat::TcgCelJson => cel::parse_json(log.data.as_slice())?,
+                    _ => cel::parse_dstack_json(log.data.as_slice())?,
+                };
+                let out = cel::replay(&records, |i| (i < 4).then_some([0u8; 48]), false)?;
+                for (index, slot) in out.slots {
+                    if !constant_time_eq(&slot.value, &rtmrs[usize::from(index)]) {
+                        return Err(AttestationError::EventlogIntegrityFailed(format!(
+                            "RTMR[{index}] does not replay to the signed value"
+                        )));
+                    }
+                    replayed[usize::from(index)] = true;
+                }
+            }
             other => {
                 return Err(invalid(format!(
                     "event log format {other:?} cannot be replayed by this release"
                 )))
             }
         }
+    }
+    if !policy.reference.slot_owners.is_empty() {
+        return Err(invalid(
+            "policy pins slot owners but a TDX cpu submodule has no workload slots",
+        ));
     }
     let registers: Vec<VerifiedRegister> = rtmrs
         .iter()

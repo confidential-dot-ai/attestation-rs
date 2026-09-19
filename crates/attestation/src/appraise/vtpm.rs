@@ -9,14 +9,16 @@
 
 use super::vector::evaluate_backing;
 use super::{invalid, Ctx, Outcome};
-use crate::error::Result;
+use crate::error::{AttestationError, Result};
 use crate::platforms::tpm_common::{
     parse_hcl_report, parse_quote_info, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
     HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
 };
+use crate::profile::tcg2;
 use crate::profile::{
-    AttesterClaims, Backing, Binding, Freshness, ReferenceOutcome, RegisterSource, SubmodAppraisal,
-    Tee, TpmAkMethod, TrustVector, VerifiedRegister, VerifierClaims, VtpmClaims, VtpmEvidence,
+    AttesterClaims, Backing, Binding, Freshness, HashAlg, LogFormat, ReferenceOutcome,
+    RegisterSource, SubmodAppraisal, Tee, TpmAkMethod, TrustVector, VerifiedRegister,
+    VerifierClaims, VtpmClaims, VtpmEvidence,
 };
 use crate::utils::constant_time_eq;
 use std::collections::BTreeMap;
@@ -61,11 +63,33 @@ pub(crate) fn appraise(
     verify_tpm_nonce(quote.message.as_slice(), &ctx.anchor)?;
     let (selected, _) = parse_quote_info(quote.message.as_slice())?;
 
+    // 8. A TCG2 log replays into the quoted PCRs in the quoted bank; a PCR
+    // the log names must reproduce, and only those are marked replayed.
+    let mut replayed: BTreeMap<u16, bool> = BTreeMap::new();
     if let Some(log) = &v.cvm_log {
-        return Err(invalid(format!(
-            "vtpm event log format {:?} cannot be replayed by this release",
-            log.format
-        )));
+        if log.format != LogFormat::Tpm2EventLog {
+            return Err(invalid(format!(
+                "vtpm event log format {:?} is not a TPM2 event log",
+                log.format
+            )));
+        }
+        if quote.bank != HashAlg::Sha256 {
+            return Err(invalid("vtpm log replay is defined for the SHA-256 bank"));
+        }
+        let events = tcg2::parse(log.data.as_slice(), tcg2::TPM_ALG_SHA256)?;
+        let regs = tcg2::replay::<32>(&events, |i| u16::try_from(i).ok().filter(|&i| i < 24))?;
+        for (pcr, value) in regs {
+            let quoted = pcrs
+                .get(usize::from(pcr))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if !constant_time_eq(&value, quoted) {
+                return Err(AttestationError::EventlogIntegrityFailed(format!(
+                    "PCR {pcr} does not replay to the quoted value"
+                )));
+            }
+            replayed.insert(pcr, true);
+        }
     }
 
     // 7. Registers: the projected PCRs, each inside the signed selection and
@@ -90,7 +114,7 @@ pub(crate) fn appraise(
             value: r.value.clone(),
             source: RegisterSource::VtpmPcr,
             backing: Backing::PrivilegedService,
-            replayed: false,
+            replayed: replayed.get(&r.index).copied().unwrap_or(false),
             owner: None,
             purpose: None,
         });

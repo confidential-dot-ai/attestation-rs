@@ -9,12 +9,14 @@
 pub mod appraisal;
 pub mod binding;
 pub mod bytes;
+pub mod cel;
 pub mod cmw;
 pub mod evidence;
 pub mod keys;
 pub mod policy;
 pub mod registers;
 pub mod schema;
+pub mod tcg2;
 
 pub use appraisal::*;
 pub use bytes::{Bytes, FixedBytes};

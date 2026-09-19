@@ -89,6 +89,74 @@ fn generation_from_issuer(vek_der: &[u8]) -> Result<ProcessorGeneration> {
     })
 }
 
+/// Section 4.9 replay: the log's records, `chain_len` of them, replay every
+/// touched slot from genesis to the committed value; untouched slots must
+/// still be at genesis; workload slots report their claim.
+fn replay_chain(
+    log: &crate::profile::EventLog,
+    chain_len: u64,
+    bootseed: &[u8; 32],
+    seed: &[u8; 48],
+    registers: &mut [VerifiedRegister],
+) -> Result<()> {
+    use crate::profile::cel;
+    use crate::profile::LogFormat;
+    let records = match log.format {
+        LogFormat::TcgCelCbor => cel::parse_cbor(log.data.as_slice())?,
+        LogFormat::TcgCelJson => cel::parse_json(log.data.as_slice())?,
+        other => {
+            return Err(invalid(format!(
+                "event log format {other:?} does not carry the register chain"
+            )))
+        }
+    };
+    if records.len() as u64 != chain_len {
+        return Err(invalid(format!(
+            "cvm_chain claims {chain_len} extensions but the log carries {}",
+            records.len()
+        )));
+    }
+    let out = cel::replay(
+        &records,
+        |i| (usize::from(i) < REG_COUNT).then(|| genesis(i as u8, seed)),
+        true,
+    )?;
+    let expected_boot: [u8; 48] = {
+        use sha2::Digest;
+        sha2::Sha384::digest(bootseed).into()
+    };
+    match out.boot_digest {
+        Some(d) if constant_time_eq(&d, &expected_boot) => {}
+        _ => return Err(invalid("record 0 is not the boot record for this bootseed")),
+    }
+    for r in registers.iter_mut() {
+        match out.slots.get(&r.index) {
+            Some(slot) => {
+                if !constant_time_eq(r.value.as_slice(), &slot.value) {
+                    return Err(AttestationError::EventlogIntegrityFailed(format!(
+                        "slot {} does not replay to the committed value",
+                        r.index
+                    )));
+                }
+                r.replayed = true;
+                if let Some((owner, purpose)) = &slot.claim {
+                    r.owner = Some(owner.clone());
+                    r.purpose = Some(purpose.clone());
+                }
+            }
+            None => {
+                if !constant_time_eq(r.value.as_slice(), &genesis(r.index as u8, seed)) {
+                    return Err(AttestationError::EventlogIntegrityFailed(format!(
+                        "slot {} left genesis with no record in the log",
+                        r.index
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn appraise(
     cpu: &CpuEvidence,
     ctx: &Ctx<'_>,
@@ -271,6 +339,30 @@ pub(crate) async fn appraise(
                 });
             }
             registers.sort_by_key(|r| r.index);
+            // 8. The log is what turns committed values into a chain: record
+            // 0 is the boot record for this bootseed, every slot that left
+            // genesis replays, and workload slots open with their claim.
+            let log = cpu.cvm_log.as_ref().ok_or_else(|| {
+                invalid("commitment mode without a log: the boot record cannot be checked")
+            })?;
+            let seed_bytes = cpu
+                .bootseed
+                .ok_or_else(|| invalid("commitment mode without bootseed"))?;
+            replay_chain(
+                log,
+                chain_len,
+                &seed_bytes.0,
+                &policy.commitment.seed.0,
+                &mut registers,
+            )?;
+            for (slot, owner) in &policy.reference.slot_owners {
+                let reg = registers.iter().find(|r| r.index == *slot);
+                if reg.and_then(|r| r.owner.as_deref()) != Some(owner.as_str()) {
+                    return Err(invalid(format!(
+                        "slot {slot} is not owned by {owner:?} as policy requires"
+                    )));
+                }
+            }
             chain = cpu.cvm_chain;
             bootseed = cpu.bootseed;
             true
@@ -289,6 +381,11 @@ pub(crate) async fn appraise(
             )))
         }
     };
+    if !policy.reference.slot_owners.is_empty() && cpu.cvm_binding.mode != BindingMode::Commitment {
+        return Err(invalid(
+            "policy pins slot owners but the evidence carries no workload slots",
+        ));
+    }
 
     // 9. References, backing, vector.
     let assessment = Assessment {
@@ -404,6 +501,75 @@ pub(crate) async fn appraise(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::registers::SEED;
+    use crate::profile::{EventLog, LogFormat};
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../../docs/design/vectors/cvm_profile_vectors.json"
+        ))
+        .unwrap()
+    }
+
+    fn hexv(v: &serde_json::Value, k: &str) -> Vec<u8> {
+        hex::decode(v[k].as_str().unwrap()).unwrap()
+    }
+
+    fn bank(v: &serde_json::Value) -> Vec<VerifiedRegister> {
+        (0..REG_COUNT as u8)
+            .map(|i| {
+                let value = match i {
+                    3 => hexv(v, "boot_r3"),
+                    4 => hexv(v, "claim_r4"),
+                    _ => genesis(i, &SEED).to_vec(),
+                };
+                VerifiedRegister {
+                    index: u16::from(i),
+                    alg: HashAlg::Sha384,
+                    value: Bytes(value),
+                    source: RegisterSource::SnpVmr,
+                    backing: Backing::Virtualized,
+                    replayed: false,
+                    owner: None,
+                    purpose: None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_chain_replays_from_the_boot_record_to_the_committed_registers() {
+        let v = vectors();
+        let log = EventLog {
+            format: LogFormat::TcgCelCbor,
+            data: Bytes([hexv(&v, "boot_cel_record"), hexv(&v, "claim_cel_record")].concat()),
+        };
+        let bootseed: [u8; 32] = hexv(&v, "bootseed").try_into().unwrap();
+        let mut regs = bank(&v);
+        replay_chain(&log, 2, &bootseed, &SEED, &mut regs).unwrap();
+        assert!(regs[3].replayed && regs[4].replayed && !regs[5].replayed);
+        assert_eq!(regs[4].owner.as_deref(), Some("c8s"));
+        assert_eq!(regs[4].purpose.as_deref(), Some("workload"));
+
+        // chain_len must count the records
+        assert!(replay_chain(&log, 3, &bootseed, &SEED, &mut bank(&v)).is_err());
+        // a different bootseed is a different boot
+        assert!(replay_chain(&log, 2, &[0u8; 32], &SEED, &mut bank(&v)).is_err());
+        // a committed value the log does not reach
+        let mut regs = bank(&v);
+        regs[4].value = Bytes(vec![1u8; 48]);
+        assert!(replay_chain(&log, 2, &bootseed, &SEED, &mut regs).is_err());
+        // a slot that left genesis without a record
+        let mut regs = bank(&v);
+        regs[7].value = Bytes(vec![1u8; 48]);
+        assert!(replay_chain(&log, 2, &bootseed, &SEED, &mut regs).is_err());
+        // the CCEL format carries no chain
+        let ccel = EventLog {
+            format: LogFormat::TdxCcel,
+            data: log.data.clone(),
+        };
+        assert!(replay_chain(&ccel, 2, &bootseed, &SEED, &mut bank(&v)).is_err());
+    }
 
     #[test]
     fn v2_reports_take_their_generation_from_the_vek_issuer() {

@@ -217,6 +217,7 @@ name = "attestation-cli"
 version = "0.5.0"
 dependencies = [
  "attestation",
+ "base64 0.22.1",
  "clap",
  "hex",
  "serde_json",
