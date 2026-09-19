@@ -125,10 +125,10 @@ For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.
 | Mode | Platforms | Expected value |
 | --- | --- | --- |
 | `report-data` | SNP without the register driver, TDX, dstack | `report_data == pad64(anchor)` |
-| `commitment` | SNP with the register driver | `report_data == header16 || SHA-384("ats-mr-v1/commit" || R[0..n] || chain_len || caller_data)` with `caller_data` starting with `anchor` |
+| `commitment` | SNP with the register driver | `report_data == header16 \|\| SHA-384("ats-mr-v1/commit" \|\| R[0..n] \|\| chain_len \|\| caller_data)` with `caller_data` starting with `anchor` |
 | `vtpm-extradata` | Azure SNP, Azure TDX, future SVSM vTPM | TPM quote `extraData == anchor`, and the CPU report binds the AK |
 | `cca-challenge` | Arm CCA | realm token `challenge == pad64(anchor)` |
-| `nras-nonce` | NVIDIA devices | SPDM nonce `== SHA-256(nonce || "NVIDIA-GPU-EAT-v1")` (switches use the switch tag) |
+| `nras-nonce` | NVIDIA devices | SPDM nonce `== SHA-256(nonce \|\| "NVIDIA-GPU-EAT-v1")` (switches use the switch tag) |
 
 `anchor` is the relying party's binding input. When `cvm_binding.key` is absent, `anchor = nonce`. When present, `anchor = SHA-384(nonce || key.kind || key.value)` where `key` is `{kind, value}` and `kind` is `spki-sha256` (hash of a serving certificate's SubjectPublicKeyInfo) or `raw` (an opaque value the relying party chose). This replaces the per-platform padding rules c8s carries today with one derivation the verifier owns.
 
