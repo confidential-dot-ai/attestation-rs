@@ -17,6 +17,7 @@ nvidia-gpu-attest = ["nvidia-gpu", "attest", "attestation/nvidia-gpu-attest"]
 [dependencies]
 attestation = { workspace = true }
 clap = { workspace = true }
+base64 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

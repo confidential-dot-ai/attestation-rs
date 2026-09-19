@@ -233,6 +233,61 @@ pub async fn attest(
     serde_json::to_vec(&envelope).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
 }
 
+/// Attest under the profile (section 4.3): `nonce` (16 to 64 bytes) and an
+/// optional key binding form the anchor of section 4.5, which every platform
+/// binds in its own mode; the returned envelope is the profile's JSON, so
+/// `Verifier::appraise_json` is its verifier. `with_devices` also collects
+/// NVIDIA device evidence (needs the `nvidia-gpu-attest` feature).
+#[cfg(all(feature = "attest", target_os = "linux"))]
+pub async fn attest_profile(
+    platform: PlatformType,
+    nonce: &[u8],
+    key: Option<profile::KeyBinding>,
+    with_devices: bool,
+    options: &AttestOptions,
+) -> Result<Vec<u8>> {
+    use profile::{NONCE_MAX, NONCE_MIN};
+    if nonce.len() < NONCE_MIN || nonce.len() > NONCE_MAX {
+        return Err(AttestationError::ProfileEvidenceInvalid(format!(
+            "eat_nonce must be {NONCE_MIN} to {NONCE_MAX} bytes, got {}",
+            nonce.len()
+        )));
+    }
+    let anchor = profile::binding::anchor(
+        nonce,
+        key.as_ref().map(|k| (k.kind.as_str(), k.value.as_slice())),
+    )
+    .ok_or_else(|| {
+        AttestationError::ProfileEvidenceInvalid("binding key too long for the anchor".to_string())
+    })?;
+    // Azure binds the anchor as the vTPM quote's extraData verbatim; every
+    // other platform carries pad64(anchor) in report_data (section 4.5).
+    let report_data = match platform {
+        PlatformType::AzSnp | PlatformType::AzTdx => anchor,
+        _ => profile::binding::pad64(&anchor)
+            .ok_or_else(|| {
+                AttestationError::ProfileEvidenceInvalid("anchor longer than 64 bytes".to_string())
+            })?
+            .to_vec(),
+    };
+    let legacy = if with_devices {
+        #[cfg(feature = "nvidia-gpu-attest")]
+        {
+            attest_with_devices(platform, &report_data, nonce, options).await?
+        }
+        #[cfg(not(feature = "nvidia-gpu-attest"))]
+        {
+            return Err(AttestationError::PlatformNotEnabled(
+                "NVIDIA device evidence collection".to_string(),
+            ));
+        }
+    } else {
+        attest(platform, &report_data, options).await?
+    };
+    let evidence = profile::Evidence::from_legacy(&legacy, nonce, key)?;
+    serde_json::to_vec(&evidence).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
+}
+
 /// Attest a CPU TEE quote and an attached NVIDIA GPU bundle in one shot.
 ///
 /// Returns a self-describing envelope where the CPU TEE `report_data` carries
@@ -244,10 +299,22 @@ pub async fn attest_with_nvidia_gpu(
     user_nonce: &[u8],
     options: &AttestOptions,
 ) -> Result<Vec<u8>> {
+    attest_with_devices(platform, user_nonce, user_nonce, options).await
+}
+
+/// The CPU evidence over `report_data` plus the device bundle challenged
+/// from `user_nonce`, in the legacy envelope.
+#[cfg(all(feature = "nvidia-gpu-attest", feature = "attest", target_os = "linux"))]
+async fn attest_with_devices(
+    platform: PlatformType,
+    report_data: &[u8],
+    user_nonce: &[u8],
+    options: &AttestOptions,
+) -> Result<Vec<u8>> {
     // Enforce the same minimum nonce length the verifier requires so callers
     // can't produce evidence their own verifier will reject.
     platforms::nvidia_gpu::check_user_nonce_len(user_nonce)?;
-    let cpu_envelope_bytes = attest(platform, user_nonce, options).await?;
+    let cpu_envelope_bytes = attest(platform, report_data, options).await?;
     let mut envelope: AttestationEvidence = serde_json::from_slice(&cpu_envelope_bytes)
         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
     let bundle = platforms::nvidia_gpu::attest::collect_bundle(
