@@ -36,7 +36,7 @@ def anchor(nonce: bytes, key=None) -> bytes:
     )
 
 
-SEED = sha384(b"ats-mr-v1/seed")            # recommended constant seed, decision 1
+SEED = sha384(b"ats-mr-v1/seed")            # the constant genesis seed, section 4.9
 REG_COUNT = 16
 HEADER16 = b"ATS-MR-1" + bytes([1, 1, REG_COUNT, 0]) + bytes(4)   # section 4.9
 
@@ -52,6 +52,55 @@ def extend(r: bytes, d: bytes) -> bytes:
 def commit(regs, chain_len: int, caller_data: bytes) -> bytes:
     assert len(regs) == REG_COUNT and all(len(r) == 48 for r in regs) and len(caller_data) == 64
     return sha384(b"ats-mr-v1/commit" + b"".join(regs) + chain_len.to_bytes(8, "little") + caller_data)
+
+
+def cbor_head(major: int, n: int) -> bytes:
+    """Shortest-form head, RFC 8949 section 4.2.1."""
+    if n < 24:
+        return bytes([major << 5 | n])
+    if n < 0x100:
+        return bytes([major << 5 | 24, n])
+    if n < 0x10000:
+        return bytes([major << 5 | 25]) + n.to_bytes(2, "big")
+    raise ValueError("no vector needs a longer length")
+
+
+def cbor_uint(n: int) -> bytes:
+    return cbor_head(0, n)
+
+
+def cbor_tstr(s: str) -> bytes:
+    b = s.encode("utf-8")
+    return cbor_head(3, len(b)) + b
+
+
+def cbor_bstr(b: bytes) -> bytes:
+    return cbor_head(2, len(b)) + b
+
+
+def cbor_map(pairs) -> bytes:
+    """Map with unsigned integer keys; deterministic order is by encoded key, length first."""
+    enc = [(cbor_uint(k), v) for k, v in pairs]
+    assert [k for k, _ in enc] == sorted((k for k, _ in enc), key=lambda k: (len(k), k))
+    return cbor_head(5, len(enc)) + b"".join(k + v for k, v in enc)
+
+
+def c8s_event(domain: str, operation: str, content_digest: bytes, content: bytes | None = None) -> bytes:
+    """Section 4.8: the content bytes of one runtime event record."""
+    pairs = [(0, cbor_tstr(domain)), (1, cbor_tstr(operation)), (2, cbor_bstr(content_digest))]
+    if content is not None:
+        pairs.append((3, cbor_bstr(content)))
+    return cbor_map(pairs)
+
+
+CVM_CONTENT_TYPE = 200      # CEL content type `cvm`, section 4.8 (decision 3)
+TPM_ALG_SHA384 = 0x000C
+
+
+def cel_record(recnum: int, slot: int, d: bytes, content: bytes) -> bytes:
+    """Section 4.8: one CEL-CBOR record {0: recnum, 1: pcr, 3: digests, 200: content}."""
+    digests = cbor_head(4, 1) + cbor_map([(0, cbor_uint(TPM_ALG_SHA384)), (1, cbor_bstr(d))])
+    return cbor_map([(0, cbor_uint(recnum)), (1, cbor_uint(slot)), (3, digests), (CVM_CONTENT_TYPE, cbor_bstr(content))])
 
 
 def main() -> None:
@@ -80,6 +129,23 @@ def main() -> None:
     c1 = commit(regs, 1, pad64(a))
     print("commit chain1  ", hx(c1))
     print("report_data 1  ", hx(HEADER16 + c1))
+    # Section 4.9: the boot record, record 0 of the log, slot 3, bootseed 0x33 repeated 32 times.
+    bootseed = bytes([0x33]) * 32
+    boot = c8s_event("ats", "boot", sha384(bootseed))
+    db = sha384(boot)
+    print("boot content   ", hx(boot))
+    print("boot digest d  ", hx(db))
+    print("R[3] boot only ", hx(extend(genesis(3), db)))
+    print("boot CEL record", hx(cel_record(0, 3, db, boot)))
+    # Section 4.9: the claim record, record 1 of the log, first record of workload slot 4.
+    claim_body = cbor_map([(0, cbor_tstr("c8s")), (1, cbor_tstr("workload"))])
+    claim = c8s_event("ats", "claim", sha384(claim_body), claim_body)
+    dc = sha384(claim)
+    print("claim body     ", hx(claim_body))
+    print("claim content  ", hx(claim))
+    print("claim digest d ", hx(dc))
+    print("R[4] claim only", hx(extend(genesis(4), dc)))
+    print("claim CEL rec  ", hx(cel_record(1, 4, dc, claim)))
 
 
 if __name__ == "__main__":
