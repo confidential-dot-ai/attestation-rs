@@ -261,6 +261,7 @@ Per appraisal:
 | `ear_appraisal_policy_ids` | the policy identifier the verifier applied |
 | `ear_attester_claims` | our normalized claims, section 5.1 |
 | `ear_verifier_claims` | collateral and reference-value outcomes, section 5.1 |
+| `ear_raw_evidence` | the evidence envelope as appraised, as a CMW collection that also carries the endorsement snapshot the verifier used (indicator bit 1), so the verdict re-verifies after a vendor withdraws collateral; optional, on by default in attestation-api |
 | `eat_nonce` | the nonce that was bound |
 
 ### 5.1 Normalized claims
@@ -275,7 +276,7 @@ Per appraisal:
 | `cvm_freshness` | `{mode, key?}` as bound; presence means the check passed, because a failure is an error |
 | `cvm_host_data` | `{semantics, value}`; semantics in `snp-host-data` (32 bytes), `tdx-mrconfigid` (48), `cca-rpv` (64); a label, see section 10 |
 | `cvm_owner` | SNP `family_id`, `image_id`, `id_key_digest`, `author_key_digest`; TDX `mr_owner`, `mr_owner_config`. On SNP these are guest-owner values authenticated by the ID block, trustworthy only when policy pins `id_key_digest` or `author_key_digest`; on TDX they are host-set labels |
-| `cvm_policy` | `{debug, migratable, smt, single_socket?, vmpl?, sept_ve_disable?, ...}` normalized booleans and small integers |
+| `cvm_policy` | `{debug, migratable, smt, single_socket?, vmpl?, sept_ve_disable?, service_td?, reserved_bits_zero?}` normalized booleans and small integers |
 | `dbgstat` | EAT value derived from `cvm_policy.debug`: 0 (enabled) when the guest policy permits debug, 2 (disabled-since-boot) otherwise, because the policy is fixed at launch |
 | `cvm_tcb` | vendor-tagged: SNP `{reported, committed, current, launch}` each with the SPL components; TDX `{tee_tcb_svn, pck_tcb, pcesvn, fmspc, status, advisories}`; CCA `{lifecycle, sw_components}`; GPU `{driver, vbios}` |
 | `cvm_identity` | SNP `chip_id` (64 bytes); TDX `ppid`, the 16-byte Platform Provisioning ID from the PCK certificate's SGX extension (OID 1.2.840.113741.1.13.1.1); CCA `instance_id`; GPU `ueid` |
@@ -320,7 +321,7 @@ Normative order for the `cpu` submodule; every step fails closed.
 1. Parse the envelope. Reject unknown profile versions and unknown submodule names.
 2. Select the parser from `cvm_report.format`. Re-derive vendor and TEE from the report and reject a contradicting `cvm_platform`.
 3. Verify the hardware chain to the trust anchor and the report signature. SNP: ARK to ASK or ASVK to VEK against the embedded AMD roots, VEK validity, chip id and TCB cross-check against the report, VLEK detected from the certificate. TDX: PCK chain to the embedded Intel SGX Root CA, QE report signature and binding. CCA: the platform token by the platform attestation key, which is endorsed per instance by the vendor (implementation id and instance id resolve the key through the verification service or a CoRIM; there is no single embedded root), then the realm token by the realm attestation key, then `hash(realm key) == platform challenge`.
-4. Enforce guest policy: debug disabled unless policy allows, VMPL 0 on SNP, TD attributes reserved bits, CCA lifecycle.
+4. Enforce guest policy. SNP: debug disabled unless policy allows, VMPL 0, migration disallowed unless policy allows. TDX, matching Intel's quote verification policy: debug bit clear, `SEPT_VE_DISABLE` set, every reserved TD attribute bit zero, and no migration-service TD (a non-zero MRSERVICETD in a 1.5 quote) unless policy allows. CCA: lifecycle in the accepted set.
 5. Bind freshness per `cvm_binding.mode`. For `commitment` this is the recompute of section 4.9 over the registers established in step 7, so steps 5 and 7 run together for that mode.
 6. Verify collateral per policy: revocation, TCB status and advisories, QE identity, each with its signing chain anchored; record each outcome.
 7. Establish registers: authoritative values from the report, the quote's PCR digest, or the commitment; reject envelope values that differ.
@@ -340,7 +341,8 @@ VerifyPolicy {
   freshness: { key: Option<KeyBinding> }
   commitment: { header16: bytes, seed: bytes }
   tcb: { snp_floor?, tdx_allowed_status: [status], require_revocation: bool, require_signed_collateral: bool }
-  policy_bits: { allow_debug: bool, allow_migration: bool, require_vmpl0: bool }
+  policy_bits: { allow_debug: bool, allow_migration: bool, require_vmpl0: bool,
+                 require_sept_ve_disable: bool, require_zero_reserved_attributes: bool, allow_service_td: bool }
   identity: { allowed: [id] }?
   owner: { id_key_digests: [digest] }?
   gpu: NvidiaGpuParams (existing)
@@ -444,6 +446,9 @@ SEV-SNP Measurement Registers:
 8. SNP native claim names beside `cvm_*`: AMD runs no attestation service and has no vocabulary; the Confidential Containers Trustee names (`snp.measurement`, `snp.reported_tcb_*`, `snp.policy_*`, `snp.chip_id`) are the only shared ones. Adopt them, or emit `cvm_*` only for SNP.
 9. Multi-attester binding: report `ear_all_submods_bound` now and adopt draft-sun-rats-composite-eat's detached-digest bundle (SHA-384, tag 602, one 32-byte nonce for every sub-attester) in v2, or adopt it in v1 and delay the GPU submodule until it lands.
 10. Reference values: publish confos manifests as CoRIM with `integrity-registers` in addition to the flat JSON that deployments consume today, and whether to add machine allowlists (SNP `chip_id`, TDX `ppid`) with named TCB floors as a first-class policy input.
+11. A derived TDX `cvm_workload_id` (`keccak256(MRTD || RTMR0..3 || MRCONFIGID || XFAM || TDATTRIBUTES)`) so results line up with on-chain policies that key on it; cheap, but it imports a hash the profile otherwise never uses.
+12. A `tls-exporter` key kind (the RFC 9266 exporter value) for the certificate pattern, giving per-session freshness without a relying-party nonce; v2 unless a relying party needs it now.
+13. A reserved `cvm_provenance` claim for hosting-provider evidence (a PPID against a provider's host registry, a TPM attestation key bound into the report, a CoRIM-carried proof of environment), which is where two cloud providers and one research line are heading.
 
 ## 13. Implementation plan
 
