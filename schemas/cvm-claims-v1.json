@@ -543,7 +543,11 @@
           ]
         },
         "smt": {
-          "type": "boolean"
+          "description": "SNP only; a TD carries no SMT policy.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "vmpl": {
           "format": "uint8",
@@ -557,8 +561,7 @@
       },
       "required": [
         "debug",
-        "migratable",
-        "smt"
+        "migratable"
       ],
       "type": "object"
     },
@@ -766,7 +769,15 @@
           "description": "CPUSVN of the PCK certificate's TCB level."
         },
         "status": {
-          "$ref": "#/$defs/TdxTcbStatus"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TdxTcbStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent only when policy allowed the collateral checks to be skipped."
         },
         "tee_tcb_svn": {
           "$ref": "#/$defs/Base64UrlBytes16"
@@ -776,9 +787,7 @@
         "tee_tcb_svn",
         "pck_tcb",
         "pcesvn",
-        "fmspc",
-        "status",
-        "advisories"
+        "fmspc"
       ],
       "type": "object"
     },
@@ -1096,6 +1105,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "The EAR claims set.",
   "properties": {
+    "ear_all_submods_bound": {
+      "description": "Every submodule's freshness binding held (section 5.3, from the TDX\nand confidential-GPU EAR profile).",
+      "type": "boolean"
+    },
     "ear_raw_evidence": {
       "anyOf": [
         {
@@ -1136,6 +1149,7 @@
     "iat",
     "ear_verifier_id",
     "eat_nonce",
+    "ear_all_submods_bound",
     "submods"
   ],
   "title": "CVM attestation profile v1: EAR claims",

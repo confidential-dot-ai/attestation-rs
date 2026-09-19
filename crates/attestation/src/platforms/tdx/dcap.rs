@@ -523,6 +523,77 @@ const SGX_EXTENSIONS_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1];
 
 /// FMSPC OID: 1.2.840.113741.1.13.1.4
 const FMSPC_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 4];
+/// PPID OID: 1.2.840.113741.1.13.1.1 (16-byte Platform Provisioning ID).
+const PPID_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 1];
+
+/// The 16-byte PPID from the PCK leaf certificate's SGX extension, the
+/// platform identity the profile reports as `cvm_identity.ppid`.
+pub fn extract_ppid_from_pck(pem_data: &[u8]) -> Result<[u8; 16]> {
+    let der_certs = parse_pem_to_der(pem_data)?;
+    let leaf = der_certs.first().ok_or_else(|| {
+        AttestationError::CertChainError("no certificates found in PEM data".into())
+    })?;
+    let (_, cert) = X509Certificate::from_der(leaf)
+        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
+    let sgx_ext_oid = x509_parser::oid_registry::Oid::from(SGX_EXTENSIONS_OID).map_err(|e| {
+        AttestationError::CertChainError(format!("invalid SGX_EXTENSIONS_OID: {e:?}"))
+    })?;
+    let ppid_oid = x509_parser::oid_registry::Oid::from(PPID_OID)
+        .map_err(|e| AttestationError::CertChainError(format!("invalid PPID_OID: {e:?}")))?;
+    let ext = cert
+        .extensions()
+        .iter()
+        .find(|e| e.oid == sgx_ext_oid)
+        .ok_or_else(|| {
+            AttestationError::CertChainError(
+                "SGX extensions OID not found in PCK certificate".into(),
+            )
+        })?;
+    let value = extract_sgx_extension_octets(ext.value, &ppid_oid, "PPID")?;
+    <[u8; 16]>::try_from(value.as_slice()).map_err(|_| {
+        AttestationError::CertChainError(format!("PPID is {} bytes, expected 16", value.len()))
+    })
+}
+
+/// The OCTET STRING value stored under `wanted` in an SGX extension: an ASN.1
+/// SEQUENCE of SEQUENCE { OID, value } entries.
+fn extract_sgx_extension_octets(
+    data: &[u8],
+    wanted: &x509_parser::oid_registry::Oid<'_>,
+    name: &str,
+) -> Result<Vec<u8>> {
+    use x509_parser::der_parser::ber::{parse_ber, BerObjectContent};
+    let (_, outer) = parse_ber(data)
+        .map_err(|e| AttestationError::CertChainError(format!("SGX extension parse: {e}")))?;
+    let BerObjectContent::Sequence(items) = &outer.content else {
+        return Err(AttestationError::CertChainError(
+            "SGX extension is not a SEQUENCE".into(),
+        ));
+    };
+    for item in items {
+        let BerObjectContent::Sequence(inner) = &item.content else {
+            continue;
+        };
+        if inner.len() < 2 {
+            continue;
+        }
+        let BerObjectContent::OID(oid) = &inner[0].content else {
+            continue;
+        };
+        if oid != wanted {
+            continue;
+        }
+        return match &inner[1].content {
+            BerObjectContent::OctetString(v) => Ok(v.to_vec()),
+            _ => Err(AttestationError::CertChainError(format!(
+                "{name} OID found but value is not an OCTET STRING"
+            ))),
+        };
+    }
+    Err(AttestationError::CertChainError(format!(
+        "{name} OID not found in SGX extension"
+    )))
+}
 
 /// Extract the FMSPC (Family-Model-Stepping-Platform-CustomSKU) from a PCK leaf cert.
 ///
@@ -658,7 +729,7 @@ struct SvnComponent {
 ///
 /// The PCK certificate contains 16 TCB component SVNs under OID
 /// 1.2.840.113741.1.13.1.2.{1..16} and a PCESVN under 1.2.840.113741.1.13.1.2.17.
-fn extract_pck_tcb_components(pem_data: &[u8]) -> Result<([u8; 16], u16)> {
+pub(crate) fn extract_pck_tcb_components(pem_data: &[u8]) -> Result<([u8; 16], u16)> {
     let der_certs = parse_pem_to_der(pem_data)?;
     extract_pck_tcb_components_from_der(&der_certs)
 }

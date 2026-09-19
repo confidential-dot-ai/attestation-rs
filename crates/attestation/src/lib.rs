@@ -30,6 +30,7 @@
 #[cfg(all(feature = "attest", target_os = "linux"))]
 use std::sync::OnceLock;
 
+pub mod appraise;
 pub mod collateral;
 pub mod error;
 pub mod platforms;

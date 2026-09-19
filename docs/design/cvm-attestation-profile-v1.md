@@ -184,7 +184,7 @@ When evidence rides in a certificate, it is carried in the `id-pe-cmw` extension
 | --- | --- |
 | `snp.vek` | `application/pkix-cert`, VCEK or VLEK DER |
 | `snp.crl` | `application/pkix-crl`, AMD CRL for the generation |
-| `tdx.tcb_info` | `application/vnd.confidential-ai.pcs-signed+json`, `{body, issuer_chain}` exactly as Intel PCS returned them |
+| `tdx.tcb_info` | `application/vnd.confidential-ai.pcs-signed+json`, the JSON object `{body, issuer_chain}` with `body` the exact PCS response bytes and `issuer_chain` the PEM issuer chain from the response header, both as byte strings, so Intel's signature over the body verifies on the bytes Intel produced |
 | `tdx.qe_identity` | same type, `{body, issuer_chain}` |
 | `tdx.pck_crl`, `tdx.root_crl` | `application/pkix-crl` |
 | `nras.jwks` | `application/jwk-set+json` |
@@ -413,7 +413,7 @@ Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schem
 
 ## 9. Compatibility and migration
 
-The current envelope `{platform, evidence, nvidia_gpu?}` maps mechanically: `platform` splits into `cvm_platform.tee` and `hosting`; `evidence` becomes `cvm_report` with the format chosen by platform and its byte encoding normalized to section 4.10; `nvidia_gpu.devices` become `gpu/<uuid>` submodules. The library accepts both forms for two minor releases; `attest()` emits the profile by default with an opt-out; `POST /verify` accepts both; `POST /attest` returns the profile. `VerificationResult` v1 is kept for one release as a projection of `Appraisal` and then removed.
+The current envelope `{platform, evidence, nvidia_gpu?}` maps mechanically: `platform` splits into `cvm_platform.tee` and `hosting`; `evidence` becomes `cvm_report` with the format chosen by platform and its byte encoding normalized to section 4.10; `nvidia_gpu.devices` become `gpu/<uuid>` submodules. The library accepts both forms for two minor releases: `appraise_json` takes the profile envelope, and `appraise_legacy_json` takes the old envelope together with the nonce the relying party expected as `report_data` (the profile's anchor with no key) and an optional key binding, since the old envelope carries neither. `attest()` emits the profile by default with an opt-out; `POST /verify` accepts both; `POST /attest` returns the profile. `VerificationResult` v1 is kept for one release as a projection of `Appraisal` and then removed.
 
 The SNP register driver cannot ship before the verifiers understand the `commitment` mode; until then a report from that image fails every existing verifier's freshness check. Rollout order is therefore: library and WASM, attestation-go, c8s and c8s-verify-js, then the confos image.
 

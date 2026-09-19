@@ -1,0 +1,361 @@
+//! Intel TDX `cpu` submodule (section 6), over the primitives in `platforms::tdx`.
+
+use super::inline::InlineCollateral;
+use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, resolve_floor, Assessment};
+use super::{invalid, Ctx, Outcome};
+use crate::collateral::TdxCollateralProvider;
+use crate::error::{AttestationError, Result};
+use crate::platforms::tdx::dcap;
+use crate::platforms::tdx::verify::{parse_tdx_quote, verify_quote_signature};
+use crate::profile::{
+    AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
+    CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
+    HostDataSemantics, Identity, Owner, PolicyBits, RegisterSource, SubmodAppraisal, Tcb, TdxTcb,
+    VerifiedPlatform, VerifiedRegister, VerifierClaims,
+};
+use crate::types::TdxTcbStatus;
+use crate::utils::constant_time_eq;
+use std::collections::BTreeMap;
+
+/// TD attribute bits (Intel TDX Module ABI): DEBUG, SEPT_VE_DISABLE,
+/// MIGRATABLE, PKS, KL, PERFMON. Every other bit is reserved and must be zero.
+const ATTR_DEBUG: u64 = 1;
+const ATTR_SEPT_VE_DISABLE: u64 = 1 << 28;
+const ATTR_MIGRATABLE: u64 = 1 << 29;
+const ATTR_PKS: u64 = 1 << 30;
+const ATTR_KL: u64 = 1 << 31;
+const ATTR_PERFMON: u64 = 1 << 63;
+const ATTR_DEFINED: u64 =
+    ATTR_DEBUG | ATTR_SEPT_VE_DISABLE | ATTR_MIGRATABLE | ATTR_PKS | ATTR_KL | ATTR_PERFMON;
+
+fn checked(next_update: Option<String>) -> CollateralOutcome {
+    CollateralOutcome {
+        status: CollateralStatus::Checked,
+        reason: None,
+        this_update: None,
+        next_update,
+        signed: Some(true),
+    }
+}
+
+fn skipped(reason: &str) -> CollateralOutcome {
+    CollateralOutcome {
+        status: CollateralStatus::Skipped,
+        reason: Some(reason.to_string()),
+        this_update: None,
+        next_update: None,
+        signed: None,
+    }
+}
+
+fn pcs_next_update(body: &[u8], object: &str) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get(object)?
+        .get("nextUpdate")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn pcs_u32(body: &[u8], object: &str, field: &str) -> Option<u32> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get(object)?
+        .get(field)?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+pub(crate) async fn appraise(
+    cpu: &CpuEvidence,
+    ctx: &Ctx<'_>,
+    collateral: &InlineCollateral<'_>,
+) -> Result<Outcome> {
+    let policy = ctx.policy;
+    let quote_bytes = cpu.cvm_report.value.as_slice();
+    crate::utils::check_field_size("cvm_report", quote_bytes.len())?;
+    let quote = parse_tdx_quote(quote_bytes)?;
+
+    // 3. Signature, then the DCAP chain to the embedded Intel root.
+    verify_quote_signature(quote_bytes, &quote)?;
+    dcap::verify_dcap_chain(quote_bytes, quote.quote_version, None)?;
+    let body_end = dcap::compute_body_end(quote_bytes, quote.quote_version)?;
+    let auth = dcap::parse_auth_data(quote_bytes, body_end)?;
+    let pck_pem = auth.pck_cert_chain_pem;
+    let fmspc = dcap::extract_fmspc_from_pck(pck_pem)?.to_ascii_lowercase();
+    let ppid = dcap::extract_ppid_from_pck(pck_pem)?;
+    let (pck_tcb, pcesvn) = dcap::extract_pck_tcb_components(pck_pem)?;
+
+    // 4. Guest policy, matching Intel's quote verification policy.
+    let attrs = u64::from_le_bytes(quote.body.td_attributes);
+    let debug = attrs & ATTR_DEBUG != 0;
+    let sept_ve_disable = attrs & ATTR_SEPT_VE_DISABLE != 0;
+    let migratable = attrs & ATTR_MIGRATABLE != 0;
+    let reserved_zero = attrs & !ATTR_DEFINED == 0;
+    let service_td = quote.body.mr_servicetd.map(|m| m.iter().any(|b| *b != 0));
+    let bits = &policy.policy_bits;
+    if debug && !bits.allow_debug {
+        return Err(AttestationError::DebugPolicyViolation);
+    }
+    if migratable && !bits.allow_migration {
+        return Err(invalid("TD is migratable and policy does not allow it"));
+    }
+    if bits.require_sept_ve_disable && !sept_ve_disable {
+        return Err(invalid("TD attributes lack SEPT_VE_DISABLE"));
+    }
+    if bits.require_zero_reserved_attributes && !reserved_zero {
+        return Err(invalid(format!(
+            "TD attributes carry reserved bits: {attrs:#018x}"
+        )));
+    }
+    if service_td == Some(true) && !bits.allow_service_td {
+        return Err(invalid(
+            "a migration service TD is bound and policy does not allow it",
+        ));
+    }
+
+    // Identity, floor.
+    let (floor, instance_identity) = resolve_floor(policy, &ppid)?;
+    let tdx_floor = floor.and_then(|f| f.tdx.as_ref());
+    if let Some(min) = tdx_floor.and_then(|f| f.min_tee_tcb_svn.as_ref()) {
+        if quote
+            .body
+            .tee_tcb_svn
+            .iter()
+            .zip(min.0.iter())
+            .any(|(have, want)| have < want)
+        {
+            return Err(AttestationError::TcbMismatch(
+                "TEE TCB SVN is below the policy floor".to_string(),
+            ));
+        }
+    }
+
+    // 6. Collateral: revocation, TCB status, QE identity, each signed.
+    let mut outcomes = BTreeMap::new();
+    let (status, advisories, hardware) =
+        if collateral.tdx().is_some() || collateral.has("tdx.tcb_info") {
+            collateral.check_pck_revocation(pck_pem).await?;
+            outcomes.insert(CollateralCheck::TdxPckCrl, checked(None));
+            outcomes.insert(CollateralCheck::TdxRootCrl, checked(None));
+            let tcb_info = collateral.get_tcb_info(&fmspc).await?;
+            let evaluated = dcap::evaluate_tcb_status(
+                &tcb_info.body,
+                &quote.body.tee_tcb_svn,
+                pck_pem,
+                &tcb_info.signing_chain,
+            )?;
+            if evaluated.tcb_status == TdxTcbStatus::Revoked {
+                return Err(AttestationError::TcbMismatch(
+                    "TDX TCB status is Revoked".into(),
+                ));
+            }
+            if !policy
+                .tcb
+                .tdx_allowed_status
+                .contains(&evaluated.tcb_status)
+            {
+                return Err(AttestationError::TcbMismatch(format!(
+                    "TDX TCB status {} is not accepted by policy",
+                    evaluated.tcb_status
+                )));
+            }
+            if let Some(min) = tdx_floor.and_then(|f| f.min_tcb_evaluation_data_number) {
+                let have = pcs_u32(&tcb_info.body, "tcbInfo", "tcbEvaluationDataNumber")
+                    .ok_or_else(|| invalid("TCB Info carries no tcbEvaluationDataNumber"))?;
+                if have < min {
+                    return Err(AttestationError::TcbMismatch(format!(
+                        "tcbEvaluationDataNumber {have} is below the policy floor {min}"
+                    )));
+                }
+            }
+            outcomes.insert(
+                CollateralCheck::TdxTcbInfo,
+                checked(pcs_next_update(&tcb_info.body, "tcbInfo")),
+            );
+            let qe = collateral.get_td_qe_identity().await?;
+            dcap::verify_qe_identity(auth.qe_report_body, &qe.body, &qe.signing_chain)?;
+            outcomes.insert(
+                CollateralCheck::TdxQeIdentity,
+                checked(pcs_next_update(&qe.body, "enclaveIdentity")),
+            );
+            let hardware = if evaluated.tcb_status == TdxTcbStatus::UpToDate {
+                2
+            } else {
+                32
+            };
+            (
+                Some(evaluated.tcb_status),
+                evaluated.advisory_ids,
+                Some(hardware),
+            )
+        } else {
+            if policy.tcb.require_revocation || policy.tcb.require_signed_collateral {
+                return Err(AttestationError::CertFetchError(
+                    "policy requires TDX collateral checks and the verifier has no provider"
+                        .to_string(),
+                ));
+            }
+            for check in [
+                CollateralCheck::TdxPckCrl,
+                CollateralCheck::TdxRootCrl,
+                CollateralCheck::TdxTcbInfo,
+                CollateralCheck::TdxQeIdentity,
+            ] {
+                outcomes.insert(
+                    check,
+                    skipped("no provider and policy does not require collateral"),
+                );
+            }
+            (None, Vec::new(), None)
+        };
+
+    // 5. Freshness.
+    let bound = match cpu.cvm_binding.mode {
+        BindingMode::ReportData => {
+            let expected = ctx.expected_report_data();
+            if !constant_time_eq(&quote.body.report_data, &expected) {
+                return Err(AttestationError::ReportDataMismatch);
+            }
+            true
+        }
+        other => {
+            return Err(invalid(format!(
+                "binding mode {other:?} on a TDX cpu submodule"
+            )))
+        }
+    };
+
+    // 7. Registers: the RTMRs in the signed quote are authoritative.
+    let rtmrs = [
+        quote.body.rtmr_0,
+        quote.body.rtmr_1,
+        quote.body.rtmr_2,
+        quote.body.rtmr_3,
+    ];
+    if let Some(claimed) = &cpu.cvm_registers {
+        for r in claimed {
+            if r.source != RegisterSource::TdxRtmr
+                || usize::from(r.index) >= rtmrs.len()
+                || !constant_time_eq(r.value.as_slice(), &rtmrs[usize::from(r.index)])
+            {
+                return Err(invalid(format!(
+                    "cvm_registers entry {} differs from the signed RTMR",
+                    r.index
+                )));
+            }
+        }
+    }
+    let registers: Vec<VerifiedRegister> = rtmrs
+        .iter()
+        .enumerate()
+        .map(|(i, v)| VerifiedRegister {
+            index: i as u16,
+            alg: HashAlg::Sha384,
+            value: Bytes(v.to_vec()),
+            source: RegisterSource::TdxRtmr,
+            backing: Backing::Hardware,
+            replayed: false,
+            owner: None,
+            purpose: None,
+        })
+        .collect();
+
+    // 9. References, backing, vector.
+    let assessment = Assessment {
+        launch_alg: HashAlg::Sha384,
+        launch: &quote.body.mr_td,
+        registers: &registers,
+        hardware,
+    };
+    let (reference, executables) = evaluate_reference(policy, &assessment)?;
+    let backing_min = evaluate_backing(policy, &registers)?;
+    let vector = cpu_vector(instance_identity, executables, hardware);
+
+    let mut compat = BTreeMap::new();
+    for (name, value) in [
+        ("tdx_mrtd", hex::encode(quote.body.mr_td)),
+        ("tdx_rtmr0", hex::encode(quote.body.rtmr_0)),
+        ("tdx_rtmr1", hex::encode(quote.body.rtmr_1)),
+        ("tdx_rtmr2", hex::encode(quote.body.rtmr_2)),
+        ("tdx_rtmr3", hex::encode(quote.body.rtmr_3)),
+        ("tdx_mrconfigid", hex::encode(quote.body.mr_config_id)),
+        ("tdx_mrowner", hex::encode(quote.body.mr_owner)),
+        ("tdx_mrownerconfig", hex::encode(quote.body.mr_owner_config)),
+        ("tdx_td_attributes", hex::encode(quote.body.td_attributes)),
+        ("tdx_tee_tcb_svn", hex::encode(quote.body.tee_tcb_svn)),
+        ("tdx_xfam", hex::encode(quote.body.xfam)),
+        ("tdx_mrseam", hex::encode(quote.body.mr_seam)),
+        ("tdx_mrsignerseam", hex::encode(quote.body.mrsigner_seam)),
+    ] {
+        compat.insert(name.to_string(), serde_json::Value::String(value));
+    }
+    let claims = CpuClaims {
+        cvm_platform: VerifiedPlatform {
+            vendor: cpu.cvm_platform.vendor,
+            tee: cpu.cvm_platform.tee,
+            generation: Some(fmspc.clone()),
+            hosting: cpu.cvm_platform.hosting,
+        },
+        cvm_launch_measurement: Digest {
+            alg: HashAlg::Sha384,
+            value: Bytes(quote.body.mr_td.to_vec()),
+        },
+        cvm_registers: Some(registers),
+        cvm_freshness: Freshness {
+            pattern: cpu.cvm_binding.pattern,
+            mode: cpu.cvm_binding.mode,
+            key: cpu.cvm_binding.key.clone(),
+            not_before: None,
+            not_after: None,
+        },
+        cvm_host_data: Some(HostData {
+            semantics: HostDataSemantics::TdxMrconfigid,
+            value: Bytes(quote.body.mr_config_id.to_vec()),
+        }),
+        cvm_owner: Some(Owner::Tdx {
+            mr_owner: FixedBytes(quote.body.mr_owner),
+            mr_owner_config: FixedBytes(quote.body.mr_owner_config),
+        }),
+        cvm_policy: PolicyBits {
+            debug,
+            migratable,
+            smt: None,
+            single_socket: None,
+            vmpl: None,
+            sept_ve_disable: Some(sept_ve_disable),
+            service_td,
+            reserved_bits_zero: Some(reserved_zero),
+        },
+        dbgstat: if debug { 0 } else { 2 },
+        cvm_tcb: Tcb::Tdx(Box::new(TdxTcb {
+            tee_tcb_svn: FixedBytes(quote.body.tee_tcb_svn),
+            pck_tcb: FixedBytes(pck_tcb),
+            pcesvn,
+            fmspc,
+            status,
+            advisories,
+        })),
+        cvm_identity: Identity::Tdx {
+            ppid: FixedBytes(ppid),
+        },
+        cvm_chain: None,
+        bootseed: None,
+        compat,
+    };
+    let vector_status = vector.status();
+    Ok(Outcome {
+        appraisal: SubmodAppraisal {
+            ear_status: vector_status,
+            ear_trustworthiness_vector: vector,
+            ear_appraisal_policy_ids: vec![crate::profile::PROFILE_URI.to_string()],
+            ear_attester_claims: AttesterClaims::Cpu(Box::new(claims)),
+            ear_verifier_claims: VerifierClaims {
+                cvm_collateral: outcomes,
+                cvm_reference: reference,
+                cvm_backing_min: backing_min,
+            },
+        },
+        bound,
+    })
+}

@@ -35,6 +35,9 @@ pub struct Appraisal {
     /// snapshot the verifier used (bit 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ear_raw_evidence: Option<CmwRecord>,
+    /// Every submodule's freshness binding held (section 5.3, from the TDX
+    /// and confidential-GPU EAR profile).
+    pub ear_all_submods_bound: bool,
     /// One appraisal per evidence submodule, same names.
     pub submods: BTreeMap<String, SubmodAppraisal>,
 }
@@ -310,7 +313,9 @@ pub enum Owner {
 pub struct PolicyBits {
     pub debug: bool,
     pub migratable: bool,
-    pub smt: bool,
+    /// SNP only; a TD carries no SMT policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smt: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_socket: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,7 +364,10 @@ pub struct TdxTcb {
     pub pcesvn: u16,
     /// Twelve lowercase hex characters.
     pub fmspc: String,
-    pub status: TdxTcbStatus,
+    /// Absent only when policy allowed the collateral checks to be skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<TdxTcbStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advisories: Vec<String>,
 }
 
