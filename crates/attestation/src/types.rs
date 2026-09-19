@@ -308,7 +308,7 @@ pub struct DcapVerificationStatus {
 }
 
 /// AMD processor generation for SNP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProcessorGeneration {
     Milan,
     Genoa,
@@ -337,7 +337,19 @@ impl ProcessorGeneration {
 }
 
 /// SNP TCB version components (used for KDS URL construction and TCB checks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 pub struct SnpTcb {
     pub bootloader: u8,
     pub tee: u8,

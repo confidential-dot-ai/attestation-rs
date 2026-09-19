@@ -30,7 +30,6 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 
 # Caching
-moka = { version = "0.12", features = ["future"] }
 
 # Crypto / tokens
 p256 = { workspace = true, features = ["jwk", "ecdsa"] }
@@ -50,7 +49,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 # Async traits
 async-trait = { workspace = true }
 # Bounded concurrency for collateral refreshes
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # PEM parsing
 pem = { workspace = true }

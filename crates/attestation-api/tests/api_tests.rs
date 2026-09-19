@@ -3,7 +3,6 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use attestation_api::certs::cache::CertCache;
 use attestation_api::config::Config;
 use attestation_api::server::{build_api_router, build_router};
 use attestation_api::AppState;
@@ -17,16 +16,8 @@ fn test_state() -> AppState {
 fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
-    let cert_cache = Arc::new(CertCache::new(&Default::default()));
-    let cert_provider =
-        attestation_api::certs::snp_provider::CachedCertProvider::new(cert_cache.clone(), false);
-    let tdx_provider =
-        attestation_api::certs::tdx_provider::CachedTdxProvider::new(cert_cache.clone());
-    let verifier = Arc::new(
-        attestation::Verifier::new()
-            .with_cert_provider(cert_provider)
-            .with_tdx_provider(tdx_provider),
-    );
+    let cert_cache = attestation_api::certs::build(&Default::default()).unwrap();
+    let verifier = Arc::new(attestation::Verifier::new().with_collateral(cert_cache.clone()));
     AppState {
         config: Arc::new(config),
         cert_cache,

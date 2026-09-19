@@ -13,8 +13,8 @@ license = "Apache-2.0"
 default = ["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"]
 
 # Platform features — gate which TEE platforms are compiled in
-snp = ["dep:sev", "dep:x509-parser"]
-tdx = ["dep:x509-parser"]
+snp = ["dep:sev"]
+tdx = []
 az-snp = ["snp"]       # Azure SNP depends on bare-metal SNP for report parsing
 az-tdx = ["tdx"]       # Azure TDX depends on bare-metal TDX for quote parsing
 gcp-snp = ["snp"]      # GCP SNP depends on bare-metal SNP for report parsing
@@ -54,7 +54,7 @@ sha2 = "0.10"
 thiserror = "2"
 anyhow = "1"
 log = "0.4"
-chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "now", "serde"] }
 cfg-if = "1"
 subtle = "2"
 
@@ -70,7 +70,7 @@ ecdsa = { version = "0.16", features = ["verifying", "hazmat"] }
 # path does not apply. Accepted until a fixed version is available upstream.
 rsa = { version = "0.9", features = ["sha2"] }
 x509-cert = "0.2"
-x509-parser = { version = "0.16", optional = true }
+x509-parser = "0.16"
 der = { version = "0.7", features = ["alloc", "oid"] }
 spki = "0.7"
 signature = "2"
@@ -103,7 +103,7 @@ getrandom = { version = "0.2", features = ["js"] }
 # wasm32-unknown-unknown. Without it chrono falls back to `SystemTime::now()`,
 # which panics on that target — trapping every real EAT/cert expiry check in
 # the browser (see verify.rs `exp`/validity enforcement).
-chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "now", "serde", "wasmbind"] }
 # `x509-parser`'s `ASN1Time::now()` (used for cert notBefore/notAfter checks in
 # the TDX DCAP chain — see `platforms/tdx/dcap.rs`) resolves through the `time`
 # crate's `OffsetDateTime::now_utc()`, which panics on wasm32-unknown-unknown
@@ -114,7 +114,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "now", 
 time = { version = "0.3", default-features = false, features = ["wasm-bindgen"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 async-trait = "0.1"
 tempfile = "3"

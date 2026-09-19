@@ -62,7 +62,7 @@ fn protected_routes() -> Router<AppState> {
         .route("/platform", get(api::platform::handler))
         .route("/attest", post(api::attest::handler))
         .route("/verify", post(api::verify::handler))
-        .route("/certs/status", get(api::certs::status))
+        .route("/certs/status", get(api::certs::status_handler))
         .route("/certs/refresh", post(api::certs::refresh))
         .route("/token/jwks", get(api::token::jwks))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))

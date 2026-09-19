@@ -43,6 +43,9 @@ pub use collateral::{
     AMD_KDS_VLEK_BASE, INTEL_CERTS_BASE, INTEL_PCS_V4_BASE, INTEL_QE_IDENTITY_URL,
     INTEL_ROOT_CA_CRL_URL, INTEL_TDX_PCS_V4_BASE, INTEL_TD_QE_IDENTITY_URL,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use collateral::{CachePolicy, CollateralCache, DiskStore, Endpoints};
+pub use collateral::{CollateralError, CollateralKey, CollateralKind};
 pub use error::{AttestationError, Result};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]
 pub use platforms::tdx::attest::TdxQuoteMethod;
@@ -280,14 +283,39 @@ pub struct Verifier {
 }
 
 impl Verifier {
+    /// On native targets every provider is one shared [`CollateralCache`]
+    /// (single flight, validity-driven serving, failure backoff); on wasm the
+    /// lightweight default providers serve what was inlined.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            cert_provider: Box::new(DefaultCertProvider::new()),
-            tdx_provider: Some(Box::new(DefaultTdxCollateralProvider::new())),
-            #[cfg(feature = "nvidia-gpu")]
-            nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::offline()
+                .with_collateral(std::sync::Arc::new(collateral::CollateralCache::default()))
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {
+                cert_provider: Box::new(DefaultCertProvider::new()),
+                tdx_provider: Some(Box::new(DefaultTdxCollateralProvider::new())),
+                #[cfg(feature = "nvidia-gpu")]
+                nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
+            }
+        }
+    }
+
+    /// Serve SNP, TDX and NVIDIA collateral from one shared cache. A service
+    /// builds the cache once, pins what it wants warm, and hands it here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_collateral(mut self, cache: std::sync::Arc<collateral::CollateralCache>) -> Self {
+        self.cert_provider = Box::new(cache.clone());
+        self.tdx_provider = Some(Box::new(cache.clone()));
+        #[cfg(feature = "nvidia-gpu")]
+        {
+            self.nras_provider = Box::new(cache);
+        }
+        self
     }
 
     #[must_use]

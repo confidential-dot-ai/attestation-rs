@@ -137,6 +137,9 @@ pub enum AttestationError {
     NvidiaGpuEvidenceCollection(String),
 
     #[error(transparent)]
+    Collateral(#[from] crate::collateral::CollateralError),
+
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
