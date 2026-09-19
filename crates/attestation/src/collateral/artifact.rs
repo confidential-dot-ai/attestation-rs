@@ -75,13 +75,20 @@ impl Collateral {
                 return false;
             }
         }
-        now < self.fetched_at + max_age
+        now < self.age_cap(max_age)
+    }
+
+    /// `fetched_at + max_age`, saturating at the end of time instead of panicking.
+    pub fn age_cap(&self, max_age: chrono::Duration) -> DateTime<Utc> {
+        self.fetched_at
+            .checked_add_signed(max_age)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC)
     }
 
     /// The instant the copy stops being served: the earlier of its own window
     /// and the max-age cap.
     pub fn expires_at(&self, max_age: chrono::Duration) -> DateTime<Utc> {
-        let cap = self.fetched_at + max_age;
+        let cap = self.age_cap(max_age);
         match self.valid_until {
             Some(until) if until < cap => until,
             _ => cap,
@@ -115,11 +122,13 @@ impl Collateral {
 
 pub type SharedCollateral = Arc<Collateral>;
 
-/// Validity windows read from the artifacts themselves.
+/// Validity windows read from the artifacts themselves, and the binding of
+/// the bytes to the key that names them.
 pub mod validity {
     use super::super::error::{CollateralError, CollateralResult};
-    use super::super::key::{CollateralKey, CollateralKind};
+    use super::super::key::{CollateralKey, PckCa};
     use chrono::{DateTime, Utc};
+    use x509_parser::prelude::*;
 
     fn parse_err(key: &CollateralKey, what: &str, e: impl std::fmt::Display) -> CollateralError {
         CollateralError::Parse {
@@ -132,46 +141,121 @@ pub mod validity {
         DateTime::<Utc>::from_timestamp(t.timestamp(), 0)
     }
 
-    fn cert_not_after(key: &CollateralKey, der: &[u8]) -> CollateralResult<DateTime<Utc>> {
-        let (_, cert) = x509_parser::parse_x509_certificate(der)
-            .map_err(|e| parse_err(key, "certificate", e))?;
+    fn common_name(name: &X509Name<'_>) -> Option<String> {
+        name.iter_common_name()
+            .next()
+            .and_then(|a| a.as_str().ok())
+            .map(str::to_string)
+    }
+
+    fn expect_cn(
+        key: &CollateralKey,
+        what: &str,
+        name: &X509Name<'_>,
+        expected: &str,
+    ) -> CollateralResult<()> {
+        let cn = common_name(name).unwrap_or_default();
+        if cn != expected {
+            return Err(parse_err(
+                key,
+                what,
+                format!("CN is {cn:?}, expected {expected:?}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse_cert<'a>(
+        key: &CollateralKey,
+        what: &str,
+        der: &'a [u8],
+    ) -> CollateralResult<X509Certificate<'a>> {
+        let (rest, cert) = parse_x509_certificate(der).map_err(|e| parse_err(key, what, e))?;
+        if !rest.is_empty() {
+            return Err(parse_err(key, what, "trailing bytes after the certificate"));
+        }
+        Ok(cert)
+    }
+
+    fn cert_not_after(
+        key: &CollateralKey,
+        what: &str,
+        cert: &X509Certificate<'_>,
+    ) -> CollateralResult<DateTime<Utc>> {
         asn1_to_utc(cert.validity().not_after)
-            .ok_or_else(|| parse_err(key, "certificate", "notAfter out of range"))
+            .ok_or_else(|| parse_err(key, what, "notAfter out of range"))
     }
 
-    fn crl_next_update(key: &CollateralKey, der: &[u8]) -> CollateralResult<Option<DateTime<Utc>>> {
-        let (_, crl) = x509_parser::parse_x509_crl(der).map_err(|e| parse_err(key, "CRL", e))?;
-        Ok(crl.next_update().and_then(asn1_to_utc))
+    /// A CRL's `nextUpdate`, required: the three vendors always set it, and
+    /// without it the copy would fall back to a cache timer.
+    fn crl_next_update(
+        key: &CollateralKey,
+        der: &[u8],
+        issuer_cn: &str,
+    ) -> CollateralResult<DateTime<Utc>> {
+        let (rest, crl) = parse_x509_crl(der).map_err(|e| parse_err(key, "CRL", e))?;
+        if !rest.is_empty() {
+            return Err(parse_err(key, "CRL", "trailing bytes after the CRL"));
+        }
+        expect_cn(key, "CRL issuer", crl.issuer(), issuer_cn)?;
+        crl.next_update()
+            .and_then(asn1_to_utc)
+            .ok_or_else(|| parse_err(key, "CRL", "no nextUpdate"))
     }
 
-    fn json_next_update(
+    fn pcs_body(
         key: &CollateralKey,
         body: &[u8],
         object: &str,
-    ) -> CollateralResult<DateTime<Utc>> {
+    ) -> CollateralResult<serde_json::Value> {
         let v: serde_json::Value =
             serde_json::from_slice(body).map_err(|e| parse_err(key, object, e))?;
-        let s = v
-            .get(object)
-            .and_then(|o| o.get("nextUpdate"))
+        v.get(object)
+            .cloned()
+            .ok_or_else(|| parse_err(key, object, "missing object"))
+    }
+
+    fn pcs_str<'a>(
+        key: &CollateralKey,
+        object: &str,
+        o: &'a serde_json::Value,
+        field: &str,
+    ) -> CollateralResult<&'a str> {
+        o.get(field)
             .and_then(|n| n.as_str())
-            .ok_or_else(|| parse_err(key, object, "no nextUpdate"))?;
+            .ok_or_else(|| parse_err(key, object, format!("no {field}")))
+    }
+
+    fn pcs_next_update(
+        key: &CollateralKey,
+        object: &str,
+        o: &serde_json::Value,
+    ) -> CollateralResult<DateTime<Utc>> {
+        let s = pcs_str(key, object, o, "nextUpdate")?;
         DateTime::parse_from_rfc3339(s)
             .map(|t| t.with_timezone(&Utc))
             .map_err(|e| parse_err(key, object, format!("nextUpdate {s:?}: {e}")))
     }
 
-    /// The artifact's own end of validity. Parsing also proves the bytes are
-    /// the kind of artifact the key names, so a wrong body never enters the
-    /// cache. `Ok(None)` only for kinds without a window.
-    pub fn valid_until(
-        key: &CollateralKey,
-        bytes: &[u8],
-    ) -> CollateralResult<Option<DateTime<Utc>>> {
-        match key.kind() {
-            CollateralKind::SnpVcek => cert_not_after(key, bytes).map(Some),
-            CollateralKind::SnpCertChain => {
-                let certs = pem::parse_many(bytes).map_err(|e| parse_err(key, "chain PEM", e))?;
+    /// Parse the bytes as the artifact the key names, check that they are
+    /// bound to the key's parameters (generation, FMSPC, CA, identity), and
+    /// return the artifact's own end of validity. `Ok(None)` only for kinds
+    /// without a window. A body under the wrong key never enters the cache.
+    pub fn inspect(key: &CollateralKey, bytes: &[u8]) -> CollateralResult<Option<DateTime<Utc>>> {
+        match key {
+            CollateralKey::SnpVcek { generation, .. } => {
+                let cert = parse_cert(key, "VCEK", bytes)?;
+                expect_cn(key, "VCEK subject", cert.subject(), "SEV-VCEK")?;
+                expect_cn(
+                    key,
+                    "VCEK issuer",
+                    cert.issuer(),
+                    &format!("SEV-{}", generation.product_name()),
+                )?;
+                cert_not_after(key, "VCEK", &cert).map(Some)
+            }
+            CollateralKey::SnpCertChain { generation } => {
+                let certs = ::pem::parse_many(bytes).map_err(|e| parse_err(key, "chain PEM", e))?;
                 if certs.len() < 2 {
                     return Err(parse_err(
                         key,
@@ -179,28 +263,79 @@ pub mod validity {
                         format!("{} certificates", certs.len()),
                     ));
                 }
-                let mut earliest: Option<DateTime<Utc>> = None;
-                for c in &certs[..2] {
-                    let t = cert_not_after(key, c.contents())?;
-                    earliest = Some(earliest.map_or(t, |e| e.min(t)));
+                let ask = parse_cert(key, "ASK", certs[0].contents())?;
+                let ark = parse_cert(key, "ARK", certs[1].contents())?;
+                let product = generation.product_name();
+                expect_cn(key, "ASK subject", ask.subject(), &format!("SEV-{product}"))?;
+                expect_cn(key, "ARK subject", ark.subject(), &format!("ARK-{product}"))?;
+                let a = cert_not_after(key, "ASK", &ask)?;
+                let b = cert_not_after(key, "ARK", &ark)?;
+                Ok(Some(a.min(b)))
+            }
+            CollateralKey::SnpCrl { generation } => {
+                crl_next_update(key, bytes, &format!("ARK-{}", generation.product_name())).map(Some)
+            }
+            CollateralKey::TdxPckCrl { ca } => {
+                let issuer = match ca {
+                    PckCa::Platform => "Intel SGX PCK Platform CA",
+                    PckCa::Processor => "Intel SGX PCK Processor CA",
+                };
+                crl_next_update(key, bytes, issuer).map(Some)
+            }
+            CollateralKey::TdxRootCrl => crl_next_update(key, bytes, "Intel SGX Root CA").map(Some),
+            CollateralKey::TdxTcbInfo { fmspc } => {
+                let o = pcs_body(key, bytes, "tcbInfo")?;
+                let id = pcs_str(key, "tcbInfo", &o, "id")?;
+                if id != "TDX" {
+                    return Err(parse_err(
+                        key,
+                        "tcbInfo",
+                        format!("id is {id:?}, expected TDX"),
+                    ));
                 }
-                Ok(earliest)
+                let body_fmspc = pcs_str(key, "tcbInfo", &o, "fmspc")?.to_ascii_lowercase();
+                if body_fmspc != fmspc.as_str() {
+                    return Err(parse_err(
+                        key,
+                        "tcbInfo",
+                        format!("fmspc is {body_fmspc:?}, key names {fmspc}"),
+                    ));
+                }
+                pcs_next_update(key, "tcbInfo", &o).map(Some)
             }
-            CollateralKind::SnpCrl | CollateralKind::TdxPckCrl | CollateralKind::TdxRootCrl => {
-                crl_next_update(key, bytes)
+            CollateralKey::TdxQeIdentity { td } => {
+                let o = pcs_body(key, bytes, "enclaveIdentity")?;
+                let id = pcs_str(key, "enclaveIdentity", &o, "id")?;
+                let expected = if *td { "TD_QE" } else { "QE" };
+                if id != expected {
+                    return Err(parse_err(
+                        key,
+                        "enclaveIdentity",
+                        format!("id is {id:?}, expected {expected}"),
+                    ));
+                }
+                pcs_next_update(key, "enclaveIdentity", &o).map(Some)
             }
-            CollateralKind::TdxTcbInfo => json_next_update(key, bytes, "tcbInfo").map(Some),
-            CollateralKind::TdxQeIdentity => {
-                json_next_update(key, bytes, "enclaveIdentity").map(Some)
-            }
-            CollateralKind::NrasJwks => {
-                serde_json::from_slice::<serde_json::Value>(bytes)
+            CollateralKey::NrasJwks { .. } => {
+                let keys = serde_json::from_slice::<serde_json::Value>(bytes)
                     .map_err(|e| parse_err(key, "JWKS", e))?
                     .get("keys")
                     .and_then(|k| k.as_array())
+                    .map(Vec::len)
                     .ok_or_else(|| parse_err(key, "JWKS", "no keys array"))?;
+                if keys == 0 {
+                    return Err(parse_err(key, "JWKS", "empty key set"));
+                }
                 Ok(None)
             }
         }
+    }
+
+    /// Kept for callers that only need the window; identical to [`inspect`].
+    pub fn valid_until(
+        key: &CollateralKey,
+        bytes: &[u8],
+    ) -> CollateralResult<Option<DateTime<Utc>>> {
+        inspect(key, bytes)
     }
 }

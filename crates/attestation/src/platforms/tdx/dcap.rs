@@ -814,14 +814,9 @@ pub fn evaluate_tcb_status(
     tcb_info_json: &[u8],
     tee_tcb_svn: &[u8; 16],
     pck_pem: &[u8],
-    signing_certs_pem: Option<&[u8]>,
+    signing_certs_pem: &[u8],
 ) -> Result<DcapVerificationStatus> {
-    if let Some(certs_pem) = signing_certs_pem {
-        verify_tcb_info_signature(tcb_info_json, certs_pem)?;
-    } else {
-        log::warn!("TCB Info signing chain not available; skipping signature verification on TCB collateral");
-    }
-
+    verify_tcb_info_signature(tcb_info_json, signing_certs_pem)?;
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
 
@@ -1027,7 +1022,7 @@ const QE_ISVSVN_OFFSET: usize = 258;
 pub fn verify_qe_identity(
     qe_report_body: &[u8],
     qe_identity_json: &[u8],
-    signing_certs_pem: Option<&[u8]>,
+    signing_certs_pem: &[u8],
 ) -> Result<()> {
     if qe_report_body.len() < QE_REPORT_BODY_SIZE {
         return Err(AttestationError::QuoteParseFailed(format!(
@@ -1037,34 +1032,27 @@ pub fn verify_qe_identity(
         )));
     }
 
-    // Parse the envelope and optionally verify signature
+    // Parse the envelope and verify its signature
     let envelope: QeIdentityEnvelope<'_> =
         serde_json::from_slice(qe_identity_json).map_err(|e| {
             AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
         })?;
 
-    if let Some(certs_pem) = signing_certs_pem {
-        // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
-        let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+    // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
+    let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+    })?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
+    })?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem)?;
+    signing_key
+        .verify(envelope.enclave_identity.get().as_bytes(), &signature)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!(
+                "QE Identity signature verification failed: {e}"
+            ))
         })?;
-        let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
-        })?;
-
-        let signing_key = verify_signing_cert_chain(certs_pem)?;
-
-        // RawValue preserves the exact bytes Intel signed — no re-serialization.
-        signing_key
-            .verify(envelope.enclave_identity.get().as_bytes(), &signature)
-            .map_err(|e| {
-                AttestationError::CertChainError(format!(
-                    "QE Identity signature verification failed: {e}"
-                ))
-            })?;
-    } else {
-        log::warn!("QE Identity signing chain not available; skipping signature verification on QE Identity collateral");
-    }
 
     // Parse the identity fields from the raw JSON
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())

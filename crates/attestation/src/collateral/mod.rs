@@ -31,7 +31,7 @@ pub use cache::{
 pub use error::{CollateralError, CollateralResult};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fetch::{Endpoints, Fetcher};
-pub use key::{CollateralKey, CollateralKind, PckCa};
+pub use key::{CollateralKey, CollateralKind, Fmspc, PckCa};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::DiskStore;
 
@@ -194,30 +194,11 @@ impl<T: CertProvider + ?Sized> CertProvider for std::sync::Arc<T> {
 /// The zero-configuration provider. On native targets it is a handle on a
 /// [`CollateralCache`], so the CLI and the default [`crate::Verifier`] get
 /// single flight, validity-driven serving and failure backoff; on wasm it
-/// serves what was inlined plus the bundled AMD roots.
+/// serves the bundled AMD roots and nothing that needs the network.
 pub struct DefaultCertProvider {
     #[cfg(not(target_arch = "wasm32"))]
     shared: std::sync::Arc<CollateralCache>,
-    #[cfg(target_arch = "wasm32")]
-    cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, CachedCert>>>,
 }
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-struct CachedCert {
-    data: Vec<u8>,
-    fetched_at: std::time::Instant,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl CachedCert {
-    fn is_expired(&self, ttl: std::time::Duration) -> bool {
-        self.fetched_at.elapsed() > ttl
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600); // 1 hour
 
 #[cfg(not(target_arch = "wasm32"))]
 impl DefaultCertProvider {
@@ -251,22 +232,10 @@ impl DefaultCertProvider {
         Self::with_timeouts(HttpTimeouts::default())
     }
 
-    /// Create a new provider with custom HTTP timeouts.
+    /// Timeouts are irrelevant on wasm: nothing here reaches the network.
     pub fn with_timeouts(timeouts: HttpTimeouts) -> Self {
         let _ = timeouts;
-        Self {
-            cache: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-        }
-    }
-
-    fn get_cached(&self, key: &str) -> Option<Vec<u8>> {
-        let cache = self.cache.read().ok()?;
-        let entry = cache.get(key)?;
-        if entry.is_expired(CACHE_TTL) {
-            None
-        } else {
-            Some(entry.data.clone())
-        }
+        Self {}
     }
 }
 
@@ -324,12 +293,7 @@ impl CertProvider for DefaultCertProvider {
         chip_id: &[u8; 64],
         reported_tcb: &SnpTcb,
     ) -> Result<Vec<u8>> {
-        // Check cache first
-        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb)?;
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-
+        let _ = (processor_gen, chip_id, reported_tcb);
         Err(crate::error::AttestationError::CertFetchError(
             "VCEK fetch requires a custom CertProvider implementation in WASM".to_string(),
         ))
@@ -364,58 +328,40 @@ impl Default for DefaultCertProvider {
 // TDX DCAP collateral provider (Intel PCS v4)
 // ---------------------------------------------------------------------------
 
+/// A signed Intel PCS body together with the issuer chain it was served with
+/// (the `TCB-Info-Issuer-Chain` or `SGX-Enclave-Identity-Issuer-Chain`
+/// header, PEM). The chain travels with the body it signs, so a verifier can
+/// never pair a body with another fetch's chain, and never skip the check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedCollateral {
+    pub body: Vec<u8>,
+    pub signing_chain: Vec<u8>,
+}
+
 /// Trait for fetching Intel TDX DCAP collateral (TCB Info, QE Identity, CRLs).
 ///
 /// The library ships a default impl backed by the shared collateral cache.
 /// Users can plug in their own (offline bundles, caching proxies, etc.).
 #[async_trait]
 pub trait TdxCollateralProvider: Send + Sync {
-    /// Fetch TDX TCB Info JSON for a given FMSPC.
-    async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>>;
+    /// TDX TCB Info for an FMSPC, with the chain that signs it.
+    async fn get_tcb_info(&self, fmspc: &str) -> Result<SignedCollateral>;
 
-    /// Fetch the SGX QE Identity JSON.
-    async fn get_qe_identity(&self) -> Result<Vec<u8>>;
+    /// The SGX QE Identity, with the chain that signs it.
+    async fn get_qe_identity(&self) -> Result<SignedCollateral>;
 
-    /// Fetch the TDX TD_QE Identity JSON.
+    /// The TDX TD_QE Identity, with the chain that signs it.
     ///
     /// TDX quotes are produced by a TD QE with a different MRSIGNER than the
     /// SGX QE. Implementors must fetch from the TDX-specific Intel PCS
     /// endpoint (`/tdx/certification/v4/qe/identity`), not the SGX one.
-    async fn get_td_qe_identity(&self) -> Result<Vec<u8>>;
+    async fn get_td_qe_identity(&self) -> Result<SignedCollateral>;
 
     /// Fetch the Intel SGX Root CA CRL (DER-encoded).
     async fn get_root_ca_crl(&self) -> Result<Vec<u8>>;
 
     /// Fetch the PCK CRL for a given CA type ("platform" or "processor").
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>>;
-
-    /// Fetch the TCB Info signing certificate chain (PEM).
-    ///
-    /// This is the `TCB-Info-Issuer-Chain` response header from Intel PCS,
-    /// containing the Intel SGX TCB Signing Certificate → Root CA chain.
-    /// Used to verify the Intel ECDSA signature on TCB Info JSON.
-    ///
-    /// Returns `None` if the signing chain is not available (signature
-    /// verification will be skipped).
-    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Fetch the QE Identity signing certificate chain (PEM).
-    ///
-    /// This is the `SGX-Enclave-Identity-Issuer-Chain` response header from
-    /// Intel PCS. Used to verify the Intel ECDSA signature on QE Identity JSON.
-    ///
-    /// Returns `None` if the signing chain is not available (signature
-    /// verification will be skipped).
-    async fn get_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Fetch the TD QE Identity signing certificate chain (PEM).
-    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
 
     /// Check PCK cert chain against CRLs (leaf + intermediate CA revocation).
     ///
@@ -453,13 +399,13 @@ pub trait TdxCollateralProvider: Send + Sync {
 
 #[async_trait]
 impl<T: TdxCollateralProvider + ?Sized> TdxCollateralProvider for std::sync::Arc<T> {
-    async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
+    async fn get_tcb_info(&self, fmspc: &str) -> Result<SignedCollateral> {
         (**self).get_tcb_info(fmspc).await
     }
-    async fn get_qe_identity(&self) -> Result<Vec<u8>> {
+    async fn get_qe_identity(&self) -> Result<SignedCollateral> {
         (**self).get_qe_identity().await
     }
-    async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
+    async fn get_td_qe_identity(&self) -> Result<SignedCollateral> {
         (**self).get_td_qe_identity().await
     }
     async fn get_root_ca_crl(&self) -> Result<Vec<u8>> {
@@ -467,15 +413,6 @@ impl<T: TdxCollateralProvider + ?Sized> TdxCollateralProvider for std::sync::Arc
     }
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
         (**self).get_pck_crl(ca).await
-    }
-    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        (**self).get_tcb_signing_chain().await
-    }
-    async fn get_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        (**self).get_qe_identity_signing_chain().await
-    }
-    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        (**self).get_td_qe_identity_signing_chain().await
     }
     async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {
         (**self).check_pck_revocation(pck_cert_chain_pem).await
@@ -519,8 +456,6 @@ impl<T: crate::platforms::nvidia_gpu::NrasProvider + ?Sized>
 pub struct DefaultTdxCollateralProvider {
     #[cfg(not(target_arch = "wasm32"))]
     shared: std::sync::Arc<CollateralCache>,
-    #[cfg(target_arch = "wasm32")]
-    cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, CachedCert>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -555,22 +490,10 @@ impl DefaultTdxCollateralProvider {
         Self::with_timeouts(HttpTimeouts::default())
     }
 
-    /// Create a new provider with custom HTTP timeouts.
+    /// Timeouts are irrelevant on wasm: nothing here reaches the network.
     pub fn with_timeouts(timeouts: HttpTimeouts) -> Self {
         let _ = timeouts;
-        Self {
-            cache: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-        }
-    }
-
-    fn get_cached(&self, key: &str) -> Option<Vec<u8>> {
-        let cache = self.cache.read().ok()?;
-        let entry = cache.get(key)?;
-        if entry.is_expired(CACHE_TTL) {
-            None
-        } else {
-            Some(entry.data.clone())
-        }
+        Self {}
     }
 }
 
@@ -611,15 +534,15 @@ impl DefaultTdxCollateralProvider {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl TdxCollateralProvider for DefaultTdxCollateralProvider {
-    async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
+    async fn get_tcb_info(&self, fmspc: &str) -> Result<SignedCollateral> {
         self.shared.get_tcb_info(fmspc).await
     }
 
-    async fn get_qe_identity(&self) -> Result<Vec<u8>> {
+    async fn get_qe_identity(&self) -> Result<SignedCollateral> {
         self.shared.get_qe_identity().await
     }
 
-    async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
+    async fn get_td_qe_identity(&self) -> Result<SignedCollateral> {
         self.shared.get_td_qe_identity().await
     }
 
@@ -631,18 +554,6 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         self.shared.get_pck_crl(ca).await
     }
 
-    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.shared.get_tcb_signing_chain().await
-    }
-
-    async fn get_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.shared.get_qe_identity_signing_chain().await
-    }
-
-    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.shared.get_td_qe_identity_signing_chain().await
-    }
-
     async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {
         self.shared.check_pck_revocation(pck_cert_chain_pem).await
     }
@@ -651,55 +562,32 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
 #[cfg(target_arch = "wasm32")]
 #[async_trait]
 impl TdxCollateralProvider for DefaultTdxCollateralProvider {
-    async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
-        let url = Self::tcb_info_url(fmspc);
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-        Err(crate::error::AttestationError::CertFetchError(
-            "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
-        ))
+    async fn get_tcb_info(&self, _fmspc: &str) -> Result<SignedCollateral> {
+        Err(wasm_needs_provider())
     }
 
-    async fn get_qe_identity(&self) -> Result<Vec<u8>> {
-        let url = Self::qe_identity_url();
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-        Err(crate::error::AttestationError::CertFetchError(
-            "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
-        ))
+    async fn get_qe_identity(&self) -> Result<SignedCollateral> {
+        Err(wasm_needs_provider())
     }
 
-    async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
-        let url = Self::td_qe_identity_url();
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-        Err(crate::error::AttestationError::CertFetchError(
-            "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
-        ))
+    async fn get_td_qe_identity(&self) -> Result<SignedCollateral> {
+        Err(wasm_needs_provider())
     }
 
     async fn get_root_ca_crl(&self) -> Result<Vec<u8>> {
-        let url = Self::root_ca_crl_url();
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-        Err(crate::error::AttestationError::CertFetchError(
-            "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
-        ))
+        Err(wasm_needs_provider())
     }
 
-    async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
-        let url = Self::pck_crl_url(ca);
-        if let Some(cached) = self.get_cached(&url) {
-            return Ok(cached);
-        }
-        Err(crate::error::AttestationError::CertFetchError(
-            "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
-        ))
+    async fn get_pck_crl(&self, _ca: &str) -> Result<Vec<u8>> {
+        Err(wasm_needs_provider())
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_needs_provider() -> crate::error::AttestationError {
+    crate::error::AttestationError::CertFetchError(
+        "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
+    )
 }
 
 impl Default for DefaultTdxCollateralProvider {

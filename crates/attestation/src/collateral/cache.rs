@@ -7,25 +7,34 @@
 //! artifact's own validity window. The per-kind max age is a refresh trigger,
 //! never a reason to refuse a copy that the vendor still says is valid. Kinds
 //! without a window (a JWKS) are bounded by their max age alone.
+//!
+//! Lock order: `pinned` before `entries`; `failures`, `inflight`,
+//! `last_refresh` and `last_report` are only ever taken alone.
 
 use super::artifact::{Collateral, SharedCollateral};
 use super::error::{CollateralError, CollateralResult};
 use super::fetch::{Endpoints, Fetcher};
-use super::key::{CollateralKey, CollateralKind, PckCa};
+use super::key::{CollateralKey, CollateralKind, Fmspc, PckCa};
 use super::store::DiskStore;
-use super::{CertProvider, HttpTimeouts, TdxCollateralProvider};
+use super::{CertProvider, HttpTimeouts, SignedCollateral, TdxCollateralProvider};
 use crate::error::{AttestationError, Result};
 use crate::types::{ProcessorGeneration, SnpTcb};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-/// Refreshes in flight at once. Under vendor rate limits, above one round trip deep.
+/// Refreshes in flight at once, across every refresh pass of one cache.
 pub const REFRESH_CONCURRENCY: usize = 8;
+/// Failure records kept; the oldest retry time goes first. A verify with a
+/// random chip id would otherwise grow this map without bound.
+pub const MAX_FAILURES: usize = 256;
+/// No max age above this; it keeps the date arithmetic in range.
+pub const MAX_AGE_CAP: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
 
 /// The cache's notion of now; injectable so validity logic is testable.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -78,7 +87,7 @@ impl CachePolicy {
             CollateralKind::TdxTcbInfo | CollateralKind::TdxQeIdentity => self.max_age_tdx,
             CollateralKind::NrasJwks => self.max_age_jwks,
         };
-        ChronoDuration::from_std(d).unwrap_or(ChronoDuration::MAX)
+        ChronoDuration::from_std(d.min(MAX_AGE_CAP)).unwrap_or_else(|_| ChronoDuration::days(3650))
     }
 
     /// Doubles from the base per consecutive failure, capped at the max.
@@ -103,7 +112,9 @@ pub struct Backoff {
 
 struct Entry {
     value: SharedCollateral,
-    last_used: Instant,
+    /// Monotonic use counter for LRU eviction, bumped under the read lock.
+    use_seq: AtomicU64,
+    inserted: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,11 +148,24 @@ pub struct CacheStatus {
     pub last_refresh: Option<DateTime<Utc>>,
 }
 
-/// Outcome of a refresh pass.
-#[derive(Debug, Default)]
+/// Outcome of a refresh pass. Failures carry the error text, so a report can
+/// be shared with callers that coalesced onto one pass.
+#[derive(Debug, Clone, Default)]
 pub struct RefreshReport {
     pub attempted: usize,
-    pub failed: Vec<(CollateralKey, CollateralError)>,
+    pub failed: Vec<(CollateralKey, String)>,
+}
+
+fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct CollateralCache {
@@ -149,13 +173,16 @@ pub struct CollateralCache {
     policy: CachePolicy,
     store: Option<DiskStore>,
     entries: RwLock<HashMap<CollateralKey, Entry>>,
+    use_counter: AtomicU64,
     inflight: Mutex<HashMap<CollateralKey, Weak<AsyncMutex<()>>>>,
     failures: Mutex<HashMap<CollateralKey, Backoff>>,
     pinned: RwLock<BTreeSet<CollateralKey>>,
-    /// The Intel signing chain last captured with each signed kind, for the
-    /// chain accessors of [`TdxCollateralProvider`], which take no key.
-    signing_chains: RwLock<HashMap<&'static str, Vec<u8>>>,
     last_refresh: RwLock<Option<DateTime<Utc>>>,
+    /// Coalesces refresh passes: a caller that finds one running waits for it
+    /// and takes its report instead of starting another.
+    refresh_gate: AsyncMutex<()>,
+    last_report: RwLock<Option<RefreshReport>>,
+    refresh_slots: Arc<Semaphore>,
     clock: Clock,
     #[cfg(feature = "nvidia-gpu")]
     nras: crate::platforms::nvidia_gpu::DefaultNrasProvider,
@@ -188,11 +215,14 @@ impl CollateralCache {
             policy,
             store,
             entries: RwLock::new(HashMap::new()),
+            use_counter: AtomicU64::new(1),
             inflight: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             pinned: RwLock::new(BTreeSet::new()),
-            signing_chains: RwLock::new(HashMap::new()),
             last_refresh: RwLock::new(None),
+            refresh_gate: AsyncMutex::new(()),
+            last_report: RwLock::new(None),
+            refresh_slots: Arc::new(Semaphore::new(REFRESH_CONCURRENCY)),
             clock: Arc::new(Utc::now),
             #[cfg(feature = "nvidia-gpu")]
             nras: crate::platforms::nvidia_gpu::DefaultNrasProvider::new(),
@@ -205,16 +235,16 @@ impl CollateralCache {
         self
     }
 
-    pub fn now(&self) -> DateTime<Utc> {
-        (self.clock)()
-    }
-
     /// NRAS endpoints for GPU and switch attestation; JWKS keys derive from them.
     #[cfg(feature = "nvidia-gpu")]
     pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Self {
         self.nras =
             crate::platforms::nvidia_gpu::DefaultNrasProvider::with_urls(gpu_url, switch_url);
         self
+    }
+
+    pub fn now(&self) -> DateTime<Utc> {
+        (self.clock)()
     }
 
     pub fn policy(&self) -> &CachePolicy {
@@ -228,28 +258,23 @@ impl CollateralCache {
     /// Keep this artifact warm: fetched by the refresher when absent, refreshed
     /// before it goes stale, never evicted.
     pub fn pin(&self, key: CollateralKey) {
-        self.pinned.write().expect("pinned set").insert(key);
+        write(&self.pinned).insert(key);
     }
 
     pub fn pinned(&self) -> Vec<CollateralKey> {
-        self.pinned
-            .read()
-            .expect("pinned set")
-            .iter()
-            .cloned()
-            .collect()
+        read(&self.pinned).iter().cloned().collect()
     }
 
     fn freshness(&self, c: &Collateral, now: DateTime<Utc>) -> Option<Freshness> {
-        let max_age = self.policy.max_age(c.kind());
+        let cap = c.age_cap(self.policy.max_age(c.kind()));
         match c.valid_until {
             Some(until) if now >= until => None,
-            Some(_) => Some(if now < c.fetched_at + max_age {
+            Some(_) => Some(if now < cap {
                 Freshness::Fresh
             } else {
                 Freshness::Stale
             }),
-            None => (now < c.fetched_at + max_age).then_some(Freshness::Fresh),
+            None => (now < cap).then_some(Freshness::Fresh),
         }
     }
 
@@ -258,77 +283,79 @@ impl CollateralCache {
         key: &CollateralKey,
         now: DateTime<Utc>,
     ) -> Option<(SharedCollateral, Freshness)> {
-        let mut entries = self.entries.write().expect("entries");
-        let entry = entries.get_mut(key)?;
+        let entries = read(&self.entries);
+        let entry = entries.get(key)?;
         let freshness = self.freshness(&entry.value, now)?;
-        entry.last_used = Instant::now();
+        entry.use_seq.store(
+            self.use_counter.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         Some((entry.value.clone(), freshness))
     }
 
-    fn remember_signing_chain(&self, c: &Collateral) {
-        let name = match &c.key {
-            CollateralKey::TdxTcbInfo { .. } => "tcb",
-            CollateralKey::TdxQeIdentity { td: true } => "qe_td",
-            CollateralKey::TdxQeIdentity { td: false } => "qe_sgx",
-            _ => return,
-        };
-        if let Some(chain) = &c.signing_chain {
-            self.signing_chains
-                .write()
-                .expect("signing chains")
-                .insert(name, chain.clone());
-        }
+    /// The copy inserted after `since`, if it is servable: the refresh path uses
+    /// it to skip a dial another task just made.
+    fn inserted_after(&self, key: &CollateralKey, since: Instant) -> Option<SharedCollateral> {
+        let entries = read(&self.entries);
+        let entry = entries.get(key)?;
+        (entry.inserted > since && self.freshness(&entry.value, self.now()).is_some())
+            .then(|| entry.value.clone())
     }
 
-    /// Lock order everywhere: `pinned` before `entries`, never the reverse.
     fn insert(&self, c: SharedCollateral, persist: bool) {
-        self.remember_signing_chain(&c);
         if persist {
             if let Some(store) = &self.store {
                 store.put(&c);
             }
         }
-        let pinned = self.pinned.read().expect("pinned set");
-        let mut entries = self.entries.write().expect("entries");
+        let pinned = read(&self.pinned);
+        let mut entries = write(&self.entries);
         entries.insert(
             c.key.clone(),
             Entry {
                 value: c,
-                last_used: Instant::now(),
+                use_seq: AtomicU64::new(self.use_counter.fetch_add(1, Ordering::Relaxed)),
+                inserted: Instant::now(),
             },
         );
-        if entries.len() > self.policy.max_entries {
+        while entries.len() > self.policy.max_entries {
             let victim = entries
                 .iter()
                 .filter(|(k, _)| !pinned.contains(*k))
-                .min_by_key(|(_, e)| e.last_used)
+                .min_by_key(|(_, e)| e.use_seq.load(Ordering::Relaxed))
                 .map(|(k, _)| k.clone());
-            if let Some(k) = victim {
-                entries.remove(&k);
+            match victim {
+                Some(k) => {
+                    entries.remove(&k);
+                }
+                None => break,
             }
         }
     }
 
     fn flight(&self, key: &CollateralKey) -> Arc<AsyncMutex<()>> {
-        let mut inflight = self.inflight.lock().expect("inflight");
+        let mut inflight = lock(&self.inflight);
         if let Some(existing) = inflight.get(key).and_then(Weak::upgrade) {
             return existing;
         }
         if inflight.len() > 256 {
             inflight.retain(|_, w| w.strong_count() > 0);
         }
-        let lock = Arc::new(AsyncMutex::new(()));
-        inflight.insert(key.clone(), Arc::downgrade(&lock));
-        lock
+        let flight = Arc::new(AsyncMutex::new(()));
+        inflight.insert(key.clone(), Arc::downgrade(&flight));
+        flight
     }
 
     fn backoff_for(&self, key: &CollateralKey, now: DateTime<Utc>) -> Option<Backoff> {
-        let failures = self.failures.lock().expect("failures");
-        failures.get(key).filter(|b| now < b.retry_at).cloned()
+        lock(&self.failures)
+            .get(key)
+            .filter(|b| now < b.retry_at)
+            .cloned()
     }
 
     fn record_failure(&self, key: &CollateralKey) {
-        let mut failures = self.failures.lock().expect("failures");
+        let now = self.now();
+        let mut failures = lock(&self.failures);
         let consecutive = failures
             .get(key)
             .map_or(0, |b| b.consecutive)
@@ -338,17 +365,45 @@ impl CollateralCache {
             failures.remove(key);
             return;
         }
+        failures.retain(|_, b| b.retry_at > now);
+        if failures.len() >= MAX_FAILURES {
+            let oldest = failures
+                .iter()
+                .min_by_key(|(_, b)| b.retry_at)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                failures.remove(&k);
+            }
+        }
         failures.insert(
             key.clone(),
             Backoff {
                 consecutive,
-                retry_at: self.now() + delay,
+                retry_at: now
+                    .checked_add_signed(delay)
+                    .unwrap_or(DateTime::<Utc>::MAX_UTC),
             },
         );
     }
 
     fn clear_failure(&self, key: &CollateralKey) {
-        self.failures.lock().expect("failures").remove(key);
+        lock(&self.failures).remove(key);
+    }
+
+    /// A fallback copy is served only if it is still inside its window at the
+    /// moment it is served; the fetch it stood in for may have taken seconds.
+    fn serve_fallback(
+        &self,
+        fallback: Option<SharedCollateral>,
+        err: CollateralError,
+    ) -> CollateralResult<SharedCollateral> {
+        match fallback {
+            Some(c) if self.freshness(&c, self.now()).is_some() => {
+                log::warn!("{err}; serving the copy valid until {:?}", c.valid_until);
+                Ok(c)
+            }
+            _ => Err(err),
+        }
     }
 
     /// The artifact, from memory, disk or the vendor, in that order. A copy
@@ -377,25 +432,29 @@ impl CollateralCache {
         self.fetch_into(key, fallback).await
     }
 
-    /// Fetch under the key's single-flight lock. `fallback` is a copy still
-    /// inside its window, served when the vendor cannot be reached.
+    /// Fetch under the key's single-flight lock. `fallback` is a copy inside
+    /// its window, served when the vendor cannot be reached.
     async fn fetch_into(
         &self,
         key: &CollateralKey,
         fallback: Option<SharedCollateral>,
     ) -> CollateralResult<SharedCollateral> {
-        let now = self.now();
-        if let Some(b) = self.backoff_for(key, now) {
-            return fallback.ok_or(CollateralError::Backoff {
-                key: key.clone(),
-                consecutive: b.consecutive,
-                retry_at: b.retry_at,
-            });
+        let backoff_err = |b: Backoff| CollateralError::Backoff {
+            key: key.clone(),
+            consecutive: b.consecutive,
+            retry_at: b.retry_at,
+        };
+        if let Some(b) = self.backoff_for(key, self.now()) {
+            return self.serve_fallback(fallback, backoff_err(b));
         }
         let flight = self.flight(key);
         let _guard = flight.lock().await;
         if let Some((c, Freshness::Fresh)) = self.lookup(key, self.now()) {
             return Ok(c);
+        }
+        // A waiter behind a leader that just failed must not dial again.
+        if let Some(b) = self.backoff_for(key, self.now()) {
+            return self.serve_fallback(fallback, backoff_err(b));
         }
         match self.fetcher.fetch(key, self.now()).await {
             Ok(c) => {
@@ -406,22 +465,21 @@ impl CollateralCache {
             }
             Err(e) => {
                 self.record_failure(key);
-                match fallback {
-                    Some(c) => {
-                        log::warn!("{e}; serving the copy valid until {:?}", c.valid_until);
-                        Ok(c)
-                    }
-                    None => Err(e),
-                }
+                self.serve_fallback(fallback, e)
             }
         }
     }
 
     /// Refetch now, regardless of age or backoff, replacing the copy on
-    /// success and keeping it on failure.
+    /// success and keeping it on failure. A copy another task inserted while
+    /// this call waited for the lock is returned instead of dialling again.
     pub async fn refresh(&self, key: &CollateralKey) -> CollateralResult<SharedCollateral> {
+        let started = Instant::now();
         let flight = self.flight(key);
         let _guard = flight.lock().await;
+        if let Some(c) = self.inserted_after(key, started) {
+            return Ok(c);
+        }
         match self.fetcher.fetch(key, self.now()).await {
             Ok(c) => {
                 let c = Arc::new(c);
@@ -439,15 +497,16 @@ impl CollateralCache {
     /// Keys the refresher should fetch now: pinned keys with no usable copy,
     /// and held copies past half their max age or past their window.
     fn due(&self, now: DateTime<Utc>) -> Vec<CollateralKey> {
-        let pinned = self.pinned.read().expect("pinned set");
-        let entries = self.entries.read().expect("entries");
+        let pinned = read(&self.pinned);
+        let entries = read(&self.entries);
         let mut due: BTreeSet<CollateralKey> = BTreeSet::new();
         for (key, entry) in entries.iter() {
-            let lead = self.policy.max_age(entry.value.kind()) / 2;
+            let max_age = self.policy.max_age(entry.value.kind());
             let refresh_at = entry
                 .value
-                .expires_at(self.policy.max_age(entry.value.kind()))
-                - lead;
+                .expires_at(max_age)
+                .checked_sub_signed(max_age / 2)
+                .unwrap_or(DateTime::<Utc>::MIN_UTC);
             if now >= refresh_at {
                 due.insert(key.clone());
             }
@@ -463,34 +522,42 @@ impl CollateralCache {
         due.into_iter().collect()
     }
 
-    /// Refresh what is due (see [`Self::due`]), bounded concurrency.
+    /// Refresh what is due (see [`Self::due`]). Skipped when a pass is running.
     pub async fn refresh_due(self: &Arc<Self>) -> RefreshReport {
+        let Ok(_gate) = self.refresh_gate.try_lock() else {
+            return RefreshReport::default();
+        };
         let due = self.due(self.now());
         self.refresh_keys(due).await
     }
 
     /// Refetch every held and pinned artifact, replacing each only on success.
+    /// Concurrent callers coalesce onto the running pass and share its report.
     pub async fn refresh_all(self: &Arc<Self>) -> RefreshReport {
-        let mut keys: BTreeSet<CollateralKey> = self
-            .entries
-            .read()
-            .expect("entries")
-            .keys()
-            .cloned()
-            .collect();
-        keys.extend(self.pinned());
-        self.refresh_keys(keys.into_iter().collect()).await
+        match self.refresh_gate.try_lock() {
+            Ok(_gate) => {
+                let mut keys: BTreeSet<CollateralKey> =
+                    read(&self.entries).keys().cloned().collect();
+                keys.extend(self.pinned());
+                let report = self.refresh_keys(keys.into_iter().collect()).await;
+                *write(&self.last_report) = Some(report.clone());
+                report
+            }
+            Err(_) => {
+                let _gate = self.refresh_gate.lock().await;
+                read(&self.last_report).clone().unwrap_or_default()
+            }
+        }
     }
 
     async fn refresh_keys(self: &Arc<Self>, keys: Vec<CollateralKey>) -> RefreshReport {
-        let semaphore = Arc::new(Semaphore::new(REFRESH_CONCURRENCY));
         let mut set = tokio::task::JoinSet::new();
         let attempted = keys.len();
         for key in keys {
             let cache = self.clone();
-            let semaphore = semaphore.clone();
+            let slots = self.refresh_slots.clone();
             set.spawn(async move {
-                let _permit = semaphore.acquire().await.expect("semaphore open");
+                let _permit = slots.acquire().await.expect("semaphore open");
                 let outcome = cache.refresh(&key).await.map(drop);
                 (key, outcome)
             });
@@ -498,7 +565,7 @@ impl CollateralCache {
         let mut failed = Vec::new();
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok((key, Err(e))) => failed.push((key, e)),
+                Ok((key, Err(e))) => failed.push((key, e.to_string())),
                 Ok((_, Ok(()))) => {}
                 Err(e) => log::error!("collateral refresh task failed: {e}"),
             }
@@ -507,7 +574,7 @@ impl CollateralCache {
         for (key, e) in &failed {
             log::warn!("refresh of {key} failed, keeping the held copy: {e}");
         }
-        *self.last_refresh.write().expect("last refresh") = Some(self.now());
+        *write(&self.last_refresh) = Some(self.now());
         RefreshReport { attempted, failed }
     }
 
@@ -528,8 +595,8 @@ impl CollateralCache {
 
     pub fn status(&self) -> CacheStatus {
         let now = self.now();
-        let pinned = self.pinned.read().expect("pinned set");
-        let entries = self.entries.read().expect("entries");
+        let pinned = read(&self.pinned);
+        let entries = read(&self.entries);
         let mut out: Vec<EntryStatus> = entries
             .iter()
             .map(|(k, e)| {
@@ -548,10 +615,7 @@ impl CollateralCache {
             })
             .collect();
         out.sort_by(|a, b| a.key.cmp(&b.key));
-        let mut failures: Vec<(String, Backoff)> = self
-            .failures
-            .lock()
-            .expect("failures")
+        let mut failures: Vec<(String, Backoff)> = lock(&self.failures)
             .iter()
             .map(|(k, b)| (k.to_string(), b.clone()))
             .collect();
@@ -560,32 +624,35 @@ impl CollateralCache {
             entries: out,
             pinned: pinned.iter().map(ToString::to_string).collect(),
             failures,
-            last_refresh: *self.last_refresh.read().expect("last refresh"),
+            last_refresh: *read(&self.last_refresh),
         }
     }
 
     /// Entries held in memory for a kind.
     pub fn count(&self, kind: CollateralKind) -> usize {
-        self.entries
-            .read()
-            .expect("entries")
+        read(&self.entries)
             .values()
             .filter(|e| e.value.kind() == kind)
             .count()
     }
 
-    fn signing_chain(&self, name: &'static str, what: &str) -> Result<Option<Vec<u8>>> {
-        self.signing_chains
-            .read()
-            .expect("signing chains")
-            .get(name)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| {
-                AttestationError::CertFetchError(format!(
-                    "{what} signing chain is not held; fetch the {what} body first"
-                ))
-            })
+    /// Failure records currently held.
+    pub fn failure_count(&self) -> usize {
+        lock(&self.failures).len()
+    }
+
+    /// A signed PCS body with the chain that arrived with it. The fetcher and
+    /// the store refuse such a body without a chain, so a missing one here is
+    /// an invariant violation and fails closed.
+    async fn signed(&self, key: &CollateralKey) -> Result<SignedCollateral> {
+        let c = self.get(key).await?;
+        let signing_chain = c.signing_chain.clone().ok_or_else(|| {
+            AttestationError::CertFetchError(format!("{key}: held without its signing chain"))
+        })?;
+        Ok(SignedCollateral {
+            body: c.bytes.clone(),
+            signing_chain,
+        })
     }
 }
 
@@ -632,29 +699,23 @@ impl CertProvider for CollateralCache {
 
 #[async_trait]
 impl TdxCollateralProvider for CollateralCache {
-    async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
-        let key = CollateralKey::tdx_tcb_info(fmspc).ok_or_else(|| {
+    async fn get_tcb_info(&self, fmspc: &str) -> Result<SignedCollateral> {
+        let fmspc = Fmspc::new(fmspc).ok_or_else(|| {
             AttestationError::QuoteParseFailed(format!(
                 "FMSPC {fmspc:?} is not twelve hex characters"
             ))
         })?;
-        Ok(self.get(&key).await?.bytes.clone())
+        self.signed(&CollateralKey::TdxTcbInfo { fmspc }).await
     }
 
-    async fn get_qe_identity(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .get(&CollateralKey::TdxQeIdentity { td: false })
-            .await?
-            .bytes
-            .clone())
+    async fn get_qe_identity(&self) -> Result<SignedCollateral> {
+        self.signed(&CollateralKey::TdxQeIdentity { td: false })
+            .await
     }
 
-    async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .get(&CollateralKey::TdxQeIdentity { td: true })
-            .await?
-            .bytes
-            .clone())
+    async fn get_td_qe_identity(&self) -> Result<SignedCollateral> {
+        self.signed(&CollateralKey::TdxQeIdentity { td: true })
+            .await
     }
 
     async fn get_root_ca_crl(&self) -> Result<Vec<u8>> {
@@ -669,18 +730,6 @@ impl TdxCollateralProvider for CollateralCache {
             .await?
             .bytes
             .clone())
-    }
-
-    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.signing_chain("tcb", "TCB Info")
-    }
-
-    async fn get_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.signing_chain("qe_sgx", "QE Identity")
-    }
-
-    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        self.signing_chain("qe_td", "TD QE Identity")
     }
 }
 

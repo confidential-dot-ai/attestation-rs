@@ -123,7 +123,11 @@ async fn test_tcb_info_has_tdx_components() {
     let auth = parse_auth_data(V5_QUOTE, body_end).expect("auth data");
     let fmspc = extract_fmspc_from_pck(auth.pck_cert_chain_pem).expect("fmspc");
 
-    let tcb_json = provider.get_tcb_info(&fmspc).await.expect("fetch TCB Info");
+    let tcb_json = provider
+        .get_tcb_info(&fmspc)
+        .await
+        .expect("fetch TCB Info")
+        .body;
     let parsed: serde_json::Value = serde_json::from_slice(&tcb_json).expect("parse TCB Info JSON");
 
     let levels = parsed["tcbInfo"]["tcbLevels"]
@@ -152,7 +156,8 @@ async fn test_qe_identity_is_tdx() {
     let qe_json = provider
         .get_td_qe_identity()
         .await
-        .expect("fetch QE Identity");
+        .expect("fetch QE Identity")
+        .body;
     let parsed: serde_json::Value =
         serde_json::from_slice(&qe_json).expect("parse QE Identity JSON");
 

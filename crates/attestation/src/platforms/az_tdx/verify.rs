@@ -89,13 +89,12 @@ pub async fn verify_evidence(
 
         // TCB status evaluation
         let fmspc = dcap::extract_fmspc_from_pck_der(&pck_der_certs)?;
-        let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
-        let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
+        let tcb_info = provider.get_tcb_info(&fmspc).await?;
         let status = dcap::evaluate_tcb_status(
-            &tcb_info_json,
+            &tcb_info.body,
             &tdx_quote.body.tee_tcb_svn,
             auth.pck_cert_chain_pem,
-            tcb_signing_chain.as_deref(),
+            &tcb_info.signing_chain,
         )?;
 
         // Reject Revoked TCB status
@@ -106,12 +105,11 @@ pub async fn verify_evidence(
         }
 
         // QE Identity verification (TDX uses TD_QE, not SGX QE)
-        let qe_identity_json = provider.get_td_qe_identity().await?;
-        let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
+        let qe_identity = provider.get_td_qe_identity().await?;
         dcap::verify_qe_identity(
             auth.qe_report_body,
-            &qe_identity_json,
-            qe_signing_chain.as_deref(),
+            &qe_identity.body,
+            &qe_identity.signing_chain,
         )?;
 
         Some(status)

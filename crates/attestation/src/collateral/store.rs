@@ -18,13 +18,21 @@ pub struct DiskStore {
     root: PathBuf,
 }
 
-/// Sidecar next to the bytes: when the copy was fetched and, for signed PCS
-/// bodies, the signing chain that came with it.
+/// Sidecar next to the bytes: when the copy was fetched, the SHA-256 of the
+/// body it belongs to, and, for signed PCS bodies, the signing chain that
+/// came with it. The digest pairs a body with its own metadata, so a crash
+/// between the two writes can never hand a new body an old chain.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Meta {
     fetched_at: DateTime<Utc>,
+    #[serde(default)]
+    body_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signing_chain_pem: Option<String>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(crate::utils::sha256(bytes))
 }
 
 impl DiskStore {
@@ -83,11 +91,14 @@ impl DiskStore {
             Some(bytes) => {
                 let meta = read_if_present(&base.with_extension("meta.json"))
                     .and_then(|m| serde_json::from_slice::<Meta>(&m).ok());
+                // A sidecar that does not describe these bytes is a torn pair.
+                let meta = meta
+                    .filter(|m| m.body_sha256.is_empty() || m.body_sha256 == sha256_hex(&bytes));
                 (bytes, meta)
             }
             None => (self.legacy_chain(key)?, None),
         };
-        let valid_until = match validity::valid_until(key, &bytes) {
+        let valid_until = match validity::inspect(key, &bytes) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("collateral store: discarding {key}: {e}");
@@ -138,17 +149,23 @@ impl DiskStore {
         let Some(base) = self.base_path(&c.key) else {
             return;
         };
-        write_atomic(&base.with_extension(Self::ext(c.kind())), &c.bytes);
+        // Meta first: a body is only trusted with a sidecar whose digest
+        // matches it, so the order makes a crash in between harmless.
         let meta = Meta {
             fetched_at: c.fetched_at,
+            body_sha256: sha256_hex(&c.bytes),
             signing_chain_pem: c
                 .signing_chain
                 .as_ref()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),
         };
-        if let Ok(m) = serde_json::to_vec(&meta) {
-            write_atomic(&base.with_extension("meta.json"), &m);
+        let Ok(m) = serde_json::to_vec(&meta) else {
+            return;
+        };
+        if !write_atomic(&base.with_extension("meta.json"), &m) {
+            return;
         }
+        write_atomic(&base.with_extension(Self::ext(c.kind())), &c.bytes);
     }
 }
 
@@ -164,12 +181,15 @@ fn read_if_present(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Temp file plus rename, so a concurrent reader never observes a partial file.
-fn write_atomic(path: &Path, bytes: &[u8]) {
-    let Some(dir) = path.parent() else { return };
+/// Temp file plus rename, then a directory sync, so a concurrent reader never
+/// observes a partial file and a power loss does not lose the rename.
+fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
+    let Some(dir) = path.parent() else {
+        return false;
+    };
     if let Err(e) = fs::create_dir_all(dir) {
         log::warn!("collateral store mkdir {} failed: {e}", dir.display());
-        return;
+        return false;
     }
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".tmp.{}.{seq}", std::process::id()));
@@ -180,10 +200,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) {
     if let Err(e) = written {
         log::warn!("collateral store write {} failed: {e}", tmp.display());
         let _ = fs::remove_file(&tmp);
-        return;
+        return false;
     }
     if let Err(e) = fs::rename(&tmp, path) {
         log::warn!("collateral store rename {} failed: {e}", path.display());
         let _ = fs::remove_file(&tmp);
+        return false;
     }
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    true
 }

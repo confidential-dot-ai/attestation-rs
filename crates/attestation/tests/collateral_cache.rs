@@ -98,7 +98,7 @@ async fn vendor(routes: Vendor) -> (String, Arc<AtomicUsize>) {
                     ("500 Internal Server Error", None, &[])
                 } else if path.starts_with("/tdx/certification/v4/tcb") {
                     ("200 OK", Some("TCB-Info-Issuer-Chain"), &routes.tcb_info)
-                } else if path.starts_with("/tdx/certification/v4/qe/identity") {
+                } else if path.contains("/certification/v4/qe/identity") {
                     (
                         "200 OK",
                         Some("SGX-Enclave-Identity-Issuer-Chain"),
@@ -236,23 +236,12 @@ async fn signed_bodies_carry_their_chain_and_unsigned_ones_are_refused() {
         tcb.valid_until,
         Some(Utc.with_ymd_and_hms(2026, 4, 15, 22, 21, 30).unwrap())
     );
-    assert_eq!(
-        cache.get_tcb_signing_chain().await.unwrap().as_deref(),
-        Some(INTEL_TCB_SIGNING_CHAIN)
-    );
-    let qe = cache
-        .get(&CollateralKey::TdxQeIdentity { td: true })
-        .await
-        .unwrap();
-    assert!(qe.signing_chain.is_some());
-    assert_eq!(
-        cache
-            .get_td_qe_identity_signing_chain()
-            .await
-            .unwrap()
-            .as_deref(),
-        Some(INTEL_TCB_SIGNING_CHAIN)
-    );
+    let signed = cache.get_tcb_info("50806f000000").await.unwrap();
+    assert_eq!(signed.body, INTEL_TCB_INFO);
+    assert_eq!(signed.signing_chain, INTEL_TCB_SIGNING_CHAIN);
+    let qe = cache.get_td_qe_identity().await.unwrap();
+    assert_eq!(qe.body, INTEL_TD_QE_IDENTITY);
+    assert_eq!(qe.signing_chain, INTEL_TCB_SIGNING_CHAIN);
 
     let (origin, _) = vendor(Vendor {
         chain: None,
@@ -268,9 +257,227 @@ async fn signed_bodies_carry_their_chain_and_unsigned_ones_are_refused() {
         0,
         "nothing unsigned enters the cache"
     );
-    assert!(
-        cache.get_tcb_signing_chain().await.is_err(),
-        "no chain without a body"
+    // A header that is present but empty, or not PEM certificates, is no chain.
+    for bad in [
+        "",
+        "not a pem",
+        "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+    ] {
+        let (origin, _) = vendor(Vendor {
+            chain: Some(bad.to_string()),
+            ..Vendor::intel()
+        })
+        .await;
+        let cache = cache_at(&origin, CachePolicy::default(), None);
+        let err = cache.get(&key).await.unwrap_err();
+        assert!(
+            matches!(err, CollateralError::Unsigned { .. }),
+            "{bad:?}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bytes_are_bound_to_the_key_that_names_them() {
+    // TCB Info for one FMSPC served under another FMSPC's key.
+    let (origin, _) = vendor(Vendor {
+        tcb_info: include_bytes!("../test_data/collateral/tcb_info_90c06f000000.json").to_vec(),
+        ..Vendor::intel()
+    })
+    .await;
+    let cache = cache_at(&origin, CachePolicy::default(), None);
+    let err = cache
+        .get(&CollateralKey::tdx_tcb_info("50806f000000").unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CollateralError::Parse { .. }), "{err}");
+    assert!(err.to_string().contains("fmspc"), "{err}");
+    cache
+        .get(&CollateralKey::tdx_tcb_info("90c06f000000").unwrap())
+        .await
+        .unwrap();
+
+    // A PCK CRL served where the root CRL should be.
+    let (origin, _) = vendor(Vendor {
+        root_ca_crl: INTEL_PCK_CRL.to_vec(),
+        ..Vendor::intel()
+    })
+    .await;
+    let cache = cache_at(&origin, CachePolicy::default(), None);
+    let err = cache.get(&CollateralKey::TdxRootCrl).await.unwrap_err();
+    assert!(err.to_string().contains("Intel SGX Root CA"), "{err}");
+
+    // The TD QE identity served under the SGX QE key.
+    let (origin, _) = vendor(Vendor::intel()).await;
+    let cache = cache_at(&origin, CachePolicy::default(), None);
+    let err = cache
+        .get(&CollateralKey::TdxQeIdentity { td: false })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("expected QE"), "{err}");
+
+    // A Genoa VCEK under a Milan key, checked on the bytes directly.
+    let wrong_gen = CollateralKey::SnpVcek {
+        generation: ProcessorGeneration::Milan,
+        chip_id: [0xab; 64],
+        tcb: SnpTcb {
+            bootloader: 3,
+            tee: 0,
+            snp: 10,
+            microcode: 27,
+            fmc: None,
+        },
+    };
+    let err =
+        attestation::collateral::artifact::validity::inspect(&wrong_gen, GENOA_VCEK).unwrap_err();
+    assert!(err.to_string().contains("SEV-Milan"), "{err}");
+}
+
+#[tokio::test]
+async fn waiters_behind_a_failed_leader_do_not_dial() {
+    let (origin, hits) = vendor(Vendor {
+        fail_after: Some(0),
+        delay: Duration::from_millis(200),
+        ..Vendor::intel()
+    })
+    .await;
+    let cache = cache_at(
+        &origin,
+        CachePolicy {
+            backoff_base: Duration::from_secs(300),
+            ..CachePolicy::default()
+        },
+        None,
+    );
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let cache = cache.clone();
+        tasks.push(tokio::spawn(async move {
+            cache
+                .get(&CollateralKey::TdxRootCrl)
+                .await
+                .err()
+                .map(|e| e.to_string())
+        }));
+    }
+    for t in tasks {
+        assert!(t.await.unwrap().is_some());
+    }
+    assert_eq!(
+        dials(&hits),
+        1,
+        "one leader dials, seven waiters take the backoff"
+    );
+    assert_eq!(cache.failure_count(), 1);
+}
+
+#[tokio::test]
+async fn failure_records_are_bounded() {
+    let (origin, _) = vendor(Vendor {
+        fail_after: Some(0),
+        ..Vendor::intel()
+    })
+    .await;
+    let cache = cache_at(
+        &origin,
+        CachePolicy {
+            backoff_base: Duration::from_secs(300),
+            ..CachePolicy::default()
+        },
+        None,
+    );
+    let tcb = SnpTcb {
+        bootloader: 3,
+        tee: 0,
+        snp: 10,
+        microcode: 27,
+        fmc: None,
+    };
+    let max = attestation::collateral::cache::MAX_FAILURES;
+    for i in 0..(max + 40) {
+        let mut chip_id = [0u8; 64];
+        chip_id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        let key = CollateralKey::SnpVcek {
+            generation: ProcessorGeneration::Genoa,
+            chip_id,
+            tcb,
+        };
+        let _ = cache.get(&key).await;
+    }
+    assert!(cache.failure_count() <= max);
+    assert!(cache.status().failures.len() <= max);
+}
+
+#[tokio::test]
+async fn a_chunked_body_over_the_limit_is_refused() {
+    // A loopback that streams without Content-Length past the response bound.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (rd, mut wr) = sock.into_split();
+                let mut lines = BufReader::new(rd).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    if l.is_empty() {
+                        break;
+                    }
+                }
+                let _ = wr
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+                    .await;
+                let chunk = vec![b'A'; 1 << 20];
+                for _ in 0..8 {
+                    if wr
+                        .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if wr.write_all(&chunk).await.is_err() {
+                        return;
+                    }
+                    let _ = wr.write_all(b"\r\n").await;
+                }
+                let _ = wr.write_all(b"0\r\n\r\n").await;
+            });
+        }
+    });
+    let cache = cache_at(&format!("http://{addr}"), CachePolicy::default(), None);
+    let err = cache.get(&CollateralKey::TdxRootCrl).await.unwrap_err();
+    assert!(matches!(err, CollateralError::TooLarge { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn concurrent_refresh_all_calls_coalesce() {
+    let (origin, hits) = vendor(Vendor {
+        delay: Duration::from_millis(200),
+        ..Vendor::intel()
+    })
+    .await;
+    let cache = cache_at(&origin, CachePolicy::default(), None);
+    cache.get(&CollateralKey::TdxRootCrl).await.unwrap();
+    cache
+        .get(&CollateralKey::TdxPckCrl {
+            ca: PckCa::Platform,
+        })
+        .await
+        .unwrap();
+    let before = dials(&hits);
+    let mut tasks = Vec::new();
+    for _ in 0..10 {
+        let cache = cache.clone();
+        tasks.push(tokio::spawn(async move { cache.refresh_all().await }));
+    }
+    for t in tasks {
+        let report = t.await.unwrap();
+        assert!(report.failed.is_empty());
+    }
+    assert_eq!(
+        dials(&hits) - before,
+        2,
+        "ten concurrent refreshes cost one pass over two entries"
     );
 }
 
@@ -372,7 +579,8 @@ async fn the_disk_store_survives_a_restart_and_reads_the_legacy_chain_layout() {
     assert_eq!(stored.bytes, GENOA_VCEK);
     assert_eq!(stored.origin, attestation::collateral::Origin::Stored);
 
-    // A TCB Info body is stored with its chain; a copy without a chain is not served.
+    // A TCB Info body is stored with its chain; a copy without a matching
+    // sidecar is not served.
     let tcb_key = CollateralKey::tdx_tcb_info("50806f000000").unwrap();
     cache.get(&tcb_key).await.unwrap();
     let again = cold.get(&tcb_key).await.unwrap();
@@ -380,7 +588,9 @@ async fn the_disk_store_survives_a_restart_and_reads_the_legacy_chain_layout() {
         again.signing_chain.as_deref(),
         Some(INTEL_TCB_SIGNING_CHAIN)
     );
-    std::fs::remove_file(dir.path().join("tdx_tcb_info/50806f000000.meta.json")).unwrap();
+    let meta_path = dir.path().join("tdx_tcb_info/50806f000000.meta.json");
+    let meta = std::fs::read(&meta_path).unwrap();
+    std::fs::remove_file(&meta_path).unwrap();
     let cold2 = cache_at(
         "http://127.0.0.1:1",
         CachePolicy::default(),
@@ -388,7 +598,21 @@ async fn the_disk_store_survives_a_restart_and_reads_the_legacy_chain_layout() {
     );
     assert!(
         cold2.get(&tcb_key).await.is_err(),
-        "a stored body without its chain is not served"
+        "a stored body without its sidecar is not served"
+    );
+    // A sidecar that describes different bytes (a torn pair) is ignored too.
+    let torn = String::from_utf8(meta)
+        .unwrap()
+        .replace("\"body_sha256\":\"", "\"body_sha256\":\"00");
+    std::fs::write(&meta_path, torn).unwrap();
+    let cold3 = cache_at(
+        "http://127.0.0.1:1",
+        CachePolicy::default(),
+        Some(DiskStore::new(dir.path())),
+    );
+    assert!(
+        cold3.get(&tcb_key).await.is_err(),
+        "a sidecar for other bytes is not paired with these"
     );
 }
 

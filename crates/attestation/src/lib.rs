@@ -45,7 +45,7 @@ pub use collateral::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use collateral::{CachePolicy, CollateralCache, DiskStore, Endpoints};
-pub use collateral::{CollateralError, CollateralKey, CollateralKind};
+pub use collateral::{CollateralError, CollateralKey, CollateralKind, Fmspc, SignedCollateral};
 pub use error::{AttestationError, Result};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]
 pub use platforms::tdx::attest::TdxQuoteMethod;

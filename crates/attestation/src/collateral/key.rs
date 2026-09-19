@@ -28,6 +28,42 @@ impl PckCa {
     }
 }
 
+/// An Intel FMSPC: twelve lowercase hex characters, validated on every
+/// construction path (constructor, `Deserialize`, `TryFrom`), so no key can
+/// carry a string that is not one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Fmspc(String);
+
+impl Fmspc {
+    pub fn new(s: &str) -> Option<Self> {
+        let lower = s.to_ascii_lowercase();
+        (lower.len() == 12 && lower.bytes().all(|b| b.is_ascii_hexdigit())).then_some(Fmspc(lower))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Fmspc {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        Fmspc::new(&s).ok_or_else(|| format!("{s:?} is not an FMSPC (twelve hex characters)"))
+    }
+}
+
+impl From<Fmspc> for String {
+    fn from(f: Fmspc) -> String {
+        f.0
+    }
+}
+
+impl fmt::Display for Fmspc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The artifact family, for policy (max age) and reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,8 +149,7 @@ pub enum CollateralKey {
         generation: ProcessorGeneration,
     },
     TdxTcbInfo {
-        /// Twelve lowercase hex characters.
-        fmspc: String,
+        fmspc: Fmspc,
     },
     TdxQeIdentity {
         /// The TD QE (TDX endpoint) or the SGX QE.
@@ -158,9 +193,7 @@ impl CollateralKey {
 
     /// A TCB Info key, refusing anything that is not an FMSPC.
     pub fn tdx_tcb_info(fmspc: &str) -> Option<Self> {
-        let fmspc = fmspc.to_ascii_lowercase();
-        (fmspc.len() == 12 && fmspc.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then_some(CollateralKey::TdxTcbInfo { fmspc })
+        Fmspc::new(fmspc).map(|fmspc| CollateralKey::TdxTcbInfo { fmspc })
     }
 
     /// The hex TCB string a VCEK is filed under: the four SPLs, plus the FMC
@@ -249,9 +282,7 @@ mod tests {
             CollateralKey::SnpCertChain {
                 generation: ProcessorGeneration::Milan,
             },
-            CollateralKey::TdxTcbInfo {
-                fmspc: "50806f000000".into(),
-            },
+            CollateralKey::tdx_tcb_info("50806f000000").unwrap(),
             CollateralKey::TdxQeIdentity { td: true },
             CollateralKey::TdxPckCrl {
                 ca: PckCa::Platform,
@@ -274,5 +305,15 @@ mod tests {
         assert!(CollateralKey::tdx_tcb_info("50806F000000").is_some());
         assert!(CollateralKey::tdx_tcb_info("../x").is_none());
         assert!(CollateralKey::tdx_tcb_info("50806f0000").is_none());
+        let traversal = r#"{"kind":"tdx_tcb_info","fmspc":"../../../../tmp/x"}"#;
+        assert!(
+            serde_json::from_str::<CollateralKey>(traversal).is_err(),
+            "deserialization validates too"
+        );
+        let upper = r#"{"kind":"tdx_tcb_info","fmspc":"50806F000000"}"#;
+        assert_eq!(
+            serde_json::from_str::<CollateralKey>(upper).unwrap().id(),
+            "tdx_tcb_info/50806f000000"
+        );
     }
 }

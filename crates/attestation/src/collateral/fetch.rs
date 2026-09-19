@@ -148,25 +148,32 @@ impl Fetcher {
             .map_err(|e| fetch_err(format!("status: {e}")))?;
 
         // Signed PCS bodies arrive with their Intel signing chain in a header.
-        // The verifier checks the signature only when handed that chain, so a
-        // body without it is refused rather than evaluated unsigned.
+        // The verifier checks the signature only with that chain, so a body
+        // without it, or with an empty or unparsable one, is refused rather
+        // than evaluated unsigned.
         let header = match key.kind() {
             CollateralKind::TdxTcbInfo => Some(INTEL_TCB_INFO_ISSUER_CHAIN_HEADER),
             CollateralKind::TdxQeIdentity => Some(INTEL_ENCLAVE_IDENTITY_ISSUER_CHAIN_HEADER),
             _ => None,
         };
         let signing_chain = match header {
-            Some(h) => Some(
-                response
+            Some(h) => {
+                let unsigned = || CollateralError::Unsigned {
+                    key: key.clone(),
+                    header: h,
+                };
+                let chain = response
                     .headers()
                     .get(h)
                     .and_then(|v| v.to_str().ok())
                     .map(pcs_issuer_chain_from_header)
-                    .ok_or(CollateralError::Unsigned {
-                        key: key.clone(),
-                        header: h,
-                    })?,
-            ),
+                    .ok_or_else(unsigned)?;
+                let certs = pem::parse_many(&chain).map_err(|_| unsigned())?;
+                if certs.is_empty() || certs.iter().any(|c| c.tag() != "CERTIFICATE") {
+                    return Err(unsigned());
+                }
+                Some(chain)
+            }
             None => None,
         };
 
@@ -179,17 +186,23 @@ impl Fetcher {
                 });
             }
         }
-        let mut bytes = response
-            .bytes()
+        // Stream with a running total, so a chunked body without a
+        // Content-Length cannot grow past the limit in memory.
+        let mut bytes = Vec::new();
+        let mut response = response;
+        while let Some(chunk) = response
+            .chunk()
             .await
             .map_err(|e| fetch_err(format!("body: {e}")))?
-            .to_vec();
-        if bytes.len() > MAX_RESPONSE_SIZE {
-            return Err(CollateralError::TooLarge {
-                key: key.clone(),
-                size: bytes.len(),
-                max: MAX_RESPONSE_SIZE,
-            });
+        {
+            if bytes.len() + chunk.len() > MAX_RESPONSE_SIZE {
+                return Err(CollateralError::TooLarge {
+                    key: key.clone(),
+                    size: bytes.len() + chunk.len(),
+                    max: MAX_RESPONSE_SIZE,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
         }
 
         // Intel serves PCK CRLs as PEM; the verifier consumes DER.
@@ -206,7 +219,7 @@ impl Fetcher {
         }
 
         let fetched_at = now;
-        let valid_until = validity::valid_until(key, &bytes)?;
+        let valid_until = validity::inspect(key, &bytes)?;
         if let Some(until) = valid_until {
             if until <= fetched_at {
                 return Err(CollateralError::Expired {
@@ -242,10 +255,8 @@ mod tests {
             "https://kdsintf.amd.com/vcek/v1/Genoa/crl"
         );
         assert_eq!(
-            e.url(&CollateralKey::TdxTcbInfo {
-                fmspc: "50806f000000".into()
-            })
-            .unwrap(),
+            e.url(&CollateralKey::tdx_tcb_info("50806f000000").unwrap())
+                .unwrap(),
             "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=50806f000000"
         );
         assert_eq!(
