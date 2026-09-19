@@ -428,6 +428,24 @@ pub struct VerifierClaims {
     pub cvm_reference: Option<ReferenceOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_backing_min: Option<BackingMin>,
+    /// Device submodules only: the composing draft's `ear_nvidia_evidence`
+    /// (section 5.3), derived from NRAS's signed per-device claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ear_nvidia_evidence: Option<NvidiaEvidenceOutcome>,
+}
+
+/// `ear_nvidia_evidence` of draft-kykdxy-rats-tdx-cgpu-ear-profile: what the
+/// verifier established about the device evidence. NRAS reports these; the
+/// chain and key details the draft also lists stay with NRAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NvidiaEvidenceOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce_match: Option<bool>,
 }
 
 #[derive(

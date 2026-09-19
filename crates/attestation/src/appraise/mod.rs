@@ -8,6 +8,8 @@
 //! normalized claims, the trustworthiness vector and the collateral outcomes.
 //! Every step fails closed.
 
+#[cfg(feature = "nvidia-gpu")]
+mod device;
 pub mod inline;
 pub mod legacy;
 #[cfg(any(feature = "snp", feature = "tdx"))]
@@ -27,8 +29,8 @@ use crate::profile::binding::pad64;
 #[cfg(any(feature = "snp", feature = "tdx"))]
 use crate::profile::Tee;
 use crate::profile::{
-    Appraisal, Binding, BindingMode, CpuEvidence, Evidence, FreshnessPattern, KeyBinding, Submod,
-    SubmodAppraisal, VerifierId, VerifyPolicy, EAR_PROFILE_URI,
+    Appraisal, Binding, BindingMode, CpuEvidence, Evidence, FreshnessPattern, GpuDeviceEvidence,
+    KeyBinding, Submod, SubmodAppraisal, TcbFloor, VerifierId, VerifyPolicy, EAR_PROFILE_URI,
 };
 use crate::Verifier;
 use chrono::Utc;
@@ -81,6 +83,7 @@ impl<'a> Ctx<'a> {
 }
 
 /// One submodule's appraisal plus whether its freshness binding held.
+#[derive(Debug)]
 pub(crate) struct Outcome {
     pub appraisal: SubmodAppraisal,
     pub bound: bool,
@@ -136,6 +139,7 @@ impl Verifier {
             }
         }
 
+        let mut devices = Vec::new();
         for (name, submod) in &evidence.submods {
             let outcome = match submod {
                 Submod::Cpu(cpu) => {
@@ -162,14 +166,19 @@ impl Verifier {
                         "a vtpm submodule needs a cpu bound through vtpm-extradata",
                     ));
                 }
-                Submod::Device(_) => {
-                    return Err(AttestationError::PlatformNotEnabled(
-                        "device submodule appraisal".to_string(),
-                    ))
+                Submod::Device(d) => {
+                    devices.push((name.clone(), d));
+                    continue;
                 }
             };
             all_bound &= outcome.bound;
             submods.insert(name.clone(), outcome.appraisal);
+        }
+
+        // Devices go to NRAS in one request per architecture (section 6).
+        for (name, outcome) in self.appraise_devices(devices, nonce, policy).await? {
+            all_bound &= outcome.bound;
+            submods.insert(name, outcome.appraisal);
         }
 
         let appraisal = Appraisal {
@@ -220,6 +229,71 @@ impl Verifier {
 struct VtpmOutcome {
     var_data: Vec<u8>,
     outcome: Outcome,
+}
+
+impl Verifier {
+    #[cfg(feature = "nvidia-gpu")]
+    async fn appraise_devices(
+        &self,
+        devices: Vec<(String, &GpuDeviceEvidence)>,
+        nonce: &[u8],
+        policy: &VerifyPolicy,
+    ) -> Result<Vec<(String, Outcome)>> {
+        device::appraise_devices(devices, nonce, policy, self.nras_provider.as_ref()).await
+    }
+
+    #[cfg(not(feature = "nvidia-gpu"))]
+    async fn appraise_devices(
+        &self,
+        devices: Vec<(String, &GpuDeviceEvidence)>,
+        _nonce: &[u8],
+        policy: &VerifyPolicy,
+    ) -> Result<Vec<(String, Outcome)>> {
+        if devices.is_empty() && !policy.gpu.required {
+            return Ok(Vec::new());
+        }
+        Err(AttestationError::PlatformNotEnabled(
+            "NVIDIA device appraisal".to_string(),
+        ))
+    }
+}
+
+/// The floor a machine is held to: its allowlist entry's, else the default.
+/// `identity` is the value the hardware chain authenticated (section 7).
+#[cfg_attr(
+    not(any(feature = "snp", feature = "tdx", feature = "nvidia-gpu")),
+    allow(dead_code)
+)]
+pub(crate) fn resolve_floor<'p>(
+    policy: &'p VerifyPolicy,
+    identity: &[u8],
+) -> Result<(Option<&'p TcbFloor>, Option<i8>)> {
+    let Some(allow) = &policy.identity else {
+        return Ok((
+            policy
+                .tcb
+                .default_floor
+                .as_deref()
+                .and_then(|f| policy.tcb.floors.get(f)),
+            None,
+        ));
+    };
+    let Some(entry) = allow
+        .machines
+        .iter()
+        .find(|m| crate::utils::constant_time_eq(m.id.as_slice(), identity))
+    else {
+        // AR4SI 97: the attester is not recognized, and policy says it should be.
+        return Err(invalid(format!(
+            "identity {} is not on the machine allowlist",
+            hex::encode(identity)
+        )));
+    };
+    let floor_name = entry
+        .tcb_floor
+        .as_deref()
+        .or(policy.tcb.default_floor.as_deref());
+    Ok((floor_name.and_then(|f| policy.tcb.floors.get(f)), Some(2)))
 }
 
 /// Dispatch on the TEE the envelope names; a TEE this build was compiled

@@ -465,6 +465,31 @@
       ],
       "type": "string"
     },
+    "NvidiaEvidenceOutcome": {
+      "additionalProperties": false,
+      "description": "`ear_nvidia_evidence` of draft-kykdxy-rats-tdx-cgpu-ear-profile: what the\nverifier established about the device evidence. NRAS reports these; the\nchain and key details the draft also lists stay with NRAS.",
+      "properties": {
+        "nonce_match": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "parsed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "signature_verified": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Owner": {
       "anyOf": [
         {
@@ -1056,6 +1081,17 @@
               "type": "null"
             }
           ]
+        },
+        "ear_nvidia_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NvidiaEvidenceOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Device submodules only: the composing draft's `ear_nvidia_evidence`\n(section 5.3), derived from NRAS's signed per-device claims."
         }
       },
       "type": "object"

@@ -700,3 +700,144 @@ async fn legacy_envelopes_map_to_the_profile() {
         attestation::profile::Hosting::Gcp
     );
 }
+
+/// Device submodules go to NRAS, whose tokens chain to a pinned NVIDIA key,
+/// so these tests stop at the provider: they check what the verifier sends
+/// and what it refuses before sending.
+#[cfg(feature = "nvidia-gpu")]
+mod devices {
+    use super::*;
+    use attestation::platforms::nvidia_gpu::{Jwks, NrasProvider, NrasRequest};
+    use attestation::profile::binding::nras_gpu_nonce;
+    use attestation::profile::GpuArch;
+    use attestation::{AttestationError, NvidiaGpuArch};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recording {
+        requests: Mutex<Vec<NrasRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NrasProvider for Recording {
+        fn url_for(&self, _arch: NvidiaGpuArch) -> &str {
+            "https://nras.invalid/v3/attest/gpu"
+        }
+        async fn attest(&self, request: &NrasRequest) -> attestation::Result<serde_json::Value> {
+            self.requests.lock().unwrap().push(request.clone());
+            Err(AttestationError::NrasRequestFailed("recorded".to_string()))
+        }
+        async fn jwks(&self, _arch: NvidiaGpuArch) -> attestation::Result<Jwks> {
+            Err(AttestationError::JwksFetch("recorded".to_string()))
+        }
+    }
+
+    fn gpu_submod(uuid: &str, arch: &str) -> serde_json::Value {
+        json!({
+            "arch": arch,
+            "uuid": uuid,
+            "evidence_b64": "AAAA",
+            "cert_chain_b64": "AAAA",
+            "cvm_binding": {"pattern": "challenge", "mode": "nras-nonce"}
+        })
+    }
+
+    fn envelope_with_devices(nonce: &[u8]) -> Vec<u8> {
+        let mut v: serde_json::Value = serde_json::from_slice(&snp_envelope(nonce)).unwrap();
+        v["submods"]["gpu/GPU-b"] = gpu_submod("GPU-b", "HOPPER");
+        v["submods"]["gpu/GPU-a"] = gpu_submod("GPU-a", "HOPPER");
+        v["submods"]["nvswitch/SW-1"] = gpu_submod("SW-1", "LS10");
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    #[tokio::test]
+    async fn devices_are_batched_per_architecture_with_the_derived_nonce() {
+        let nonce = snp_nonce();
+        let recording = std::sync::Arc::new(Recording::default());
+        let verifier = Verifier::offline()
+            .with_cert_provider(NoCollateral)
+            .with_nras_provider(recording.clone());
+        let err = verifier
+            .appraise_json(&envelope_with_devices(&nonce), &lenient_policy())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AttestationError::NrasRequestFailed(_)),
+            "{err}"
+        );
+        let requests = recording.requests.lock().unwrap();
+        // The Hopper batch went first (the cpu appraised fine before it) and
+        // carries both GPUs in envelope order; the switch batch never went
+        // because the first failure is final.
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].arch, NvidiaGpuArch::Hopper);
+        assert_eq!(requests[0].nonce, hex::encode(nras_gpu_nonce(&nonce)));
+        assert_eq!(requests[0].evidence_list.len(), 2);
+        assert_eq!(requests[0].claims_version, "2.0");
+    }
+
+    #[tokio::test]
+    async fn device_gates_apply_before_nras_is_asked() {
+        let nonce = snp_nonce();
+        let recording = std::sync::Arc::new(Recording::default());
+        let verifier = Verifier::offline()
+            .with_cert_provider(NoCollateral)
+            .with_nras_provider(recording.clone());
+        let mut policy = lenient_policy();
+        policy.gpu.expected_archs = Some(vec![GpuArch::Blackwell]);
+        let err = verifier
+            .appraise_json(&envelope_with_devices(&nonce), &policy)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AttestationError::NvidiaGpuArchNotAllowed(_)),
+            "{err}"
+        );
+        assert!(recording.requests.lock().unwrap().is_empty());
+
+        // A policy that requires a device refuses an envelope without one.
+        let mut policy = lenient_policy();
+        policy.gpu.required = true;
+        let err = verifier
+            .appraise_json(&snp_envelope(&nonce), &policy)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttestationError::NvidiaGpuRequired), "{err}");
+        // Without the requirement the cpu alone appraises.
+        assert!(verifier
+            .appraise_json(&snp_envelope(&nonce), &lenient_policy())
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn a_legacy_gpu_bundle_becomes_device_submodules() {
+        let nonce = snp_nonce();
+        let legacy = serde_json::to_vec(&json!({
+            "platform": "snp",
+            "evidence": {"attestation_report": BASE64.encode(SNP_REPORT), "cert_chain": {"vcek": BASE64.encode(SNP_VCEK)}},
+            "nvidia_gpu": {
+                "devices": [
+                    {"arch": "HOPPER", "uuid": "GPU-1", "evidence_b64": "AAAA", "cert_chain_b64": "AAAA"},
+                    {"arch": "LS10", "uuid": "SW-1", "evidence_b64": "AAAA", "cert_chain_b64": "AAAA"}
+                ],
+                "binding": {"kind": "concat", "algo": "sha256"}
+            }
+        }))
+        .unwrap();
+        let e = attestation::profile::Evidence::from_legacy(&legacy, &nonce, None).unwrap();
+        assert_eq!(e.submods.len(), 3);
+        let attestation::profile::Submod::Device(d) = &e.submods["gpu/GPU-1"] else {
+            panic!("device")
+        };
+        assert_eq!(d.arch, GpuArch::Hopper);
+        assert_eq!(
+            d.cvm_binding.mode,
+            attestation::profile::BindingMode::NrasNonce
+        );
+        assert!(matches!(
+            &e.submods["nvswitch/SW-1"],
+            attestation::profile::Submod::Device(d) if d.arch == GpuArch::Ls10
+        ));
+    }
+}

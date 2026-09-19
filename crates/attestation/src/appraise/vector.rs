@@ -4,8 +4,7 @@
 use super::invalid;
 use crate::error::Result;
 use crate::profile::{
-    BackingMin, Digest, HashAlg, ReferenceOutcome, TcbFloor, TrustVector, VerifiedRegister,
-    VerifyPolicy,
+    BackingMin, Digest, HashAlg, ReferenceOutcome, TrustVector, VerifiedRegister, VerifyPolicy,
 };
 use crate::utils::constant_time_eq;
 use std::collections::BTreeMap;
@@ -19,39 +18,6 @@ pub(crate) struct Assessment<'a> {
     /// known vulnerability the policy accepts, `None` when the TCB status
     /// could not be assessed because policy allowed skipping collateral.
     pub hardware: Option<i8>,
-}
-
-/// The floor a machine is held to: its allowlist entry's, else the default.
-pub(crate) fn resolve_floor<'p>(
-    policy: &'p VerifyPolicy,
-    identity: &[u8],
-) -> Result<(Option<&'p TcbFloor>, Option<i8>)> {
-    let Some(allow) = &policy.identity else {
-        return Ok((
-            policy
-                .tcb
-                .default_floor
-                .as_deref()
-                .and_then(|f| policy.tcb.floors.get(f)),
-            None,
-        ));
-    };
-    let Some(entry) = allow
-        .machines
-        .iter()
-        .find(|m| constant_time_eq(m.id.as_slice(), identity))
-    else {
-        // AR4SI 97: the attester is not recognized, and policy says it should be.
-        return Err(invalid(format!(
-            "identity {} is not on the machine allowlist",
-            hex::encode(identity)
-        )));
-    };
-    let floor_name = entry
-        .tcb_floor
-        .as_deref()
-        .or(policy.tcb.default_floor.as_deref());
-    Ok((floor_name.and_then(|f| policy.tcb.floors.get(f)), Some(2)))
 }
 
 fn matches_any(refs: &[Digest], alg: HashAlg, value: &[u8]) -> bool {

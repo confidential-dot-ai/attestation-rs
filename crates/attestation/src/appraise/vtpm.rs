@@ -157,6 +157,7 @@ pub(crate) fn appraise(
                     cvm_collateral: BTreeMap::new(),
                     cvm_reference: reference,
                     cvm_backing_min: backing_min,
+                    ear_nvidia_evidence: None,
                 },
             },
             bound: true,

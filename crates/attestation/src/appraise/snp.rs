@@ -1,7 +1,8 @@
 //! SEV-SNP `cpu` submodule (section 6), over the primitives in `platforms::snp`.
 
 use super::inline::InlineCollateral;
-use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, resolve_floor, Assessment};
+use super::resolve_floor;
+use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, Assessment};
 use super::{invalid, Ctx, Outcome};
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
@@ -393,6 +394,7 @@ pub(crate) async fn appraise(
                 cvm_collateral: collateral_outcomes,
                 cvm_reference: reference,
                 cvm_backing_min: backing_min,
+                ear_nvidia_evidence: None,
             },
         },
         bound,

@@ -815,6 +815,17 @@ pub enum GpuArch {
 }
 
 #[cfg(feature = "nvidia-gpu")]
+impl From<crate::types::NvidiaGpuArch> for GpuArch {
+    fn from(a: crate::types::NvidiaGpuArch) -> Self {
+        match a {
+            crate::types::NvidiaGpuArch::Hopper => GpuArch::Hopper,
+            crate::types::NvidiaGpuArch::Blackwell => GpuArch::Blackwell,
+            crate::types::NvidiaGpuArch::Ls10 => GpuArch::Ls10,
+        }
+    }
+}
+
+#[cfg(feature = "nvidia-gpu")]
 impl From<GpuArch> for crate::types::NvidiaGpuArch {
     fn from(a: GpuArch) -> Self {
         match a {

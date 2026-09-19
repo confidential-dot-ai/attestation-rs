@@ -1,7 +1,8 @@
 //! Intel TDX `cpu` submodule (section 6), over the primitives in `platforms::tdx`.
 
 use super::inline::InlineCollateral;
-use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, resolve_floor, Assessment};
+use super::resolve_floor;
+use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, Assessment};
 use super::{invalid, Ctx, Outcome};
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
@@ -400,6 +401,7 @@ pub(crate) async fn appraise(
                 cvm_collateral: outcomes,
                 cvm_reference: reference,
                 cvm_backing_min: backing_min,
+                ear_nvidia_evidence: None,
             },
         },
         bound,

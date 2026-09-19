@@ -320,7 +320,7 @@ An `isSafe` boolean is not part of the profile. A relying party that wants one d
 
 draft-kykdxy-rats-tdx-cgpu-ear-profile (Microsoft, Intel, NVIDIA) defines EAR submodules `tdx`, `cvm_guest` and `gpu_N`, reuses Intel Trust Authority claim names for the TDX report (`tdx_mrtd`, `tdx_rtmr0` to `tdx_rtmr3`, `tdx_mrconfigid`, `tdx_mrowner`, `tdx_mrownerconfig`, `tdx_td_attributes`, `tdx_tee_tcb_svn`, `tdx_xfam`, `tdx_mrseam`, `tdx_mrsignerseam`), Azure MAA names for the guest (`tpm_*`), and defines `ear_all_submods_bound`, `ear_managed_keysets` and the `ear_nvidia_*` result claims. It covers no SEV-SNP, no Arm, no runtime registers beyond the RTMRs and no event logs.
 
-This profile composes with it: for a TDX submodule the verifier emits the `tdx_*` claims above verbatim inside `ear_attester_claims` beside the vendor-neutral `cvm_*` claims, GPU submodules carry the `ear_nvidia_*` result claims and NRAS claim names unchanged, and `ear_all_submods_bound` is set from the binding checks of section 4.5. A relying party written against that draft reads our tokens without a mapping; a relying party written against this profile gains SNP, Arm, registers and logs.
+This profile composes with it: for a TDX submodule the verifier emits the `tdx_*` claims above verbatim inside `ear_attester_claims` beside the vendor-neutral `cvm_*` claims, GPU submodules carry the NRAS claim names unchanged in `ear_attester_claims` (with `cvm_identity` and `cvm_tcb` beside them) and the draft's `ear_nvidia_evidence` (`signature_verified`, `parsed`, `nonce_match`, derived from NRAS's signed `x-nvidia-gpu-attestation-report-*` claims) in `ear_verifier_claims`, and `ear_all_submods_bound` is set from the binding checks of section 4.5. A relying party written against that draft reads our tokens without a mapping; a relying party written against this profile gains SNP, Arm, registers and logs.
 
 Multi-attester binding in v1 is `ear_all_submods_bound`, set from the per-submodule nonce checks of section 4.5. The detached-digest bundle of draft-sun-rats-composite-eat (SHA-384 digests, tag 602, one nonce for every sub-attester) is v2, so the GPU submodule ships now.
 
@@ -342,7 +342,7 @@ Normative order for the `cpu` submodule; every step fails closed.
 8. Replay the log when present; mark each register `replayed`.
 9. Apply reference values and the backing minimum; produce claims, verifier claims and the vector.
 
-For `vtpm`, steps 3 and 5 are the TPM signature by the AK and the AK binding to the CPU report, and step 7 projects PCRs. For GPU submodules the existing NRAS flow applies with the per-device policy gates the library already has.
+For `vtpm`, steps 3 and 5 are the TPM signature by the AK and the AK binding to the CPU report, and step 7 projects PCRs. For GPU submodules the existing NRAS flow applies with the per-device policy gates the library already has: one request per architecture, every device of that architecture in it. NRAS names the submodules of a batch `GPU-<i>` and `SWITCH-<i>` with `<i>` the position in the request; the verifier maps them back by that index, requires the count to match, and takes the device identity from the signed `ueid` claim. The `<ueid>` in the submodule name is the attester's label and is never compared against policy.
 
 ## 7. Policy and reference values
 

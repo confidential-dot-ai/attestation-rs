@@ -80,11 +80,19 @@ impl Evidence {
         }
         let env: LegacyEnvelope = serde_json::from_slice(json)
             .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+        #[cfg(not(feature = "nvidia-gpu"))]
         if env.nvidia_gpu.is_some() {
             return Err(AttestationError::PlatformNotEnabled(
                 "legacy nvidia_gpu bundle mapping".to_string(),
             ));
         }
+        #[cfg(feature = "nvidia-gpu")]
+        let devices = match &env.nvidia_gpu {
+            Some(bundle) => map_devices(bundle)?,
+            None => Vec::new(),
+        };
+        #[cfg(not(feature = "nvidia-gpu"))]
+        let devices = Vec::new();
         let (vendor, tee, hosting) = match env.platform {
             PlatformType::Snp => (Vendor::Amd, Tee::SevSnp, Hosting::Bare),
             PlatformType::GcpSnp => (Vendor::Amd, Tee::SevSnp, Hosting::Gcp),
@@ -92,9 +100,9 @@ impl Evidence {
             PlatformType::GcpTdx => (Vendor::Intel, Tee::Tdx, Hosting::Gcp),
             PlatformType::Dstack => (Vendor::Intel, Tee::Tdx, Hosting::Dstack),
             #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
-            PlatformType::AzSnp => return azure(env.evidence, Tee::SevSnp, nonce, key),
+            PlatformType::AzSnp => return azure(env.evidence, Tee::SevSnp, nonce, key, devices),
             #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
-            PlatformType::AzTdx => return azure(env.evidence, Tee::Tdx, nonce, key),
+            PlatformType::AzTdx => return azure(env.evidence, Tee::Tdx, nonce, key, devices),
             #[cfg(not(any(feature = "az-snp", feature = "az-tdx")))]
             PlatformType::AzSnp | PlatformType::AzTdx => {
                 return Err(AttestationError::PlatformNotEnabled(
@@ -180,6 +188,7 @@ impl Evidence {
         };
         let mut submods = BTreeMap::new();
         submods.insert("cpu".to_string(), Submod::Cpu(cpu));
+        submods.extend(devices);
         let evidence = Evidence {
             eat_profile: PROFILE_URI.to_string(),
             eat_nonce: Bytes(nonce.to_vec()),
@@ -255,6 +264,7 @@ fn azure(
     tee: Tee,
     nonce: &[u8],
     key: Option<KeyBinding>,
+    devices: Vec<(String, Submod)>,
 ) -> Result<Evidence> {
     use crate::platforms::tpm_common::{parse_hcl_report, parse_quote_info};
     use crate::profile::{Register, TpmAkBinding, TpmAkMethod, TpmQuote, VtpmEvidence};
@@ -377,6 +387,7 @@ fn azure(
     let mut submods = BTreeMap::new();
     submods.insert("cpu".to_string(), Submod::Cpu(cpu));
     submods.insert("vtpm".to_string(), Submod::Vtpm(vtpm));
+    submods.extend(devices);
     let evidence = Evidence {
         eat_profile: PROFILE_URI.to_string(),
         eat_nonce: Bytes(nonce.to_vec()),
@@ -385,4 +396,43 @@ fn azure(
     };
     evidence.validate()?;
     Ok(evidence)
+}
+
+/// The legacy `nvidia_gpu` bundle: each device becomes a `gpu/<uuid>` or
+/// `nvswitch/<uuid>` submodule in `nras-nonce` mode. The bundle's binding is
+/// `concat`/`sha256`, the only algorithm the profile defines.
+#[cfg(feature = "nvidia-gpu")]
+fn map_devices(bundle: &serde_json::Value) -> Result<Vec<(String, Submod)>> {
+    use crate::profile::GpuDeviceEvidence;
+    use crate::types::{
+        NvidiaGpuArch, NvidiaGpuBinding, NvidiaGpuEvidenceBundle, NvidiaGpuHashAlgo,
+    };
+
+    let bundle: NvidiaGpuEvidenceBundle = serde_json::from_value(bundle.clone())
+        .map_err(|e| AttestationError::EvidenceDeserialize(format!("nvidia_gpu: {e}")))?;
+    let NvidiaGpuBinding::Concat {
+        algo: NvidiaGpuHashAlgo::Sha256,
+    } = bundle.binding;
+    let mut out = Vec::with_capacity(bundle.devices.len());
+    for d in bundle.devices {
+        let name = match d.arch {
+            NvidiaGpuArch::Ls10 => format!("nvswitch/{}", d.uuid),
+            _ => format!("gpu/{}", d.uuid),
+        };
+        out.push((
+            name,
+            Submod::Device(GpuDeviceEvidence {
+                arch: d.arch.into(),
+                uuid: d.uuid,
+                evidence_b64: d.evidence_b64,
+                cert_chain_b64: d.cert_chain_b64,
+                cvm_binding: Binding {
+                    pattern: FreshnessPattern::Challenge,
+                    mode: BindingMode::NrasNonce,
+                    key: None,
+                },
+            }),
+        ));
+    }
+    Ok(out)
 }
