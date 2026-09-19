@@ -174,30 +174,6 @@ pub async fn handler(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{attest_mode, AttestMode};
-
-    #[test]
-    fn the_profile_is_the_default_and_old_clients_keep_the_old_envelope() {
-        assert_eq!(attest_mode(None, true, false).unwrap(), AttestMode::Profile);
-        assert_eq!(
-            attest_mode(None, false, false).unwrap(),
-            AttestMode::Profile
-        );
-        assert_eq!(attest_mode(None, false, true).unwrap(), AttestMode::Legacy);
-        assert_eq!(
-            attest_mode(Some("cvm-v1"), false, true).unwrap(),
-            AttestMode::Profile
-        );
-        assert_eq!(
-            attest_mode(Some("legacy"), true, false).unwrap(),
-            AttestMode::Legacy
-        );
-        assert!(attest_mode(Some("v2"), true, false).is_err());
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn resolve_platform(name: &str) -> Result<attestation::PlatformType, ApiError> {
     match name {
@@ -229,5 +205,29 @@ fn ensure_platform_allowed(
         Err(ApiError::BadRequest(format!(
             "platform '{platform_name}' is not allowed by attestation.platforms"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{attest_mode, AttestMode};
+
+    #[test]
+    fn the_profile_is_the_default_and_old_clients_keep_the_old_envelope() {
+        assert_eq!(attest_mode(None, true, false).unwrap(), AttestMode::Profile);
+        assert_eq!(
+            attest_mode(None, false, false).unwrap(),
+            AttestMode::Profile
+        );
+        assert_eq!(attest_mode(None, false, true).unwrap(), AttestMode::Legacy);
+        assert_eq!(
+            attest_mode(Some("cvm-v1"), false, true).unwrap(),
+            AttestMode::Profile
+        );
+        assert_eq!(
+            attest_mode(Some("legacy"), true, false).unwrap(),
+            AttestMode::Legacy
+        );
+        assert!(attest_mode(Some("v2"), true, false).is_err());
     }
 }

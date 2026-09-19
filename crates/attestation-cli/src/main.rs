@@ -28,7 +28,7 @@ enum Commands {
     #[cfg(all(feature = "attest", target_os = "linux"))]
     Attest(AttestArgs),
     /// Verify attestation evidence.
-    Verify(VerifyArgs),
+    Verify(Box<VerifyArgs>),
     /// Detect the current TEE platform (Linux only).
     #[cfg(all(feature = "attest", target_os = "linux"))]
     Detect,
@@ -230,7 +230,7 @@ async fn main() {
         Commands::Detect => cmd_detect(),
         #[cfg(all(feature = "attest", target_os = "linux"))]
         Commands::Attest(args) => cmd_attest(args).await,
-        Commands::Verify(args) => cmd_verify(args).await,
+        Commands::Verify(args) => cmd_verify(*args).await,
     }
 }
 
