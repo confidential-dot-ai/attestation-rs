@@ -8,15 +8,15 @@ pub mod middleware;
 pub mod server;
 pub mod token;
 
+use attestation::collateral::CollateralCache;
 use attestation::Verifier;
-use certs::cache::CertCache;
 use config::Config;
 use token::issuer::TokenIssuer;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub cert_cache: Arc<CertCache>,
+    pub cert_cache: Arc<CollateralCache>,
     pub token_issuer: Option<Arc<TokenIssuer>>,
     pub verifier: Arc<Verifier>,
 }

@@ -35,9 +35,9 @@ pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
 
     let cache = &state.cert_cache;
     let cache_stats = CacheStats {
-        vcek_entries: cache.vcek_entry_count(),
-        chain_entries: cache.chain_entry_count(),
-        last_crl_refresh: cache.last_crl_refresh().await.map(|t| t.to_rfc3339()),
+        vcek_entries: cache.count(attestation::CollateralKind::SnpVcek) as u64,
+        chain_entries: cache.count(attestation::CollateralKind::SnpCertChain) as u64,
+        last_crl_refresh: cache.status().last_refresh.map(|t| t.to_rfc3339()),
     };
 
     Json(HealthResponse {

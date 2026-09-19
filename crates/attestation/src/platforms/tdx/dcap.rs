@@ -523,6 +523,77 @@ const SGX_EXTENSIONS_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1];
 
 /// FMSPC OID: 1.2.840.113741.1.13.1.4
 const FMSPC_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 4];
+/// PPID OID: 1.2.840.113741.1.13.1.1 (16-byte Platform Provisioning ID).
+const PPID_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 1];
+
+/// The 16-byte PPID from the PCK leaf certificate's SGX extension, the
+/// platform identity the profile reports as `cvm_identity.ppid`.
+pub fn extract_ppid_from_pck(pem_data: &[u8]) -> Result<[u8; 16]> {
+    let der_certs = parse_pem_to_der(pem_data)?;
+    let leaf = der_certs.first().ok_or_else(|| {
+        AttestationError::CertChainError("no certificates found in PEM data".into())
+    })?;
+    let (_, cert) = X509Certificate::from_der(leaf)
+        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
+    let sgx_ext_oid = x509_parser::oid_registry::Oid::from(SGX_EXTENSIONS_OID).map_err(|e| {
+        AttestationError::CertChainError(format!("invalid SGX_EXTENSIONS_OID: {e:?}"))
+    })?;
+    let ppid_oid = x509_parser::oid_registry::Oid::from(PPID_OID)
+        .map_err(|e| AttestationError::CertChainError(format!("invalid PPID_OID: {e:?}")))?;
+    let ext = cert
+        .extensions()
+        .iter()
+        .find(|e| e.oid == sgx_ext_oid)
+        .ok_or_else(|| {
+            AttestationError::CertChainError(
+                "SGX extensions OID not found in PCK certificate".into(),
+            )
+        })?;
+    let value = extract_sgx_extension_octets(ext.value, &ppid_oid, "PPID")?;
+    <[u8; 16]>::try_from(value.as_slice()).map_err(|_| {
+        AttestationError::CertChainError(format!("PPID is {} bytes, expected 16", value.len()))
+    })
+}
+
+/// The OCTET STRING value stored under `wanted` in an SGX extension: an ASN.1
+/// SEQUENCE of SEQUENCE { OID, value } entries.
+fn extract_sgx_extension_octets(
+    data: &[u8],
+    wanted: &x509_parser::oid_registry::Oid<'_>,
+    name: &str,
+) -> Result<Vec<u8>> {
+    use x509_parser::der_parser::ber::{parse_ber, BerObjectContent};
+    let (_, outer) = parse_ber(data)
+        .map_err(|e| AttestationError::CertChainError(format!("SGX extension parse: {e}")))?;
+    let BerObjectContent::Sequence(items) = &outer.content else {
+        return Err(AttestationError::CertChainError(
+            "SGX extension is not a SEQUENCE".into(),
+        ));
+    };
+    for item in items {
+        let BerObjectContent::Sequence(inner) = &item.content else {
+            continue;
+        };
+        if inner.len() < 2 {
+            continue;
+        }
+        let BerObjectContent::OID(oid) = &inner[0].content else {
+            continue;
+        };
+        if oid != wanted {
+            continue;
+        }
+        return match &inner[1].content {
+            BerObjectContent::OctetString(v) => Ok(v.to_vec()),
+            _ => Err(AttestationError::CertChainError(format!(
+                "{name} OID found but value is not an OCTET STRING"
+            ))),
+        };
+    }
+    Err(AttestationError::CertChainError(format!(
+        "{name} OID not found in SGX extension"
+    )))
+}
 
 /// Extract the FMSPC (Family-Model-Stepping-Platform-CustomSKU) from a PCK leaf cert.
 ///
@@ -658,7 +729,7 @@ struct SvnComponent {
 ///
 /// The PCK certificate contains 16 TCB component SVNs under OID
 /// 1.2.840.113741.1.13.1.2.{1..16} and a PCESVN under 1.2.840.113741.1.13.1.2.17.
-fn extract_pck_tcb_components(pem_data: &[u8]) -> Result<([u8; 16], u16)> {
+pub(crate) fn extract_pck_tcb_components(pem_data: &[u8]) -> Result<([u8; 16], u16)> {
     let der_certs = parse_pem_to_der(pem_data)?;
     extract_pck_tcb_components_from_der(&der_certs)
 }
@@ -814,14 +885,9 @@ pub fn evaluate_tcb_status(
     tcb_info_json: &[u8],
     tee_tcb_svn: &[u8; 16],
     pck_pem: &[u8],
-    signing_certs_pem: Option<&[u8]>,
+    signing_certs_pem: &[u8],
 ) -> Result<DcapVerificationStatus> {
-    if let Some(certs_pem) = signing_certs_pem {
-        verify_tcb_info_signature(tcb_info_json, certs_pem)?;
-    } else {
-        log::warn!("TCB Info signing chain not available; skipping signature verification on TCB collateral");
-    }
-
+    verify_tcb_info_signature(tcb_info_json, signing_certs_pem)?;
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
 
@@ -1027,7 +1093,7 @@ const QE_ISVSVN_OFFSET: usize = 258;
 pub fn verify_qe_identity(
     qe_report_body: &[u8],
     qe_identity_json: &[u8],
-    signing_certs_pem: Option<&[u8]>,
+    signing_certs_pem: &[u8],
 ) -> Result<()> {
     if qe_report_body.len() < QE_REPORT_BODY_SIZE {
         return Err(AttestationError::QuoteParseFailed(format!(
@@ -1037,34 +1103,27 @@ pub fn verify_qe_identity(
         )));
     }
 
-    // Parse the envelope and optionally verify signature
+    // Parse the envelope and verify its signature
     let envelope: QeIdentityEnvelope<'_> =
         serde_json::from_slice(qe_identity_json).map_err(|e| {
             AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
         })?;
 
-    if let Some(certs_pem) = signing_certs_pem {
-        // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
-        let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+    // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
+    let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+    })?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
+    })?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem)?;
+    signing_key
+        .verify(envelope.enclave_identity.get().as_bytes(), &signature)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!(
+                "QE Identity signature verification failed: {e}"
+            ))
         })?;
-        let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
-        })?;
-
-        let signing_key = verify_signing_cert_chain(certs_pem)?;
-
-        // RawValue preserves the exact bytes Intel signed — no re-serialization.
-        signing_key
-            .verify(envelope.enclave_identity.get().as_bytes(), &signature)
-            .map_err(|e| {
-                AttestationError::CertChainError(format!(
-                    "QE Identity signature verification failed: {e}"
-                ))
-            })?;
-    } else {
-        log::warn!("QE Identity signing chain not available; skipping signature verification on QE Identity collateral");
-    }
 
     // Parse the identity fields from the raw JSON
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
@@ -1201,23 +1260,32 @@ pub fn check_intermediate_ca_revocation_from_der(
     der_certs: &[Vec<u8>],
     root_ca_crl_der: &[u8],
 ) -> Result<()> {
+    check_intermediate_ca_revocation_from_der_at(der_certs, root_ca_crl_der, chrono::Utc::now())
+}
+
+/// Check the intermediate PCK CA against the Intel SGX Root CA CRL, which
+/// must be signed by the pinned Intel root and be inside its window at `now`.
+pub fn check_intermediate_ca_revocation_from_der_at(
+    der_certs: &[Vec<u8>],
+    root_ca_crl_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(
             "need at least 2 certs to check intermediate CA revocation".into(),
         ));
     }
-
-    // The intermediate CA is the 2nd cert in the chain
     let (_, intermediate_cert) = X509Certificate::from_der(&der_certs[1])
         .map_err(|e| AttestationError::CertChainError(format!("Intermediate CA parse: {e}")))?;
     let intermediate_serial = intermediate_cert.raw_serial();
 
-    // Parse the Root CA CRL (handle both PEM and DER formats)
     let root_crl_der_bytes = normalize_crl_to_der(root_ca_crl_der)?;
     let (_, crl) = CertificateRevocationList::from_der(&root_crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("Root CA CRL parse: {e}")))?;
+    let root_key = VerifyingKey::from_sec1_bytes(INTEL_SGX_ROOT_CA_PUB_DER)
+        .map_err(|e| AttestationError::CertChainError(format!("Intel Root CA key parse: {e}")))?;
+    verify_intel_crl(&crl, &root_key, now, "Intel SGX Root CA")?;
 
-    // Check if intermediate serial is in the revoked list
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == intermediate_serial {
             return Err(AttestationError::CertChainError(
@@ -1225,7 +1293,6 @@ pub fn check_intermediate_ca_revocation_from_der(
             ));
         }
     }
-
     Ok(())
 }
 
@@ -1241,23 +1308,32 @@ pub fn check_cert_revocation(pck_pem: &[u8], crl_der: &[u8]) -> Result<()> {
 /// Check PCK leaf revocation from pre-parsed DER certificate chain.
 /// See [`check_cert_revocation`] for details.
 pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<()> {
-    if der_certs.is_empty() {
+    check_cert_revocation_from_der_at(der_certs, crl_der, chrono::Utc::now())
+}
+
+/// Check the PCK leaf against the PCK CA's CRL, which must be signed by the
+/// PCK CA in the (already verified) chain and be inside its window at `now`.
+pub fn check_cert_revocation_from_der_at(
+    der_certs: &[Vec<u8>],
+    crl_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(
-            "no certificates found".into(),
+            "need the PCK leaf and its CA to check revocation".into(),
         ));
     }
-
-    // Parse the leaf cert to get its serial number
     let (_, leaf_cert) = X509Certificate::from_der(&der_certs[0])
         .map_err(|e| AttestationError::CertChainError(format!("PCK leaf parse: {e}")))?;
     let leaf_serial = leaf_cert.raw_serial();
 
-    // Parse the CRL (handle both PEM and DER formats)
     let crl_der_bytes = normalize_crl_to_der(crl_der)?;
     let (_, crl) = CertificateRevocationList::from_der(&crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("CRL DER parse: {e}")))?;
+    let issuer = parse_x509_cert(&der_certs[1], "PCK CA")?;
+    let issuer_key = extract_p256_pub_key(&issuer.pub_key_bytes, "PCK CA")?;
+    verify_intel_crl(&crl, &issuer_key, now, "PCK CA")?;
 
-    // Check if leaf serial is in the revoked list
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == leaf_serial {
             return Err(AttestationError::CertChainError(
@@ -1265,8 +1341,54 @@ pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> 
             ));
         }
     }
-
     Ok(())
+}
+
+/// ecdsa-with-SHA256, the only algorithm Intel signs SGX CRLs with.
+const OID_ECDSA_WITH_SHA256: &str = "1.2.840.10045.4.3.2";
+
+/// An Intel CRL is trusted only with a valid ECDSA P-256 signature by
+/// `issuer_key` over its TBSCertList, a `thisUpdate` not in the future and a
+/// `nextUpdate` that is present and has not passed at `now`.
+fn verify_intel_crl(
+    crl: &CertificateRevocationList<'_>,
+    issuer_key: &VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+    label: &str,
+) -> Result<()> {
+    let alg = crl.signature_algorithm.algorithm.to_string();
+    if alg != OID_ECDSA_WITH_SHA256 {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} CRL signature algorithm {alg} is not ecdsa-with-SHA256"
+        )));
+    }
+    let sig = Signature::from_der(crl.signature_value.as_ref()).map_err(|e| {
+        AttestationError::CertChainError(format!("{label} CRL signature parse: {e}"))
+    })?;
+    issuer_key
+        .verify(crl.tbs_cert_list.as_ref(), &sig)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!(
+                "{label} CRL signature verification failed: {e}"
+            ))
+        })?;
+    let now_asn1 = x509_parser::time::ASN1Time::from_timestamp(now.timestamp())
+        .map_err(|e| AttestationError::CertChainError(format!("clock out of range: {e}")))?;
+    if crl.last_update() > now_asn1 {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} CRL thisUpdate {} is in the future",
+            crl.last_update()
+        )));
+    }
+    match crl.next_update() {
+        None => Err(AttestationError::CertChainError(format!(
+            "{label} CRL has no nextUpdate; refusing a revocation list with no defined freshness"
+        ))),
+        Some(next) if next < now_asn1 => Err(AttestationError::CertChainError(format!(
+            "{label} CRL is stale: nextUpdate {next} has passed; fetch a current CRL"
+        ))),
+        Some(_) => Ok(()),
+    }
 }
 
 #[cfg(test)]

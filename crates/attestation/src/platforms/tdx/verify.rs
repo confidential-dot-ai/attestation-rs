@@ -388,13 +388,12 @@ pub async fn verify_evidence(
 
         // TCB status evaluation
         let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
-        let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
-        let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
+        let tcb_info = provider.get_tcb_info(&fmspc).await?;
         let status = super::dcap::evaluate_tcb_status(
-            &tcb_info_json,
+            &tcb_info.body,
             &quote.body.tee_tcb_svn,
             auth.pck_cert_chain_pem,
-            tcb_signing_chain.as_deref(),
+            &tcb_info.signing_chain,
         )?;
 
         // Reject Revoked TCB status
@@ -405,12 +404,11 @@ pub async fn verify_evidence(
         }
 
         // QE Identity verification (TDX uses TD_QE, not SGX QE)
-        let qe_identity_json = provider.get_td_qe_identity().await?;
-        let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
+        let qe_identity = provider.get_td_qe_identity().await?;
         super::dcap::verify_qe_identity(
             auth.qe_report_body,
-            &qe_identity_json,
-            qe_signing_chain.as_deref(),
+            &qe_identity.body,
+            &qe_identity.signing_chain,
         )?;
 
         Some(status)
@@ -815,6 +813,8 @@ mod tests {
     const PCK_CRL_DER: &[u8] = include_bytes!("../../../test_data/collateral/pck_crl_platform.der");
     const ROOT_CA_CRL_DER: &[u8] = include_bytes!("../../../test_data/collateral/root_ca_crl.der");
 
+    use crate::collateral::SignedCollateral;
+
     struct FixtureCollateralProvider {
         fmspc_tcb_info: std::collections::HashMap<String, Vec<u8>>,
     }
@@ -832,20 +832,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TdxCollateralProvider for FixtureCollateralProvider {
-        async fn get_tcb_info(&self, fmspc: &str) -> crate::error::Result<Vec<u8>> {
-            self.fmspc_tcb_info.get(fmspc).cloned().ok_or_else(|| {
+        async fn get_tcb_info(&self, fmspc: &str) -> crate::error::Result<SignedCollateral> {
+            let body = self.fmspc_tcb_info.get(fmspc).cloned().ok_or_else(|| {
                 AttestationError::CertFetchError(format!("no fixture TCB info for FMSPC {fmspc}"))
+            })?;
+            Ok(SignedCollateral {
+                body,
+                signing_chain: TCB_SIGNING_CHAIN.to_vec(),
             })
         }
 
-        async fn get_qe_identity(&self) -> crate::error::Result<Vec<u8>> {
+        async fn get_qe_identity(&self) -> crate::error::Result<SignedCollateral> {
             Err(AttestationError::CertFetchError(
                 "fixture provider only has TD QE identity, not SGX QE identity".into(),
             ))
         }
 
-        async fn get_td_qe_identity(&self) -> crate::error::Result<Vec<u8>> {
-            Ok(TD_QE_IDENTITY.to_vec())
+        async fn get_td_qe_identity(&self) -> crate::error::Result<SignedCollateral> {
+            Ok(SignedCollateral {
+                body: TD_QE_IDENTITY.to_vec(),
+                signing_chain: QE_IDENTITY_SIGNING_CHAIN.to_vec(),
+            })
         }
 
         async fn get_root_ca_crl(&self) -> crate::error::Result<Vec<u8>> {
@@ -856,16 +863,9 @@ mod tests {
             Ok(PCK_CRL_DER.to_vec())
         }
 
-        async fn get_tcb_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(TCB_SIGNING_CHAIN.to_vec()))
-        }
-
-        async fn get_qe_identity_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(QE_IDENTITY_SIGNING_CHAIN.to_vec()))
-        }
-
-        async fn get_td_qe_identity_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(QE_IDENTITY_SIGNING_CHAIN.to_vec()))
+        /// The fixtures were captured on 2026-03-16 and expire on 2026-04-15.
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 3, 17, 0, 0, 0).unwrap()
         }
     }
 

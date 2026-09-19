@@ -19,31 +19,6 @@ use sha2::{Digest, Sha384};
 use crate::error::{AttestationError, Result};
 
 /// Maximum digest algorithms per event (TCG spec allows ~3; cap at 16 for safety).
-const MAX_DIGEST_ALGORITHMS: u32 = 16;
-
-/// Returns true if reading `len` bytes from `offset` would exceed `data`.
-fn exceeds(data: &[u8], offset: usize, len: usize) -> bool {
-    offset.checked_add(len).is_none_or(|end| end > data.len())
-}
-
-/// Read a little-endian u32 from `data` at `offset`.
-fn read_le_u32(data: &[u8], offset: usize, field: &str) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        data[offset..offset + 4]
-            .try_into()
-            .map_err(|_| AttestationError::EventlogIntegrityFailed(format!("{field} parse")))?,
-    ))
-}
-
-/// Read a little-endian u16 from `data` at `offset`.
-fn read_le_u16(data: &[u8], offset: usize, field: &str) -> Result<u16> {
-    Ok(u16::from_le_bytes(
-        data[offset..offset + 2]
-            .try_into()
-            .map_err(|_| AttestationError::EventlogIntegrityFailed(format!("{field} parse")))?,
-    ))
-}
-
 /// A parsed CCEL event.
 #[derive(Debug, Clone)]
 pub struct CcelEvent {
@@ -62,124 +37,16 @@ pub struct CcelEvent {
 /// The first event is a TCG Spec ID Event header (EV_NO_ACTION at PCR 0)
 /// which is skipped. Subsequent events are TCG_PCR_EVENT2 structures.
 pub fn parse_ccel(data: &[u8]) -> Result<Vec<CcelEvent>> {
-    if data.len() < 32 {
-        return Err(AttestationError::EventlogIntegrityFailed(format!(
-            "CCEL data too short: {} bytes",
-            data.len()
-        )));
-    }
-
-    // Skip Spec ID Event header: first 32 bytes contain the TCG_PCR_EVENT
-    // header, then event_size bytes of Spec ID Event data.
-    let event_size = u32::from_le_bytes(data[28..32].try_into().map_err(|_| {
-        AttestationError::EventlogIntegrityFailed("reading Spec ID Event size".into())
-    })?) as usize;
-
-    let mut offset = 32usize.checked_add(event_size).ok_or_else(|| {
-        AttestationError::EventlogIntegrityFailed("Spec ID Event size overflow".into())
-    })?;
-
-    if offset > data.len() {
-        return Err(AttestationError::EventlogIntegrityFailed(format!(
-            "Spec ID Event size ({event_size}) exceeds CCEL data ({})",
-            data.len()
-        )));
-    }
-
-    let mut events = Vec::new();
-
-    while offset < data.len() {
-        if exceeds(data, offset, 8) {
-            break;
-        }
-
-        let mr_index = read_le_u32(data, offset, "mr_index")?;
-        let event_type = read_le_u32(data, offset + 4, "event_type")?;
-
-        let mut pos = offset + 8;
-        if exceeds(data, pos, 4) {
-            break;
-        }
-
-        let digest_count = read_le_u32(data, pos, "digest_count")?;
-        pos += 4;
-
-        if digest_count > MAX_DIGEST_ALGORITHMS {
-            // Hit padding/uninitialized region in the CCEL ACPI table
-            // (the table is typically 64KB but event data is smaller).
-            break;
-        }
-
-        let mut sha384_digest = Vec::new();
-        let mut truncated = false;
-
-        for _ in 0..digest_count {
-            if exceeds(data, pos, 2) {
-                truncated = true;
-                break;
-            }
-            let algo_id = read_le_u16(data, pos, "algo_id")?;
-            pos += 2;
-
-            let digest_size = match algo_id {
-                0x000C => 48, // SHA-384
-                0x000D => 64, // SHA-512
-                0x000B => 32, // SHA-256
-                0x0004 => 20, // SHA-1
-                _ => {
-                    return Err(AttestationError::EventlogIntegrityFailed(format!(
-                        "unsupported digest algorithm 0x{algo_id:04X} at offset {pos}"
-                    )));
-                }
-            };
-
-            if exceeds(data, pos, digest_size) {
-                truncated = true;
-                break;
-            }
-            if algo_id == 0x000C {
-                sha384_digest = data[pos..pos + digest_size].to_vec();
-            }
-            pos += digest_size;
-        }
-
-        if truncated {
-            break;
-        }
-
-        if exceeds(data, pos, 4) {
-            break;
-        }
-        let event_data_size = read_le_u32(data, pos, "event_data_size")? as usize;
-        pos += 4;
-
-        let event_end = pos.checked_add(event_data_size).ok_or_else(|| {
-            AttestationError::EventlogIntegrityFailed("event_data_size overflow".into())
-        })?;
-        if event_end > data.len() {
-            break;
-        }
-
-        // Terminator: type=0, mr=0, size=0
-        if event_type == 0 && mr_index == 0 && event_data_size == 0 {
-            break;
-        }
-
-        let event_data = data[pos..event_end].to_vec();
-
-        if !sha384_digest.is_empty() {
-            events.push(CcelEvent {
-                mr_index,
-                event_type,
-                sha384_digest,
-                event_data,
-            });
-        }
-
-        offset = event_end;
-    }
-
-    Ok(events)
+    let events = crate::profile::tcg2::parse(data, crate::profile::tcg2::TPM_ALG_SHA384)?;
+    Ok(events
+        .into_iter()
+        .map(|e| CcelEvent {
+            mr_index: e.index,
+            event_type: e.event_type,
+            sha384_digest: e.digest,
+            event_data: e.event_data,
+        })
+        .collect())
 }
 
 /// Replay CCEL events to compute RTMR values.

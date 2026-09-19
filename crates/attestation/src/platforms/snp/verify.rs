@@ -23,7 +23,7 @@ use super::claims::extract_claims;
 use super::evidence::SnpEvidence;
 
 /// SNP Attestation Report version (must be >= 3 for cpuid fields).
-const MIN_REPORT_VERSION: u32 = 3;
+pub const MIN_REPORT_VERSION: u32 = 3;
 
 /// Maximum supported SNP report version.
 /// Matches Trustee's upper bound — future versions may change field layout.

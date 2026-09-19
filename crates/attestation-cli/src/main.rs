@@ -28,7 +28,7 @@ enum Commands {
     #[cfg(all(feature = "attest", target_os = "linux"))]
     Attest(AttestArgs),
     /// Verify attestation evidence.
-    Verify(VerifyArgs),
+    Verify(Box<VerifyArgs>),
     /// Detect the current TEE platform (Linux only).
     #[cfg(all(feature = "attest", target_os = "linux"))]
     Detect,
@@ -67,9 +67,21 @@ struct AttestArgs {
     #[arg(long)]
     nvidia_gpu: bool,
 
+    /// Evidence format: the profile envelope (cvm-v1, the report data is the
+    /// relying party's nonce of 16 to 64 bytes) or the legacy envelope.
+    #[arg(long, value_enum, default_value_t = FormatArg::CvmV1)]
+    format: FormatArg,
+
     /// Write evidence JSON to a file instead of stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
+}
+
+#[cfg(all(feature = "attest", target_os = "linux"))]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FormatArg {
+    CvmV1,
+    Legacy,
 }
 
 #[derive(clap::Args)]
@@ -77,6 +89,17 @@ struct VerifyArgs {
     /// Path to evidence JSON file. Reads from stdin if not specified.
     #[arg(short, long)]
     evidence: Option<PathBuf>,
+
+    /// Appraise under the profile: a VerifyPolicy JSON file
+    /// (schemas/cvm-policy-v1.json). A profile envelope is appraised with
+    /// strict defaults when this is omitted.
+    #[arg(long)]
+    policy: Option<PathBuf>,
+
+    /// The nonce the relying party issued (hex). Checked against eat_nonce
+    /// of a profile envelope; required to appraise a legacy envelope.
+    #[arg(long)]
+    nonce_hex: Option<String>,
 
     /// Expected report data (hex-encoded) for nonce binding verification.
     #[arg(long)]
@@ -207,7 +230,7 @@ async fn main() {
         Commands::Detect => cmd_detect(),
         #[cfg(all(feature = "attest", target_os = "linux"))]
         Commands::Attest(args) => cmd_attest(args).await,
-        Commands::Verify(args) => cmd_verify(args).await,
+        Commands::Verify(args) => cmd_verify(*args).await,
     }
 }
 
@@ -257,14 +280,22 @@ async fn cmd_attest(args: AttestArgs) {
     let opts = attestation::AttestOptions::default();
 
     #[cfg(feature = "nvidia-gpu-attest")]
-    let evidence_result = if args.nvidia_gpu {
-        eprintln!("Collecting NVIDIA GPU evidence...");
-        attestation::attest_with_nvidia_gpu(platform, &report_data, &opts).await
-    } else {
-        attestation::attest(platform, &report_data, &opts).await
-    };
+    let with_devices = args.nvidia_gpu;
     #[cfg(not(feature = "nvidia-gpu-attest"))]
-    let evidence_result = attestation::attest(platform, &report_data, &opts).await;
+    let with_devices = false;
+    if with_devices {
+        eprintln!("Collecting NVIDIA GPU evidence...");
+    }
+    let evidence_result = match args.format {
+        FormatArg::CvmV1 => {
+            attestation::attest_profile(platform, &report_data, None, with_devices, &opts).await
+        }
+        #[cfg(feature = "nvidia-gpu-attest")]
+        FormatArg::Legacy if with_devices => {
+            attestation::attest_with_nvidia_gpu(platform, &report_data, &opts).await
+        }
+        FormatArg::Legacy => attestation::attest(platform, &report_data, &opts).await,
+    };
 
     let evidence_json = match evidence_result {
         Ok(json) => json,
@@ -302,6 +333,190 @@ async fn cmd_attest(args: AttestArgs) {
     }
 }
 
+/// The profile path (section 6): the envelope, or a legacy envelope mapped
+/// through section 9 with the relying party's nonce, appraised under a policy.
+/// The legacy expectation flags keep their meaning on the profile path: each
+/// becomes the corresponding policy pin, so a caller that migrates the
+/// evidence format loses no check.
+fn apply_expectation_flags(
+    mut policy: attestation::profile::VerifyPolicy,
+    args: &VerifyArgs,
+) -> Result<attestation::profile::VerifyPolicy, String> {
+    use attestation::profile::{Bytes, Digest, HashAlg};
+    let digest48 = |hex_str: &str, name: &str| -> Result<Digest, String> {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex for --{name}: {e}"))?;
+        if bytes.len() != 48 {
+            return Err(format!(
+                "--{name} must be 48 bytes (96 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        Ok(Digest {
+            alg: HashAlg::Sha384,
+            value: Bytes(bytes),
+        })
+    };
+    for (flag, name) in [
+        (&args.expected_launch_digest, "expected-launch-digest"),
+        (&args.expected_mrtd, "expected-mrtd"),
+    ] {
+        if let Some(h) = flag {
+            policy.reference.launch_measurement.push(digest48(h, name)?);
+        }
+    }
+    for (i, flag) in [
+        &args.expected_rtmr0,
+        &args.expected_rtmr1,
+        &args.expected_rtmr2,
+        &args.expected_rtmr3,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(h) = flag {
+            policy
+                .reference
+                .registers
+                .entry(i as u16)
+                .or_default()
+                .push(digest48(h, &format!("expected-rtmr{i}"))?);
+        }
+    }
+    if let Some(h) = &args.expected_init_data {
+        let bytes =
+            hex::decode(h).map_err(|e| format!("invalid hex for --expected-init-data: {e}"))?;
+        policy.reference.host_data = Some(Bytes(bytes));
+    }
+    #[cfg(feature = "nvidia-gpu")]
+    {
+        policy.gpu.required |= args.nvidia_gpu_required;
+        if let Some(archs) = &args.nvidia_gpu_expected_archs {
+            let mut parsed = Vec::with_capacity(archs.len());
+            for a in archs {
+                parsed.push(match a.to_ascii_uppercase().as_str() {
+                    "HOPPER" => attestation::profile::GpuArch::Hopper,
+                    "BLACKWELL" => attestation::profile::GpuArch::Blackwell,
+                    "LS10" => attestation::profile::GpuArch::Ls10,
+                    other => {
+                        return Err(format!(
+                            "unknown arch for --nvidia-gpu-expected-archs: {other} (want HOPPER, BLACKWELL, or LS10)"
+                        ))
+                    }
+                });
+            }
+            policy.gpu.expected_archs = Some(parsed);
+        }
+    }
+    Ok(policy)
+}
+
+async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool) {
+    let policy: attestation::profile::VerifyPolicy = match &args.policy {
+        Some(path) => match std::fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: cannot read --policy {}: {e}", path.display());
+                process::exit(1);
+            }
+        },
+        None => attestation::profile::VerifyPolicy::default(),
+    };
+    let policy = match apply_expectation_flags(policy, args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    // The relying party's nonce: --nonce-hex, or the legacy --expected-report-data,
+    // which is the same value (the anchor with no key).
+    let nonce = match args
+        .nonce_hex
+        .as_deref()
+        .or(args.expected_report_data.as_deref())
+    {
+        Some(h) => match hex::decode(h) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                eprintln!("Error: invalid hex for the nonce: {e}");
+                process::exit(1);
+            }
+        },
+        None => None,
+    };
+    #[cfg(feature = "nvidia-gpu")]
+    if let (Some(gpu), Some(n)) = (&args.nvidia_gpu_user_nonce, &nonce) {
+        if hex::decode(gpu).ok().as_deref() != Some(n.as_slice()) {
+            eprintln!("Error: --nvidia-gpu-user-nonce must equal the nonce; the profile derives the device nonce from eat_nonce");
+            process::exit(1);
+        }
+    }
+    let verifier = attestation::Verifier::new();
+    eprintln!("Appraising evidence...");
+    let t0 = Instant::now();
+    let appraisal = if is_profile {
+        let Some(n) = &nonce else {
+            eprintln!(
+                "Error: a profile envelope needs the nonce this relying party issued: --nonce-hex or --expected-report-data"
+            );
+            process::exit(1);
+        };
+        {
+            let carried = serde_json::from_slice::<serde_json::Value>(evidence_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("eat_nonce")
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                })
+                .and_then(|s| {
+                    use base64::Engine;
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(s)
+                        .ok()
+                })
+                .unwrap_or_default();
+            if !attestation::utils::constant_time_eq(n, &carried) {
+                eprintln!(
+                    "Appraisal failed: eat_nonce differs from the nonce this relying party issued"
+                );
+                process::exit(1);
+            }
+        }
+        verifier.appraise_json(evidence_json, &policy).await
+    } else {
+        let Some(n) = &nonce else {
+            eprintln!(
+                "Error: a legacy envelope needs --nonce-hex (or --expected-report-data), the nonce the relying party issued"
+            );
+            process::exit(1);
+        };
+        verifier
+            .appraise_legacy_json(evidence_json, n, None, &policy)
+            .await
+    };
+    let appraisal = match appraisal {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Appraisal failed: {e}");
+            process::exit(1);
+        }
+    };
+    eprintln!("Appraised in {:?}", t0.elapsed());
+    eprintln!(
+        "  All submodules bound: {}",
+        appraisal.ear_all_submods_bound
+    );
+    for (name, sub) in &appraisal.submods {
+        eprintln!("  {name}: {:?}", sub.ear_status);
+    }
+    let json = serde_json::to_string_pretty(&appraisal).expect("failed to serialize appraisal");
+    println!("{json}");
+}
+
 async fn cmd_verify(args: VerifyArgs) {
     let evidence_json = match read_evidence(&args) {
         Ok(e) => e,
@@ -310,6 +525,14 @@ async fn cmd_verify(args: VerifyArgs) {
             process::exit(1);
         }
     };
+
+    let is_profile = serde_json::from_slice::<serde_json::Value>(&evidence_json)
+        .map(|v| v.get("eat_profile").is_some())
+        .unwrap_or(false);
+    if is_profile || args.policy.is_some() || args.nonce_hex.is_some() {
+        cmd_appraise(&args, &evidence_json, is_profile).await;
+        return;
+    }
 
     let mut params = VerifyParams::default();
 

@@ -542,7 +542,56 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
 
 /// Parse TPMS_QUOTE_INFO from a TPMS_ATTEST message to extract the PCR
 /// selection bitmap and the expected PCR digest.
-fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
+/// TPM_ST_ATTEST_QUOTE: the attest type a PCR quote carries.
+pub(crate) const TPM_ST_ATTEST_QUOTE: u16 = 0x8018;
+
+/// The PCR indices a quote selects in `bank` (a TPM_ALG_ID), after checking
+/// the TPMS_ATTEST magic and that its type is a quote.
+pub(crate) fn quote_selection(message: &[u8], bank: u16) -> Result<Vec<usize>> {
+    if read_be_u32(message, 0, "TPM magic")? != TPM_ATTEST_MAGIC {
+        return Err(AttestationError::QuoteParseFailed(
+            "invalid TPM Attest magic".to_string(),
+        ));
+    }
+    if read_be_u16(message, 4, "TPM attest type")? != TPM_ST_ATTEST_QUOTE {
+        return Err(AttestationError::QuoteParseFailed(
+            "TPMS_ATTEST is not a quote".to_string(),
+        ));
+    }
+    let mut offset = 6;
+    let signer_size = read_be_u16(message, offset, "qualifiedSigner size")? as usize;
+    offset += 2 + signer_size;
+    let extra_size = read_be_u16(message, offset, "extraData size")? as usize;
+    offset += 2 + extra_size;
+    offset += 17 + 8;
+    let count = read_be_u32(message, offset, "PCR selection count")? as usize;
+    offset += 4;
+    let mut selected = Vec::new();
+    for _ in 0..count {
+        let alg = read_be_u16(message, offset, "PCR hash alg")?;
+        offset += 2;
+        let select_size = *message.get(offset).ok_or_else(|| {
+            AttestationError::QuoteParseFailed("truncated at PCR selection size".to_string())
+        })? as usize;
+        offset += 1;
+        let bitmap = message.get(offset..offset + select_size).ok_or_else(|| {
+            AttestationError::QuoteParseFailed("truncated at PCR selection bitmap".to_string())
+        })?;
+        if alg == bank {
+            for (byte_idx, byte) in bitmap.iter().enumerate() {
+                for bit in 0..8u8 {
+                    if byte & (1 << bit) != 0 {
+                        selected.push(byte_idx * 8 + usize::from(bit));
+                    }
+                }
+            }
+        }
+        offset += select_size;
+    }
+    Ok(selected)
+}
+
+pub(crate) fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
     if message.len() < 10 {
         return Err(AttestationError::QuoteParseFailed(
             "TPMS_ATTEST too short".to_string(),

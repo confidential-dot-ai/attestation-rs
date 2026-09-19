@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::Json;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +23,14 @@ pub struct VerifyRequest {
     pub params: VerifyParamsInput,
     #[serde(default)]
     pub issue_token: bool,
+    /// Profile envelopes: the policy (`schemas/cvm-policy-v1.json`); every
+    /// knob is at its strictest when absent.
+    #[serde(default)]
+    pub policy: Option<attestation::profile::VerifyPolicy>,
+    /// Profile envelopes: the nonce this relying party issued, base64url
+    /// without padding; required, and must equal the envelope's `eat_nonce`.
+    #[serde(default)]
+    pub nonce: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -58,6 +66,25 @@ pub struct VerifyParamsInput {
     pub expected_rtmr3: Option<String>,
 }
 
+impl VerifyParamsInput {
+    /// Whether any expectation was supplied.
+    fn is_set(&self) -> bool {
+        self.expected_report_data.is_some()
+            || self.expected_init_data_hash.is_some()
+            || self.allow_debug
+            || self.min_tcb.is_some()
+            || self.nvidia_gpu_user_nonce.is_some()
+            || self.nvidia_gpu_required
+            || self.nvidia_gpu_expected_archs.is_some()
+            || self.expected_launch_digest.is_some()
+            || self.expected_mrtd.is_some()
+            || self.expected_rtmr0.is_some()
+            || self.expected_rtmr1.is_some()
+            || self.expected_rtmr2.is_some()
+            || self.expected_rtmr3.is_some()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct MinTcbInput {
     pub bootloader: u8,
@@ -66,9 +93,14 @@ pub struct MinTcbInput {
     pub microcode: u8,
 }
 
+/// `result` for the pre-profile envelope, `appraisal` (EAR) for a profile
+/// envelope; never both.
 #[derive(Serialize)]
 pub struct VerifyResponse {
-    pub result: attestation::VerificationResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<attestation::VerificationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appraisal: Option<attestation::profile::Appraisal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -77,6 +109,9 @@ pub async fn handler(
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
+    if req.evidence.get("eat_profile").is_some() {
+        return appraise_profile(&state, req).await;
+    }
     let evidence_json = build_evidence_envelope(req.platform, req.evidence, req.nvidia_gpu)?;
 
     let expected_report_data = req
@@ -154,7 +189,70 @@ pub async fn handler(
         None
     };
 
-    Ok(Json(VerifyResponse { result, token }))
+    Ok(Json(VerifyResponse {
+        result: Some(result),
+        appraisal: None,
+        token,
+    }))
+}
+
+/// A profile envelope is appraised under the request's policy (section 6);
+/// the appraisal is the result, so no token is minted for it.
+async fn appraise_profile(
+    state: &AppState,
+    req: VerifyRequest,
+) -> Result<Json<VerifyResponse>, ApiError> {
+    if req.issue_token {
+        return Err(ApiError::BadRequest(
+            "issue_token does not apply to a profile envelope; the appraisal is the result"
+                .to_string(),
+        ));
+    }
+    if req.params.is_set() {
+        return Err(ApiError::BadRequest(
+            "params do not apply to a profile envelope; send policy and nonce".to_string(),
+        ));
+    }
+    let policy = req.policy.unwrap_or_default();
+    if policy.policy_bits.allow_debug && !state.config.attestation.allow_debug {
+        return Err(ApiError::BadRequest(
+            "allow_debug is disabled by server configuration".to_string(),
+        ));
+    }
+    // Without the nonce this relying party issued, a replayed envelope would
+    // appraise as bound to its own eat_nonce.
+    let expected = req.nonce.as_deref().ok_or_else(|| {
+        ApiError::BadRequest(
+            "nonce is required for a profile envelope: the value this relying party issued, base64url"
+                .to_string(),
+        )
+    })?;
+    {
+        let expected = URL_SAFE_NO_PAD
+            .decode(expected)
+            .map_err(|e| ApiError::BadRequest(format!("invalid base64url nonce: {e}")))?;
+        let carried = req
+            .evidence
+            .get("eat_nonce")
+            .and_then(Value::as_str)
+            .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
+            .unwrap_or_default();
+        if !attestation::utils::constant_time_eq(&expected, &carried) {
+            return Err(ApiError::Verification(
+                attestation::AttestationError::ProfileEvidenceInvalid(
+                    "eat_nonce differs from the nonce this relying party issued".to_string(),
+                ),
+            ));
+        }
+    }
+    let bytes = serde_json::to_vec(&req.evidence)
+        .map_err(|e| ApiError::BadRequest(format!("invalid evidence JSON: {e}")))?;
+    let appraisal = state.verifier.appraise_json(&bytes, &policy).await?;
+    Ok(Json(VerifyResponse {
+        result: None,
+        appraisal: Some(appraisal),
+        token: None,
+    }))
 }
 
 /// Decodes a base64 measurement parameter, which must be exactly 48 bytes.

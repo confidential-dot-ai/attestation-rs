@@ -21,6 +21,41 @@ pub struct AttestRequest {
     /// be built with the `nvidia-gpu-attest` cargo feature.
     #[serde(default)]
     pub nvidia_gpu: bool,
+    /// `"cvm-v1"` (the profile envelope) or `"legacy"`. Absent: the profile
+    /// when `nonce` is given; a request carrying only `report_data` keeps the
+    /// legacy envelope for one release.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// The relying party's nonce, base64url without padding, 16 to 64 bytes
+    /// (profile only).
+    #[serde(default)]
+    pub nonce: Option<String>,
+    /// Optional key binding (profile section 4.5.1).
+    #[serde(default)]
+    pub key: Option<attestation::profile::KeyBinding>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttestMode {
+    Profile,
+    Legacy,
+}
+
+fn attest_mode(
+    format: Option<&str>,
+    has_nonce: bool,
+    has_report_data: bool,
+) -> Result<AttestMode, ApiError> {
+    match format {
+        Some("cvm-v1") => Ok(AttestMode::Profile),
+        Some("legacy") => Ok(AttestMode::Legacy),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "unknown format {other:?}; want cvm-v1 or legacy"
+        ))),
+        None if has_nonce => Ok(AttestMode::Profile),
+        None if has_report_data => Ok(AttestMode::Legacy),
+        None => Ok(AttestMode::Profile),
+    }
 }
 
 fn default_platform() -> String {
@@ -37,26 +72,63 @@ pub struct AttestResponse {
     pub nvidia_gpu: Option<Value>,
 }
 
+/// The profile envelope (section 4.3) as the body, or the legacy split form
+/// `{platform, evidence, nvidia_gpu?}`.
 pub async fn handler(
     State(state): State<AppState>,
     Json(req): Json<AttestRequest>,
-) -> Result<Json<AttestResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     if !state.config.attestation.enabled {
         return Err(ApiError::AttestNotAvailable);
     }
+    let mode = attest_mode(
+        req.format.as_deref(),
+        req.nonce.is_some(),
+        req.report_data.is_some(),
+    )?;
 
     #[cfg(target_os = "linux")]
     {
+        let platform = resolve_platform(&req.platform)?;
+        ensure_platform_allowed(&state.config.attestation.platforms, platform)?;
+        let options = state.config.attestation.attest_options();
+
+        if mode == AttestMode::Profile {
+            let nonce = req.nonce.as_deref().ok_or_else(|| {
+                ApiError::BadRequest(
+                    "the profile needs a nonce: 16 to 64 bytes, base64url".to_string(),
+                )
+            })?;
+            if req.report_data.is_some() {
+                return Err(ApiError::BadRequest(
+                    "report_data does not apply to the profile; the nonce is the binding input"
+                        .to_string(),
+                ));
+            }
+            let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(nonce)
+                .map_err(|e| ApiError::BadRequest(format!("invalid base64url nonce: {e}")))?;
+            if req.nvidia_gpu && !cfg!(feature = "nvidia-gpu-attest") {
+                return Err(ApiError::BadRequest(
+                    "nvidia_gpu=true requires this service to be built with the \
+                     `nvidia-gpu-attest` cargo feature"
+                        .to_string(),
+                ));
+            }
+            let bytes =
+                attestation::attest_profile(platform, &nonce, req.key, req.nvidia_gpu, &options)
+                    .await?;
+            let envelope: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| ApiError::Internal(format!("failed to parse evidence: {e}")))?;
+            return Ok(Json(envelope));
+        }
+
         let report_data = match req.report_data {
             Some(b64) => BASE64
                 .decode(&b64)
                 .map_err(|e| ApiError::BadRequest(format!("invalid base64 report_data: {e}")))?,
             None => Vec::new(),
         };
-
-        let platform = resolve_platform(&req.platform)?;
-        ensure_platform_allowed(&state.config.attestation.platforms, platform)?;
-        let options = state.config.attestation.attest_options();
 
         let evidence_bytes = if req.nvidia_gpu {
             #[cfg(feature = "nvidia-gpu-attest")]
@@ -85,16 +157,19 @@ pub async fn handler(
         // Keep the service response shape stable: top-level `platform` plus
         // platform-specific `evidence` (+ optional `nvidia_gpu`). /verify
         // accepts this split form when clients send the same fields.
-        Ok(Json(AttestResponse {
+        let response = AttestResponse {
             platform: format!("{platform}"),
             evidence: envelope.get("evidence").cloned().unwrap_or(envelope),
             nvidia_gpu: gpu_field,
-        }))
+        };
+        Ok(Json(serde_json::to_value(response).map_err(|e| {
+            ApiError::Internal(format!("failed to encode evidence: {e}"))
+        })?))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = req;
+        let _ = (req, mode);
         Err(ApiError::NoPlatform)
     }
 }
@@ -130,5 +205,29 @@ fn ensure_platform_allowed(
         Err(ApiError::BadRequest(format!(
             "platform '{platform_name}' is not allowed by attestation.platforms"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{attest_mode, AttestMode};
+
+    #[test]
+    fn the_profile_is_the_default_and_old_clients_keep_the_old_envelope() {
+        assert_eq!(attest_mode(None, true, false).unwrap(), AttestMode::Profile);
+        assert_eq!(
+            attest_mode(None, false, false).unwrap(),
+            AttestMode::Profile
+        );
+        assert_eq!(attest_mode(None, false, true).unwrap(), AttestMode::Legacy);
+        assert_eq!(
+            attest_mode(Some("cvm-v1"), false, true).unwrap(),
+            AttestMode::Profile
+        );
+        assert_eq!(
+            attest_mode(Some("legacy"), true, false).unwrap(),
+            AttestMode::Legacy
+        );
+        assert!(attest_mode(Some("v2"), true, false).is_err());
     }
 }

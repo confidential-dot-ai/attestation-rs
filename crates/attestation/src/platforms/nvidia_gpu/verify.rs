@@ -47,7 +47,7 @@ pub async fn verify_bundle(
     Ok(aggregated)
 }
 
-const MAX_GPU_DEVICES: usize = 32;
+pub(crate) const MAX_GPU_DEVICES: usize = 32;
 
 /// Validate bundle and params before any network or crypto work. Returns the
 /// validated `user_nonce` slice on success.
@@ -111,16 +111,17 @@ fn group_by_arch(
 
 /// Result of attesting + verifying one arch group. The caller folds these
 /// into the running [`NvidiaGpuClaims`] aggregate.
-struct ArchGroupResult {
-    overall_ok: bool,
-    eat_nonce: Option<String>,
-    nonce_binding_ok: bool,
-    overall_raw: serde_json::Value,
-    devices: Vec<crate::types::NvidiaGpuDeviceClaims>,
+pub(crate) struct ArchGroupResult {
+    pub(crate) overall_ok: bool,
+    pub(crate) eat_nonce: Option<String>,
+    pub(crate) nonce_binding_ok: bool,
+    pub(crate) overall_raw: serde_json::Value,
+    /// NRAS submodule name (`GPU-<i>` or `SWITCH-<i>`, `<i>` the position in
+    /// the request) and the claims of its verified JWT.
+    pub(crate) devices: Vec<(String, NvidiaGpuDeviceClaims)>,
 }
 
-/// Build the NRAS request, attest, JWS-verify the overall + each submodule,
-/// and check the eat_nonce binding against the derived SPDM nonce.
+/// Derive the SPDM nonce per `bundle.binding`, then attest the group.
 async fn verify_arch_group(
     arch: NvidiaGpuArch,
     devices: &[&crate::types::NvidiaGpuDeviceEvidence],
@@ -133,6 +134,26 @@ async fn verify_arch_group(
         NvidiaGpuArch::Ls10 => switch_nonce(user_nonce, &bundle.binding),
         _ => gpu_nonce(user_nonce, &bundle.binding),
     };
+    attest_arch(
+        arch,
+        devices,
+        nonce_bytes,
+        &params.nvidia_gpu.device_policy,
+        provider,
+    )
+    .await
+}
+
+/// Build the NRAS request for one architecture, attest, JWS-verify the
+/// overall and each submodule JWT, bind every submodule to `nonce_bytes` and
+/// apply the per-device policy.
+pub(crate) async fn attest_arch(
+    arch: NvidiaGpuArch,
+    devices: &[&crate::types::NvidiaGpuDeviceEvidence],
+    nonce_bytes: [u8; 32],
+    device_policy: &crate::types::NvidiaGpuDevicePolicy,
+    provider: &dyn NrasProvider,
+) -> Result<ArchGroupResult> {
     let nonce_hex = hex::encode(nonce_bytes);
 
     let request = NrasRequest {
@@ -191,8 +212,8 @@ async fn verify_arch_group(
         if dc.arch.is_none() {
             dc.arch = Some(arch);
         }
-        apply_device_policy(&name, &dc, &params.nvidia_gpu.device_policy)?;
-        device_claims.push(dc);
+        apply_device_policy(&name, &dc, device_policy)?;
+        device_claims.push((name, dc));
     }
 
     Ok(ArchGroupResult {
@@ -213,7 +234,9 @@ fn fold_arch_group(aggregated: &mut NvidiaGpuClaims, group: ArchGroupResult) {
         aggregated.eat_nonce = group.eat_nonce;
     }
     aggregated.overall_raw = group.overall_raw;
-    aggregated.devices.extend(group.devices);
+    aggregated
+        .devices
+        .extend(group.devices.into_iter().map(|(_, dc)| dc));
 }
 
 /// Post-aggregation invariants: every device produced claims, overall passed,

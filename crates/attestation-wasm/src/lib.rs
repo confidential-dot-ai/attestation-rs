@@ -145,6 +145,88 @@ pub async fn verify(
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
 
+/// Appraise a profile envelope (`tag:confidential.ai,2026:cvm#1`, section 6)
+/// against a policy and return the EAR appraisal as JSON.
+///
+/// - `evidence_json`: the envelope (`schemas/cvm-evidence-v1.json`)
+/// - `nonce`: the value this relying party issued, which must be the
+///   envelope's `eat_nonce`; without it a replayed envelope would appraise
+///   as bound to its own nonce
+/// - `policy_json`: a `VerifyPolicy` (`schemas/cvm-policy-v1.json`); every
+///   knob defaults to its strictest setting
+/// - `snp_crl_der`: optional DER AMD KDS CRL for the report's generation
+///
+/// Offline: SNP endorsements ride inline in `cvm_endorsements` (or the CRL
+/// here), and TDX collateral must be inline when the policy requires it.
+#[wasm_bindgen]
+pub async fn appraise(
+    evidence_json: String,
+    nonce: Vec<u8>,
+    policy_json: String,
+    snp_crl_der: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let policy: attestation::profile::VerifyPolicy = serde_json::from_str(&policy_json)
+        .map_err(|e| JsError::new(&format!("policy deserialize: {e}")))?;
+    let carried = serde_json::from_str::<serde_json::Value>(&evidence_json)
+        .ok()
+        .and_then(|v| {
+            v.get("eat_nonce")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .and_then(|s| {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s)
+                .ok()
+        })
+        .unwrap_or_default();
+    if !constant_time_eq(&nonce, &carried) {
+        return Err(JsError::new(
+            "appraise: eat_nonce differs from the nonce this relying party issued",
+        ));
+    }
+    let appraisal = attestation::Verifier::offline()
+        .with_cert_provider(StaticSnpCollateral {
+            inner: DefaultCertProvider::new(),
+            crl_der: snp_crl_der,
+        })
+        .appraise_json(evidence_json.as_bytes(), &policy)
+        .await
+        .map_err(|e| JsError::new(&format!("appraise: {e}")))?;
+    serde_json::to_string_pretty(&appraisal)
+        .map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
+/// Appraise a pre-profile `{ platform, evidence }` envelope through the
+/// section 9 mapping. `nonce` is what the relying party issued (the anchor
+/// with no key); `key_json` is an optional `KeyBinding` (`{kind, value}`).
+#[wasm_bindgen]
+pub async fn appraise_legacy(
+    envelope_json: String,
+    nonce: Vec<u8>,
+    key_json: Option<String>,
+    policy_json: String,
+    snp_crl_der: Option<Vec<u8>>,
+) -> Result<String, JsError> {
+    let policy: attestation::profile::VerifyPolicy = serde_json::from_str(&policy_json)
+        .map_err(|e| JsError::new(&format!("policy deserialize: {e}")))?;
+    let key: Option<attestation::profile::KeyBinding> = key_json
+        .map(|k| serde_json::from_str(&k))
+        .transpose()
+        .map_err(|e| JsError::new(&format!("key deserialize: {e}")))?;
+    let appraisal = attestation::Verifier::offline()
+        .with_cert_provider(StaticSnpCollateral {
+            inner: DefaultCertProvider::new(),
+            crl_der: snp_crl_der,
+        })
+        .appraise_legacy_json(envelope_json.as_bytes(), &nonce, key, &policy)
+        .await
+        .map_err(|e| JsError::new(&format!("appraise: {e}")))?;
+    serde_json::to_string_pretty(&appraisal)
+        .map_err(|e| JsError::new(&format!("json serialize: {e}")))
+}
+
 /// Verify live SNP evidence in WASM.
 ///
 /// Enforces the same endorsement-key and platform-security policy as the

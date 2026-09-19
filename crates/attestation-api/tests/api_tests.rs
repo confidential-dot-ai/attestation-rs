@@ -3,7 +3,6 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use attestation_api::certs::cache::CertCache;
 use attestation_api::config::Config;
 use attestation_api::server::{build_api_router, build_router};
 use attestation_api::AppState;
@@ -17,16 +16,8 @@ fn test_state() -> AppState {
 fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
-    let cert_cache = Arc::new(CertCache::new(&Default::default()));
-    let cert_provider =
-        attestation_api::certs::snp_provider::CachedCertProvider::new(cert_cache.clone(), false);
-    let tdx_provider =
-        attestation_api::certs::tdx_provider::CachedTdxProvider::new(cert_cache.clone());
-    let verifier = Arc::new(
-        attestation::Verifier::new()
-            .with_cert_provider(cert_provider)
-            .with_tdx_provider(tdx_provider),
-    );
+    let cert_cache = attestation_api::certs::build(&Default::default()).unwrap();
+    let verifier = Arc::new(attestation::Verifier::new().with_collateral(cert_cache.clone()));
     AppState {
         config: Arc::new(config),
         cert_cache,
@@ -199,6 +190,125 @@ async fn verify_rejects_full_envelope_evidence() {
         .as_str()
         .unwrap()
         .contains("platform-specific evidence"));
+}
+
+async fn post_verify(
+    app: axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+fn profile_envelope(nonce_b64url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "eat_profile": "tag:confidential.ai,2026:cvm#1",
+        "eat_nonce": nonce_b64url,
+        "cvm_version": 1,
+        "submods": {}
+    })
+}
+
+#[tokio::test]
+async fn verify_routes_a_profile_envelope_to_the_appraiser() {
+    // 16 bytes of 0x01, base64url without padding.
+    let nonce = "AQEBAQEBAQEBAQEBAQEBAQ";
+    let state = test_state();
+
+    // No cpu submodule: the profile parser refuses it before any collateral.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "policy": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "verification_failed");
+    assert!(json["message"].as_str().unwrap().contains("cpu"), "{json}");
+
+    // No nonce: the request cannot establish freshness for this relying party.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("nonce is required"));
+
+    // The relying party's nonce must be the envelope's.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": "AgICAgICAgICAgICAgICAg"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("eat_nonce differs"));
+
+    // Tokens are for the old result; the appraisal is the result here.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "issue_token": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("issue_token"));
+
+    // Legacy params are refused rather than silently ignored.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "params": {"expected_report_data": "AQID"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("params"));
+
+    // Debug policy bits stay under the server's control.
+    let (status, _) = post_verify(
+        build_api_router(test_state_with(|c| c.attestation.allow_debug = false)),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "policy": {"policy_bits": {"allow_debug": true}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn attest_refuses_an_unknown_format_before_hardware_access() {
+    let state = test_state();
+    let app = build_api_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/attest")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"platform": "snp", "format": "v2"}))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

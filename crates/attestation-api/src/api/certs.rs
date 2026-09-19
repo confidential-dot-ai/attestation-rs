@@ -1,40 +1,31 @@
 use axum::extract::State;
 use axum::Json;
-use serde::Serialize;
-use serde_json::Value;
 
+use crate::certs::{status, CertStatusResponse};
 use crate::error::ApiError;
 use crate::AppState;
 
-#[derive(Serialize)]
-pub struct CertStatusResponse {
-    pub snp_chains_cached: Vec<String>,
-    pub vcek_count: u64,
-    pub tdx_collateral_count: u64,
-    pub crl_status: Value,
+pub async fn status_handler(State(state): State<AppState>) -> Json<CertStatusResponse> {
+    Json(status(&state.cert_cache))
 }
 
-pub async fn status(State(state): State<AppState>) -> Json<CertStatusResponse> {
-    let cache = &state.cert_cache;
-    Json(CertStatusResponse {
-        snp_chains_cached: cache.cached_chain_names().await,
-        vcek_count: cache.vcek_entry_count(),
-        tdx_collateral_count: cache.tdx_entry_count(),
-        crl_status: cache.crl_status_json().await,
-    })
-}
-
+/// Refetch every held and pinned artifact. A failure keeps the previous copy;
+/// the response reports every failure so an operator sees what is stale.
 pub async fn refresh(State(state): State<AppState>) -> Result<Json<CertStatusResponse>, ApiError> {
-    state
-        .cert_cache
-        .refresh_all()
-        .await
-        .map_err(|e| ApiError::CertFetch(e.to_string()))?;
-
-    Ok(Json(CertStatusResponse {
-        snp_chains_cached: state.cert_cache.cached_chain_names().await,
-        vcek_count: state.cert_cache.vcek_entry_count(),
-        tdx_collateral_count: state.cert_cache.tdx_entry_count(),
-        crl_status: state.cert_cache.crl_status_json().await,
-    }))
+    let report = state.cert_cache.refresh_all().await;
+    if !report.failed.is_empty() {
+        let mut lines: Vec<String> = report
+            .failed
+            .iter()
+            .map(|(k, e)| format!("{k}: {e}"))
+            .collect();
+        lines.sort();
+        return Err(ApiError::CertFetch(format!(
+            "{} of {} collateral refresh(es) failed; the previous copies are still served: {}",
+            report.failed.len(),
+            report.attempted,
+            lines.join("; ")
+        )));
+    }
+    Ok(Json(status(&state.cert_cache)))
 }
