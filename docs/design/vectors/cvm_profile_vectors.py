@@ -60,6 +60,7 @@ def main() -> None:
     key = ("spki-sha256", bytes([0x11]) * 32)
     a = anchor(nonce, key)
     print("anchor (key)   ", hx(a))
+    print("anchor (x509)  ", hx(anchor(nonce, ("x509-tbs-sha256", bytes([0x22]) * 32))))
     print("pad64(anchor)  ", hx(pad64(a)))
     print("gpu spdm nonce ", hx(sha256(nonce + b"NVIDIA-GPU-EAT-v1")))
     print("switch nonce   ", hx(sha256(nonce + b"NVIDIA-SWITCH-EAT-v1")))
