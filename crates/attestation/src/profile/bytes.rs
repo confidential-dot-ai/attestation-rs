@@ -74,8 +74,8 @@ impl JsonSchema for Bytes {
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "string",
-            "description": "bytes, base64url without padding (RFC 4648 section 5)",
-            "pattern": "^[A-Za-z0-9_-]*$",
+            "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
+            "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
             "contentEncoding": "base64url"
         })
     }
@@ -153,11 +153,17 @@ impl<const N: usize> JsonSchema for FixedBytes<N> {
         format!("Base64UrlBytes{N}").into()
     }
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        let len = Self::encoded_len();
+        // The final character carries the padding bits, which must be zero.
+        let full = N / 3 * 4;
+        let pattern = match N % 3 {
+            0 => format!("^[A-Za-z0-9_-]{{{full}}}$"),
+            1 => format!("^[A-Za-z0-9_-]{{{}}}[AQgw]$", full + 1),
+            _ => format!("^[A-Za-z0-9_-]{{{}}}[AEIMQUYcgkosw048]$", full + 2),
+        };
         json_schema!({
             "type": "string",
             "description": format!("exactly {N} bytes, base64url without padding"),
-            "pattern": format!("^[A-Za-z0-9_-]{{{len}}}$"),
+            "pattern": pattern,
             "contentEncoding": "base64url"
         })
     }
@@ -191,5 +197,11 @@ mod tests {
         assert_eq!(FixedBytes::<3>::encoded_len(), 4);
         assert_eq!(FixedBytes::<32>::default().encode().len(), 43);
         assert_eq!(FixedBytes::<48>::default().encode().len(), 64);
+        assert!(Bytes::decode("AQ").is_ok());
+        assert!(
+            Bytes::decode("AR").is_err(),
+            "non-zero trailing bits are rejected"
+        );
+        assert!(Bytes::decode("A").is_err(), "length 1 mod 4 is rejected");
     }
 }

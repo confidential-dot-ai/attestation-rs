@@ -43,20 +43,20 @@
     },
     "Base64Url": {
       "contentEncoding": "base64url",
-      "description": "bytes, base64url without padding (RFC 4648 section 5)",
-      "pattern": "^[A-Za-z0-9_-]*$",
+      "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
       "type": "string"
     },
     "Base64UrlBytes16": {
       "contentEncoding": "base64url",
       "description": "exactly 16 bytes, base64url without padding",
-      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
       "type": "string"
     },
     "Base64UrlBytes32": {
       "contentEncoding": "base64url",
       "description": "exactly 32 bytes, base64url without padding",
-      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
       "type": "string"
     },
     "Base64UrlBytes48": {
@@ -68,7 +68,7 @@
     "Base64UrlBytes64": {
       "contentEncoding": "base64url",
       "description": "exactly 64 bytes, base64url without padding",
-      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$",
       "type": "string"
     },
     "BindingMode": {

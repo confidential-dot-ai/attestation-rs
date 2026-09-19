@@ -12,14 +12,14 @@
     },
     "Base64Url": {
       "contentEncoding": "base64url",
-      "description": "bytes, base64url without padding (RFC 4648 section 5)",
-      "pattern": "^[A-Za-z0-9_-]*$",
+      "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
       "type": "string"
     },
     "Base64UrlBytes32": {
       "contentEncoding": "base64url",
       "description": "exactly 32 bytes, base64url without padding",
-      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
       "type": "string"
     },
     "Binding": {
@@ -79,6 +79,7 @@
         "$ref": "#/$defs/CmwEntry"
       },
       "description": "RFC 9999 collection: optional __cmwc_t plus labeled records or collections",
+      "maxProperties": 33,
       "minProperties": 1,
       "properties": {
         "__cmwc_t": {
@@ -400,24 +401,6 @@
       ],
       "type": "string"
     },
-    "Submod": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/CpuEvidence"
-        },
-        {
-          "$ref": "#/$defs/NestedToken",
-          "description": "Arm CCA: the token as the RMM emits it, nested per RFC 9711 section 4.2.18.3."
-        },
-        {
-          "$ref": "#/$defs/VtpmEvidence"
-        },
-        {
-          "$ref": "#/$defs/GpuDeviceEvidence"
-        }
-      ],
-      "description": "One attester's submodule (section 4.4)."
-    },
     "Tee": {
       "enum": [
         "sev-snp",
@@ -539,10 +522,32 @@
       "type": "string"
     },
     "submods": {
-      "additionalProperties": {
-        "$ref": "#/$defs/Submod"
-      },
+      "additionalProperties": false,
       "description": "Keyed by the reserved name forms; see [`SubmodName`].",
+      "maxProperties": 66,
+      "patternProperties": {
+        "^(gpu|nvswitch)/[!-.0-~]{1,128}$": {
+          "$ref": "#/$defs/GpuDeviceEvidence"
+        }
+      },
+      "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpuEvidence"
+            },
+            {
+              "$ref": "#/$defs/NestedToken"
+            }
+          ]
+        },
+        "vtpm": {
+          "$ref": "#/$defs/VtpmEvidence"
+        }
+      },
+      "required": [
+        "cpu"
+      ],
       "type": "object"
     }
   },

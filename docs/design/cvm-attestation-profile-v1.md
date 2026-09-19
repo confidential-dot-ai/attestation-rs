@@ -109,7 +109,7 @@ Submodule names are chosen by the attester within these reserved forms: `cpu` (e
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
 | `cvm_platform` | must | hint | `{vendor, tee, generation?, hosting}`; vendor in `amd`, `intel`, `arm`; tee in `sev-snp`, `tdx`, `cca`; hosting in `bare`, `azure`, `gcp`, `dstack` |
-| `cvm_report` | must | signed | a CMW record (RFC 9999) `[type, value, 4]`: `type` is the media type of the raw report, `value` the raw bytes, indicator bit 2 (evidence). Types: `application/vnd.confidential-ai.sev-snp-report`, `application/vnd.confidential-ai.tdx-quote`, `application/vnd.confidential-ai.hcl-report`; `application/vnd.veraison.tsm-report+json` is accepted on ingest |
+| `cvm_report` | must | signed | a CMW record (RFC 9999) `[type, value, 4]`: `type` is the media type of the raw report, `value` the raw bytes, and the indicator is required and exactly 4 (bit 2, evidence). Types: `application/vnd.confidential-ai.sev-snp-report`, `application/vnd.confidential-ai.tdx-quote`, `application/vnd.confidential-ai.hcl-report`; `application/vnd.veraison.tsm-report+json` is accepted on ingest |
 | `cvm_binding` | must | bound | freshness pattern, binding mode (section 4.5) and their parameters |
 | `cvm_endorsements` | may | bound | inline collateral as a CMW collection, indicator bit 1 (section 4.6) |
 | `cvm_registers` | may | bound | runtime register array (section 4.7) |
@@ -178,7 +178,7 @@ When evidence rides in a certificate, it is carried in the `id-pe-cmw` extension
 
 ### 4.6 Endorsements
 
-`cvm_endorsements` carries the same collateral set the verifier would otherwise fetch, so verification can be offline and so a KDS or PCS outage does not stop a verifier that already holds fresh collateral. It is a CMW collection (RFC 9999 section 3.3): each entry is a record `[type, value, indicator]` with indicator bit 1 (endorsements), or bit 0 for reference values when a deployment ships them inline; the collection's `__cmwc_t` is `tag:confidential.ai,2026:cvm-endorsements#1`. Entries and their types:
+`cvm_endorsements` carries the same collateral set the verifier would otherwise fetch, so verification can be offline and so a KDS or PCS outage does not stop a verifier that already holds fresh collateral. It is a CMW collection (RFC 9999 section 3.3): each entry is a record `[type, value, indicator]` with the indicator exactly 2 (bit 1, endorsements), or exactly 1 (bit 0, reference values) when a deployment ships them inline; nested collections are not accepted in it, its labels are exactly the ones below, and its `__cmwc_t` is `tag:confidential.ai,2026:cvm-endorsements#1`. Entries and their types:
 
 | Entry | Type and content |
 | --- | --- |
@@ -198,12 +198,12 @@ Inline endorsements are inputs, never authority: the verifier anchors every cert
 | Field | Meaning |
 | --- | --- |
 | `index` | integer slot, 0 to 65535 |
-| `alg` | TPM 2.0 algorithm name: `sha256` (TPM_ALG_SHA256, 0x000B), `sha384` (0x000C) or `sha512` (0x000D); the same names CEL uses in `digests` |
+| `alg` | TPM 2.0 algorithm name: `sha256` (TPM_ALG_SHA256, 0x000B), `sha384` (0x000C) or `sha512` (0x000D); the same names CEL uses in `digests`. Pinned per source: `sha384` for `tdx-rtmr` and `snp-vmr`, the quoted bank for `vtpm-pcr`, `sha256` or `sha512` (the realm hash algorithm) for `cca-rem` |
 | `value` | the register value, exactly the digest length of `alg` |
 | `source` | `tdx-rtmr`, `snp-vmr`, `vtpm-pcr`, `cca-rem` |
-| `backing` | `hardware`, `privileged-service`, `kernel-service`, `virtualized` |
+| `backing` | `hardware`, `privileged-service`, `kernel-service`, `virtualized`. In evidence this is a hint constrained by source: `hardware` for `tdx-rtmr` and `cca-rem` (the value is in the signed report), `privileged-service` for `vtpm-pcr`, and never `hardware` for `snp-vmr`; the verifier reports the backing the pinned image establishes (section 10) and never a higher one than the evidence claims |
 
-The verifier never trusts `value` from the envelope. For `tdx-rtmr` and `cca-rem` the authoritative values are in the signed report and the envelope values must equal them. For `vtpm-pcr` the quoted PCR digest must reproduce from them. For `snp-vmr` the commitment must reproduce from them (section 4.9). When a log is present it must replay to them.
+The verifier never trusts `value` from the envelope. For `tdx-rtmr` and `cca-rem` the authoritative values are in the signed report and the envelope values must equal them. For `vtpm-pcr` the quoted PCR digest must reproduce from them. For `snp-vmr` the commitment must reproduce from them (section 4.9), so `snp-vmr` registers appear only with the `commitment` binding and an envelope that carries them in any other mode is rejected. When a log is present it must replay to them.
 
 Index space: for `tdx-rtmr` the index is the RTMR ordinal 0 to 3, for `cca-rem` the REM ordinal 0 to 3, for `vtpm-pcr` the PCR number, for `snp-vmr` the slot number. The launch measurement (MRTD, RIM, SNP MEASUREMENT) is never a register; it is `cvm_launch_measurement`. Two conventions in the field are offset by one and must be converted on ingest: the UEFI `CC_EVENT` `MrIndex` (0 is MRTD, 1 to 4 are RTMR 0 to 3, so CCEL records subtract one) and the Flashbots and BuilderNet measurement files (index 0 MRTD, 1 to 4 RTMR 0 to 3). CoCo's attestation agent folds TPM PCR 17 into RTMR 3, which the log replay reproduces without renumbering. CEL's `pcr` field carries our index.
 
@@ -250,6 +250,8 @@ The verifier runs the order of section 6: chain and signature, then launch measu
 ### 4.10 Encoding rules
 
 JSON: claim names are strings; profile claims carry the `cvm_` prefix; byte strings are base64url without padding (RFC 4648 section 5); integers are JSON numbers; no floating point anywhere. Unknown claims at the top level or in a submodule claims set are ignored, as EAT extensibility requires; an unknown field inside any `cvm_*` object is rejected. Both JSON encodings in use today (standard base64 in the SNP and TDX payloads, base64url in the Azure payloads, hex in TPM quotes) are replaced by this rule; section 9 covers the transition.
+
+An object with a duplicate member name is rejected, in the envelope, in every `cvm_*` object and in every CMW collection, so no two implementations can disagree about which value was meant; implementations whose JSON library keeps the last duplicate must check for duplicates themselves. Untrusted input is parsed without buffering and within fixed bounds: an envelope carries at most 66 submodules, a CMW collection at most 32 entries and one level of nesting, and every byte string field at most 1 MiB, with the whole envelope at most 10 MiB.
 
 CBOR: claim keys from Appendix A; text strings for names, byte strings for bytes; deterministic encoding; definite lengths.
 

@@ -1,13 +1,25 @@
 //! RFC 9999 Conceptual Message Wrappers in their JSON serialization.
+//!
+//! Collections are parsed by a streaming visitor, never through an untagged
+//! enum: untagged deserialization buffers every remaining byte once per
+//! nesting level, which turns an 8 MB envelope into gigabytes of heap.
 
 use super::bytes::Bytes;
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::value::SeqAccessDeserializer;
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// A collection may contain a collection, and no deeper.
+pub const MAX_CMW_DEPTH: u8 = 2;
+/// Entries per collection; the profile defines seven labels.
+pub const MAX_CMW_ENTRIES: usize = 32;
+/// RFC 9999 defines indicator bits 0 to 3.
+pub const MAX_CMW_IND: u32 = 0b1111;
 
 /// `json-record = [type: media-type, value: base64url-string, ? ind: uint]`
 /// (RFC 9999 section 3.1).
@@ -67,6 +79,9 @@ impl<'de> Deserialize<'de> for CmwRecord {
                 if media_type.is_empty() || !media_type.contains('/') {
                     return Err(de::Error::custom("CMW record: type is not a media type"));
                 }
+                if ind.is_some_and(|i| i > MAX_CMW_IND) {
+                    return Err(de::Error::custom("CMW record: indicator above 15"));
+                }
                 Ok(CmwRecord {
                     media_type,
                     value,
@@ -90,7 +105,7 @@ impl JsonSchema for CmwRecord {
             "prefixItems": [
                 { "type": "string", "pattern": "^[^/]+/.+$" },
                 bytes,
-                { "type": "integer", "minimum": 0, "maximum": 15 }
+                { "type": "integer", "minimum": 0, "maximum": MAX_CMW_IND }
             ],
             "minItems": 2,
             "maxItems": 3
@@ -100,7 +115,7 @@ impl JsonSchema for CmwRecord {
 
 /// One member of a collection: a record (JSON array) or a nested collection
 /// (JSON object).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CmwEntry {
     Record(CmwRecord),
@@ -131,36 +146,91 @@ impl Serialize for CmwCollection {
     }
 }
 
+/// Deserializes one entry at nesting `depth` (the depth of the collection it
+/// sits in) by dispatching on the JSON shape, without buffering.
+struct EntrySeed {
+    depth: u8,
+}
+
+impl<'de> DeserializeSeed<'de> for EntrySeed {
+    type Value = CmwEntry;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<CmwEntry, D::Error> {
+        d.deserialize_any(EntryVisitor { depth: self.depth })
+    }
+}
+
+struct EntryVisitor {
+    depth: u8,
+}
+
+impl<'de> Visitor<'de> for EntryVisitor {
+    type Value = CmwEntry;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a CMW record (array) or collection (object)")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<CmwEntry, A::Error> {
+        CmwRecord::deserialize(SeqAccessDeserializer::new(seq)).map(CmwEntry::Record)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<CmwEntry, A::Error> {
+        if self.depth >= MAX_CMW_DEPTH {
+            return Err(de::Error::custom(format!(
+                "CMW collection nested deeper than {MAX_CMW_DEPTH}"
+            )));
+        }
+        collection_from_map(map, self.depth + 1).map(CmwEntry::Collection)
+    }
+}
+
+fn collection_from_map<'de, A: MapAccess<'de>>(
+    mut map: A,
+    depth: u8,
+) -> Result<CmwCollection, A::Error> {
+    let mut out = CmwCollection::default();
+    while let Some(key) = map.next_key::<String>()? {
+        if key == CMWC_T {
+            if out.collection_type.is_some() {
+                return Err(de::Error::duplicate_field(CMWC_T));
+            }
+            out.collection_type = Some(map.next_value::<String>()?);
+            continue;
+        }
+        if out.entries.len() >= MAX_CMW_ENTRIES {
+            return Err(de::Error::custom(format!(
+                "CMW collection has more than {MAX_CMW_ENTRIES} entries"
+            )));
+        }
+        let entry = map.next_value_seed(EntrySeed { depth })?;
+        if out.entries.insert(key.clone(), entry).is_some() {
+            return Err(de::Error::custom(format!(
+                "CMW collection: duplicate label {key:?}"
+            )));
+        }
+    }
+    if out.entries.is_empty() {
+        return Err(de::Error::custom("CMW collection has no entries"));
+    }
+    Ok(out)
+}
+
 impl<'de> Deserialize<'de> for CmwCollection {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Type(String),
-            Entry(CmwEntry),
-        }
-        let raw: BTreeMap<String, Raw> = BTreeMap::deserialize(d)?;
-        let mut out = CmwCollection::default();
-        for (k, v) in raw {
-            match (k.as_str(), v) {
-                (CMWC_T, Raw::Type(t)) => out.collection_type = Some(t),
-                (CMWC_T, Raw::Entry(_)) => {
-                    return Err(de::Error::custom("__cmwc_t must be a string"))
-                }
-                (_, Raw::Type(_)) => {
-                    return Err(de::Error::custom(format!(
-                        "CMW collection entry {k:?} is not a record or collection"
-                    )))
-                }
-                (_, Raw::Entry(e)) => {
-                    out.entries.insert(k, e);
-                }
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = CmwCollection;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a CMW collection object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<CmwCollection, A::Error> {
+                collection_from_map(map, 1)
             }
         }
-        if out.entries.is_empty() {
-            return Err(de::Error::custom("CMW collection has no entries"));
-        }
-        Ok(out)
+        d.deserialize_map(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for CmwEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        EntrySeed { depth: 0 }.deserialize(d)
     }
 }
 
@@ -175,7 +245,8 @@ impl JsonSchema for CmwCollection {
             "description": "RFC 9999 collection: optional __cmwc_t plus labeled records or collections",
             "properties": { "__cmwc_t": { "type": "string" } },
             "additionalProperties": entry,
-            "minProperties": 1
+            "minProperties": 1,
+            "maxProperties": MAX_CMW_ENTRIES + 1
         })
     }
 }
@@ -195,6 +266,8 @@ mod tests {
         assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",2,9]"#).is_err());
         assert!(serde_json::from_str::<CmwRecord>(r#"["notatype","AQID"]"#).is_err());
         assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID=="]"#).is_err());
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",16]"#).is_err());
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",15]"#).is_ok());
     }
 
     #[test]
@@ -211,5 +284,35 @@ mod tests {
             r#"{"__cmwc_t":["a/b","AQ"],"a":["a/b","AQ"]}"#
         )
         .is_err());
+        let e: CmwEntry = serde_json::from_str(r#"["a/b","AQ"]"#).unwrap();
+        assert!(matches!(e, CmwEntry::Record(_)));
+    }
+
+    #[test]
+    fn bounded_and_strict() {
+        let deep = r#"{"a":{"b":{"c":["x/y","AQ"]}}}"#;
+        let err = serde_json::from_str::<CmwCollection>(deep)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nested deeper"), "{err}");
+        let ok = r#"{"a":{"c":["x/y","AQ"]}}"#;
+        serde_json::from_str::<CmwCollection>(ok).unwrap();
+        let dup = r#"{"a":["x/y","AQ"],"a":["x/y","Ag"]}"#;
+        let err = serde_json::from_str::<CmwCollection>(dup)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate label"), "{err}");
+        let dup_t = r#"{"__cmwc_t":"t","__cmwc_t":"u","a":["x/y","AQ"]}"#;
+        assert!(serde_json::from_str::<CmwCollection>(dup_t).is_err());
+        let mut many = String::from("{");
+        for i in 0..=MAX_CMW_ENTRIES {
+            many.push_str(&format!(r#""e{i}":["x/y","AQ"],"#));
+        }
+        many.pop();
+        many.push('}');
+        let err = serde_json::from_str::<CmwCollection>(&many)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than"), "{err}");
     }
 }

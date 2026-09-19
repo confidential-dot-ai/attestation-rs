@@ -257,6 +257,26 @@ impl VerifyPolicy {
             k.validate()
                 .map_err(|e| policy_err(format!("freshness.key: {e}")))?;
         }
+        for (name, f) in &self.tcb.floors {
+            if f.snp.is_none() && f.tdx.is_none() {
+                return Err(policy_err(format!(
+                    "tcb.floors[{name:?}]: constrains nothing"
+                )));
+            }
+        }
+        if self.commitment.header16.0 != HEADER16 {
+            return Err(policy_err(
+                "commitment.header16: v1 pins ATS-MR-1, version 1, alg 1, reg_count 16, flags 0",
+            ));
+        }
+        if self.commitment.seed.0 != SEED {
+            return Err(policy_err(
+                "commitment.seed: v1 pins SHA-384(\"ats-mr-v1/seed\")",
+            ));
+        }
+        if self.gpu.expected_archs.as_ref().is_some_and(Vec::is_empty) {
+            return Err(policy_err("gpu.expected_archs: an empty list admits no device; omit it to accept every architecture"));
+        }
         if self.tcb.tdx_allowed_status.is_empty() {
             return Err(policy_err("tcb.tdx_allowed_status: empty"));
         }
@@ -354,5 +374,19 @@ mod tests {
         let short =
             json!({"reference": {"launch_measurement": [{"alg": "sha384", "value": "AQ"}]}});
         assert!(VerifyPolicy::from_json(&serde_json::to_vec(&short).unwrap()).is_err());
+        let msg = |v: serde_json::Value| {
+            VerifyPolicy::from_json(&serde_json::to_vec(&v).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(msg(json!({"tcb": {"floors": {"f": {}}}})).contains("constrains nothing"));
+        assert!(msg(json!({"gpu": {"expected_archs": []}})).contains("admits no device"));
+        assert!(
+            msg(json!({"commitment": {"header16": Bytes(vec![0; 16]).encode()}}))
+                .contains("header16")
+        );
+        assert!(msg(json!({"commitment": {"seed": Bytes(vec![0; 48]).encode()}})).contains("seed"));
+        let pinned = json!({"commitment": {"header16": FixedBytes(HEADER16).encode(), "seed": FixedBytes(SEED).encode()}});
+        VerifyPolicy::from_json(&serde_json::to_vec(&pinned).unwrap()).unwrap();
     }
 }

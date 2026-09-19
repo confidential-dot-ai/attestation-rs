@@ -16,7 +16,8 @@ use super::{
 use crate::error::{AttestationError, Result};
 use crate::utils::MAX_EVIDENCE_FIELD_SIZE;
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+use serde::de::{self, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
@@ -81,50 +82,255 @@ pub struct Evidence {
     /// Always [`CVM_VERSION`].
     pub cvm_version: u32,
     /// Keyed by the reserved name forms; see [`SubmodName`].
+    #[schemars(schema_with = "submods_schema")]
     pub submods: BTreeMap<String, Submod>,
 }
 
-#[derive(Deserialize)]
-struct EvidenceWire {
-    eat_profile: String,
-    eat_nonce: Bytes,
-    cvm_version: u32,
-    submods: BTreeMap<String, serde_json::Value>,
+/// The schema says which shape each name form carries, as the parser does.
+fn submods_schema(g: &mut SchemaGenerator) -> Schema {
+    let cpu = g.subschema_for::<CpuEvidence>();
+    let token = g.subschema_for::<NestedToken>();
+    let vtpm = g.subschema_for::<VtpmEvidence>();
+    let device = g.subschema_for::<GpuDeviceEvidence>();
+    json_schema!({
+        "type": "object",
+        "description": "one entry per attester, keyed by the reserved name forms of section 4.3",
+        "properties": {
+            "cpu": { "anyOf": [cpu, token] },
+            "vtpm": vtpm
+        },
+        "patternProperties": { "^(gpu|nvswitch)/[!-.0-~]{1,128}$": device },
+        "additionalProperties": false,
+        "required": ["cpu"],
+        "maxProperties": MAX_SUBMODS
+    })
 }
 
 impl<'de> Deserialize<'de> for Evidence {
     fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        let w = EvidenceWire::deserialize(d)?;
-        let mut submods = BTreeMap::new();
-        for (name, value) in w.submods {
-            let kind = SubmodName::parse(&name).map_err(de::Error::custom)?;
-            let parsed = |v: serde_json::Value| -> std::result::Result<Submod, D::Error> {
-                let err =
-                    |e: serde_json::Error| de::Error::custom(format!("submodule {name:?}: {e}"));
-                Ok(match kind {
-                    SubmodName::Cpu if v.is_array() => {
-                        Submod::CcaToken(serde_json::from_value(v).map_err(err)?)
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Evidence;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("an evidence envelope object")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Evidence, A::Error> {
+                let mut eat_profile: Option<String> = None;
+                let mut eat_nonce: Option<Bytes> = None;
+                let mut cvm_version: Option<u32> = None;
+                let mut submods: Option<BTreeMap<String, Submod>> = None;
+                let mut seen = BTreeSet::new();
+                fn dup<E: de::Error>(field: &'static str) -> E {
+                    E::duplicate_field(field)
+                }
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!(
+                            "envelope: duplicate member {key:?}"
+                        )));
                     }
-                    SubmodName::Cpu => Submod::Cpu(serde_json::from_value(v).map_err(err)?),
-                    SubmodName::Vtpm => Submod::Vtpm(serde_json::from_value(v).map_err(err)?),
-                    SubmodName::Gpu(_) | SubmodName::NvSwitch(_) => {
-                        Submod::Device(serde_json::from_value(v).map_err(err)?)
+                    match key.as_str() {
+                        "eat_profile" => {
+                            if eat_profile.is_some() {
+                                return Err(dup("eat_profile"));
+                            }
+                            eat_profile = Some(map.next_value()?);
+                        }
+                        "eat_nonce" => {
+                            if eat_nonce.is_some() {
+                                return Err(dup("eat_nonce"));
+                            }
+                            eat_nonce = Some(map.next_value()?);
+                        }
+                        "cvm_version" => {
+                            if cvm_version.is_some() {
+                                return Err(dup("cvm_version"));
+                            }
+                            cvm_version = Some(map.next_value()?);
+                        }
+                        "submods" => {
+                            if submods.is_some() {
+                                return Err(dup("submods"));
+                            }
+                            submods = Some(map.next_value_seed(SubmodsSeed)?);
+                        }
+                        // Unknown top-level claims are ignored, as EAT extensibility requires.
+                        _ => {
+                            map.next_value::<de::IgnoredAny>()?;
+                        }
                     }
+                }
+                Ok(Evidence {
+                    eat_profile: eat_profile
+                        .ok_or_else(|| de::Error::missing_field("eat_profile"))?,
+                    eat_nonce: eat_nonce.ok_or_else(|| de::Error::missing_field("eat_nonce"))?,
+                    cvm_version: cvm_version
+                        .ok_or_else(|| de::Error::missing_field("cvm_version"))?,
+                    submods: submods.ok_or_else(|| de::Error::missing_field("submods"))?,
                 })
-            };
-            submods.insert(name.clone(), parsed(value)?);
+            }
         }
-        Ok(Evidence {
-            eat_profile: w.eat_profile,
-            eat_nonce: w.eat_nonce,
-            cvm_version: w.cvm_version,
-            submods,
-        })
+        d.deserialize_map(V)
+    }
+}
+
+/// A map adapter that rejects a member name it has already seen, so a claims
+/// set cannot carry two values under one name even when the name is one the
+/// profile ignores. Nested `cvm_*` objects reject duplicates on their own
+/// (`deny_unknown_fields` plus serde's duplicate-field check).
+struct DupCheckMap<A> {
+    inner: A,
+    seen: BTreeSet<String>,
+    what: &'static str,
+}
+
+impl<A> DupCheckMap<A> {
+    fn new(inner: A, what: &'static str) -> Self {
+        DupCheckMap {
+            inner,
+            seen: BTreeSet::new(),
+            what,
+        }
+    }
+}
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for DupCheckMap<A> {
+    type Error = A::Error;
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> std::result::Result<Option<K::Value>, A::Error> {
+        let Some(key) = self.inner.next_key::<String>()? else {
+            return Ok(None);
+        };
+        if !self.seen.insert(key.clone()) {
+            return Err(de::Error::custom(format!(
+                "{}: duplicate member {key:?}",
+                self.what
+            )));
+        }
+        seed.deserialize(IntoDeserializer::<A::Error>::into_deserializer(key))
+            .map(Some)
+    }
+    fn next_value_seed<V: DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> std::result::Result<V::Value, A::Error> {
+        self.inner.next_value_seed(seed)
+    }
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
+}
+
+/// Deserializes a claims-set struct through [`DupCheckMap`].
+struct StrictStructVisitor<T> {
+    what: &'static str,
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<T> StrictStructVisitor<T> {
+    fn new(what: &'static str) -> Self {
+        StrictStructVisitor {
+            what,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for StrictStructVisitor<T> {
+    type Value = T;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "a {} claims set", self.what)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> std::result::Result<T, A::Error> {
+        T::deserialize(MapAccessDeserializer::new(DupCheckMap::new(map, self.what)))
+    }
+}
+
+/// The `submods` map: each value is parsed straight from the stream into the
+/// type its name form selects, so a duplicate name or an over-long map is an
+/// error before any further bytes are read.
+struct SubmodsSeed;
+
+impl<'de> DeserializeSeed<'de> for SubmodsSeed {
+    type Value = BTreeMap<String, Submod>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Self::Value, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = BTreeMap<String, Submod>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a submods object keyed by reserved name forms")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(name) = map.next_key::<String>()? {
+                    if out.len() >= MAX_SUBMODS {
+                        return Err(de::Error::custom(format!(
+                            "submods: more than {MAX_SUBMODS} submodules"
+                        )));
+                    }
+                    let kind = SubmodName::parse(&name).map_err(de::Error::custom)?;
+                    let value = map
+                        .next_value_seed(SubmodSeed { kind })
+                        .map_err(|e| de::Error::custom(format!("submodule {name:?}: {e}")))?;
+                    if out.insert(name.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!(
+                            "submods: duplicate submodule {name:?}"
+                        )));
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
+struct SubmodSeed {
+    kind: SubmodName,
+}
+
+impl<'de> DeserializeSeed<'de> for SubmodSeed {
+    type Value = Submod;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Submod, D::Error> {
+        match self.kind {
+            SubmodName::Cpu => d.deserialize_any(CpuOrTokenVisitor),
+            SubmodName::Vtpm => d
+                .deserialize_map(StrictStructVisitor::<VtpmEvidence>::new("vtpm"))
+                .map(Submod::Vtpm),
+            SubmodName::Gpu(_) | SubmodName::NvSwitch(_) => d
+                .deserialize_map(StrictStructVisitor::<GpuDeviceEvidence>::new("device"))
+                .map(Submod::Device),
+        }
+    }
+}
+
+/// `cpu` is a claims set (object) or, for Arm CCA, a nested token (array).
+struct CpuOrTokenVisitor;
+
+impl<'de> Visitor<'de> for CpuOrTokenVisitor {
+    type Value = Submod;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a cpu claims set or a nested token selector")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> std::result::Result<Submod, A::Error> {
+        NestedToken::deserialize(SeqAccessDeserializer::new(seq)).map(Submod::CcaToken)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> std::result::Result<Submod, A::Error> {
+        CpuEvidence::deserialize(MapAccessDeserializer::new(DupCheckMap::new(map, "cpu")))
+            .map(Submod::Cpu)
     }
 }
 
 /// One attester's submodule (section 4.4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Submod {
     Cpu(CpuEvidence),
@@ -355,7 +561,51 @@ pub struct Register {
 }
 
 impl Register {
+    /// Structural rules of section 4.7. `backing` in evidence is a hint: the
+    /// sources with a hardware-signed value are `hardware`, a vTPM is
+    /// `privileged-service`, and an SNP register can never claim `hardware`;
+    /// the verifier reports what the pinned image establishes, never more.
     pub fn validate(&self) -> Result<()> {
+        let (alg_ok, backing_ok, alg_rule, backing_rule) = match self.source {
+            RegisterSource::TdxRtmr => (
+                self.alg == HashAlg::Sha384,
+                self.backing == Backing::Hardware,
+                "sha384",
+                "hardware",
+            ),
+            RegisterSource::CcaRem => (
+                matches!(self.alg, HashAlg::Sha256 | HashAlg::Sha512),
+                self.backing == Backing::Hardware,
+                "sha256 or sha512",
+                "hardware",
+            ),
+            RegisterSource::VtpmPcr => (
+                true,
+                self.backing == Backing::PrivilegedService,
+                "the quoted bank",
+                "privileged-service",
+            ),
+            RegisterSource::SnpVmr => (
+                self.alg == HashAlg::Sha384,
+                self.backing != Backing::Hardware,
+                "sha384",
+                "below hardware",
+            ),
+        };
+        if !alg_ok {
+            return Err(invalid(format!(
+                "register {}/{}: alg must be {alg_rule}",
+                self.source.as_str(),
+                self.index
+            )));
+        }
+        if !backing_ok {
+            return Err(invalid(format!(
+                "register {}/{}: backing must be {backing_rule}",
+                self.source.as_str(),
+                self.index
+            )));
+        }
         if self.value.len() != self.alg.digest_len() {
             return Err(invalid(format!(
                 "register {}/{}: value has {} bytes, {} needs {}",
@@ -655,8 +905,10 @@ impl CpuEvidence {
         if r.value.len() > MAX_EVIDENCE_FIELD_SIZE {
             return Err(invalid("cvm_report: value too large"));
         }
-        if r.ind.is_some() && !r.has_ind(CMW_IND_EVIDENCE) {
-            return Err(invalid("cvm_report: indicator lacks the evidence bit"));
+        if r.ind != Some(CMW_IND_EVIDENCE) {
+            return Err(invalid(
+                "cvm_report: indicator must be exactly 4 (evidence)",
+            ));
         }
         let azure = p.hosting == Hosting::Azure;
         let report_ok = match r.media_type.as_str() {
@@ -724,6 +976,11 @@ impl CpuEvidence {
         }
 
         let commitment = b.mode == BindingMode::Commitment;
+        if p.tee == Tee::SevSnp && self.cvm_registers.is_some() && !commitment {
+            return Err(invalid(
+                "cpu: snp-vmr registers bind only through the commitment (section 4.7)",
+            ));
+        }
         if let Some(regs) = &self.cvm_registers {
             let source = if p.tee == Tee::SevSnp {
                 RegisterSource::SnpVmr
@@ -820,8 +1077,10 @@ fn validate_endorsements(c: &CmwCollection, tee: Tee) -> Result<()> {
                 "cvm_endorsements.{label}: empty or too large"
             )));
         }
-        if !(rec.has_ind(CMW_IND_ENDORSEMENTS) || rec.has_ind(CMW_IND_REFERENCE_VALUES)) {
-            return Err(invalid(format!("cvm_endorsements.{label}: indicator must carry the endorsements or reference-values bit")));
+        if !(rec.ind == Some(CMW_IND_ENDORSEMENTS) || rec.ind == Some(CMW_IND_REFERENCE_VALUES)) {
+            return Err(invalid(format!(
+                "cvm_endorsements.{label}: indicator must be exactly 2 (endorsements) or 1 (reference values)"
+            )));
         }
     }
     Ok(())
@@ -844,12 +1103,6 @@ impl VtpmEvidence {
                     "vtpm: register {} is not in the quoted {} bank",
                     r.index,
                     bank.as_str()
-                )));
-            }
-            if r.backing != Backing::PrivilegedService {
-                return Err(invalid(format!(
-                    "vtpm: register {} backing must be privileged-service",
-                    r.index
                 )));
             }
             let quoted = &self.cvm_tpm_quote.pcrs[usize::from(r.index)];
@@ -1041,6 +1294,33 @@ mod tests {
         })
     }
 
+    fn tdx_envelope() -> Value {
+        json!({
+            "eat_profile": PROFILE_URI,
+            "eat_nonce": b64(&[7u8; 16]),
+            "cvm_version": 1,
+            "submods": {
+                "cpu": {
+                    "cvm_platform": {"vendor": "intel", "tee": "tdx", "hosting": "bare"},
+                    "cvm_report": [MEDIA_TYPE_TDX_QUOTE, b64(&[2u8; 5000]), 4],
+                    "cvm_binding": {"pattern": "challenge", "mode": "report-data"}
+                }
+            }
+        })
+    }
+
+    fn tdx_registers() -> Value {
+        Value::Array((0..4).map(|i| json!({
+            "index": i, "alg": "sha384", "value": b64(&[i as u8; 48]), "source": "tdx-rtmr", "backing": "hardware"
+        })).collect())
+    }
+
+    fn snp_registers() -> Value {
+        Value::Array((0..16).map(|i| json!({
+            "index": i, "alg": "sha384", "value": b64(&[i as u8; 48]), "source": "snp-vmr", "backing": "kernel-service"
+        })).collect())
+    }
+
     fn parse(v: &Value) -> Result<Evidence> {
         Evidence::from_json(&serde_json::to_vec(v).unwrap())
     }
@@ -1088,6 +1368,56 @@ mod tests {
         let mut v = snp_envelope();
         v["eat_nonce"] = json!(format!("{}=", b64(&[1u8; 16])));
         assert!(err(&v).contains("base64url"));
+        let mut v = snp_envelope();
+        v.as_object_mut().unwrap().remove("submods");
+        assert!(err(&v).contains("missing field `submods`"));
+    }
+
+    #[test]
+    fn duplicate_members_rejected() {
+        let cpu = serde_json::to_string(&snp_envelope()["submods"]["cpu"]).unwrap();
+        let nonce = b64(&[7u8; 16]);
+        let dup_submod = format!(
+            r#"{{"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{"cpu":{cpu},"cpu":["CBOR","AQ"]}}}}"#
+        );
+        let e = Evidence::from_json(dup_submod.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("duplicate submodule"), "{e}");
+        let dup_top = format!(
+            r#"{{"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{"cpu":{cpu}}}}}"#
+        );
+        let e = Evidence::from_json(dup_top.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("duplicate member \"eat_nonce\""), "{e}");
+        let dup_inner = format!(
+            r#"{{"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{"cpu":{}}}}}"#,
+            cpu.replacen(
+                "\"cvm_binding\"",
+                "\"cvm_version\":1,\"cvm_version\":2,\"cvm_binding\"",
+                1
+            )
+        );
+        let e = Evidence::from_json(dup_inner.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("duplicate member \"cvm_version\""), "{e}");
+        let dup_nested = format!(
+            r#"{{"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{"cpu":{}}}}}"#,
+            cpu.replacen("\"pattern\"", "\"mode\":\"report-data\",\"pattern\"", 1)
+        );
+        let e = Evidence::from_json(dup_nested.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("duplicate field `mode`"), "{e}");
+        let dup_unknown_top = format!(
+            r#"{{"x":1,"x":2,"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{"cpu":{cpu}}}}}"#
+        );
+        let e = Evidence::from_json(dup_unknown_top.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("duplicate member \"x\""), "{e}");
     }
 
     #[test]
@@ -1101,11 +1431,29 @@ mod tests {
         let mut v = snp_envelope();
         v["submods"]["cpu"] = json!(["JWT", "abc"]);
         assert!(err(&v).contains("only CBOR"));
+        let mut v = snp_envelope();
+        v["submods"]["cpu"] = json!("string");
+        assert!(err(&v).contains("cpu claims set or a nested token"));
         assert!(SubmodName::parse("gpu/GPU-1234").is_ok());
         assert!(SubmodName::parse("nvswitch/abc").is_ok());
         assert!(SubmodName::parse("gpu/").is_err());
         assert!(SubmodName::parse("gpu/a/b").is_err());
         assert!(SubmodName::parse("cpu2").is_err());
+    }
+
+    #[test]
+    fn submodule_count_capped_while_streaming() {
+        let cpu = serde_json::to_string(&snp_envelope()["submods"]["cpu"]).unwrap();
+        let mut submods = format!(r#""cpu":{cpu}"#);
+        for i in 0..MAX_SUBMODS {
+            submods.push_str(&format!(r#","gpu/GPU-{i}":{{"arch":"HOPPER","uuid":"GPU-{i}","evidence_b64":"AA","cert_chain_b64":"AA","cvm_binding":{{"pattern":"challenge","mode":"nras-nonce"}}}}"#));
+        }
+        let nonce = b64(&[7u8; 16]);
+        let doc = format!(
+            r#"{{"eat_profile":"{PROFILE_URI}","eat_nonce":"{nonce}","cvm_version":1,"submods":{{{submods}}}}}"#
+        );
+        let e = Evidence::from_json(doc.as_bytes()).unwrap_err().to_string();
+        assert!(e.contains("more than"), "{e}");
     }
 
     #[test]
@@ -1121,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn report_type_matches_platform() {
+    fn report_record_rules() {
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_report"][0] = json!(MEDIA_TYPE_TDX_QUOTE);
         assert!(err(&v).contains("does not fit"));
@@ -1130,7 +1478,16 @@ mod tests {
         assert!(err(&v).contains("unknown media type"));
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_report"][2] = json!(2);
-        assert!(err(&v).contains("evidence bit"));
+        assert!(err(&v).contains("exactly 4"));
+        let mut v = snp_envelope();
+        v["submods"]["cpu"]["cvm_report"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(err(&v).contains("exactly 4"));
+        let mut v = snp_envelope();
+        v["submods"]["cpu"]["cvm_report"][2] = json!(4294967295u32);
+        assert!(err(&v).contains("indicator above 15"));
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_platform"]["vendor"] = json!("intel");
         assert!(err(&v).contains("disagree"));
@@ -1154,12 +1511,6 @@ mod tests {
         assert!(err(&v).contains("not a cpu binding"));
     }
 
-    fn snp_registers() -> Value {
-        Value::Array((0..16).map(|i| json!({
-            "index": i, "alg": "sha384", "value": b64(&[i as u8; 48]), "source": "snp-vmr", "backing": "kernel-service"
-        })).collect())
-    }
-
     #[test]
     fn commitment_mode_requirements() {
         let mut v = snp_envelope();
@@ -1171,6 +1522,8 @@ mod tests {
         v["submods"]["cpu"]["bootseed"] = json!(b64(&[0x33; 32]));
         assert!(err(&v).contains("chain_len is 0"));
         v["submods"]["cpu"]["cvm_chain"] = json!({"chain_len": 1});
+        parse(&v).unwrap();
+        v["submods"]["cpu"]["cvm_log"] = json!({"format": "tcg-cel-cbor", "data": b64(&[0xa4])});
         parse(&v).unwrap();
         v["submods"]["cpu"]["cvm_registers"]
             .as_array_mut()
@@ -1186,25 +1539,86 @@ mod tests {
     }
 
     #[test]
-    fn registers_and_logs() {
+    fn snp_registers_bind_only_through_the_commitment() {
         let mut v = snp_envelope();
-        v["submods"]["cpu"]["cvm_log"] = json!({"format": "tcg-cel-cbor", "data": b64(&[0xa4])});
-        assert!(err(&v).contains("requires cvm_registers"));
         v["submods"]["cpu"]["cvm_registers"] = snp_registers();
+        assert!(err(&v).contains("only through the commitment"));
+    }
+
+    #[test]
+    fn backing_and_alg_pinned_per_source() {
+        let reg = |source: &str, alg: &str, backing: &str, len: usize| -> Register {
+            serde_json::from_value(json!({
+                "index": 0, "alg": alg, "value": b64(&vec![0u8; len]), "source": source, "backing": backing
+            }))
+            .unwrap()
+        };
+        assert!(reg("snp-vmr", "sha384", "hardware", 48)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("below hardware"));
+        assert!(reg("snp-vmr", "sha384", "privileged-service", 48)
+            .validate()
+            .is_ok());
+        assert!(reg("snp-vmr", "sha256", "kernel-service", 32)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("sha384"));
+        assert!(reg("tdx-rtmr", "sha384", "kernel-service", 48)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("hardware"));
+        assert!(reg("tdx-rtmr", "sha256", "hardware", 32)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("sha384"));
+        assert!(reg("cca-rem", "sha384", "hardware", 48)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("sha256 or sha512"));
+        assert!(reg("cca-rem", "sha512", "hardware", 64).validate().is_ok());
+        assert!(reg("vtpm-pcr", "sha256", "hardware", 32)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("privileged-service"));
+        assert!(reg("tdx-rtmr", "sha384", "hardware", 32)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("needs 48"));
+    }
+
+    #[test]
+    fn registers_and_logs() {
+        let mut v = tdx_envelope();
+        v["submods"]["cpu"]["cvm_log"] = json!({"format": "tdx-ccel", "data": b64(&[0xa4])});
+        assert!(err(&v).contains("requires cvm_registers"));
+        v["submods"]["cpu"]["cvm_registers"] = tdx_registers();
         parse(&v).unwrap();
-        v["submods"]["cpu"]["cvm_registers"][0]["source"] = json!("tdx-rtmr");
-        assert!(err(&v).contains("snp-vmr is required"));
-        let mut v = snp_envelope();
-        v["submods"]["cpu"]["cvm_registers"] = json!([{"index": 0, "alg": "sha384", "value": b64(&[0; 32]), "source": "snp-vmr", "backing": "hardware"}]);
-        assert!(err(&v).contains("needs 48"));
-        let mut v = snp_envelope();
-        v["submods"]["cpu"]["cvm_registers"] = json!([{"index": 16, "alg": "sha384", "value": b64(&[0; 48]), "source": "snp-vmr", "backing": "hardware"}]);
-        assert!(err(&v).contains("index above 15"));
-        let mut v = snp_envelope();
-        let mut regs = snp_registers();
+        v["submods"]["cpu"]["cvm_registers"][0]["source"] = json!("snp-vmr");
+        v["submods"]["cpu"]["cvm_registers"][0]["backing"] = json!("kernel-service");
+        assert!(err(&v).contains("tdx-rtmr is required"));
+        let mut v = tdx_envelope();
+        v["submods"]["cpu"]["cvm_registers"] = json!([{"index": 4, "alg": "sha384", "value": b64(&[0; 48]), "source": "tdx-rtmr", "backing": "hardware"}]);
+        assert!(err(&v).contains("index above 3"));
+        let mut v = tdx_envelope();
+        v["submods"]["cpu"]["cvm_registers"] = json!([]);
+        assert!(err(&v).contains("empty"));
+        let mut v = tdx_envelope();
+        let mut regs = tdx_registers();
         regs[1]["index"] = json!(0);
         v["submods"]["cpu"]["cvm_registers"] = regs;
         assert!(err(&v).contains("duplicate"));
+        let mut v = tdx_envelope();
+        v["submods"]["cpu"]["cvm_registers"] = tdx_registers();
+        v["submods"]["cpu"]["cvm_log"] = json!({"format": "tdx-ccel", "data": ""});
+        assert!(err(&v).contains("cvm_log: empty"));
         assert!(Backing::Virtualized < Backing::KernelService);
         assert!(Backing::KernelService < Backing::PrivilegedService);
         assert!(Backing::PrivilegedService < Backing::Hardware);
@@ -1216,7 +1630,7 @@ mod tests {
         v["submods"]["cpu"]["cvm_endorsements"] = json!({
             "__cmwc_t": ENDORSEMENTS_COLLECTION_TAG,
             "snp.vek": [MEDIA_TYPE_PKIX_CERT, b64(&[0x30, 0x82]), 2],
-            "snp.crl": [MEDIA_TYPE_PKIX_CRL, b64(&[0x30, 0x82]), 2]
+            "snp.crl": [MEDIA_TYPE_PKIX_CRL, b64(&[0x30, 0x82]), 1]
         });
         parse(&v).unwrap();
         v["submods"]["cpu"]["cvm_endorsements"]["tdx.pck_crl"] =
@@ -1224,7 +1638,10 @@ mod tests {
         assert!(err(&v).contains("does not belong"));
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_endorsements"] = json!({"__cmwc_t": ENDORSEMENTS_COLLECTION_TAG, "snp.vek": [MEDIA_TYPE_PKIX_CERT, b64(&[1])]});
-        assert!(err(&v).contains("indicator"));
+        assert!(err(&v).contains("exactly 2"));
+        let mut v = snp_envelope();
+        v["submods"]["cpu"]["cvm_endorsements"] = json!({"__cmwc_t": ENDORSEMENTS_COLLECTION_TAG, "snp.vek": [MEDIA_TYPE_PKIX_CERT, b64(&[1]), 3]});
+        assert!(err(&v).contains("exactly 2"));
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_endorsements"] =
             json!({"__cmwc_t": "tag:other", "snp.vek": [MEDIA_TYPE_PKIX_CERT, b64(&[1]), 2]});
@@ -1232,6 +1649,9 @@ mod tests {
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_endorsements"] = json!({"__cmwc_t": ENDORSEMENTS_COLLECTION_TAG, "snp.vek": [MEDIA_TYPE_PKIX_CRL, b64(&[1]), 2]});
         assert!(err(&v).contains("type must be"));
+        let mut v = snp_envelope();
+        v["submods"]["cpu"]["cvm_endorsements"] = json!({"__cmwc_t": ENDORSEMENTS_COLLECTION_TAG, "snp.vek": {"x": [MEDIA_TYPE_PKIX_CERT, b64(&[1]), 2]}});
+        assert!(err(&v).contains("nested collections"));
     }
 
     fn azure_envelope() -> Value {
@@ -1274,6 +1694,10 @@ mod tests {
         let mut v = azure_envelope();
         v["submods"]["vtpm"]["cvm_registers"][1]["backing"] = json!("hardware");
         assert!(err(&v).contains("privileged-service"));
+        let mut v = azure_envelope();
+        v["submods"]["vtpm"]["cvm_registers"][1]["alg"] = json!("sha384");
+        v["submods"]["vtpm"]["cvm_registers"][1]["value"] = json!(b64(&[7u8; 48]));
+        assert!(err(&v).contains("not in the quoted"));
         let mut v = azure_envelope();
         v["submods"]["vtpm"]["cvm_tpm_quote"]["pcrs"]
             .as_array_mut()
