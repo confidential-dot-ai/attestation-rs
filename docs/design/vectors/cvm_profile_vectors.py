@@ -104,48 +104,68 @@ def cel_record(recnum: int, slot: int, d: bytes, content: bytes) -> bytes:
 
 
 def main() -> None:
-    hx = bytes.hex
+    import json
+    import sys
+
+    out = {}
+    as_json = "--json" in sys.argv[1:]
+
+    def hx(b: bytes) -> str:
+        return b.hex()
+
+    def emit(key: str, label: str, value: bytes) -> None:
+        out[key] = hx(value)
+        if not as_json:
+            print(label, hx(value))
     nonce = bytes(range(16))
     key = ("spki-sha256", bytes([0x11]) * 32)
     a = anchor(nonce, key)
-    print("anchor (key)   ", hx(a))
-    print("anchor (x509)  ", hx(anchor(nonce, ("x509-tbs-sha256", bytes([0x22]) * 32))))
-    print("pad64(anchor)  ", hx(pad64(a)))
-    print("gpu spdm nonce ", hx(sha256(nonce + b"NVIDIA-GPU-EAT-v1")))
-    print("switch nonce   ", hx(sha256(nonce + b"NVIDIA-SWITCH-EAT-v1")))
-    print("seed           ", hx(SEED))
+    emit("anchor_key", "anchor (key)   ", a)
+    emit("anchor_x509", "anchor (x509)  ", anchor(nonce, ("x509-tbs-sha256", bytes([0x22]) * 32)))
+    emit("pad64_anchor_key", "pad64(anchor)  ", pad64(a))
+    emit("nras_gpu_nonce", "gpu spdm nonce ", sha256(nonce + b"NVIDIA-GPU-EAT-v1"))
+    emit("nras_switch_nonce", "switch nonce   ", sha256(nonce + b"NVIDIA-SWITCH-EAT-v1"))
+    emit("seed", "seed           ", SEED)
     regs = [genesis(i) for i in range(REG_COUNT)]
     for i in (0, 3, 15):
-        print(f"R[{i}] genesis  ", hx(regs[i]))
-    print("header16       ", hx(HEADER16))
+        emit(f"genesis_{i}", f"R[{i}] genesis  ", regs[i])
+    emit("header16", "header16       ", HEADER16)
     c0 = commit(regs, 0, pad64(nonce))
-    print("commit chain0  ", hx(c0))
-    print("report_data 0  ", hx(HEADER16 + c0))
+    emit("commit_chain0", "commit chain0  ", c0)
+    emit("report_data_chain0", "report_data 0  ", HEADER16 + c0)
     content = bytes.fromhex("a3006373386301706d73746172742d636f6e7461696e65720258300102")
     d = sha384(content)
     regs[3] = extend(regs[3], d)
-    print("record digest d", hx(d))
-    print("R[3] after ext ", hx(regs[3]))
+    emit("extend_content", "extend content ", content)
+    emit("extend_digest", "record digest d", d)
+    emit("extend_r3", "R[3] after ext ", regs[3])
     c1 = commit(regs, 1, pad64(a))
-    print("commit chain1  ", hx(c1))
-    print("report_data 1  ", hx(HEADER16 + c1))
+    emit("commit_chain1", "commit chain1  ", c1)
+    emit("report_data_chain1", "report_data 1  ", HEADER16 + c1)
     # Section 4.9: the boot record, record 0 of the log, slot 3, bootseed 0x33 repeated 32 times.
     bootseed = bytes([0x33]) * 32
     boot = c8s_event("ats", "boot", sha384(bootseed))
     db = sha384(boot)
-    print("boot content   ", hx(boot))
-    print("boot digest d  ", hx(db))
-    print("R[3] boot only ", hx(extend(genesis(3), db)))
-    print("boot CEL record", hx(cel_record(0, 3, db, boot)))
+    emit("boot_content", "boot content   ", boot)
+    emit("boot_digest", "boot digest d  ", db)
+    emit("boot_r3", "R[3] boot only ", extend(genesis(3), db))
+    emit("boot_cel_record", "boot CEL record", cel_record(0, 3, db, boot))
     # Section 4.9: the claim record, record 1 of the log, first record of workload slot 4.
     claim_body = cbor_map([(0, cbor_tstr("c8s")), (1, cbor_tstr("workload"))])
     claim = c8s_event("ats", "claim", sha384(claim_body), claim_body)
     dc = sha384(claim)
-    print("claim body     ", hx(claim_body))
-    print("claim content  ", hx(claim))
-    print("claim digest d ", hx(dc))
-    print("R[4] claim only", hx(extend(genesis(4), dc)))
-    print("claim CEL rec  ", hx(cel_record(1, 4, dc, claim)))
+    emit("claim_body", "claim body     ", claim_body)
+    emit("claim_content", "claim content  ", claim)
+    emit("claim_digest", "claim digest d ", dc)
+    emit("claim_r4", "R[4] claim only", extend(genesis(4), dc))
+    emit("claim_cel_record", "claim CEL rec  ", cel_record(1, 4, dc, claim))
+    if as_json:
+        out["nonce"] = hx(nonce)
+        out["key_spki_value"] = hx(key[1])
+        out["key_x509_value"] = hx(bytes([0x22]) * 32)
+        out["bootseed"] = hx(bootseed)
+        json.dump(out, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
 
 
 if __name__ == "__main__":

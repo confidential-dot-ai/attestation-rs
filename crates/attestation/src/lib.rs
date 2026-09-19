@@ -33,6 +33,7 @@ use std::sync::OnceLock;
 pub mod collateral;
 pub mod error;
 pub mod platforms;
+pub mod profile;
 pub mod types;
 pub mod utils;
 

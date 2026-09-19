@@ -54,6 +54,12 @@ pub enum AttestationError {
     #[error("evidence too large: {size} bytes exceeds maximum {max} bytes")]
     EvidenceTooLarge { size: usize, max: usize },
 
+    #[error("profile evidence invalid: {0}")]
+    ProfileEvidenceInvalid(String),
+
+    #[error("verify policy invalid: {0}")]
+    PolicyInvalid(String),
+
     #[error("GPU evidence required but envelope has no gpu bundle")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuRequired,

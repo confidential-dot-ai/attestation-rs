@@ -49,6 +49,7 @@ base64 = "0.22"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+schemars = "1"
 sha2 = "0.10"
 thiserror = "2"
 anyhow = "1"

@@ -1,0 +1,524 @@
+{
+  "$defs": {
+    "Backing": {
+      "description": "Who holds a register's value. Ordered weakest first so a policy floor is a\nplain comparison: `seen >= required`.",
+      "enum": [
+        "virtualized",
+        "kernel-service",
+        "privileged-service",
+        "hardware"
+      ],
+      "type": "string"
+    },
+    "Base64Url": {
+      "contentEncoding": "base64url",
+      "description": "bytes, base64url without padding (RFC 4648 section 5)",
+      "pattern": "^[A-Za-z0-9_-]*$",
+      "type": "string"
+    },
+    "Base64UrlBytes16": {
+      "contentEncoding": "base64url",
+      "description": "exactly 16 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "type": "string"
+    },
+    "Base64UrlBytes48": {
+      "contentEncoding": "base64url",
+      "description": "exactly 48 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{64}$",
+      "type": "string"
+    },
+    "CommitmentPolicy": {
+      "additionalProperties": false,
+      "description": "The pinned commitment parameters (section 4.9).",
+      "properties": {
+        "header16": {
+          "$ref": "#/$defs/Base64UrlBytes16",
+          "default": "QVRTLU1SLTEBARAAAAAAAA"
+        },
+        "seed": {
+          "$ref": "#/$defs/Base64UrlBytes48",
+          "default": "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"
+        }
+      },
+      "type": "object"
+    },
+    "Digest": {
+      "additionalProperties": false,
+      "description": "`{alg, value}` with the value the length of the algorithm's digest.",
+      "properties": {
+        "alg": {
+          "$ref": "#/$defs/HashAlg"
+        },
+        "value": {
+          "$ref": "#/$defs/Base64Url"
+        }
+      },
+      "required": [
+        "alg",
+        "value"
+      ],
+      "type": "object"
+    },
+    "FreshnessPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When set, the evidence must bind exactly this key."
+        }
+      },
+      "type": "object"
+    },
+    "GpuArch": {
+      "description": "NVIDIA device architecture as NRAS names it.",
+      "enum": [
+        "HOPPER",
+        "BLACKWELL",
+        "LS10"
+      ],
+      "type": "string"
+    },
+    "GpuDevicePolicy": {
+      "additionalProperties": false,
+      "description": "Per-device gates evaluated against each NRAS submodule; defaults fail closed.",
+      "properties": {
+        "allow_debug": {
+          "default": false,
+          "type": "boolean"
+        },
+        "require_measres_success": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_nonce_match": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_secboot": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "GpuPolicy": {
+      "additionalProperties": false,
+      "description": "NVIDIA device policy (section 7, `gpu`). Defined without a feature gate so\nthe policy schema is one schema; the `nvidia-gpu` verifier converts it to\nits own parameter types.",
+      "properties": {
+        "device_policy": {
+          "$ref": "#/$defs/GpuDevicePolicy",
+          "default": {
+            "allow_debug": false,
+            "require_measres_success": true,
+            "require_nonce_match": true,
+            "require_secboot": true
+          }
+        },
+        "expected_archs": {
+          "description": "Accepted architectures, as NRAS names them (`HOPPER`, `BLACKWELL`, `LS10`).",
+          "items": {
+            "$ref": "#/$defs/GpuArch"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required": {
+          "default": false,
+          "description": "Reject envelopes without a device submodule.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "HashAlg": {
+      "description": "TPM 2.0 algorithm names, as CEL uses them.",
+      "enum": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "type": "string"
+    },
+    "IdentityPolicy": {
+      "additionalProperties": false,
+      "description": "Machine allowlist (section 7). An identity absent from `machines` fails.",
+      "properties": {
+        "machines": {
+          "items": {
+            "$ref": "#/$defs/MachineEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "machines"
+      ],
+      "type": "object"
+    },
+    "KeyBinding": {
+      "additionalProperties": false,
+      "description": "`cvm_binding.key`. The `tls-exporter` kind is reserved for v2 and, being\nabsent here, is rejected as unknown.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/KeyKind"
+        },
+        "value": {
+          "$ref": "#/$defs/Base64Url"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "type": "object"
+    },
+    "KeyKind": {
+      "enum": [
+        "spki-sha256",
+        "x509-tbs-sha256",
+        "raw"
+      ],
+      "type": "string"
+    },
+    "MachineEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Base64Url",
+          "description": "The `cvm_identity` value: SNP `chip_id`, TDX `ppid`, CCA `instance_id`,\nor a GPU `ueid` as UTF-8."
+        },
+        "tcb_floor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "OwnerPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "id_key_digests": {
+          "description": "SNP `id_key_digest` values that make `cvm_owner` trustworthy.",
+          "items": {
+            "$ref": "#/$defs/Base64UrlBytes48"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id_key_digests"
+      ],
+      "type": "object"
+    },
+    "PolicyBitsPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_debug": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allow_migration": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allow_service_td": {
+          "default": false,
+          "type": "boolean"
+        },
+        "require_sept_ve_disable": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_vmpl0": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_zero_reserved_attributes": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ReferenceValues": {
+      "additionalProperties": false,
+      "description": "Reference values, from confos manifests (flat JSON or CoRIM).",
+      "properties": {
+        "launch_measurement": {
+          "default": [],
+          "description": "Any of these launch measurements is acceptable. Empty means unpinned.",
+          "items": {
+            "$ref": "#/$defs/Digest"
+          },
+          "type": "array"
+        },
+        "registers": {
+          "additionalProperties": false,
+          "description": "Acceptable values per slot. A slot absent here is not pinned.",
+          "patternProperties": {
+            "^\\d+$": {
+              "items": {
+                "$ref": "#/$defs/Digest"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "slot_owners": {
+          "additionalProperties": false,
+          "description": "Required `owner` of a workload slot's claim record (section 4.9).",
+          "patternProperties": {
+            "^\\d+$": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SnpTcb": {
+      "description": "SNP TCB version components (used for KDS URL construction and TCB checks).",
+      "properties": {
+        "bootloader": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fmc": {
+          "description": "FMC (Firmware Microcontroller) SPL — present only on Turin processors.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "microcode": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snp": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tee": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bootloader",
+        "tee",
+        "snp",
+        "microcode"
+      ],
+      "type": "object"
+    },
+    "TcbFloor": {
+      "additionalProperties": false,
+      "properties": {
+        "snp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnpTcb"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tdx": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TdxFloor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TcbPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "default_floor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "floors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TcbFloor"
+          },
+          "description": "Named floors; a machine entry or `default_floor` selects one.",
+          "type": "object"
+        },
+        "require_revocation": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_signed_collateral": {
+          "default": true,
+          "type": "boolean"
+        },
+        "tdx_allowed_status": {
+          "default": [
+            "UpToDate"
+          ],
+          "items": {
+            "$ref": "#/$defs/TdxTcbStatus"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TdxFloor": {
+      "additionalProperties": false,
+      "properties": {
+        "min_tcb_evaluation_data_number": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_tee_tcb_svn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base64UrlBytes16"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TdxTcbStatus": {
+      "description": "TDX TCB status from Intel DCAP collateral evaluation.",
+      "enum": [
+        "UpToDate",
+        "SWHardeningNeeded",
+        "ConfigurationNeeded",
+        "ConfigurationAndSWHardeningNeeded",
+        "OutOfDate",
+        "OutOfDateConfigurationNeeded",
+        "Revoked"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://confidential.ai/schemas/cvm-policy-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "commitment": {
+      "$ref": "#/$defs/CommitmentPolicy",
+      "default": {
+        "header16": "QVRTLU1SLTEBARAAAAAAAA",
+        "seed": "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"
+      }
+    },
+    "freshness": {
+      "$ref": "#/$defs/FreshnessPolicy",
+      "default": {}
+    },
+    "gpu": {
+      "$ref": "#/$defs/GpuPolicy",
+      "default": {
+        "device_policy": {
+          "allow_debug": false,
+          "require_measres_success": true,
+          "require_nonce_match": true,
+          "require_secboot": true
+        },
+        "required": false
+      }
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdentityPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "min_backing": {
+      "$ref": "#/$defs/Backing",
+      "default": "hardware",
+      "description": "The weakest backing any verified register may have."
+    },
+    "owner": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OwnerPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy_bits": {
+      "$ref": "#/$defs/PolicyBitsPolicy",
+      "default": {
+        "allow_debug": false,
+        "allow_migration": false,
+        "allow_service_td": false,
+        "require_sept_ve_disable": true,
+        "require_vmpl0": true,
+        "require_zero_reserved_attributes": true
+      }
+    },
+    "reference": {
+      "$ref": "#/$defs/ReferenceValues",
+      "default": {
+        "launch_measurement": []
+      }
+    },
+    "tcb": {
+      "$ref": "#/$defs/TcbPolicy",
+      "default": {
+        "require_revocation": true,
+        "require_signed_collateral": true,
+        "tdx_allowed_status": [
+          "UpToDate"
+        ]
+      }
+    }
+  },
+  "title": "CVM attestation profile v1: verifier policy",
+  "type": "object"
+}

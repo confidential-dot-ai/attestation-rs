@@ -266,7 +266,7 @@ Per appraisal:
 | `ear_appraisal_policy_ids` | the policy identifier the verifier applied |
 | `ear_attester_claims` | our normalized claims, section 5.1 |
 | `ear_verifier_claims` | collateral and reference-value outcomes, section 5.1 |
-| `ear_raw_evidence` | the evidence envelope as appraised, as a CMW collection that also carries the endorsement snapshot the verifier used (indicator bit 1), so the verdict re-verifies after a vendor withdraws collateral; optional, on by default in attestation-api |
+| `ear_raw_evidence` | a CMW record of type `application/cmw+json` (RFC 9999 section 9.5.2), as the EAR CDDL requires, whose value is a CMW collection carrying the evidence envelope as appraised (indicator bit 2) and the endorsement snapshot the verifier used (bit 1), so the verdict re-verifies after a vendor withdraws collateral; at the top level of the EAR claims set beside `eat_nonce`; optional, on by default in attestation-api |
 | `eat_nonce` | the nonce that was bound |
 
 ### 5.1 Normalized claims
@@ -407,7 +407,7 @@ impl Verifier {
 
 Collateral is one type with three transports (inline, cached, fetched), keyed by `CollateralKey`, with `valid_until` taken from each artifact, exactly as the sweep plan describes. The service becomes a router over the library cache.
 
-Schemas: `schemas/cvm-evidence-v1.json` and `schemas/cvm-claims-v1.json` are generated from the Rust types and committed; attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as fixtures for all three implementations. The WASM export becomes `appraise(envelope_json, policy_json)`; the four per-platform exports are deleted.
+Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schemas/cvm-policy-v1.json` are generated from the Rust types (`attestation::profile::schema`) and committed; a library test fails on drift, and attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as `docs/design/vectors/cvm_profile_vectors.json`, emitted by the same script, and every implementation consumes that file; the Rust test fails when a vector has no check. The WASM export becomes `appraise(envelope_json, policy_json)`; the four per-platform exports are deleted.
 
 ## 9. Compatibility and migration
 
