@@ -10,8 +10,8 @@ use crate::platforms::tdx::verify::{parse_tdx_quote, verify_quote_signature};
 use crate::profile::{
     AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
     CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
-    HostDataSemantics, Identity, Owner, PolicyBits, RegisterSource, SubmodAppraisal, Tcb, TdxTcb,
-    VerifiedPlatform, VerifiedRegister, VerifierClaims,
+    HostDataSemantics, Identity, LogFormat, Owner, PolicyBits, RegisterSource, SubmodAppraisal,
+    Tcb, TdxTcb, VerifiedPlatform, VerifiedRegister, VerifierClaims,
 };
 use crate::types::TdxTcbStatus;
 use crate::utils::constant_time_eq;
@@ -112,6 +112,13 @@ pub(crate) async fn appraise(
         return Err(invalid(
             "a migration service TD is bound and policy does not allow it",
         ));
+    }
+
+    if let Some(expected) = &policy.reference.host_data {
+        let padded = crate::utils::pad_report_data(expected.as_slice(), 48)?;
+        if !constant_time_eq(&quote.body.mr_config_id, &padded) {
+            return Err(AttestationError::InitDataMismatch);
+        }
     }
 
     // Identity, floor.
@@ -246,6 +253,28 @@ pub(crate) async fn appraise(
             }
         }
     }
+    // 8. Replay the log when present. The CCEL reproduces RTMR 0 to 2; RTMR 3
+    // takes runtime extends the firmware log does not carry.
+    let mut replayed = [false; 4];
+    if let Some(log) = &cpu.cvm_log {
+        match log.format {
+            LogFormat::TdxCcel => {
+                crate::platforms::tdx::ccel::verify_ccel_against_rtmrs(
+                    log.data.as_slice(),
+                    &rtmrs[0],
+                    &rtmrs[1],
+                    &rtmrs[2],
+                    &rtmrs[3],
+                )?;
+                replayed = [true, true, true, false];
+            }
+            other => {
+                return Err(invalid(format!(
+                    "event log format {other:?} cannot be replayed by this release"
+                )))
+            }
+        }
+    }
     let registers: Vec<VerifiedRegister> = rtmrs
         .iter()
         .enumerate()
@@ -255,7 +284,7 @@ pub(crate) async fn appraise(
             value: Bytes(v.to_vec()),
             source: RegisterSource::TdxRtmr,
             backing: Backing::Hardware,
-            replayed: false,
+            replayed: replayed[i],
             owner: None,
             purpose: None,
         })
@@ -270,7 +299,8 @@ pub(crate) async fn appraise(
     };
     let (reference, executables) = evaluate_reference(policy, &assessment)?;
     let backing_min = evaluate_backing(policy, &registers)?;
-    let vector = cpu_vector(instance_identity, executables, hardware);
+    let configuration = if debug { 96 } else { 2 };
+    let vector = cpu_vector(instance_identity, executables, hardware, configuration);
 
     let mut compat = BTreeMap::new();
     for (name, value) in [

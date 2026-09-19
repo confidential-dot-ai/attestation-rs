@@ -25,8 +25,8 @@ use crate::profile::binding::pad64;
 #[cfg(any(feature = "snp", feature = "tdx"))]
 use crate::profile::Tee;
 use crate::profile::{
-    Appraisal, CpuEvidence, Evidence, KeyBinding, Submod, SubmodAppraisal, VerifierId,
-    VerifyPolicy, EAR_PROFILE_URI,
+    Appraisal, Binding, CpuEvidence, Evidence, FreshnessPattern, Hosting, KeyBinding, Submod,
+    SubmodAppraisal, VerifierId, VerifyPolicy, EAR_PROFILE_URI,
 };
 use crate::Verifier;
 use chrono::Utc;
@@ -43,13 +43,21 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(nonce: &[u8], key: Option<&KeyBinding>, policy: &'a VerifyPolicy) -> Result<Self> {
+    fn new(nonce: &[u8], binding: &Binding, policy: &'a VerifyPolicy) -> Result<Self> {
+        let key = binding.key.as_ref();
         if let Some(required) = &policy.freshness.key {
             if Some(required) != key {
                 return Err(invalid(
                     "cvm_binding.key does not match the key the policy requires",
                 ));
             }
+        } else if binding.pattern == FreshnessPattern::Certificate {
+            // Section 4.5.1: the verifier compares the certificate it was
+            // presented with, which reaches it as the policy's key. Without
+            // it the evidence would vouch for a certificate nobody saw.
+            return Err(invalid(
+                "the certificate pattern needs the presented certificate's key in policy.freshness.key",
+            ));
         }
         let anchor = anchor(nonce, key.map(|k| (k.kind.as_str(), k.value.as_slice())))
             .ok_or_else(|| invalid("anchor inputs are out of range"))?;
@@ -105,7 +113,7 @@ impl Verifier {
         for (name, submod) in &evidence.submods {
             let outcome = match submod {
                 Submod::Cpu(cpu) => {
-                    let ctx = Ctx::new(nonce, cpu.cvm_binding.key.as_ref(), policy)?;
+                    let ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
                     let collateral = InlineCollateral::new(
                         cpu.cvm_endorsements.as_ref(),
                         self.cert_provider.as_ref(),
@@ -159,6 +167,11 @@ async fn appraise_cpu(
     ctx: &Ctx<'_>,
     collateral: &InlineCollateral<'_>,
 ) -> Result<Outcome> {
+    if cpu.cvm_platform.hosting == Hosting::Azure {
+        return Err(AttestationError::PlatformNotEnabled(
+            "Azure (vtpm submodule) appraisal".to_string(),
+        ));
+    }
     match cpu.cvm_platform.tee {
         #[cfg(feature = "snp")]
         Tee::SevSnp => snp::appraise(cpu, ctx, collateral).await,

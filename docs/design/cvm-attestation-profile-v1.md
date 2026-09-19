@@ -350,7 +350,8 @@ Policy is a verifier input, never evidence:
 
 ```
 VerifyPolicy {
-  reference: { launch_measurement: [digest], registers: { slot -> [digest] }, slot_owners: { slot -> owner }? }
+  reference: { launch_measurement: [digest], registers: { slot -> [digest] }, slot_owners: { slot -> owner }?,
+               host_data: bytes? }   // the value cvm_host_data must carry, zero-padded to the platform's length
   min_backing: Backing
   freshness: { key: Option<KeyBinding> }
   commitment: { header16: bytes, seed: bytes }

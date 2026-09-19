@@ -363,6 +363,12 @@ pub trait TdxCollateralProvider: Send + Sync {
     /// Fetch the PCK CRL for a given CA type ("platform" or "processor").
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>>;
 
+    /// The clock CRL windows are checked against. Caches with a pinned clock
+    /// and fixture providers override it; everything else is the wall clock.
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
     /// Check PCK cert chain against CRLs (leaf + intermediate CA revocation).
     ///
     /// Default implementation fetches CRL data via `get_pck_crl` + `get_root_ca_crl`
@@ -379,11 +385,16 @@ pub trait TdxCollateralProvider: Send + Sync {
             let der_certs = crate::platforms::tdx::dcap::parse_pem_to_der(pck_cert_chain_pem)?;
             let ca_type = crate::platforms::tdx::dcap::determine_ca_type_from_der(&der_certs)?;
             let pck_crl_der = self.get_pck_crl(&ca_type).await?;
-            crate::platforms::tdx::dcap::check_cert_revocation_from_der(&der_certs, &pck_crl_der)?;
+            crate::platforms::tdx::dcap::check_cert_revocation_from_der_at(
+                &der_certs,
+                &pck_crl_der,
+                self.now(),
+            )?;
             let root_crl_der = self.get_root_ca_crl().await?;
-            crate::platforms::tdx::dcap::check_intermediate_ca_revocation_from_der(
+            crate::platforms::tdx::dcap::check_intermediate_ca_revocation_from_der_at(
                 &der_certs,
                 &root_crl_der,
+                self.now(),
             )?;
             Ok(())
         }
@@ -413,6 +424,9 @@ impl<T: TdxCollateralProvider + ?Sized> TdxCollateralProvider for std::sync::Arc
     }
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
         (**self).get_pck_crl(ca).await
+    }
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        (**self).now()
     }
     async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {
         (**self).check_pck_revocation(pck_cert_chain_pem).await
@@ -552,6 +566,10 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
 
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
         self.shared.get_pck_crl(ca).await
+    }
+
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        TdxCollateralProvider::now(&*self.shared)
     }
 
     async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {

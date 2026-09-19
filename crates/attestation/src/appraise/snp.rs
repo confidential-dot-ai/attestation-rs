@@ -9,7 +9,9 @@ use crate::platforms::snp::verify::{
     check_vcek_not_revoked, enforce_min_tcb, is_vlek_cert, parse_report, verify_cert_chain,
     verify_vcek_tcb, verify_vek_validity_period, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
 };
-use crate::profile::registers::{commit, report_data as commitment_report_data, REG_COUNT};
+use crate::profile::registers::{
+    commit, genesis, report_data as commitment_report_data, BOOT_SLOT, REG_COUNT,
+};
 use crate::profile::{
     AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
     CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
@@ -152,6 +154,13 @@ pub(crate) async fn appraise(
         }
     }
 
+    if let Some(expected) = &policy.reference.host_data {
+        let padded = crate::utils::pad_report_data(expected.as_slice(), 32)?;
+        if !constant_time_eq(&report.host_data, &padded) {
+            return Err(AttestationError::InitDataMismatch);
+        }
+    }
+
     // Identity, floor.
     let (floor, instance_identity) = resolve_floor(policy, &report.chip_id)?;
     if let Some(min) = floor.and_then(|f| f.snp.as_ref()) {
@@ -189,6 +198,15 @@ pub(crate) async fn appraise(
                 .ok_or_else(|| invalid("commitment mode without cvm_chain"))?
                 .chain_len;
             let caller_data = ctx.expected_report_data();
+            // The boot record is always the first extend into slot 3, so a
+            // live chain never leaves that slot at genesis (section 4.9).
+            if chain_len >= 1
+                && bank[usize::from(BOOT_SLOT)] == genesis(BOOT_SLOT, &policy.commitment.seed.0)
+            {
+                return Err(invalid(
+                    "slot 3 is at genesis but the chain claims a boot record",
+                ));
+            }
             let c = commit(&bank, chain_len, &caller_data);
             let expected = commitment_report_data(&policy.commitment.header16.0, &c);
             if !constant_time_eq(&report.report_data, &expected) {
@@ -230,7 +248,13 @@ pub(crate) async fn appraise(
     };
     let (reference, executables) = evaluate_reference(policy, &assessment)?;
     let backing_min = evaluate_backing(policy, &registers)?;
-    let vector = cpu_vector(instance_identity, executables, assessment.hardware);
+    let configuration = if debug || report.vmpl != 0 { 96 } else { 2 };
+    let vector = cpu_vector(
+        instance_identity,
+        executables,
+        assessment.hardware,
+        configuration,
+    );
 
     let tcb_set = SnpTcbSet {
         reported,

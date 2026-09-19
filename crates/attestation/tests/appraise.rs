@@ -48,16 +48,30 @@ impl CertProvider for NoCollateral {
     }
 }
 
+const TCB_INFO_LIVE: &[u8] = include_bytes!("../test_data/collateral/tcb_info_90c06f000000.json");
+const LIVE_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_live.dat");
+const LIVE_CCEL: &[u8] = include_bytes!("../test_data/tdx_ccel_live.bin");
+const LIVE_CCEL2: &[u8] = include_bytes!("../test_data/tdx_ccel_live2.dat");
+
+/// Fixture collateral, captured 2026-03-16 and expiring 2026-04-15, so the
+/// provider's clock is pinned to the day after capture.
 struct Fixtures;
 
 #[async_trait::async_trait]
 impl TdxCollateralProvider for Fixtures {
     async fn get_tcb_info(&self, fmspc: &str) -> attestation::Result<SignedCollateral> {
-        assert_eq!(fmspc, "50806f000000");
+        let body = match fmspc {
+            "50806f000000" => TCB_INFO.to_vec(),
+            "90c06f000000" => TCB_INFO_LIVE.to_vec(),
+            other => panic!("no fixture for FMSPC {other}"),
+        };
         Ok(SignedCollateral {
-            body: TCB_INFO.to_vec(),
+            body,
             signing_chain: TCB_SIGNING_CHAIN.to_vec(),
         })
+    }
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 3, 17, 0, 0, 0).unwrap()
     }
     async fn get_qe_identity(&self) -> attestation::Result<SignedCollateral> {
         Err(attestation::AttestationError::CertFetchError(
@@ -217,6 +231,60 @@ async fn snp_policy_failures_are_errors() {
             .instance_identity,
         Some(2)
     );
+    // A pinned launch measurement that matches: executables 3 (launch only).
+    let mut pinned_ok = lenient_policy();
+    pinned_ok.reference.launch_measurement = vec![Digest {
+        alg: HashAlg::Sha384,
+        value: Bytes(report.measurement.to_vec()),
+    }];
+    let ok = verifier
+        .appraise_json(&snp_envelope(&nonce), &pinned_ok)
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.submods["cpu"].ear_trustworthiness_vector.executables,
+        Some(3)
+    );
+    assert_eq!(
+        ok.submods["cpu"].ear_trustworthiness_vector.configuration,
+        Some(2)
+    );
+    // Nothing pinned: no executables claim at all.
+    let none = verifier
+        .appraise_json(&snp_envelope(&nonce), &lenient_policy())
+        .await
+        .unwrap();
+    assert_eq!(
+        none.submods["cpu"].ear_trustworthiness_vector.executables,
+        None
+    );
+    // The host_data gate (Kata initdata): wrong value refused, right value passes.
+    let mut host = lenient_policy();
+    host.reference.host_data = Some(Bytes(vec![0xEE; 32]));
+    let err = verifier
+        .appraise_json(&snp_envelope(&nonce), &host)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, attestation::AttestationError::InitDataMismatch),
+        "{err}"
+    );
+    host.reference.host_data = Some(Bytes(report.host_data.to_vec()));
+    verifier
+        .appraise_json(&snp_envelope(&nonce), &host)
+        .await
+        .unwrap();
+    // The certificate pattern needs the relying party's key in policy.
+    let mut cert_env: serde_json::Value = serde_json::from_slice(&snp_envelope(&nonce)).unwrap();
+    cert_env["submods"]["cpu"]["cvm_binding"] = json!({
+        "pattern": "certificate", "mode": "report-data",
+        "key": {"kind": "x509-tbs-sha256", "value": b64url(&[0x22; 32])}
+    });
+    let err = verifier
+        .appraise_json(&serde_json::to_vec(&cert_env).unwrap(), &lenient_policy())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("certificate pattern"), "{err}");
     // A key the policy requires that the evidence did not bind: refused.
     let mut keyed = lenient_policy();
     keyed.freshness.key = Some(KeyBinding {
@@ -279,7 +347,9 @@ async fn tdx_quote_with_fixture_collateral_appraises() {
         .await
         .unwrap();
     let cpu = &appraisal.submods["cpu"];
-    assert!(matches!(cpu.ear_status, Tier::Affirming | Tier::Warning));
+    // Policy allowed debug; the vector still says so (section 5.2).
+    assert_eq!(cpu.ear_trustworthiness_vector.configuration, Some(96));
+    assert_eq!(cpu.ear_status, Tier::Contraindicated);
     let AttesterClaims::Cpu(claims) = &cpu.ear_attester_claims else {
         panic!("cpu claims")
     };
@@ -338,6 +408,100 @@ async fn tdx_policy_bits_and_collateral_requirements() {
     assert_eq!(
         j["submods"]["cpu"]["ear_verifier_claims"]["cvm_collateral"]["tdx_tcb_info"]["status"],
         "skipped"
+    );
+}
+
+#[tokio::test]
+async fn a_forged_inline_crl_is_rejected_and_the_provider_wins() {
+    let nonce = tdx_nonce();
+    // No provider: the inline root CRL is the only source, and a corrupted
+    // signature must be refused.
+    let mut forged = ROOT_CRL.to_vec();
+    let n = forged.len();
+    forged[n - 1] ^= 0xff;
+    forged[n - 2] ^= 0xff;
+    let pcs = |body: &[u8], chain: &[u8]| {
+        b64url(
+            serde_json::to_vec(&json!({"body": b64url(body), "issuer_chain": b64url(chain)}))
+                .unwrap()
+                .as_slice(),
+        )
+    };
+    let mut env: serde_json::Value = serde_json::from_slice(&tdx_envelope(&nonce)).unwrap();
+    env["submods"]["cpu"]["cvm_endorsements"] = json!({
+        "__cmwc_t": "tag:confidential.ai,2026:cvm-endorsements#1",
+        "tdx.root_crl": ["application/pkix-crl", b64url(&forged), 2],
+        "tdx.pck_crl": ["application/pkix-crl", b64url(PCK_CRL), 2],
+        "tdx.tcb_info": ["application/vnd.confidential-ai.pcs-signed+json", pcs(TCB_INFO, TCB_SIGNING_CHAIN), 2],
+        "tdx.qe_identity": ["application/vnd.confidential-ai.pcs-signed+json", pcs(TD_QE_IDENTITY, QE_SIGNING_CHAIN), 2]
+    });
+    let offline = Verifier::offline().with_cert_provider(NoCollateral);
+    let err = offline
+        .appraise_json(&serde_json::to_vec(&env).unwrap(), &v4_policy())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("CRL"), "{err}");
+
+    // With a provider configured, its collateral is used and the forged
+    // inline copy never matters.
+    let with_provider = Verifier::offline()
+        .with_cert_provider(NoCollateral)
+        .with_tdx_provider(Fixtures);
+    with_provider
+        .appraise_json(&serde_json::to_vec(&env).unwrap(), &v4_policy())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_legacy_tdx_log_must_replay_to_the_signed_rtmrs() {
+    let quote = attestation::platforms::tdx::verify::parse_tdx_quote(LIVE_QUOTE).unwrap();
+    // The live attester bound nothing: report_data is all zero, which a
+    // 64-byte zero nonce reproduces exactly.
+    let rd = &quote.body.report_data;
+    let nonce = if rd.iter().all(|b| *b == 0) {
+        vec![0u8; 64]
+    } else {
+        attestation::utils::strip_trailing_nulls(rd).to_vec()
+    };
+    // The live platform has no TCB Info fixture (the live PCS tests cover
+    // it), so this runs without collateral under a policy that allows that;
+    // the DCAP chain still anchors at the pinned Intel root.
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let mut policy = v4_policy();
+    policy.tcb.require_revocation = false;
+    policy.tcb.require_signed_collateral = false;
+    let legacy = |log: &[u8]| {
+        serde_json::to_vec(&json!({
+            "platform": "tdx",
+            "evidence": {"quote": BASE64.encode(LIVE_QUOTE), "cc_eventlog": BASE64.encode(log)}
+        }))
+        .unwrap()
+    };
+    // A log from another boot does not replay to the quote's RTMRs: refused.
+    let err = verifier
+        .appraise_legacy_json(&legacy(LIVE_CCEL), &nonce, None, &policy)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            attestation::AttestationError::EventlogIntegrityFailed(_)
+        ),
+        "{err}"
+    );
+    // The log captured with this quote replays, and the registers say so.
+    let a = verifier
+        .appraise_legacy_json(&legacy(LIVE_CCEL2), &nonce, None, &policy)
+        .await
+        .unwrap();
+    let AttesterClaims::Cpu(claims) = &a.submods["cpu"].ear_attester_claims else {
+        panic!()
+    };
+    let regs = claims.cvm_registers.as_ref().unwrap();
+    assert_eq!(
+        regs.iter().map(|r| r.replayed).collect::<Vec<_>>(),
+        vec![true, true, true, false]
     );
 }
 

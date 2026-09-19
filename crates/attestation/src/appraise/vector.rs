@@ -102,19 +102,20 @@ pub(crate) fn evaluate_reference(
     if !launch_pinned && registers.is_empty() {
         return Ok((None, None));
     }
-    let executables = if launch_pinned && !registers.is_empty() {
-        2
-    } else if launch_pinned {
-        3
-    } else {
-        2
+    // Section 5.2: 2 needs the launch measurement and every pinned register;
+    // 3 is the launch measurement alone; with the launch measurement unpinned
+    // nothing vouches for the firmware, so no claim is made.
+    let executables = match (launch_pinned, registers.is_empty()) {
+        (true, false) => Some(2),
+        (true, true) => Some(3),
+        (false, _) => None,
     };
     Ok((
         Some(ReferenceOutcome {
             launch_measurement: launch_pinned,
             registers,
         }),
-        Some(executables),
+        executables,
     ))
 }
 
@@ -138,15 +139,17 @@ pub(crate) fn evaluate_backing(
     }))
 }
 
-/// Section 5.2 for a CPU submodule whose checks all passed.
+/// Section 5.2 for a CPU submodule whose checks all passed. `configuration`
+/// is 96 when debug is enabled or VMPL is not 0, which policy may have allowed.
 pub(crate) fn cpu_vector(
     instance_identity: Option<i8>,
     executables: Option<i8>,
     hardware: Option<i8>,
+    configuration: i8,
 ) -> TrustVector {
     TrustVector {
         instance_identity,
-        configuration: Some(2),
+        configuration: Some(configuration),
         executables,
         file_system: None,
         hardware,

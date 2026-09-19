@@ -1257,18 +1257,6 @@ impl Evidence {
         Ok(())
     }
 
-    /// [`Self::validate`] for an envelope produced by the legacy mapping
-    /// (section 9): a legacy TDX log arrives without the register array the
-    /// profile requires beside it, because those registers come from the
-    /// signed quote and are filled by the appraiser.
-    pub(crate) fn validate_legacy(&self) -> Result<()> {
-        let mut copy = self.clone();
-        if let Some(Submod::Cpu(c)) = copy.submods.get_mut("cpu") {
-            c.cvm_log = None;
-        }
-        copy.validate()
-    }
-
     pub fn cpu(&self) -> Option<&Submod> {
         self.submods.get("cpu")
     }

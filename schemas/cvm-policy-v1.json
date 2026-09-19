@@ -259,6 +259,17 @@
       "additionalProperties": false,
       "description": "Reference values, from confos manifests (flat JSON or CoRIM).",
       "properties": {
+        "host_data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base64Url"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value `cvm_host_data` must carry, zero-padded to the platform's\nlength (32 bytes on SNP, 48 on TDX): the Kata initdata gate."
+        },
         "launch_measurement": {
           "default": [],
           "description": "Any of these launch measurements is acceptable. Empty means unpinned.",

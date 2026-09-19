@@ -862,6 +862,11 @@ mod tests {
         async fn get_pck_crl(&self, _ca: &str) -> crate::error::Result<Vec<u8>> {
             Ok(PCK_CRL_DER.to_vec())
         }
+
+        /// The fixtures were captured on 2026-03-16 and expire on 2026-04-15.
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 3, 17, 0, 0, 0).unwrap()
+        }
     }
 
     // ---------------------------------------------------------------

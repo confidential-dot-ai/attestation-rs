@@ -59,6 +59,10 @@ pub struct ReferenceValues {
     /// Required `owner` of a workload slot's claim record (section 4.9).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub slot_owners: BTreeMap<u16, String>,
+    /// The value `cvm_host_data` must carry, zero-padded to the platform's
+    /// length (32 bytes on SNP, 48 on TDX): the Kata initdata gate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_data: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -245,6 +249,14 @@ impl VerifyPolicy {
                 d.validate()
                     .map_err(|e| policy_err(format!("reference.registers[{slot}]: {e}")))?;
             }
+        }
+        if self
+            .reference
+            .host_data
+            .as_ref()
+            .is_some_and(|h| h.is_empty() || h.len() > 48)
+        {
+            return Err(policy_err("reference.host_data: 1 to 48 bytes"));
         }
         for (slot, owner) in &self.reference.slot_owners {
             if owner.is_empty() || owner.len() > super::registers::CLAIM_STRING_MAX {

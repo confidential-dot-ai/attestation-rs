@@ -722,6 +722,10 @@ impl TdxCollateralProvider for CollateralCache {
         Ok(self.get(&CollateralKey::TdxRootCrl).await?.bytes.clone())
     }
 
+    fn now(&self) -> DateTime<Utc> {
+        CollateralCache::now(self)
+    }
+
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
         let ca = PckCa::parse(ca)
             .ok_or_else(|| AttestationError::QuoteParseFailed(format!("unknown PCK CA {ca:?}")))?;

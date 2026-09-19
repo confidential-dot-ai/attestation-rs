@@ -5,8 +5,8 @@ use super::invalid;
 use crate::error::{AttestationError, Result};
 use crate::profile::{
     Binding, BindingMode, Bytes, CmwCollection, CmwEntry, CmwRecord, CpuEvidence, EventLog,
-    Evidence, FreshnessPattern, Hosting, KeyBinding, LogFormat, PlatformHint, Submod, Tee, Vendor,
-    CMW_IND_ENDORSEMENTS, CMW_IND_EVIDENCE, CVM_VERSION, ENDORSEMENTS_COLLECTION_TAG,
+    Evidence, FreshnessPattern, Hosting, KeyBinding, LogFormat, PlatformHint, Register, Submod,
+    Tee, Vendor, CMW_IND_ENDORSEMENTS, CMW_IND_EVIDENCE, CVM_VERSION, ENDORSEMENTS_COLLECTION_TAG,
     MEDIA_TYPE_PKIX_CERT, MEDIA_TYPE_SNP_REPORT, MEDIA_TYPE_TDX_QUOTE, PROFILE_URI,
 };
 use crate::types::PlatformType;
@@ -15,6 +15,7 @@ use base64::Engine;
 use std::collections::BTreeMap;
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyEnvelope {
     platform: PlatformType,
     evidence: serde_json::Value,
@@ -23,18 +24,29 @@ struct LegacyEnvelope {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySnp {
     attestation_report: String,
     #[serde(default)]
     cert_chain: Option<LegacyChain>,
 }
 
+/// The ASK and ARK are accepted for compatibility and ignored: the bundled
+/// AMD roots are the trust anchors.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyChain {
     vcek: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    ask: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    ark: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyTdx {
     quote: String,
     #[serde(default)]
@@ -85,7 +97,7 @@ impl Evidence {
                 ))
             }
         };
-        let (report, endorsements, log) = match tee {
+        let (report, endorsements, log, registers) = match tee {
             Tee::SevSnp => {
                 let ev: LegacySnp = serde_json::from_value(env.evidence)
                     .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
@@ -113,6 +125,7 @@ impl Evidence {
                     CmwRecord::new(MEDIA_TYPE_SNP_REPORT, report, Some(CMW_IND_EVIDENCE)),
                     endorsements,
                     None,
+                    None,
                 )
             }
             Tee::Tdx => {
@@ -126,10 +139,15 @@ impl Evidence {
                     }),
                     None => None,
                 };
+                // The registers the profile requires beside a log come from
+                // the signed quote; the appraiser re-derives them from the
+                // report and rejects any difference.
+                let registers = tdx_registers(&quote)?;
                 (
                     CmwRecord::new(MEDIA_TYPE_TDX_QUOTE, quote, Some(CMW_IND_EVIDENCE)),
                     None,
                     log,
+                    Some(registers),
                 )
             }
             Tee::Cca => unreachable!("no legacy CCA platform"),
@@ -148,10 +166,7 @@ impl Evidence {
                 key,
             },
             cvm_endorsements: endorsements,
-            // A legacy log rides along; registers are required beside a log,
-            // and the TDX ones come from the signed quote, so they are filled
-            // by the appraiser from the report, never from the caller.
-            cvm_registers: None,
+            cvm_registers: registers,
             cvm_log: log,
             cvm_chain: None,
             bootseed: None,
@@ -166,7 +181,30 @@ impl Evidence {
             cvm_version: CVM_VERSION,
             submods,
         };
-        evidence.validate_legacy()?;
+        evidence.validate()?;
         Ok(evidence)
     }
+}
+
+/// The four RTMRs of a quote as profile registers (section 4.7).
+#[cfg(feature = "tdx")]
+fn tdx_registers(quote: &[u8]) -> Result<Vec<Register>> {
+    let parsed = crate::platforms::tdx::verify::parse_tdx_quote(quote)?;
+    let body = &parsed.body;
+    Ok([body.rtmr_0, body.rtmr_1, body.rtmr_2, body.rtmr_3]
+        .iter()
+        .enumerate()
+        .map(|(i, v)| Register {
+            index: i as u16,
+            alg: crate::profile::HashAlg::Sha384,
+            value: Bytes(v.to_vec()),
+            source: crate::profile::RegisterSource::TdxRtmr,
+            backing: crate::profile::Backing::Hardware,
+        })
+        .collect())
+}
+
+#[cfg(not(feature = "tdx"))]
+fn tdx_registers(_quote: &[u8]) -> Result<Vec<Register>> {
+    Err(AttestationError::PlatformNotEnabled("tdx".to_string()))
 }

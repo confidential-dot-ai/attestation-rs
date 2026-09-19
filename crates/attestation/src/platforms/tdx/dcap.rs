@@ -1260,23 +1260,32 @@ pub fn check_intermediate_ca_revocation_from_der(
     der_certs: &[Vec<u8>],
     root_ca_crl_der: &[u8],
 ) -> Result<()> {
+    check_intermediate_ca_revocation_from_der_at(der_certs, root_ca_crl_der, chrono::Utc::now())
+}
+
+/// Check the intermediate PCK CA against the Intel SGX Root CA CRL, which
+/// must be signed by the pinned Intel root and be inside its window at `now`.
+pub fn check_intermediate_ca_revocation_from_der_at(
+    der_certs: &[Vec<u8>],
+    root_ca_crl_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(
             "need at least 2 certs to check intermediate CA revocation".into(),
         ));
     }
-
-    // The intermediate CA is the 2nd cert in the chain
     let (_, intermediate_cert) = X509Certificate::from_der(&der_certs[1])
         .map_err(|e| AttestationError::CertChainError(format!("Intermediate CA parse: {e}")))?;
     let intermediate_serial = intermediate_cert.raw_serial();
 
-    // Parse the Root CA CRL (handle both PEM and DER formats)
     let root_crl_der_bytes = normalize_crl_to_der(root_ca_crl_der)?;
     let (_, crl) = CertificateRevocationList::from_der(&root_crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("Root CA CRL parse: {e}")))?;
+    let root_key = VerifyingKey::from_sec1_bytes(INTEL_SGX_ROOT_CA_PUB_DER)
+        .map_err(|e| AttestationError::CertChainError(format!("Intel Root CA key parse: {e}")))?;
+    verify_intel_crl(&crl, &root_key, now, "Intel SGX Root CA")?;
 
-    // Check if intermediate serial is in the revoked list
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == intermediate_serial {
             return Err(AttestationError::CertChainError(
@@ -1284,7 +1293,6 @@ pub fn check_intermediate_ca_revocation_from_der(
             ));
         }
     }
-
     Ok(())
 }
 
@@ -1300,23 +1308,32 @@ pub fn check_cert_revocation(pck_pem: &[u8], crl_der: &[u8]) -> Result<()> {
 /// Check PCK leaf revocation from pre-parsed DER certificate chain.
 /// See [`check_cert_revocation`] for details.
 pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<()> {
-    if der_certs.is_empty() {
+    check_cert_revocation_from_der_at(der_certs, crl_der, chrono::Utc::now())
+}
+
+/// Check the PCK leaf against the PCK CA's CRL, which must be signed by the
+/// PCK CA in the (already verified) chain and be inside its window at `now`.
+pub fn check_cert_revocation_from_der_at(
+    der_certs: &[Vec<u8>],
+    crl_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(
-            "no certificates found".into(),
+            "need the PCK leaf and its CA to check revocation".into(),
         ));
     }
-
-    // Parse the leaf cert to get its serial number
     let (_, leaf_cert) = X509Certificate::from_der(&der_certs[0])
         .map_err(|e| AttestationError::CertChainError(format!("PCK leaf parse: {e}")))?;
     let leaf_serial = leaf_cert.raw_serial();
 
-    // Parse the CRL (handle both PEM and DER formats)
     let crl_der_bytes = normalize_crl_to_der(crl_der)?;
     let (_, crl) = CertificateRevocationList::from_der(&crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("CRL DER parse: {e}")))?;
+    let issuer = parse_x509_cert(&der_certs[1], "PCK CA")?;
+    let issuer_key = extract_p256_pub_key(&issuer.pub_key_bytes, "PCK CA")?;
+    verify_intel_crl(&crl, &issuer_key, now, "PCK CA")?;
 
-    // Check if leaf serial is in the revoked list
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == leaf_serial {
             return Err(AttestationError::CertChainError(
@@ -1324,8 +1341,54 @@ pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> 
             ));
         }
     }
-
     Ok(())
+}
+
+/// ecdsa-with-SHA256, the only algorithm Intel signs SGX CRLs with.
+const OID_ECDSA_WITH_SHA256: &str = "1.2.840.10045.4.3.2";
+
+/// An Intel CRL is trusted only with a valid ECDSA P-256 signature by
+/// `issuer_key` over its TBSCertList, a `thisUpdate` not in the future and a
+/// `nextUpdate` that is present and has not passed at `now`.
+fn verify_intel_crl(
+    crl: &CertificateRevocationList<'_>,
+    issuer_key: &VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+    label: &str,
+) -> Result<()> {
+    let alg = crl.signature_algorithm.algorithm.to_string();
+    if alg != OID_ECDSA_WITH_SHA256 {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} CRL signature algorithm {alg} is not ecdsa-with-SHA256"
+        )));
+    }
+    let sig = Signature::from_der(crl.signature_value.as_ref()).map_err(|e| {
+        AttestationError::CertChainError(format!("{label} CRL signature parse: {e}"))
+    })?;
+    issuer_key
+        .verify(crl.tbs_cert_list.as_ref(), &sig)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!(
+                "{label} CRL signature verification failed: {e}"
+            ))
+        })?;
+    let now_asn1 = x509_parser::time::ASN1Time::from_timestamp(now.timestamp())
+        .map_err(|e| AttestationError::CertChainError(format!("clock out of range: {e}")))?;
+    if crl.last_update() > now_asn1 {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} CRL thisUpdate {} is in the future",
+            crl.last_update()
+        )));
+    }
+    match crl.next_update() {
+        None => Err(AttestationError::CertChainError(format!(
+            "{label} CRL has no nextUpdate; refusing a revocation list with no defined freshness"
+        ))),
+        Some(next) if next < now_asn1 => Err(AttestationError::CertChainError(format!(
+            "{label} CRL is stale: nextUpdate {next} has passed; fetch a current CRL"
+        ))),
+        Some(_) => Ok(()),
+    }
 }
 
 #[cfg(test)]
