@@ -171,6 +171,20 @@ async fn snp_report_with_inline_vek_appraises() {
 async fn snp_policy_failures_are_errors() {
     let nonce = snp_nonce();
     let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    // A PCR pin cannot be honored by evidence without a vtpm submodule.
+    let mut pinned = lenient_policy();
+    pinned.reference.pcrs.insert(
+        8,
+        vec![Digest {
+            alg: HashAlg::Sha256,
+            value: Bytes(vec![0u8; 32]),
+        }],
+    );
+    let err = verifier
+        .appraise_json(&snp_envelope(&nonce), &pinned)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no vtpm submodule"), "{err}");
     // Wrong nonce: the binding fails.
     let mut wrong = nonce.clone();
     wrong[0] ^= 1;

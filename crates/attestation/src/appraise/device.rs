@@ -70,9 +70,17 @@ pub(crate) async fn appraise_devices(
     Ok(out)
 }
 
-/// The position a NRAS submodule name encodes (`GPU-3` is 3).
-fn submodule_index(name: &str) -> Option<usize> {
-    let (_, index) = name.rsplit_once('-')?;
+/// The position a NRAS submodule name encodes (`GPU-3` is 3), only when
+/// its kind is the batch's: `GPU` for GPU batches, `SWITCH` for NVSwitch.
+fn submodule_index(name: &str, arch: NvidiaGpuArch) -> Option<usize> {
+    let (kind, index) = name.rsplit_once('-')?;
+    let expected = match arch {
+        NvidiaGpuArch::Ls10 => "SWITCH",
+        _ => "GPU",
+    };
+    if kind != expected {
+        return None;
+    }
     index.parse().ok()
 }
 
@@ -83,6 +91,12 @@ fn outcomes_for_group(
     result: ArchGroupResult,
     policy: &VerifyPolicy,
 ) -> Result<Vec<(String, Outcome)>> {
+    let arch = NvidiaGpuArch::from(
+        group
+            .first()
+            .map(|(_, d)| d.arch)
+            .unwrap_or(crate::profile::GpuArch::Hopper),
+    );
     if !result.overall_ok {
         return Err(AttestationError::NrasOverallFailed);
     }
@@ -98,7 +112,7 @@ fn outcomes_for_group(
     let mut seen = vec![false; group.len()];
     let mut out = Vec::with_capacity(group.len());
     for (sub_name, claims) in result.devices {
-        let index = submodule_index(&sub_name)
+        let index = submodule_index(&sub_name, arch)
             .filter(|&i| i < group.len())
             .ok_or_else(|| {
                 AttestationError::NrasResponseParse(format!(
@@ -311,7 +325,12 @@ mod tests {
                 got: 1
             }
         ));
-        for names in [["GPU-0", "GPU-0"], ["GPU-0", "GPU-2"], ["GPU-0", "GPU"]] {
+        for names in [
+            ["GPU-0", "GPU-0"],
+            ["GPU-0", "GPU-2"],
+            ["GPU-0", "GPU"],
+            ["GPU-0", "SWITCH-1"],
+        ] {
             let r = result(vec![(names[0], claims("uA")), (names[1], claims("uB"))]);
             assert!(matches!(
                 outcomes_for_group(&group, r, &policy).unwrap_err(),

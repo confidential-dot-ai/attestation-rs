@@ -8,7 +8,7 @@
 //! content bytes before it is extended.
 
 use super::registers::{
-    extend, record_digest, CEL_CONTENT_NAME_CVM, CEL_CONTENT_TYPE_CVM, CLAIM_STRING_MAX,
+    extend, record_digest, BOOT_SLOT, CEL_CONTENT_NAME_CVM, CEL_CONTENT_TYPE_CVM, CLAIM_STRING_MAX,
     DOMAIN_ATS, FIRST_WORKLOAD_SLOT, OP_BOOT, OP_CLAIM, TPM_ALG_SHA384,
 };
 use crate::error::{AttestationError, Result};
@@ -141,35 +141,39 @@ mod cbor {
             }
         }
 
+        /// A length that fits `usize` on every target and the caller's cap.
+        fn len(n: u64, max: usize, what: &str) -> Result<usize> {
+            match usize::try_from(n) {
+                Ok(n) if n <= max => Ok(n),
+                _ => Err(bad(format!("CBOR: {what} too large"))),
+            }
+        }
+
         pub fn bstr(&mut self, max: usize) -> Result<&'a [u8]> {
             match self.head()? {
-                (2, n) if n as usize <= max => self.take(n as usize),
-                (2, _) => Err(bad("CBOR: byte string too large")),
+                (2, n) => self.take(Self::len(n, max, "byte string")?),
                 (m, _) => Err(bad(format!("CBOR: expected byte string, got major {m}"))),
             }
         }
 
         pub fn tstr(&mut self, max: usize) -> Result<&'a str> {
             match self.head()? {
-                (3, n) if n as usize <= max => std::str::from_utf8(self.take(n as usize)?)
+                (3, n) => std::str::from_utf8(self.take(Self::len(n, max, "text string")?)?)
                     .map_err(|_| bad("CBOR: text string is not UTF-8")),
-                (3, _) => Err(bad("CBOR: text string too large")),
                 (m, _) => Err(bad(format!("CBOR: expected text string, got major {m}"))),
             }
         }
 
         pub fn array(&mut self, max: usize) -> Result<usize> {
             match self.head()? {
-                (4, n) if n as usize <= max => Ok(n as usize),
-                (4, _) => Err(bad("CBOR: array too long")),
+                (4, n) => Self::len(n, max, "array"),
                 (m, _) => Err(bad(format!("CBOR: expected array, got major {m}"))),
             }
         }
 
         pub fn map(&mut self, max: usize) -> Result<usize> {
             match self.head()? {
-                (5, n) if n as usize <= max => Ok(n as usize),
-                (5, _) => Err(bad("CBOR: map too long")),
+                (5, n) => Self::len(n, max, "map"),
                 (m, _) => Err(bad(format!("CBOR: expected map, got major {m}"))),
             }
         }
@@ -182,7 +186,7 @@ mod cbor {
             let (major, arg) = self.head()?;
             match major {
                 0 | 1 => Ok(()),
-                2 | 3 => self.take(arg as usize).map(|_| ()),
+                2 | 3 => self.take(Self::len(arg, usize::MAX, "string")?).map(|_| ()),
                 4 => (0..arg).try_for_each(|_| self.skip(depth + 1)),
                 5 => (0..arg).try_for_each(|_| {
                     self.skip(depth + 1)?;
@@ -320,83 +324,131 @@ pub fn parse_cbor(data: &[u8]) -> Result<Vec<CelRecord>> {
     Ok(out)
 }
 
+/// One JSON record, read with every member name checked for repetition
+/// (section 4.10) and the content keyed by its type name.
+struct JsonRecord {
+    recnum: u64,
+    index: u16,
+    digest: [u8; 48],
+    content: CelContent,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonDigest {
+    #[serde(rename = "hashAlg")]
+    hash_alg: String,
+    digest: String,
+}
+
+impl<'de> serde::Deserialize<'de> for JsonRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = JsonRecord;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a CEL record")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<JsonRecord, A::Error> {
+                use serde::de::Error;
+                let mut recnum = None;
+                let mut index = None;
+                let mut digest = None;
+                let mut content = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "recnum" => {
+                            if recnum.replace(map.next_value::<u64>()?).is_some() {
+                                return Err(A::Error::custom("duplicate member recnum"));
+                            }
+                        }
+                        "pcr" => {
+                            let v = map.next_value::<u64>()?;
+                            let v = u16::try_from(v)
+                                .map_err(|_| A::Error::custom("pcr out of range"))?;
+                            if index.replace(v).is_some() {
+                                return Err(A::Error::custom("duplicate member pcr"));
+                            }
+                        }
+                        "digests" => {
+                            let list = map.next_value::<Vec<JsonDigest>>()?;
+                            let [entry] = list.as_slice() else {
+                                return Err(A::Error::custom("exactly one digest"));
+                            };
+                            if entry.hash_alg != "sha384" {
+                                return Err(A::Error::custom("digest algorithm is not sha384"));
+                            }
+                            let bytes = hex::decode(&entry.digest)
+                                .map_err(|e| A::Error::custom(format!("digest: {e}")))?;
+                            let d: [u8; 48] = bytes
+                                .try_into()
+                                .map_err(|_| A::Error::custom("digest is not 48 bytes"))?;
+                            if digest.replace(d).is_some() {
+                                return Err(A::Error::custom("duplicate member digests"));
+                            }
+                        }
+                        name => {
+                            let value = map.next_value::<String>()?;
+                            let c = if name == CEL_CONTENT_NAME_CVM {
+                                let bytes = hex::decode(&value)
+                                    .map_err(|e| A::Error::custom(format!("cvm content: {e}")))?;
+                                if bytes.len() > MAX_CONTENT {
+                                    return Err(A::Error::custom("content too large"));
+                                }
+                                CelContent::Cvm(bytes)
+                            } else {
+                                let content_type = match name {
+                                    "cel" => 4,
+                                    "pcclient_std" => 5,
+                                    "ima_template" => 7,
+                                    "ima_tlv" => 8,
+                                    "systemd" => 9,
+                                    other => {
+                                        return Err(A::Error::custom(format!(
+                                            "unknown content type {other:?}"
+                                        )))
+                                    }
+                                };
+                                CelContent::Other { content_type }
+                            };
+                            if content.replace(c).is_some() {
+                                return Err(A::Error::custom("a record carries one content"));
+                            }
+                        }
+                    }
+                }
+                Ok(JsonRecord {
+                    recnum: recnum.ok_or_else(|| A::Error::missing_field("recnum"))?,
+                    index: index.ok_or_else(|| A::Error::missing_field("pcr"))?,
+                    digest: digest.ok_or_else(|| A::Error::missing_field("digests"))?,
+                    content: content.ok_or_else(|| A::Error::custom("no content"))?,
+                })
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
 /// A `tcg-cel-json` log: a JSON array of records
 /// `{"recnum", "pcr", "digests": [{"hashAlg": "sha384", "digest": hex}], "<type name>": hex}`.
 pub fn parse_json(data: &[u8]) -> Result<Vec<CelRecord>> {
-    let v: serde_json::Value =
+    let records: Vec<JsonRecord> =
         serde_json::from_slice(data).map_err(|e| bad(format!("CEL JSON: {e}")))?;
-    let arr = v
-        .as_array()
-        .ok_or_else(|| bad("CEL JSON: an array of records"))?;
-    if arr.len() > MAX_RECORDS {
+    if records.len() > MAX_RECORDS {
         return Err(bad(format!("more than {MAX_RECORDS} records")));
     }
-    let hex_field = |v: &serde_json::Value, what: &str| -> Result<Vec<u8>> {
-        let s = v
-            .as_str()
-            .ok_or_else(|| bad(format!("CEL JSON: {what} is not a hex string")))?;
-        hex::decode(s).map_err(|e| bad(format!("CEL JSON: {what}: {e}")))
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for rec in arr {
-        let obj = rec
-            .as_object()
-            .ok_or_else(|| bad("CEL JSON: record is not an object"))?;
-        if obj.len() != 4 {
-            return Err(bad("CEL JSON: record has four members"));
-        }
-        let recnum = obj
-            .get("recnum")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| bad("CEL JSON: recnum"))?;
-        let index = obj
-            .get("pcr")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|i| u16::try_from(i).ok())
-            .ok_or_else(|| bad("CEL JSON: pcr"))?;
-        let digests = obj
-            .get("digests")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| bad("CEL JSON: digests"))?;
-        let [entry] = digests.as_slice() else {
-            return Err(bad("CEL JSON: exactly one digest"));
-        };
-        if entry.get("hashAlg").and_then(serde_json::Value::as_str) != Some("sha384") {
-            return Err(bad("CEL JSON: digest algorithm is not sha384"));
-        }
-        let digest = digest48(&hex_field(
-            entry.get("digest").unwrap_or(&serde_json::Value::Null),
-            "digest",
-        )?)?;
-        let (name, value) = obj
-            .iter()
-            .find(|(k, _)| !matches!(k.as_str(), "recnum" | "pcr" | "digests"))
-            .ok_or_else(|| bad("CEL JSON: no content"))?;
-        let content = if name == CEL_CONTENT_NAME_CVM {
-            let bytes = hex_field(value, "cvm content")?;
-            if bytes.len() > MAX_CONTENT {
-                return Err(bad("CEL JSON: content too large"));
-            }
-            CelContent::Cvm(bytes)
-        } else {
-            let content_type = match name.as_str() {
-                "cel" => 4,
-                "pcclient_std" => 5,
-                "ima_template" => 7,
-                "ima_tlv" => 8,
-                "systemd" => 9,
-                other => return Err(bad(format!("CEL JSON: unknown content type {other:?}"))),
-            };
-            CelContent::Other { content_type }
-        };
-        out.push(CelRecord {
-            recnum,
-            index,
-            digest,
-            content,
-        });
-    }
-    Ok(out)
+    Ok(records
+        .into_iter()
+        .map(|r| CelRecord {
+            recnum: r.recnum,
+            index: r.index,
+            digest: r.digest,
+            content: r.content,
+        })
+        .collect())
 }
 
 /// The dstack runtime log (section 4.8): an array of
@@ -531,8 +583,10 @@ pub fn replay(
             .map(|e| e.operation.as_str());
         match ats_op {
             Some(op) if op == OP_BOOT => {
-                if pos != 0 {
-                    return Err(bad(format!("record {pos}: a boot record is only record 0")));
+                if pos != 0 || rec.index != u16::from(BOOT_SLOT) {
+                    return Err(bad(format!(
+                        "record {pos}: a boot record is only record 0 into slot {BOOT_SLOT}"
+                    )));
                 }
                 boot_digest = Some(event.as_ref().unwrap().content_digest);
             }
@@ -634,6 +688,13 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(parse_json(&json).unwrap(), records);
+        // a repeated member name is refused, whichever value comes last
+        let dup = format!(
+            "[{{\"recnum\": 0, \"recnum\": 0, \"pcr\": 3, \"digests\": [{{\"hashAlg\": \"sha384\", \"digest\": \"{}\"}}], \"cvm\": \"{}\"}}]",
+            v["boot_digest"].as_str().unwrap(),
+            v["boot_content"].as_str().unwrap()
+        );
+        assert!(parse_json(dup.as_bytes()).is_err());
     }
 
     #[test]
@@ -664,6 +725,9 @@ mod tests {
             cel_record(1, 4, &d(&claim_content), &claim_content),
         ]
         .concat();
+        assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
+        // a boot record into a workload slot
+        let log = cel_record(0, 4, &d(&boot_content), &boot_content);
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a boot record after record 0
         let log = [

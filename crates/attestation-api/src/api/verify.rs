@@ -28,7 +28,7 @@ pub struct VerifyRequest {
     #[serde(default)]
     pub policy: Option<attestation::profile::VerifyPolicy>,
     /// Profile envelopes: the nonce this relying party issued, base64url
-    /// without padding; must equal the envelope's `eat_nonce`.
+    /// without padding; required, and must equal the envelope's `eat_nonce`.
     #[serde(default)]
     pub nonce: Option<String>,
 }
@@ -64,6 +64,25 @@ pub struct VerifyParamsInput {
     pub expected_rtmr1: Option<String>,
     pub expected_rtmr2: Option<String>,
     pub expected_rtmr3: Option<String>,
+}
+
+impl VerifyParamsInput {
+    /// Whether any expectation was supplied.
+    fn is_set(&self) -> bool {
+        self.expected_report_data.is_some()
+            || self.expected_init_data_hash.is_some()
+            || self.allow_debug
+            || self.min_tcb.is_some()
+            || self.nvidia_gpu_user_nonce.is_some()
+            || self.nvidia_gpu_required
+            || self.nvidia_gpu_expected_archs.is_some()
+            || self.expected_launch_digest.is_some()
+            || self.expected_mrtd.is_some()
+            || self.expected_rtmr0.is_some()
+            || self.expected_rtmr1.is_some()
+            || self.expected_rtmr2.is_some()
+            || self.expected_rtmr3.is_some()
+    }
 }
 
 #[derive(Deserialize)]
@@ -189,13 +208,26 @@ async fn appraise_profile(
                 .to_string(),
         ));
     }
+    if req.params.is_set() {
+        return Err(ApiError::BadRequest(
+            "params do not apply to a profile envelope; send policy and nonce".to_string(),
+        ));
+    }
     let policy = req.policy.unwrap_or_default();
     if policy.policy_bits.allow_debug && !state.config.attestation.allow_debug {
         return Err(ApiError::BadRequest(
             "allow_debug is disabled by server configuration".to_string(),
         ));
     }
-    if let Some(expected) = req.nonce.as_deref() {
+    // Without the nonce this relying party issued, a replayed envelope would
+    // appraise as bound to its own eat_nonce.
+    let expected = req.nonce.as_deref().ok_or_else(|| {
+        ApiError::BadRequest(
+            "nonce is required for a profile envelope: the value this relying party issued, base64url"
+                .to_string(),
+        )
+    })?;
+    {
         let expected = URL_SAFE_NO_PAD
             .decode(expected)
             .map_err(|e| ApiError::BadRequest(format!("invalid base64url nonce: {e}")))?;

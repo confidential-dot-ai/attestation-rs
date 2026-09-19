@@ -175,6 +175,13 @@ impl Verifier {
             submods.insert(name.clone(), outcome.appraisal);
         }
 
+        // A pin that nothing checked is a pin that failed.
+        if !policy.reference.pcrs.is_empty() && !submods.contains_key("vtpm") {
+            return Err(invalid(
+                "policy pins vTPM PCRs but the evidence carries no vtpm submodule",
+            ));
+        }
+
         // Devices go to NRAS in one request per architecture (section 6).
         for (name, outcome) in self.appraise_devices(devices, nonce, policy).await? {
             all_bound &= outcome.bound;

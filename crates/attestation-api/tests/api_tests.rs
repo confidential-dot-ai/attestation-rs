@@ -232,12 +232,24 @@ async fn verify_routes_a_profile_envelope_to_the_appraiser() {
     // No cpu submodule: the profile parser refuses it before any collateral.
     let (status, json) = post_verify(
         build_api_router(state.clone()),
-        serde_json::json!({"evidence": profile_envelope(nonce), "policy": {}}),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "policy": {}}),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json["error"], "verification_failed");
     assert!(json["message"].as_str().unwrap().contains("cpu"), "{json}");
+
+    // No nonce: the request cannot establish freshness for this relying party.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("nonce is required"));
 
     // The relying party's nonce must be the envelope's.
     let (status, json) = post_verify(
@@ -254,16 +266,25 @@ async fn verify_routes_a_profile_envelope_to_the_appraiser() {
     // Tokens are for the old result; the appraisal is the result here.
     let (status, json) = post_verify(
         build_api_router(state.clone()),
-        serde_json::json!({"evidence": profile_envelope(nonce), "issue_token": true}),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "issue_token": true}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["message"].as_str().unwrap().contains("issue_token"));
 
+    // Legacy params are refused rather than silently ignored.
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "params": {"expected_report_data": "AQID"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("params"));
+
     // Debug policy bits stay under the server's control.
     let (status, _) = post_verify(
         build_api_router(test_state_with(|c| c.attestation.allow_debug = false)),
-        serde_json::json!({"evidence": profile_envelope(nonce), "policy": {"policy_bits": {"allow_debug": true}}}),
+        serde_json::json!({"evidence": profile_envelope(nonce), "nonce": nonce, "policy": {"policy_bits": {"allow_debug": true}}}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

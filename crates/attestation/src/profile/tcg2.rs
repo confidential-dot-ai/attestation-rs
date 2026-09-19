@@ -48,77 +48,67 @@ fn digest_size(alg: u16) -> Result<usize> {
     })
 }
 
-/// Parse a log: the TCG_PCR_EVENT header record (Spec ID event) first, then
-/// TCG_PCR_EVENT2 records until the data ends, a zero terminator, or the
-/// padding an ACPI table carries. Events without a digest in `bank` are
-/// refused: a log that cannot be replayed in the quoted bank is no evidence.
+/// Parse a log: the TCG_PCR_EVENT Spec ID header first (EV_NO_ACTION with
+/// the `Spec ID Event03` signature), then TCG_PCR_EVENT2 records to the end of the data or to
+/// the filler tail an ACPI table carries (0x00 or 0xFF to the end). Anything
+/// else (a truncated record, a record without a digest in `bank`, bytes after
+/// the tail) is an error: a log that cannot be replayed whole is no evidence.
 pub fn parse(data: &[u8], bank: u16) -> Result<Vec<Tcg2Event>> {
     if data.len() < 32 {
         return Err(bad(format!("TCG2 log too short: {} bytes", data.len())));
+    }
+    // The header is an EV_NO_ACTION record whose data opens with the Spec ID
+    // signature; its index is 0 in a TPM log and 1 in a CCEL.
+    if le_u32(data, 4) != Some(EV_NO_ACTION) || !data[32..].starts_with(b"Spec ID Event03\0") {
+        return Err(bad("TCG2 log does not start with the Spec ID event"));
     }
     let header_size = le_u32(data, 28).ok_or_else(|| bad("Spec ID event size"))? as usize;
     let mut offset = 32usize
         .checked_add(header_size)
         .filter(|&o| o <= data.len())
         .ok_or_else(|| bad("Spec ID event exceeds the log"))?;
-    let want = digest_size(bank)?;
+    digest_size(bank)?;
+    let truncated = || bad("TCG2 log: truncated record");
     let mut events = Vec::new();
-    while offset + 12 <= data.len() {
-        let index = le_u32(data, offset).unwrap();
-        let event_type = le_u32(data, offset + 4).unwrap();
-        let digest_count = le_u32(data, offset + 8).unwrap();
-        if digest_count > MAX_DIGESTS {
-            // The ACPI table's uninitialized tail.
+    while offset < data.len() {
+        // The unused tail of an ACPI table: one filler byte (0x00 or 0xFF)
+        // to the end. Anything else must parse as a record.
+        let filler = data[offset];
+        if (filler == 0x00 || filler == 0xFF) && data[offset..].iter().all(|&b| b == filler) {
             break;
+        }
+        let index = le_u32(data, offset).ok_or_else(truncated)?;
+        let event_type = le_u32(data, offset + 4).ok_or_else(truncated)?;
+        let digest_count = le_u32(data, offset + 8).ok_or_else(truncated)?;
+        if digest_count == 0 || digest_count > MAX_DIGESTS {
+            return Err(bad(format!("TCG2 log: digest count {digest_count}")));
         }
         let mut pos = offset + 12;
         let mut digest = None;
-        let mut truncated = false;
         for _ in 0..digest_count {
-            let Some(alg) = le_u16(data, pos) else {
-                truncated = true;
-                break;
-            };
+            let alg = le_u16(data, pos).ok_or_else(truncated)?;
             pos += 2;
             let size = digest_size(alg)?;
-            let Some(bytes) = data.get(pos..pos + size) else {
-                truncated = true;
-                break;
-            };
+            let bytes = data.get(pos..pos + size).ok_or_else(truncated)?;
             if alg == bank {
                 digest = Some(bytes.to_vec());
             }
             pos += size;
         }
-        if truncated {
-            break;
-        }
-        let Some(size) = le_u32(data, pos) else {
-            break;
-        };
-        let size = size as usize;
+        let size = le_u32(data, pos).ok_or_else(truncated)? as usize;
         pos += 4;
         if size > MAX_EVENT_DATA {
-            return Err(bad("event data too large"));
+            return Err(bad("TCG2 log: event data too large"));
         }
-        let Some(event_data) = data.get(pos..pos + size) else {
-            break;
-        };
-        if event_type == 0 && index == 0 && size == 0 {
-            break;
-        }
+        let event_data = data.get(pos..pos + size).ok_or_else(truncated)?;
+        let digest = digest.ok_or_else(|| {
+            bad(format!(
+                "TCG2 log: event at offset {offset} carries no digest in bank 0x{bank:04X}"
+            ))
+        })?;
         if events.len() >= MAX_EVENTS {
             return Err(bad(format!("more than {MAX_EVENTS} events")));
         }
-        let Some(digest) = digest else {
-            if digest_count == 0 {
-                break;
-            }
-            return Err(bad(format!(
-                "event at offset {offset} carries no digest in bank 0x{bank:04X}"
-            )));
-        };
-        let _ = want;
         events.push(Tcg2Event {
             index,
             event_type,
@@ -224,8 +214,17 @@ mod tests {
         assert_eq!(regs.len(), 2);
         // The SHA-384 bank is absent from these events: not replayable there.
         assert!(parse(&log, TPM_ALG_SHA384).is_err());
-        // Truncation inside an event ends the log at the last whole event.
-        let cut = &log[..log.len() - 3];
-        assert_eq!(parse(cut, TPM_ALG_SHA256).unwrap().len(), 3);
+        // A truncated record, or bytes after the zero tail, is no log at all.
+        assert!(parse(&log[..log.len() - 3], TPM_ALG_SHA256).is_err());
+        for filler in [0x00u8, 0xFF] {
+            let mut padded = log.clone();
+            padded.extend_from_slice(&[filler; 40]);
+            assert_eq!(parse(&padded, TPM_ALG_SHA256).unwrap().len(), 4);
+            padded.push(1);
+            assert!(parse(&padded, TPM_ALG_SHA256).is_err());
+        }
+        let mut no_header = log.clone();
+        no_header[4] = 0x01;
+        assert!(parse(&no_header, TPM_ALG_SHA256).is_err());
     }
 }

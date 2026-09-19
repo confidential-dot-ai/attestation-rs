@@ -11,7 +11,7 @@ use super::vector::evaluate_backing;
 use super::{invalid, Ctx, Outcome};
 use crate::error::{AttestationError, Result};
 use crate::platforms::tpm_common::{
-    parse_hcl_report, parse_quote_info, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
+    parse_hcl_report, quote_selection, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
     HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
 };
 use crate::profile::tcg2;
@@ -61,7 +61,9 @@ pub(crate) fn appraise(
     )?;
     verify_tpm_pcrs(quote.message.as_slice(), &pcrs)?;
     verify_tpm_nonce(quote.message.as_slice(), &ctx.anchor)?;
-    let (selected, _) = parse_quote_info(quote.message.as_slice())?;
+    // Only the SHA-256 bank's selection counts: a PCR selected in another
+    // bank is not what the quoted values cover.
+    let selected = quote_selection(quote.message.as_slice(), tcg2::TPM_ALG_SHA256)?;
 
     // 8. A TCG2 log replays into the quoted PCRs in the quoted bank; a PCR
     // the log names must reproduce, and only those are marked replayed.

@@ -335,6 +335,81 @@ async fn cmd_attest(args: AttestArgs) {
 
 /// The profile path (section 6): the envelope, or a legacy envelope mapped
 /// through section 9 with the relying party's nonce, appraised under a policy.
+/// The legacy expectation flags keep their meaning on the profile path: each
+/// becomes the corresponding policy pin, so a caller that migrates the
+/// evidence format loses no check.
+fn apply_expectation_flags(
+    mut policy: attestation::profile::VerifyPolicy,
+    args: &VerifyArgs,
+) -> Result<attestation::profile::VerifyPolicy, String> {
+    use attestation::profile::{Bytes, Digest, HashAlg};
+    let digest48 = |hex_str: &str, name: &str| -> Result<Digest, String> {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex for --{name}: {e}"))?;
+        if bytes.len() != 48 {
+            return Err(format!(
+                "--{name} must be 48 bytes (96 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        Ok(Digest {
+            alg: HashAlg::Sha384,
+            value: Bytes(bytes),
+        })
+    };
+    for (flag, name) in [
+        (&args.expected_launch_digest, "expected-launch-digest"),
+        (&args.expected_mrtd, "expected-mrtd"),
+    ] {
+        if let Some(h) = flag {
+            policy.reference.launch_measurement.push(digest48(h, name)?);
+        }
+    }
+    for (i, flag) in [
+        &args.expected_rtmr0,
+        &args.expected_rtmr1,
+        &args.expected_rtmr2,
+        &args.expected_rtmr3,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(h) = flag {
+            policy
+                .reference
+                .registers
+                .entry(i as u16)
+                .or_default()
+                .push(digest48(h, &format!("expected-rtmr{i}"))?);
+        }
+    }
+    if let Some(h) = &args.expected_init_data {
+        let bytes =
+            hex::decode(h).map_err(|e| format!("invalid hex for --expected-init-data: {e}"))?;
+        policy.reference.host_data = Some(Bytes(bytes));
+    }
+    #[cfg(feature = "nvidia-gpu")]
+    {
+        policy.gpu.required |= args.nvidia_gpu_required;
+        if let Some(archs) = &args.nvidia_gpu_expected_archs {
+            let mut parsed = Vec::with_capacity(archs.len());
+            for a in archs {
+                parsed.push(match a.to_ascii_uppercase().as_str() {
+                    "HOPPER" => attestation::profile::GpuArch::Hopper,
+                    "BLACKWELL" => attestation::profile::GpuArch::Blackwell,
+                    "LS10" => attestation::profile::GpuArch::Ls10,
+                    other => {
+                        return Err(format!(
+                            "unknown arch for --nvidia-gpu-expected-archs: {other} (want HOPPER, BLACKWELL, or LS10)"
+                        ))
+                    }
+                });
+            }
+            policy.gpu.expected_archs = Some(parsed);
+        }
+    }
+    Ok(policy)
+}
+
 async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool) {
     let policy: attestation::profile::VerifyPolicy = match &args.policy {
         Some(path) => match std::fs::read(path)
@@ -349,21 +424,47 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
         },
         None => attestation::profile::VerifyPolicy::default(),
     };
-    let nonce = match &args.nonce_hex {
+    let policy = match apply_expectation_flags(policy, args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    // The relying party's nonce: --nonce-hex, or the legacy --expected-report-data,
+    // which is the same value (the anchor with no key).
+    let nonce = match args
+        .nonce_hex
+        .as_deref()
+        .or(args.expected_report_data.as_deref())
+    {
         Some(h) => match hex::decode(h) {
             Ok(n) => Some(n),
             Err(e) => {
-                eprintln!("Error: invalid hex for --nonce-hex: {e}");
+                eprintln!("Error: invalid hex for the nonce: {e}");
                 process::exit(1);
             }
         },
         None => None,
     };
+    #[cfg(feature = "nvidia-gpu")]
+    if let (Some(gpu), Some(n)) = (&args.nvidia_gpu_user_nonce, &nonce) {
+        if hex::decode(gpu).ok().as_deref() != Some(n.as_slice()) {
+            eprintln!("Error: --nvidia-gpu-user-nonce must equal the nonce; the profile derives the device nonce from eat_nonce");
+            process::exit(1);
+        }
+    }
     let verifier = attestation::Verifier::new();
     eprintln!("Appraising evidence...");
     let t0 = Instant::now();
     let appraisal = if is_profile {
-        if let Some(n) = &nonce {
+        let Some(n) = &nonce else {
+            eprintln!(
+                "Error: a profile envelope needs the nonce this relying party issued: --nonce-hex or --expected-report-data"
+            );
+            process::exit(1);
+        };
+        {
             let carried = serde_json::from_slice::<serde_json::Value>(evidence_json)
                 .ok()
                 .and_then(|v| {
@@ -379,7 +480,9 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
                 })
                 .unwrap_or_default();
             if !attestation::utils::constant_time_eq(n, &carried) {
-                eprintln!("Appraisal failed: eat_nonce differs from --nonce-hex");
+                eprintln!(
+                    "Appraisal failed: eat_nonce differs from the nonce this relying party issued"
+                );
                 process::exit(1);
             }
         }
@@ -387,7 +490,7 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
     } else {
         let Some(n) = &nonce else {
             eprintln!(
-                "Error: a legacy envelope needs --nonce-hex, the nonce the relying party issued"
+                "Error: a legacy envelope needs --nonce-hex (or --expected-report-data), the nonce the relying party issued"
             );
             process::exit(1);
         };
