@@ -24,11 +24,12 @@ fn amd_crl_urls() -> Vec<(&'static str, String)> {
 
 const INTEL_CRL_URLS: &[(&str, &str)] = &[("tdx_root_ca", attestation::INTEL_ROOT_CA_CRL_URL)];
 
-/// Fetch all known CRLs and store them in the cache.
+/// Refetch every known CRL, replacing each cached copy on success and
+/// keeping it on failure.
 pub async fn refresh_crls(cache: &Arc<CertCache>) {
     let amd_urls = amd_crl_urls();
     for (issuer, url) in &amd_urls {
-        match cache.get_crl(issuer, url).await {
+        match cache.refresh_crl(issuer, url).await {
             Ok(entry) => {
                 tracing::info!(
                     issuer,
@@ -42,7 +43,7 @@ pub async fn refresh_crls(cache: &Arc<CertCache>) {
         }
     }
     for (issuer, url) in INTEL_CRL_URLS {
-        match cache.get_crl(issuer, url).await {
+        match cache.refresh_crl(issuer, url).await {
             Ok(entry) => {
                 tracing::info!(
                     issuer,
