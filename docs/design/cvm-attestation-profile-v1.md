@@ -2,6 +2,8 @@
 
 Status: draft for review. Owner: attestation DRI. Companion documents: "Standardizing Attestation" and "SEV-SNP Measurement Registers" (Notion, Confidential AI / Docs). This document is the library-side design those two ask for, and it changes both of them; section 11 lists exactly what.
 
+Every hash input in this document is byte-exact and every formula has a test vector in Appendix B. An implementation in any language that reproduces the vectors implements the profile.
+
 ## 1. Summary
 
 We standardize by profiling existing standards, and we invent only the one thing nobody has: a hardware-bound runtime measurement register bank on SEV-SNP.
@@ -42,10 +44,15 @@ Goals, restated from the standard-format document with one correction each:
 | RFC 9334 (RATS architecture) | roles and message names above |
 | RFC 9711 (EAT) | claims set shape, `eat_profile`, `eat_nonce`, `submods`, `dbgstat`, `bootseed`, `measres`, nested tokens; the profile checklist in section 6.3 |
 | RFC 9781 (UCCS) | unprotected claims set, CBOR tag 601, JSON form UJCS, nesting rules in Appendix C |
+| RFC 8392 section 9.1 (CWT) | claim key ranges; our CBOR keys are in the private-use range (Appendix A) |
+| RFC 8949 section 4.2.1 | deterministic CBOR encoding |
+| RFC 4648 section 5 | base64url for byte strings in JSON |
 | draft-ietf-rats-ear-04 | results: `ear_verifier_id`, `submods`, `ear_status`, `ear_trustworthiness_vector`, `ear_attester_claims`, `ear_verifier_claims`, `ear_raw_evidence` |
 | draft-ietf-rats-ar4si-10 | trustworthiness tiers and per-category values |
 | TCG Canonical Event Log Format v1.1 r11 | record layout (`recnum`, register index, `digests`, typed `content`), CBOR and JSON encodings, replay |
-| Arm CCA token (RMM spec; profiles `tag:arm.com,2023:cca_platform#1.0.0`, `tag:arm.com,2023:realm#1.0.0`) | nested as a token submodule, verified by the CCA rules |
+| TCG TPM 2.0 Library Part 2 | hash algorithm identifiers used in CEL digests and in `alg` fields |
+| Arm CCA token (RMM specification; profiles `tag:arm.com,2023:cca_platform#1.0.0`, `tag:arm.com,2023:realm#1.0.0`) | nested as a token submodule, verified by the CCA rules |
+| Intel PCK Certificate and CRL Specification | SGX extension OIDs under 1.2.840.113741.1.13.1 (PPID .1, TCB .2, PCE-ID .3, FMSPC .4, SGX type .5, platform instance id .6) |
 | AMD SEV-SNP ABI, Intel TDX DCAP, NVIDIA NRAS EAT | the hardware reports and vendor tokens the envelope carries |
 
 ## 4. Evidence profile
@@ -56,16 +63,16 @@ Profile identifier: `tag:confidential.ai,2026:cvm#1`, carried in `eat_profile` (
 
 | Item | Decision |
 | --- | --- |
-| 6.3.1 JSON, CBOR or both | JSON is the primary wire encoding (this is what every consumer speaks today). CBOR is defined by the same claims with the CWT keys and is used where a token is natively CBOR (Arm CCA) and for the event log. |
+| 6.3.1 JSON, CBOR or both | JSON is the primary wire encoding (this is what every consumer speaks today); rules in section 4.10. CBOR is defined by the same claims with the keys in Appendix A and is used where a token is natively CBOR (Arm CCA) and for the event log. |
 | 6.3.2 map and array encoding | definite lengths only |
 | 6.3.3 string encoding | definite lengths only |
 | 6.3.4 preferred serialization | deterministic encoding, RFC 8949 section 4.2.1, for every CBOR object we produce |
 | 6.3.5 tags | UCCS tag 601 when a CBOR evidence set is written; no tag inside JSON |
 | 6.3.6 protection | none at the envelope (UJCS/UCCS). Trust comes from the hardware signatures inside; section 4.2 lists which fields are trusted and which are hints. |
-| 6.3.7 algorithms | inherited from each hardware report; the profile adds SHA-384 for registers and the commitment, SHA-256 for the vTPM AK binding and the GPU nonce derivation |
+| 6.3.7 algorithms | inherited from each hardware report; the profile adds SHA-384 for registers, the anchor and the commitment, SHA-256 for the vTPM AK binding and the GPU nonce derivation |
 | 6.3.8 detached bundles | not used in v1 |
-| 6.3.9 key identification | per submodule: VCEK or VLEK for SNP, PCK chain for TDX, HCL AK for the vTPM, CCA platform key, NRAS JWKS `kid` |
-| 6.3.10 endorsement identification | inline `cvm_endorsements` (section 4.6) or fetched by the verifier; either way anchored to embedded roots |
+| 6.3.9 key identification | per submodule: VCEK or VLEK for SNP, PCK chain for TDX, HCL AK for the vTPM, CCA platform attestation key, NRAS JWKS `kid` |
+| 6.3.10 endorsement identification | inline `cvm_endorsements` (section 4.6) or fetched by the verifier; either way anchored to embedded roots, except CCA (section 6) |
 | 6.3.11 freshness | one `eat_nonce` at the top, bound per submodule in a declared mode (section 4.5) |
 | 6.3.12 claims requirements | tables in sections 4.3 and 4.4 |
 
@@ -86,9 +93,9 @@ The envelope is unprotected, so the verifier classifies every field as one of:
 | `eat_profile` | 265 | must | `tag:confidential.ai,2026:cvm#1` |
 | `eat_nonce` | 10 | must | the relying party's challenge, 16 to 64 bytes |
 | `submods` | 266 | must | map of attester submodules (section 4.4) |
-| `cvm_version` | private | must | integer, 1 |
+| `cvm_version` | Appendix A | must | integer, 1 |
 
-Submodule names are chosen by the attester within these reserved forms: `cpu` (exactly one, required), `vtpm` (at most one), `gpu/<ueid>` and `nvswitch/<ueid>` (one per device). Other names are rejected.
+Submodule names are chosen by the attester within these reserved forms: `cpu` (exactly one, required), `vtpm` (at most one), `gpu/<ueid>` and `nvswitch/<ueid>` (one per device, `<ueid>` the device UUID string as the SDK reports it). Other names are rejected.
 
 ### 4.4 Submodule claims
 
@@ -97,21 +104,22 @@ Submodule names are chosen by the attester within these reserved forms: `cpu` (e
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
 | `cvm_platform` | must | hint | `{vendor, tee, generation?, hosting}`; vendor in `amd`, `intel`, `arm`; tee in `sev-snp`, `tdx`, `cca`; hosting in `bare`, `azure`, `gcp`, `dstack` |
-| `cvm_report` | must | signed | `{format, data}`; format in `sev-snp-report`, `tdx-quote`, `hcl-report`; `data` is the raw bytes, base64url in JSON |
+| `cvm_report` | must | signed | `{format, data}`; format in `sev-snp-report`, `tdx-quote`, `hcl-report`; `data` is the raw bytes |
 | `cvm_binding` | must | bound | freshness binding mode (section 4.5) and its parameters |
 | `cvm_endorsements` | may | bound | inline collateral (section 4.6) |
 | `cvm_registers` | may | bound | runtime register array (section 4.7) |
 | `cvm_log` | may | bound | event log (section 4.8) |
-| `cvm_chain` | must when binding is `commitment` | bound | `{chain_len, caller_data, bootseed}` (section 4.9) |
-| `dbgstat` | may | hint | EAT debug status; the verifier derives the real value from the report |
+| `cvm_chain` | must when binding is `commitment` | bound | `{chain_len}` (section 4.9) |
+| `bootseed` (EAT, key 268) | must when binding is `commitment` | bound | 32 random bytes chosen at boot; the first record extended into slot 3 (section 4.9) |
+| `dbgstat` (EAT, key 263) | may | hint | the verifier derives the real value from the report |
 
-For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.18.3): the CCA collection token bytes (CMW tag 907 or legacy 399, platform token at 44234, realm token at 44241). The realm token's challenge is the nonce; the platform challenge is the hash of the realm key. No `cvm_report` wrapper is needed because the token is already an EAT.
+For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.18.3): the CCA token bytes exactly as the RMM emits them. That token is a CBOR map with the platform token at key 44234 (`cca-platform-token`) and the realm token at key 44241 (`cca-realm-delegated-token`), each a COSE_Sign1 CWT, wrapped in CBOR tag 399 (the EAT-collection form) or 907 (the CMW-collection form). Neither tag is in the IANA CBOR tag registry; the verifier accepts exactly those two by allowlist. The realm token's challenge is the nonce; the platform challenge is the hash of the realm attestation key, which binds the two. No `cvm_report` wrapper is needed because the token is already an EAT.
 
 `vtpm` submodule:
 
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
-| `cvm_tpm_quote` | must | signed | `{message, signature, pcrs, bank}`; TPMS_ATTEST and its signature, the PCR values of the quoted bank |
+| `cvm_tpm_quote` | must | signed | `{message, signature, pcrs, bank}`; TPMS_ATTEST bytes, its signature, the 24 PCR values of the quoted bank, `bank` a TPM algorithm name (section 4.7) |
 | `cvm_tpm_ak` | must | bound | how the AK is bound to the CPU report; on Azure, `report_data[0..32] == SHA-256(var_data)` from the HCL report |
 | `cvm_registers` | must | bound | the PCRs projected as registers, source `vtpm-pcr`, backing `privileged-service` |
 | `cvm_log` | may | bound | TPM2 event log or CEL |
@@ -120,17 +128,27 @@ For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.
 
 ### 4.5 Freshness and binding modes
 
-`cvm_binding.mode` declares where the nonce is bound. The verifier computes the expected value and compares in constant time; a mismatch is an error.
+`cvm_binding.mode` declares where the nonce is bound. The verifier computes the expected value and compares in constant time over the full field; a mismatch is an error.
+
+Definitions used below. `||` is byte concatenation with no separators or length prefixes unless one is written explicitly. Quoted strings are ASCII bytes with no terminator. `pad64(x)` is `x` followed by zero bytes to a length of 64; `x` must be at most 64 bytes. `u8(n)` is one byte, `u16be(n)` two bytes big-endian, `u64le(n)` eight bytes little-endian.
 
 | Mode | Platforms | Expected value |
 | --- | --- | --- |
 | `report-data` | SNP without the register driver, TDX, dstack | `report_data == pad64(anchor)` |
-| `commitment` | SNP with the register driver | `report_data == header16 \|\| SHA-384("ats-mr-v1/commit" \|\| R[0..n] \|\| chain_len \|\| caller_data)` with `caller_data` starting with `anchor` |
+| `commitment` | SNP with the register driver | `report_data == header16 \|\| C` with `caller_data = pad64(anchor)`; `header16` and `C` in section 4.9 |
 | `vtpm-extradata` | Azure SNP, Azure TDX, future SVSM vTPM | TPM quote `extraData == anchor`, and the CPU report binds the AK |
-| `cca-challenge` | Arm CCA | realm token `challenge == pad64(anchor)` |
-| `nras-nonce` | NVIDIA devices | SPDM nonce `== SHA-256(nonce \|\| "NVIDIA-GPU-EAT-v1")` (switches use the switch tag) |
+| `cca-challenge` | Arm CCA | realm token `cca-realm-challenge == pad64(anchor)` |
+| `nras-nonce` | NVIDIA devices | SPDM nonce `== SHA-256(nonce \|\| "NVIDIA-GPU-EAT-v1")` for GPUs, `SHA-256(nonce \|\| "NVIDIA-SWITCH-EAT-v1")` for NVSwitch |
 
-`anchor` is the relying party's binding input. When `cvm_binding.key` is absent, `anchor = nonce`. When present, `anchor = SHA-384(nonce || key.kind || key.value)` where `key` is `{kind, value}` and `kind` is `spki-sha256` (hash of a serving certificate's SubjectPublicKeyInfo) or `raw` (an opaque value the relying party chose). This replaces the per-platform padding rules c8s carries today with one derivation the verifier owns.
+`anchor` is the relying party's binding input, derived by the verifier:
+
+```
+no key:   anchor = nonce
+with key: anchor = SHA-384("ats-anchor-v1" || u8(len(nonce)) || nonce
+                           || u8(len(kind)) || kind || u16be(len(value)) || value)
+```
+
+`cvm_binding.key` is `{kind, value}`. `kind` is `spki-sha256` (`value` is the 32-byte SHA-256 of the DER SubjectPublicKeyInfo of the key being bound, for RA-TLS) or `raw` (`value` is an opaque value the relying party chose, at most 65535 bytes). This one derivation replaces the per-platform padding rules c8s carries today. Vectors in Appendix B.
 
 ### 4.6 Endorsements
 
@@ -153,9 +171,9 @@ Inline endorsements are inputs, never authority: the verifier anchors every cert
 
 | Field | Meaning |
 | --- | --- |
-| `index` | integer slot |
-| `alg` | `sha-256`, `sha-384` or `sha-512` |
-| `value` | the register value |
+| `index` | integer slot, 0 to 65535 |
+| `alg` | TPM 2.0 algorithm name: `sha256` (TPM_ALG_SHA256, 0x000B), `sha384` (0x000C) or `sha512` (0x000D); the same names CEL uses in `digests` |
+| `value` | the register value, exactly the digest length of `alg` |
 | `source` | `tdx-rtmr`, `snp-vmr`, `vtpm-pcr`, `cca-rem` |
 | `backing` | `hardware`, `privileged-service`, `kernel-service`, `virtualized` |
 
@@ -169,30 +187,38 @@ Slot semantics are fixed across platforms so policy is portable: slots 0 to 3 ca
 
 | Format | Notes |
 | --- | --- |
-| `tcg-cel-cbor` | the target. CEL v1.1 records: `recnum`, register index (the CEL `pcr` field, integer), `digests`, typed `content`. Deterministic CBOR. |
+| `tcg-cel-cbor` | the target. CEL v1.1 records: `recnum`, register index (the CEL `pcr` field, an integer), `digests`, typed `content`. Deterministic CBOR. |
 | `tcg-cel-json` | same records, JSON encoding, for human inspection only |
 | `tdx-ccel` | the ACPI CCEL as the guest exposes it (TCG2 binary), accepted during transition |
 | `tpm2-event-log` | TCG2 binary log from a vTPM, accepted during transition |
 
-c8s runtime events (`domain`, `operation`, `content_digest`) are carried as CEL records with a profile-private content type; the record's digest is the value that was extended. Replay hashes the stored record bytes exactly as extended and never re-encodes them. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result; policy decides which slots must replay (today: RTMR 0 to 2 must, RTMR 3 reports).
+A c8s runtime event is one CEL record: `recnum` sequential from 0 within the log, `pcr` the slot index, `digests` a single entry `{sha384: d}`, and `content` of the profile-private content type (identifier pending decision 3) whose bytes are the deterministic CBOR encoding of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, optional)}`. `d = SHA-384(content_bytes)`, and `d` is the value that was extended. Replay recomputes `d` from the stored content bytes, requires it to equal the recorded digest, and extends it; the verifier never re-encodes content. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result; policy decides which slots must replay (today: RTMR 0 to 2 must, RTMR 3 reports).
 
 ### 4.9 SNP registers and the commitment (`ats-mr-v1`)
 
-This is the format from the register document, unchanged where it is specified and fixed where it is not.
+This is the format from the register document, unchanged where it is specified and fixed where it is not. Notation as in section 4.5.
 
 ```
-genesis(slot i): R[i] = SHA-384(0^48 || "ats-mr-v1/genesis" || seed || i)
-extend:          R[i] = SHA-384(R[i] || SHA-384(record_bytes))
-commit:          C    = SHA-384("ats-mr-v1/commit" || R[0] || ... || R[n-1] || chain_len || caller_data)
-report_data:     header16 || C
+genesis(i):  R[i] = SHA-384(zeros48 || "ats-mr-v1/genesis" || seed || u8(i))
+extend:      R[i] = SHA-384(R[i] || d)                      d is the record digest of section 4.8
+commit:      C    = SHA-384("ats-mr-v1/commit" || R[0] || R[1] || ... || R[reg_count-1]
+                            || u64le(chain_len) || caller_data)
+report_data: header16 || C                                   64 bytes exactly
 ```
 
-- `seed` is an open decision (section 12). This document recommends a constant domain tag; the register document seeds from the launch digest, which forces the provider to obtain a report before its first extend and adds no security the pinned launch digest does not already provide.
-- `header16` is `magic[8] = "ATS-MR-1"`, `version u8 = 1`, `alg u8 = 1 (SHA-384)`, `reg_count u8`, `flags u8`, `reserved[4] = 0`. The verifier pins magic, version, alg and reg_count from policy; any other value fails.
-- `chain_len` is a 64-bit little-endian count of every extension since genesis. `caller_data` is 64 bytes: `anchor` (48) followed by 16 caller bytes. `bootseed` (EAT claim 268) is a per-boot random value the driver extends into slot 3 as the first record, so a rebooted chain is distinguishable from a rewound one.
-- `cvm_chain` in the envelope carries `chain_len`, `caller_data` and `bootseed`; the log supplies the records.
+- `zeros48` is 48 zero bytes. Every `R[i]` is 48 bytes and they are concatenated in index order.
+- `seed` is 48 bytes. This document recommends the constant `SHA-384("ats-mr-v1/seed")`; the register document seeds from the launch digest, which forces the provider to obtain a report before its first extend and adds no security the pinned launch digest does not already provide. Decision 1 in section 12.
+- `header16` is 16 bytes: `magic` = the 8 ASCII bytes `ATS-MR-1`, `version` = `u8(1)`, `alg` = `u8(1)` meaning SHA-384, `reg_count` = `u8(16)`, `flags` = `u8(0)` (every bit reserved), `reserved` = 4 zero bytes. The verifier compares all 16 bytes against the pinned header and rejects any difference, so no byte of the header is free for a caller to choose.
+- `chain_len` counts every extension since genesis, across all slots, and is carried in `cvm_chain`. `caller_data` is `pad64(anchor)` and is not carried; the verifier derives it from the nonce and `cvm_binding.key`.
+- `bootseed` is 32 random bytes the driver draws at boot and extends into slot 3 as the first record of the log, as a c8s event with domain `ats`, operation `boot` and `content_digest = SHA-384(bootseed)`. A rebooted chain is therefore distinguishable from a rewound one, and a verifier with memory (section 12, decision 7) can detect a fork.
 
-Verification order: launch measurement pinned first, then debug policy and VMPL, then replay, then commitment, then policy on the log. The first two are the load-bearing steps; the register document says so and the verifier enforces the order.
+The verifier runs the order of section 6: chain and signature, then launch measurement and guest policy, then freshness, which for this mode is the commitment recompute, then replay. The register document says the launch measurement and the policy checks are the load-bearing steps, and the order enforces it. Vectors in Appendix B.
+
+### 4.10 Encoding rules
+
+JSON: claim names are strings; profile claims carry the `cvm_` prefix; byte strings are base64url without padding (RFC 4648 section 5); integers are JSON numbers; no floating point anywhere. Unknown claims at the top level or in a submodule claims set are ignored, as EAT extensibility requires; an unknown field inside any `cvm_*` object is rejected. Both JSON encodings in use today (standard base64 in the SNP and TDX payloads, base64url in the Azure payloads, hex in TPM quotes) are replaced by this rule; section 9 covers the transition.
+
+CBOR: claim keys from Appendix A; text strings for names, byte strings for bytes; deterministic encoding; definite lengths.
 
 ## 5. Result profile
 
@@ -215,16 +241,16 @@ Per appraisal:
 
 | Claim | Meaning |
 | --- | --- |
-| `cvm_platform` | verified vendor and TEE; hosting as reported |
+| `cvm_platform` | verified vendor and TEE; hosting as reported; `generation` from the report (SNP CPUID family and model, TDX FMSPC) |
 | `cvm_launch_measurement` | `{alg, value}` |
 | `cvm_registers` | verified array from section 4.7 plus `replayed` per entry |
 | `cvm_freshness` | `{mode, key?}` as bound; presence means the check passed, because a failure is an error |
 | `cvm_host_data` | `{semantics, value}`; semantics in `snp-host-data` (32 bytes), `tdx-mrconfigid` (48), `cca-rpv` (64); a label, see section 10 |
-| `cvm_owner` | SNP `family_id`, `image_id`, `id_key_digest`, `author_key_digest`; TDX `mr_owner`, `mr_owner_config` |
+| `cvm_owner` | SNP `family_id`, `image_id`, `id_key_digest`, `author_key_digest`; TDX `mr_owner`, `mr_owner_config`. On SNP these are guest-owner values authenticated by the ID block, trustworthy only when policy pins `id_key_digest` or `author_key_digest`; on TDX they are host-set labels |
 | `cvm_policy` | `{debug, migratable, smt, single_socket?, vmpl?, sept_ve_disable?, ...}` normalized booleans and small integers |
-| `dbgstat` | EAT value derived from `cvm_policy.debug` |
-| `cvm_tcb` | vendor-tagged: SNP `{reported, committed, current, launch}` each with the SPL components; TDX `{tee_tcb_svn, pck_tcb, pcesvn, status, advisories}`; CCA `{lifecycle, sw_components}`; GPU `{driver, vbios}` |
-| `cvm_identity` | SNP `chip_id`; TDX `fmspc`; CCA `instance_id`; GPU `ueid` |
+| `dbgstat` | EAT value derived from `cvm_policy.debug`: 0 (enabled) when the guest policy permits debug, 2 (disabled-since-boot) otherwise, because the policy is fixed at launch |
+| `cvm_tcb` | vendor-tagged: SNP `{reported, committed, current, launch}` each with the SPL components; TDX `{tee_tcb_svn, pck_tcb, pcesvn, fmspc, status, advisories}`; CCA `{lifecycle, sw_components}`; GPU `{driver, vbios}` |
+| `cvm_identity` | SNP `chip_id` (64 bytes); TDX `ppid`, the 16-byte Platform Provisioning ID from the PCK certificate's SGX extension (OID 1.2.840.113741.1.13.1.1); CCA `instance_id`; GPU `ueid` |
 
 `ear_verifier_claims`:
 
@@ -243,7 +269,7 @@ Filled from AR4SI-10 values. The library returns the vector; it never returns a 
 | Category | Value and condition |
 | --- | --- |
 | hardware | 2 when the chain anchors, the signature verifies and the TCB status is acceptable; 32 when the vendor reports known vulnerabilities (TDX `OutOfDate`, `SWHardeningNeeded`, `ConfigurationNeeded`); 96 when revoked |
-| instance-identity | 2 when the identity is recognized by policy (chip id, FMSPC, instance id allowlist); 0 when no policy |
+| instance-identity | 2 when the identity is recognized by policy (chip id, PPID, instance id allowlist); 0 when no policy |
 | executables | 2 when the launch measurement and every required register match reference values; 3 when only the launch measurement matched; 33 when a required register carries unrecognized extends; 96 when a contraindicated value is present |
 | configuration | 2 when policy bits are acceptable; 96 when debug is enabled or VMPL is not 0 |
 | runtime-opaque | 2 for every CVM whose report verified: the runtime is inside the TEE, encrypted and opaque to the hypervisor and host; this is the claim a TEE uniquely earns. Nothing is claimed about isolation between processes inside the guest |
@@ -259,9 +285,9 @@ Normative order for the `cpu` submodule; every step fails closed.
 
 1. Parse the envelope. Reject unknown profile versions and unknown submodule names.
 2. Select the parser from `cvm_report.format`. Re-derive vendor and TEE from the report and reject a contradicting `cvm_platform`.
-3. Verify the hardware chain to the embedded root and the report signature. SNP: ARK to ASK or ASVK to VEK, VEK validity, chip id and TCB cross-check against the report, VLEK detected from the certificate. TDX: PCK chain to the embedded Intel root, QE report signature and binding. CCA: platform token signature by the platform key, realm token by the RAK, RAK hash equals the platform challenge.
+3. Verify the hardware chain to the trust anchor and the report signature. SNP: ARK to ASK or ASVK to VEK against the embedded AMD roots, VEK validity, chip id and TCB cross-check against the report, VLEK detected from the certificate. TDX: PCK chain to the embedded Intel SGX Root CA, QE report signature and binding. CCA: the platform token by the platform attestation key, which is endorsed per instance by the vendor (implementation id and instance id resolve the key through the verification service or a CoRIM; there is no single embedded root), then the realm token by the realm attestation key, then `hash(realm key) == platform challenge`.
 4. Enforce guest policy: debug disabled unless policy allows, VMPL 0 on SNP, TD attributes reserved bits, CCA lifecycle.
-5. Bind freshness per `cvm_binding.mode`.
+5. Bind freshness per `cvm_binding.mode`. For `commitment` this is the recompute of section 4.9 over the registers established in step 7, so steps 5 and 7 run together for that mode.
 6. Verify collateral per policy: revocation, TCB status and advisories, QE identity, each with its signing chain anchored; record each outcome.
 7. Establish registers: authoritative values from the report, the quote's PCR digest, or the commitment; reject envelope values that differ.
 8. Replay the log when present; mark each register `replayed`.
@@ -278,9 +304,11 @@ VerifyPolicy {
   reference: { launch_measurement: [digest], registers: { slot -> [digest] } }
   min_backing: Backing
   freshness: { key: Option<KeyBinding> }
+  commitment: { header16: bytes, seed: bytes }
   tcb: { snp_floor?, tdx_allowed_status: [status], require_revocation: bool, require_signed_collateral: bool }
   policy_bits: { allow_debug: bool, allow_migration: bool, require_vmpl0: bool }
   identity: { allowed: [id] }?
+  owner: { id_key_digests: [digest] }?
   gpu: NvidiaGpuParams (existing)
 }
 ```
@@ -298,15 +326,16 @@ pub enum Submod { Cpu(CpuEvidence), Vtpm(VtpmEvidence), Gpu(GpuDeviceEvidence), 
 pub struct CpuEvidence {
     pub platform: PlatformHint,
     pub report: Report,                 // SevSnp(bytes) | TdxQuote(bytes) | Hcl(bytes)
-    pub binding: Binding,               // ReportData | Commitment { header } | VtpmExtraData
+    pub binding: Binding,               // ReportData | Commitment | VtpmExtraData, each with its key option
     pub endorsements: Option<Collateral>,
     pub registers: Option<Vec<Register>>,
     pub log: Option<EventLog>,
-    pub chain: Option<ChainInfo>,
+    pub chain: Option<ChainInfo>,       // chain_len
+    pub bootseed: Option<[u8; 32]>,
 }
 
 pub struct Register { pub index: u16, pub alg: HashAlg, pub value: Vec<u8>, pub source: RegisterSource, pub backing: Backing }
-pub enum Backing { Hardware, PrivilegedService, KernelService, Virtualized }   // ordered
+pub enum Backing { Virtualized, KernelService, PrivilegedService, Hardware }   // ordered, weakest first
 pub struct EventLog { pub format: LogFormat, pub data: Vec<u8> }
 
 pub struct Appraisal {
@@ -324,15 +353,15 @@ impl Verifier {
 
 Collateral is one type with three transports (inline, cached, fetched), keyed by `CollateralKey`, with `valid_until` taken from each artifact, exactly as the sweep plan describes. The service becomes a router over the library cache.
 
-Schemas: `schemas/cvm-evidence-v1.json` and `schemas/cvm-claims-v1.json` are generated from the Rust types and committed; attestation-go and c8s-verify-js load them in CI and fail on drift. The WASM export becomes `appraise(envelope_json, policy_json)`; the four per-platform exports are deleted.
+Schemas: `schemas/cvm-evidence-v1.json` and `schemas/cvm-claims-v1.json` are generated from the Rust types and committed; attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as fixtures for all three implementations. The WASM export becomes `appraise(envelope_json, policy_json)`; the four per-platform exports are deleted.
 
 ## 9. Compatibility and migration
 
-The current envelope `{platform, evidence, nvidia_gpu?}` maps mechanically: `platform` splits into `cvm_platform.tee` and `hosting`; `evidence` becomes `cvm_report` with the format chosen by platform; `nvidia_gpu.devices` become `gpu/<uuid>` submodules. The library accepts both forms for two minor releases; `attest()` emits the profile by default with an opt-out; `POST /verify` accepts both; `POST /attest` returns the profile. `VerificationResult` v1 is kept for one release as a projection of `Appraisal` and then removed.
+The current envelope `{platform, evidence, nvidia_gpu?}` maps mechanically: `platform` splits into `cvm_platform.tee` and `hosting`; `evidence` becomes `cvm_report` with the format chosen by platform and its byte encoding normalized to section 4.10; `nvidia_gpu.devices` become `gpu/<uuid>` submodules. The library accepts both forms for two minor releases; `attest()` emits the profile by default with an opt-out; `POST /verify` accepts both; `POST /attest` returns the profile. `VerificationResult` v1 is kept for one release as a projection of `Appraisal` and then removed.
 
 The SNP register driver cannot ship before the verifiers understand the `commitment` mode; until then a report from that image fails every existing verifier's freshness check. Rollout order is therefore: library and WASM, attestation-go, c8s and c8s-verify-js, then the confos image.
 
-c8s moves its EAR from profile 03 to 04 and its private `launch_digest`, `tee_public_key` and `operator_keys_hash` claims into `ear_attester_claims` under the names here (`tee_public_key` stays a c8s extension inside `ear_attester_claims`).
+c8s moves its EAR from profile 03 to 04 and its private `launch_digest`, `tee_public_key` and `operator_keys_hash` claims into `ear_attester_claims` under the names here (`tee_public_key` stays a c8s extension inside `ear_attester_claims`). c8s also replaces its own `ExpectedReportData` derivation with `cvm_binding.key` of kind `spki-sha256`, so the verifier derives the anchor.
 
 ## 10. Security considerations
 
@@ -341,9 +370,9 @@ c8s moves its EAR from profile 03 to 04 and its private `launch_digest`, `tee_pu
 - Registers record what measured producers extend. A process that runs code through a path that does not extend a register leaves no trace; on SNP with the register driver this includes root inside the guest. The guarantee boundary is therefore "what the sanctioned producers recorded", and a deployment that needs "everything that ran" must either measure every execution into a slot (an IMA-style exec hook feeding a register) or remove the paths (no root, no exec outside the runtime). The profile carries `backing` and per-slot `replayed` so a relying party can tell which it got.
 - The register document's kernel-service argument depends on a concrete restriction set (no module loading, no kexec, no `/dev/mem`, lockdown, eBPF and user namespaces, and every other kernel interface root can reach) that must be enumerated, measured into the launch digest, and checked by the verifier through the pinned image. Until that table exists and is pinned, `backing` for those registers is `virtualized`.
 - Debug policy and VMPL are checked before any register claim is evaluated. With debug enabled the host reads guest memory and every register is meaningless.
-- Nonces are at least 16 bytes. `report_data` comparisons are constant time over the full field.
-- Collateral freshness is the artifact's own window (`nextUpdate`, certificate validity), never a wall clock; a CRL past `nextUpdate` is rejected, and a body without its signing chain is rejected.
-- The commitment header is pinned; an attacker cannot use it as 16 bytes of free choice next to the commitment.
+- Nonces are at least 16 bytes. `report_data`, `extraData` and challenge comparisons are constant time over the full field.
+- Collateral freshness is each artifact's own validity window (a CRL's `nextUpdate`, a certificate's `notAfter`, TCB Info's `nextUpdate`) evaluated against the current time. It is never a cache timer of our own: an artifact inside its window is served however long ago it was fetched, and an artifact past its window is rejected however recently it arrived. A body without its signing chain is rejected.
+- The commitment header is pinned in full; an attacker cannot use it as 16 bytes of free choice next to the commitment. Domain tags separate the anchor, genesis, seed and commit hashes from each other and from the register values.
 
 ## 11. Changes to the two Notion documents
 
@@ -353,11 +382,11 @@ Standardizing Attestation:
 - `mr` becomes the register array with `index`, `alg`, `value`, `source`, `backing`, and the slot semantics of section 4.7.
 - `host_data` is `32 or 48 or 64` by vendor and is a label; the Kata initdata case is the documented exception.
 - `tcb` becomes the vendor-tagged union with all four SNP TCB values, and the floor moves to policy.
-- `report_data` is replaced by `cvm_binding` and the mode table.
+- `report_data` is replaced by `cvm_binding`, the mode table and the anchor derivation.
 - Add the policy claims (debug bits per Yolan's comment) as `cvm_policy` and `dbgstat`.
 - Remove `isSafe`; adopt `ear_status` and the vector.
 - Cloud variants are the `vtpm` submodule with `privileged-service` backing, and Azure launch measurements are pinnable.
-- `aael-cbor` becomes CEL.
+- `aael-cbor` becomes CEL, with the record layout of section 4.8.
 
 SEV-SNP Measurement Registers:
 
@@ -365,28 +394,106 @@ SEV-SNP Measurement Registers:
 - Resolve the module-loader contradiction (the NVIDIA open kernel modules are loadable modules).
 - State the root-executes-unmeasured-code limit as the guarantee boundary, or add the exec hook.
 - Name SVSM at VMPL0 as the target backing and keep the format independent of it.
-- Specify the header, `bootseed`, deterministic CBOR for records, the genesis seed decision, the atomicity of extend and commit, kernel-held log storage, slot ownership, and behavior past sixteen workloads.
+- Replace the format block with section 4.9: the byte-exact genesis, extend and commit, the 16-byte header, `bootseed`, `caller_data = pad64(anchor)`, the genesis seed decision, deterministic CBOR for records, the atomicity of extend and commit, kernel-held log storage, slot ownership, and behavior past sixteen workloads.
 - Add debug policy and VMPL to "what the verifier checks".
 
 ## 12. Decisions needed
 
-1. Genesis seed: constant domain tag (recommended) or launch digest.
+1. Genesis seed: the constant `SHA-384("ats-mr-v1/seed")` (recommended) or the launch digest.
 2. Slot ownership on SNP: who allocates slots 4 to 15 and how the allocation is recorded (proposed: a `CEL_MGMT`-style management record at first use).
-3. CEL private content type for c8s events: profile-private identifier, or a TCG registration request.
+3. CEL content type for c8s events: a profile-private identifier, or a TCG registration request.
 4. Whether `cvm_registers` values are required in evidence when a log is present (proposed: required, so a verifier without log support can still pin values).
 5. c8s EAR profile move from 03 to 04 in the same release as the library, or one release later.
 6. Naming: `cvm_` claim prefix and the `tag:confidential.ai,2026:cvm#1` profile URI.
+7. Verifier memory for fork detection (chain length and last head per `bootseed`): in attestation-api, in c8s CDS, or not in v1.
 
 ## 13. Implementation plan
 
 Each step is one reviewable PR in `attestation-rs` unless noted, in this order, after the open hotfixes (#89 to #93) merge.
 
-1. `types`: `Evidence`, `Submod`, `Register`, `Backing`, `EventLog`, `Binding`, `Appraisal`, `VerifyPolicy`; schemas generated and committed; fail-closed expectations; `collateral_verified` and `*_match` removed from the new types.
+1. `types`: `Evidence`, `Submod`, `Register`, `Backing`, `EventLog`, `Binding`, `Appraisal`, `VerifyPolicy`; schemas generated and committed; Appendix B vectors as fixtures; fail-closed expectations; `collateral_verified` and `*_match` removed from the new types.
 2. `collateral`: `CollateralKey`, `Collateral` with `valid_until`, one fetcher, one cache with single flight, negative cache and validity-driven refresh; the service thinned to a router; typed collateral errors.
 3. `verify`: `appraise` over the new types for SNP, TDX, Azure, GCP, dstack, GPU; envelope v1 accepted through the mapping in section 9; WASM `appraise` export; legacy exports deleted.
 4. `platforms` to `pub(crate)` with a curated public surface.
 5. `registers`: CEL parsing and replay, register establishment per source, `ats-mr-v1` commitment verification behind a feature until the driver ships.
-6. attestation-go and c8s-verify-js: schema pins, `appraise` parity, EAR 04 in c8s.
+6. attestation-go and c8s-verify-js: schema pins, vectors, `appraise` parity, EAR 04 and the anchor derivation in c8s.
 7. Arm CCA: nested token submodule and the CCA verification rules, when Vera Rubin hardware is available.
 
 Each PR carries the premises it rests on and how they were verified, per the review standard the hotfixes set.
+
+## Appendix A. CBOR claim keys
+
+Profile claims use integer keys in the CWT private-use range (RFC 8392 section 9.1, values below -65536). Standard claims keep their registered keys.
+
+| Claim | Key |
+| --- | --- |
+| `cvm_version` | -70000 |
+| `cvm_platform` | -70001 |
+| `cvm_report` | -70002 |
+| `cvm_binding` | -70003 |
+| `cvm_endorsements` | -70004 |
+| `cvm_registers` | -70005 |
+| `cvm_log` | -70006 |
+| `cvm_chain` | -70007 |
+| `cvm_tpm_quote` | -70010 |
+| `cvm_tpm_ak` | -70011 |
+| `cvm_launch_measurement` | -70020 |
+| `cvm_freshness` | -70021 |
+| `cvm_host_data` | -70022 |
+| `cvm_owner` | -70023 |
+| `cvm_policy` | -70024 |
+| `cvm_tcb` | -70025 |
+| `cvm_identity` | -70026 |
+| `cvm_collateral` | -70030 |
+| `cvm_reference` | -70031 |
+| `cvm_backing_min` | -70032 |
+
+## Appendix B. Test vectors
+
+All values hex. `nonce` is the 16 bytes `00 01 ... 0f`.
+
+Anchor, no key: `anchor = nonce`.
+
+Anchor with key `{kind: "spki-sha256", value: 0x11 repeated 32 times}`:
+
+```
+input  6174732d616e63686f722d7631 10 000102030405060708090a0b0c0d0e0f
+       0b 73706b692d736861323536 0020 1111111111111111111111111111111111111111111111111111111111111111
+anchor f98d63e4c2e788b0b92ce5d7d1f2609b191f2933f4e5e7884bfeafc4c7a16ed8e050bf2649e1e85ad4b6c89ae70e35d7
+pad64  f98d63e4c2e788b0b92ce5d7d1f2609b191f2933f4e5e7884bfeafc4c7a16ed8e050bf2649e1e85ad4b6c89ae70e35d700000000000000000000000000000000
+```
+
+NRAS nonce derivation from `nonce`:
+
+```
+gpu     a5db775022742960966c4ad77b3d903d6645eee00575a557cd18963d31251325
+switch  84982aa6b0e69839ac5b84d62d2c16f30239baa2a99add9975d09aa439c47051
+```
+
+`ats-mr-v1` with the recommended constant seed:
+
+```
+seed          60cdcaeac3f15a96cb2a1b85d42c5a4d129fced65435044c9250fdffef98984cc3bd420972c3af58295e0f61ba21e4a7
+R[0] genesis  edfcbed49c915465118143bd6ba1980e0fa6ccfe02242bc31676a275e31cd0081c9d8b9ba9d6f4ee70b94b030b1e04fa
+R[3] genesis  befc3a5c2b1a1842ea1e7d330a9671c09afa59f2b2e775bd9b77b1a3a89d68e77ea5d2fafe5dfd3767f5ea515c30307a
+R[15] genesis ca7955a6100998d9c4771d94e785098d878b66d2956c54a5f47e847694bfd246a251bb1dcd929fd945fa37de37b1c3b2
+header16      4154532d4d522d31 01 01 10 00 00000000
+```
+
+Commit at genesis (all 16 registers at their genesis values, `chain_len = 0`, `caller_data = pad64(nonce)`):
+
+```
+C            22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21e98ba4dab9034d02ddb5d596415c4
+report_data  4154532d4d522d310101100000000000 22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21e98ba4dab9034d02ddb5d596415c4
+```
+
+One extend into slot 3 with content bytes `a3006373386301706d73746172742d636f6e7461696e65720258300102` (any bytes serve for the vector; the profile's content is the CBOR map of section 4.8), then a commit with `chain_len = 1` and `caller_data = pad64(anchor with key)`:
+
+```
+d            f1c921a272001b15b37816d920bf50c03a54188a5f2a5ddfce7eed454de6e4899afd9f93547d76191e638e417a823cf0
+R[3]         4bac5eb74120ba19c25de3b32413ca9fe680b32f97aeee12a8b3103140cb299bc2499097a939df79d8dc6b85c9dc30b1
+C            51b4494c5b0a0543d7d5a9c60ea617536f4fecefc1f372444a383a8e922ddc8511bc70f9760b403d22d2b057c5194fc6
+report_data  4154532d4d522d310101100000000000 51b4494c5b0a0543d7d5a9c60ea617536f4fecefc1f372444a383a8e922ddc8511bc70f9760b403d22d2b057c5194fc6
+```
+
+The vectors were produced with SHA-384 and SHA-256 from a standard library over the exact byte strings written above; the generating script is committed beside the schemas so any implementation can regenerate them.
