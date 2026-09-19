@@ -37,7 +37,6 @@ pub const ENDORSEMENTS_COLLECTION_TAG: &str = "tag:confidential.ai,2026:cvm-endo
 /// Media types of `cvm_report` (section 4.4).
 pub const MEDIA_TYPE_SNP_REPORT: &str = "application/vnd.confidential-ai.sev-snp-report";
 pub const MEDIA_TYPE_TDX_QUOTE: &str = "application/vnd.confidential-ai.tdx-quote";
-pub const MEDIA_TYPE_HCL_REPORT: &str = "application/vnd.confidential-ai.hcl-report";
 /// Accepted on ingest only, never emitted.
 pub const MEDIA_TYPE_TSM_REPORT: &str = "application/vnd.veraison.tsm-report+json";
 

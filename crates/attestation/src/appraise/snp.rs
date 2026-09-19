@@ -9,9 +9,12 @@ use crate::platforms::snp::verify::{
     check_vcek_not_revoked, enforce_min_tcb, is_vlek_cert, parse_report, verify_cert_chain,
     verify_vcek_tcb, verify_vek_validity_period, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
 };
+#[cfg(feature = "az-snp")]
+use crate::platforms::tpm_common::verify_hcl_var_data_binding;
 use crate::profile::registers::{
     commit, genesis, report_data as commitment_report_data, BOOT_SLOT, REG_COUNT,
 };
+use crate::profile::Hosting;
 use crate::profile::{
     AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
     CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
@@ -35,20 +38,53 @@ fn tcb(v: &TcbVersion) -> SnpTcb {
     }
 }
 
-fn generation(report: &AttestationReport) -> Result<ProcessorGeneration> {
-    let (fam, model) = match (report.cpuid_fam_id, report.cpuid_mod_id) {
-        (Some(f), Some(m)) => (f, m),
-        _ if report.version >= 3 => {
-            return Err(AttestationError::QuoteParseFailed(
-                "v3+ SNP report missing CPUID family or model".to_string(),
+/// The generation from the report's CPUID fields, or, for a v2 report without
+/// them (Azure), from the issuer of the inline VEK; the chain verification
+/// that follows confirms the choice.
+fn generation(
+    report: &AttestationReport,
+    inline_vek: Option<&[u8]>,
+) -> Result<ProcessorGeneration> {
+    match (report.cpuid_fam_id, report.cpuid_mod_id) {
+        (Some(fam), Some(model)) => ProcessorGeneration::from_cpuid(fam, model).ok_or_else(|| {
+            AttestationError::QuoteParseFailed(format!(
+                "unknown processor: family=0x{fam:02X}, model=0x{model:02X}"
             ))
+        }),
+        _ if report.version >= 3 => Err(AttestationError::QuoteParseFailed(
+            "v3+ SNP report missing CPUID family or model".to_string(),
+        )),
+        _ => {
+            let vek = inline_vek.ok_or_else(|| {
+                AttestationError::QuoteParseFailed(
+                    "a v2 SNP report names no generation and the envelope carries no VEK"
+                        .to_string(),
+                )
+            })?;
+            generation_from_issuer(vek)
         }
-        _ => (0, 0),
-    };
-    ProcessorGeneration::from_cpuid(fam, model).ok_or_else(|| {
-        AttestationError::QuoteParseFailed(format!(
-            "unknown processor: family=0x{fam:02X}, model=0x{model:02X}"
-        ))
+    }
+}
+
+/// The generation named by a VEK's issuer (`SEV-Genoa`, `SEV-VLEK-Genoa`, ...).
+fn generation_from_issuer(vek_der: &[u8]) -> Result<ProcessorGeneration> {
+    let (_, cert) = x509_parser::parse_x509_certificate(vek_der)
+        .map_err(|e| AttestationError::CertChainError(format!("VEK x509 parse: {e}")))?;
+    let cn = cert
+        .issuer()
+        .iter_common_name()
+        .next()
+        .and_then(|a| a.as_str().ok())
+        .unwrap_or_default();
+    [
+        ProcessorGeneration::Milan,
+        ProcessorGeneration::Genoa,
+        ProcessorGeneration::Turin,
+    ]
+    .into_iter()
+    .find(|g| cn.ends_with(&format!("-{}", g.product_name())))
+    .ok_or_else(|| {
+        AttestationError::CertChainError(format!("VEK issuer {cn:?} names no known generation"))
     })
 }
 
@@ -61,14 +97,20 @@ pub(crate) async fn appraise(
     let report_bytes = cpu.cvm_report.value.as_slice();
     crate::utils::check_field_size("cvm_report", report_bytes.len())?;
     let report = parse_report(report_bytes)?;
-    if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
+    // Azure's paravisor issues v2 reports, which carry no CPUID fields.
+    let min_version = if cpu.cvm_platform.hosting == Hosting::Azure {
+        2
+    } else {
+        MIN_REPORT_VERSION
+    };
+    if report.version < min_version || report.version > MAX_REPORT_VERSION {
         return Err(AttestationError::UnsupportedReportVersion {
             version: report.version,
-            min: MIN_REPORT_VERSION,
+            min: min_version,
             max: MAX_REPORT_VERSION,
         });
     }
-    let generation = generation(&report)?;
+    let generation = generation(&report, collateral.raw("snp.vek"))?;
 
     // 3. Hardware chain and signature.
     let reported = tcb(&report.reported_tcb);
@@ -232,6 +274,14 @@ pub(crate) async fn appraise(
             bootseed = cpu.bootseed;
             true
         }
+        #[cfg(feature = "az-snp")]
+        BindingMode::VtpmExtradata => {
+            let var_data = ctx.vtpm_var_data.as_deref().ok_or_else(|| {
+                invalid("vtpm-extradata binding without a verified vtpm submodule")
+            })?;
+            verify_hcl_var_data_binding(&report.report_data, var_data)?;
+            true
+        }
         other => {
             return Err(invalid(format!(
                 "binding mode {other:?} on an SNP cpu submodule"
@@ -347,4 +397,24 @@ pub(crate) async fn appraise(
         },
         bound,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_reports_take_their_generation_from_the_vek_issuer() {
+        // Azure's v2 report carries no CPUID fields; its VCEK is issued by SEV-Milan.
+        let hcl = include_bytes!("../../test_data/az_snp/hcl-report.bin");
+        let report = parse_report(&hcl[0x20..0x20 + 1184]).unwrap();
+        assert_eq!(report.version, 2);
+        let vek = include_bytes!("../../test_data/az_snp/imds-vcek.der");
+        assert_eq!(
+            generation(&report, Some(vek)).unwrap(),
+            ProcessorGeneration::Milan
+        );
+        assert!(generation(&report, None).is_err());
+        assert!(generation_from_issuer(&vek[..vek.len() - 1]).is_err());
+    }
 }

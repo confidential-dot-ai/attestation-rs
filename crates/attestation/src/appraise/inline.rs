@@ -56,6 +56,11 @@ impl<'a> InlineCollateral<'a> {
         self.entry(label).is_some()
     }
 
+    /// The raw bytes under a label, unchecked; callers bind them themselves.
+    pub fn raw(&self, label: &str) -> Option<&'a [u8]> {
+        self.entry(label)
+    }
+
     fn entry(&self, label: &str) -> Option<&'a [u8]> {
         match self.endorsements?.entries.get(label)? {
             CmwEntry::Record(r) => Some(r.value.as_slice()),

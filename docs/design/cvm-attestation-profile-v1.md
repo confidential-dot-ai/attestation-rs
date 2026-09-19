@@ -109,7 +109,7 @@ Submodule names are chosen by the attester within these reserved forms: `cpu` (e
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
 | `cvm_platform` | must | hint | `{vendor, tee, generation?, hosting}`; vendor in `amd`, `intel`, `arm`; tee in `sev-snp`, `tdx`, `cca`; hosting in `bare`, `azure`, `gcp`, `dstack` |
-| `cvm_report` | must | signed | a CMW record (RFC 9999) `[type, value, 4]`: `type` is the media type of the raw report, `value` the raw bytes, and the indicator is required and exactly 4 (bit 2, evidence). Types: `application/vnd.confidential-ai.sev-snp-report`, `application/vnd.confidential-ai.tdx-quote`, `application/vnd.confidential-ai.hcl-report`; `application/vnd.veraison.tsm-report+json` is accepted on ingest |
+| `cvm_report` | must | signed | a CMW record (RFC 9999) `[type, value, 4]`: `type` is the media type of the raw report, `value` the raw bytes, and the indicator is required and exactly 4 (bit 2, evidence). Types: `application/vnd.confidential-ai.sev-snp-report`, `application/vnd.confidential-ai.tdx-quote`; `application/vnd.veraison.tsm-report+json` is accepted on ingest. On Azure this is the SNP report the HCL report wraps, or the TD quote; the HCL report itself rides in the `vtpm` submodule |
 | `cvm_binding` | must | bound | freshness pattern, binding mode (section 4.5) and their parameters |
 | `cvm_endorsements` | may | bound | inline collateral as a CMW collection, indicator bit 1 (section 4.6) |
 | `cvm_registers` | may | bound | runtime register array (section 4.7) |
@@ -126,7 +126,7 @@ For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
 | `cvm_tpm_quote` | must | signed | `{message, signature, pcrs, bank}`; TPMS_ATTEST bytes, its signature, the 24 PCR values of the quoted bank, `bank` a TPM algorithm name (section 4.7) |
-| `cvm_tpm_ak` | must | bound | how the AK is bound to the CPU report; on Azure, `report_data[0..32] == SHA-256(var_data)` from the HCL report |
+| `cvm_tpm_ak` | must | bound | `{method, data}`, how the AK is bound to the CPU report. Method `hcl-report`: `data` is the Azure HCL report; its `var_data` carries the AK public key, its report type names the same TEE as `cvm_platform`, and the verifier requires `report_data[0..32] == SHA-256(var_data)` on the CPU report |
 | `cvm_registers` | must | bound | the PCRs projected as registers, source `vtpm-pcr`, backing `privileged-service` |
 | `cvm_log` | may | bound | TPM2 event log or CEL |
 
@@ -351,6 +351,7 @@ Policy is a verifier input, never evidence:
 ```
 VerifyPolicy {
   reference: { launch_measurement: [digest], registers: { slot -> [digest] }, slot_owners: { slot -> owner }?,
+               pcrs: { pcr -> [digest] }?,   // the vtpm submodule's PCRs; Azure initdata is a pin on PCR 8
                host_data: bytes? }   // the value cvm_host_data must carry, zero-padded to the platform's length
   min_backing: Backing
   freshness: { key: Option<KeyBinding> }
@@ -382,7 +383,7 @@ pub enum Submod { Cpu(CpuEvidence), Vtpm(VtpmEvidence), Gpu(GpuDeviceEvidence), 
 
 pub struct CpuEvidence {
     pub platform: PlatformHint,
-    pub report: Report,                 // SevSnp(bytes) | TdxQuote(bytes) | Hcl(bytes)
+    pub report: Report,                 // SevSnp(bytes) | TdxQuote(bytes); on Azure the HCL report is in the vtpm submodule
     pub binding: Binding,               // ReportData | Commitment | VtpmExtraData, each with its key option
     pub endorsements: Option<Collateral>,
     pub registers: Option<Vec<Register>>,
@@ -418,7 +419,7 @@ The current envelope `{platform, evidence, nvidia_gpu?}` maps mechanically: `pla
 
 The SNP register driver cannot ship before the verifiers understand the `commitment` mode; until then a report from that image fails every existing verifier's freshness check. Rollout order is therefore: library and WASM, attestation-go, c8s and c8s-verify-js, then the confos image.
 
-c8s moves its EAR from profile 03 to 04 in the same release that adopts `appraise`, so no release emits both, and moves its private `launch_digest`, `tee_public_key` and `operator_keys_hash` claims into `ear_attester_claims` under the names here (`tee_public_key` stays a c8s extension inside `ear_attester_claims`). c8s also replaces its own `ExpectedReportData` derivation with `cvm_binding.key` of kind `spki-sha256`, so the verifier derives the anchor.
+c8s moves its EAR from profile 03 to 04 in the same release that adopts `appraise`, so no release emits both, and moves its private `launch_digest`, `tee_public_key` and `operator_keys_hash` claims into `ear_attester_claims` under the names here (`tee_public_key` stays a c8s extension inside `ear_attester_claims`). c8s also replaces its own `ExpectedReportData` derivation with `cvm_binding.key` of kind `spki-sha256`, so the verifier derives the anchor. The old Azure `expected_init_data_hash`, which compared PCR 8 against `SHA-256(zeros32 || initdata)`, becomes a pin on PCR 8 in `reference.pcrs`; on bare metal `reference.host_data` gates `HOST_DATA` and `MRCONFIGID` directly. Only the PCRs inside the quote's signed selection are appraised; an envelope that lists a PCR outside it is rejected.
 
 ## 10. Security considerations
 

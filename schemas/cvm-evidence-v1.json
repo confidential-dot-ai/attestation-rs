@@ -415,7 +415,7 @@
       "properties": {
         "data": {
           "$ref": "#/$defs/Base64Url",
-          "description": "For `hcl-var-data`: the HCL `var_data` bytes, whose SHA-256 is\n`report_data[0..32]` and which carry the AK public key."
+          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE."
         },
         "method": {
           "$ref": "#/$defs/TpmAkMethod"
@@ -429,7 +429,7 @@
     },
     "TpmAkMethod": {
       "enum": [
-        "hcl-var-data"
+        "hcl-report"
       ],
       "type": "string"
     },

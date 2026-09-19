@@ -506,6 +506,169 @@ async fn a_legacy_tdx_log_must_replay_to_the_signed_rtmrs() {
 }
 
 #[tokio::test]
+async fn azure_tdx_evidence_appraises_through_the_vtpm() {
+    // Recorded on an Azure TDX VM with the 24-byte nonce "attestation-test-fixture".
+    let raw: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../test_data/az_tdx/live-evidence.json")).unwrap();
+    let legacy = serde_json::to_vec(&json!({"platform": "az-tdx", "evidence": raw})).unwrap();
+    let legacy = legacy.as_slice();
+    let nonce = b"attestation-test-fixture";
+    // The recorded platform has no TCB Info fixture, so collateral is
+    // skipped under a policy that allows it; the DCAP chain still anchors at
+    // the pinned Intel root, and a vTPM register is privileged-service.
+    let mut policy = v4_policy();
+    policy.tcb.require_revocation = false;
+    policy.tcb.require_signed_collateral = false;
+    policy.min_backing = Backing::PrivilegedService;
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let a = verifier
+        .appraise_legacy_json(legacy, nonce, None, &policy)
+        .await
+        .unwrap();
+    assert!(a.ear_all_submods_bound);
+    let AttesterClaims::Vtpm(vtpm) = &a.submods["vtpm"].ear_attester_claims else {
+        panic!("vtpm claims")
+    };
+    assert!(!vtpm.cvm_registers.is_empty());
+    assert!(vtpm
+        .cvm_registers
+        .iter()
+        .all(|r| r.backing == Backing::PrivilegedService));
+    let AttesterClaims::Cpu(cpu) = &a.submods["cpu"].ear_attester_claims else {
+        panic!("cpu claims")
+    };
+    assert_eq!(
+        cpu.cvm_freshness.mode,
+        attestation::profile::BindingMode::VtpmExtradata
+    );
+    assert_eq!(
+        cpu.cvm_platform.hosting,
+        attestation::profile::Hosting::Azure
+    );
+
+    // A wrong nonce fails in the vTPM quote, before any CPU work.
+    let err = verifier
+        .appraise_legacy_json(legacy, b"attestation-test-fixturX", None, &policy)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, attestation::AttestationError::ReportDataMismatch),
+        "{err}"
+    );
+
+    // The default backing floor (hardware) refuses a vTPM register.
+    let mut strict = policy.clone();
+    strict.min_backing = Backing::Hardware;
+    let err = verifier
+        .appraise_legacy_json(legacy, nonce, None, &strict)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("backed by"), "{err}");
+
+    // A PCR pin that matches passes and is reported; a wrong one fails.
+    let pcr0 = vtpm
+        .cvm_registers
+        .iter()
+        .find(|r| r.index == 0)
+        .unwrap()
+        .value
+        .clone();
+    let mut pinned = policy.clone();
+    pinned.reference.pcrs.insert(
+        0,
+        vec![Digest {
+            alg: HashAlg::Sha256,
+            value: pcr0,
+        }],
+    );
+    let a = verifier
+        .appraise_legacy_json(legacy, nonce, None, &pinned)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.submods["vtpm"].ear_trustworthiness_vector.executables,
+        Some(2)
+    );
+    assert_eq!(a.submods["vtpm"].ear_status, Tier::Affirming);
+    let reference = a.submods["vtpm"]
+        .ear_verifier_claims
+        .cvm_reference
+        .as_ref()
+        .unwrap();
+    assert_eq!(reference.launch_measurement, None);
+    assert_eq!(reference.registers.get(&0), Some(&true));
+    pinned.reference.pcrs.insert(
+        0,
+        vec![Digest {
+            alg: HashAlg::Sha256,
+            value: Bytes(vec![7u8; 32]),
+        }],
+    );
+    assert!(verifier
+        .appraise_legacy_json(legacy, nonce, None, &pinned)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn azure_snp_evidence_appraises_through_the_vtpm() {
+    // Recorded on an Azure SEV-SNP (Milan) VM with the same 24-byte nonce.
+    let legacy = include_bytes!("../test_data/az_snp/live-evidence.json");
+    let nonce = b"attestation-test-fixture";
+    let mut policy = lenient_policy();
+    policy.min_backing = Backing::PrivilegedService;
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let a = verifier
+        .appraise_legacy_json(legacy, nonce, None, &policy)
+        .await
+        .unwrap();
+    assert!(a.ear_all_submods_bound);
+    assert_eq!(a.submods.len(), 2);
+    let AttesterClaims::Cpu(cpu) = &a.submods["cpu"].ear_attester_claims else {
+        panic!("cpu claims")
+    };
+    assert_eq!(cpu.cvm_platform.generation.as_deref(), Some("Milan"));
+    assert_eq!(
+        cpu.cvm_platform.hosting,
+        attestation::profile::Hosting::Azure
+    );
+    assert_eq!(
+        cpu.cvm_freshness.mode,
+        attestation::profile::BindingMode::VtpmExtradata
+    );
+    assert_eq!(a.submods["cpu"].ear_status, Tier::Affirming);
+    let AttesterClaims::Vtpm(vtpm) = &a.submods["vtpm"].ear_attester_claims else {
+        panic!("vtpm claims")
+    };
+    assert_eq!(vtpm.cvm_registers.len(), 24);
+    assert_eq!(
+        vtpm.cvm_freshness.mode,
+        attestation::profile::BindingMode::VtpmExtradata
+    );
+    // Nothing pinned: the vtpm makes no trustworthiness claim of its own.
+    assert_eq!(a.submods["vtpm"].ear_status, Tier::None);
+    assert!(a.submods["vtpm"]
+        .ear_verifier_claims
+        .cvm_reference
+        .is_none());
+    let j = serde_json::to_value(&a).unwrap();
+    assert_eq!(
+        j["submods"]["vtpm"]["ear_attester_claims"]["cvm_tpm_ak"]["method"],
+        "hcl-report"
+    );
+
+    // The vTPM quote is only as good as its nonce.
+    let err = verifier
+        .appraise_legacy_json(legacy, b"attestation-test-fixturX", None, &policy)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, attestation::AttestationError::ReportDataMismatch),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn legacy_envelopes_map_to_the_profile() {
     let verifier = Verifier::offline()
         .with_cert_provider(NoCollateral)

@@ -12,6 +12,8 @@ pub mod inline;
 pub mod legacy;
 #[cfg(any(feature = "snp", feature = "tdx"))]
 mod vector;
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+mod vtpm;
 
 #[cfg(feature = "snp")]
 mod snp;
@@ -25,7 +27,7 @@ use crate::profile::binding::pad64;
 #[cfg(any(feature = "snp", feature = "tdx"))]
 use crate::profile::Tee;
 use crate::profile::{
-    Appraisal, Binding, CpuEvidence, Evidence, FreshnessPattern, Hosting, KeyBinding, Submod,
+    Appraisal, Binding, BindingMode, CpuEvidence, Evidence, FreshnessPattern, KeyBinding, Submod,
     SubmodAppraisal, VerifierId, VerifyPolicy, EAR_PROFILE_URI,
 };
 use crate::Verifier;
@@ -40,6 +42,9 @@ pub(crate) struct Ctx<'a> {
     /// The relying party's binding input (section 4.5).
     pub anchor: Vec<u8>,
     pub policy: &'a VerifyPolicy,
+    /// The HCL `var_data` a verified vtpm submodule established, which the CPU
+    /// report must bind in `vtpm-extradata` mode.
+    pub vtpm_var_data: Option<Vec<u8>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -61,7 +66,11 @@ impl<'a> Ctx<'a> {
         }
         let anchor = anchor(nonce, key.map(|k| (k.kind.as_str(), k.value.as_slice())))
             .ok_or_else(|| invalid("anchor inputs are out of range"))?;
-        Ok(Ctx { anchor, policy })
+        Ok(Ctx {
+            anchor,
+            policy,
+            vtpm_var_data: None,
+        })
     }
 
     /// The 64-byte value a report's `report_data` must carry in `report-data` mode.
@@ -110,10 +119,28 @@ impl Verifier {
         let mut submods = BTreeMap::new();
         let mut all_bound = true;
 
+        // A CPU bound through a vTPM needs the vtpm submodule appraised first:
+        // it yields the var_data the CPU report must carry the digest of.
+        let mut var_data: Option<Vec<u8>> = None;
+        if let Some(Submod::Cpu(cpu)) = evidence.submods.get("cpu") {
+            if cpu.cvm_binding.mode == BindingMode::VtpmExtradata {
+                let Some(Submod::Vtpm(v)) = evidence.submods.get("vtpm") else {
+                    return Err(invalid(
+                        "cpu binds through vtpm-extradata but there is no vtpm submodule",
+                    ));
+                };
+                let out = self.appraise_vtpm(v, cpu, nonce, policy)?;
+                var_data = Some(out.var_data);
+                all_bound &= out.outcome.bound;
+                submods.insert("vtpm".to_string(), out.outcome.appraisal);
+            }
+        }
+
         for (name, submod) in &evidence.submods {
             let outcome = match submod {
                 Submod::Cpu(cpu) => {
-                    let ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
+                    let mut ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
+                    ctx.vtpm_var_data = var_data.clone();
                     let collateral = InlineCollateral::new(
                         cpu.cvm_endorsements.as_ref(),
                         self.cert_provider.as_ref(),
@@ -128,9 +155,12 @@ impl Verifier {
                     ))
                 }
                 Submod::Vtpm(_) => {
-                    return Err(AttestationError::PlatformNotEnabled(
-                        "vtpm submodule appraisal".to_string(),
-                    ))
+                    if submods.contains_key("vtpm") {
+                        continue;
+                    }
+                    return Err(invalid(
+                        "a vtpm submodule needs a cpu bound through vtpm-extradata",
+                    ));
                 }
                 Submod::Device(_) => {
                     return Err(AttestationError::PlatformNotEnabled(
@@ -159,6 +189,39 @@ impl Verifier {
     }
 }
 
+impl Verifier {
+    #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+    fn appraise_vtpm(
+        &self,
+        v: &crate::profile::VtpmEvidence,
+        cpu: &CpuEvidence,
+        nonce: &[u8],
+        policy: &VerifyPolicy,
+    ) -> Result<vtpm::VtpmOutcome> {
+        let ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
+        vtpm::appraise(v, cpu.cvm_platform.tee, &cpu.cvm_binding, &ctx)
+    }
+
+    #[cfg(not(any(feature = "az-snp", feature = "az-tdx")))]
+    fn appraise_vtpm(
+        &self,
+        _v: &crate::profile::VtpmEvidence,
+        _cpu: &CpuEvidence,
+        _nonce: &[u8],
+        _policy: &VerifyPolicy,
+    ) -> Result<VtpmOutcome> {
+        Err(AttestationError::PlatformNotEnabled(
+            "Azure (vtpm submodule) appraisal".to_string(),
+        ))
+    }
+}
+
+#[cfg(not(any(feature = "az-snp", feature = "az-tdx")))]
+struct VtpmOutcome {
+    var_data: Vec<u8>,
+    outcome: Outcome,
+}
+
 /// Dispatch on the TEE the envelope names; a TEE this build was compiled
 /// without is refused, never silently skipped.
 #[cfg_attr(not(any(feature = "snp", feature = "tdx")), allow(unused_variables))]
@@ -167,11 +230,6 @@ async fn appraise_cpu(
     ctx: &Ctx<'_>,
     collateral: &InlineCollateral<'_>,
 ) -> Result<Outcome> {
-    if cpu.cvm_platform.hosting == Hosting::Azure {
-        return Err(AttestationError::PlatformNotEnabled(
-            "Azure (vtpm submodule) appraisal".to_string(),
-        ));
-    }
     match cpu.cvm_platform.tee {
         #[cfg(feature = "snp")]
         Tee::SevSnp => snp::appraise(cpu, ctx, collateral).await,

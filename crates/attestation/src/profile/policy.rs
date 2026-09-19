@@ -56,6 +56,11 @@ pub struct ReferenceValues {
     /// Acceptable values per slot. A slot absent here is not pinned.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub registers: BTreeMap<u16, Vec<Digest>>,
+    /// Acceptable values per vTPM PCR, for the `vtpm` submodule; a PCR absent
+    /// here is not pinned. Azure's initdata convention pins PCR 8 to
+    /// `SHA-256(zeros32 || initdata_hash)`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub pcrs: BTreeMap<u16, Vec<Digest>>,
     /// Required `owner` of a workload slot's claim record (section 4.9).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub slot_owners: BTreeMap<u16, String>,
@@ -257,6 +262,17 @@ impl VerifyPolicy {
             .is_some_and(|h| h.is_empty() || h.len() > 48)
         {
             return Err(policy_err("reference.host_data: 1 to 48 bytes"));
+        }
+        for (pcr, ds) in &self.reference.pcrs {
+            if *pcr > 23 || ds.is_empty() {
+                return Err(policy_err(format!(
+                    "reference.pcrs[{pcr}]: PCRs are 0 to 23 and need a value"
+                )));
+            }
+            for d in ds {
+                d.validate()
+                    .map_err(|e| policy_err(format!("reference.pcrs[{pcr}]: {e}")))?;
+            }
         }
         for (slot, owner) in &self.reference.slot_owners {
             if owner.is_empty() || owner.len() > super::registers::CLAIM_STRING_MAX {

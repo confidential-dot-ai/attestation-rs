@@ -278,6 +278,19 @@
           },
           "type": "array"
         },
+        "pcrs": {
+          "additionalProperties": false,
+          "description": "Acceptable values per vTPM PCR, for the `vtpm` submodule; a PCR absent\nhere is not pinned. Azure's initdata convention pins PCR 8 to\n`SHA-256(zeros32 || initdata_hash)`.",
+          "patternProperties": {
+            "^\\d+$": {
+              "items": {
+                "$ref": "#/$defs/Digest"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "registers": {
           "additionalProperties": false,
           "description": "Acceptable values per slot. A slot absent here is not pinned.",

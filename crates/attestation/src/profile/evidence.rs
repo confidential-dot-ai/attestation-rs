@@ -9,9 +9,9 @@ use super::cmw::{CmwCollection, CmwEntry, CmwRecord};
 use super::registers::REG_COUNT;
 use super::{
     invalid, CMW_IND_ENDORSEMENTS, CMW_IND_EVIDENCE, CMW_IND_REFERENCE_VALUES, CVM_VERSION,
-    ENDORSEMENTS_COLLECTION_TAG, MAX_REGISTERS, MEDIA_TYPE_HCL_REPORT, MEDIA_TYPE_JWK_SET,
-    MEDIA_TYPE_PCS_SIGNED, MEDIA_TYPE_PKIX_CERT, MEDIA_TYPE_PKIX_CRL, MEDIA_TYPE_SNP_REPORT,
-    MEDIA_TYPE_TDX_QUOTE, MEDIA_TYPE_TSM_REPORT, NONCE_MAX, NONCE_MIN, PROFILE_URI,
+    ENDORSEMENTS_COLLECTION_TAG, MAX_REGISTERS, MEDIA_TYPE_JWK_SET, MEDIA_TYPE_PCS_SIGNED,
+    MEDIA_TYPE_PKIX_CERT, MEDIA_TYPE_PKIX_CRL, MEDIA_TYPE_SNP_REPORT, MEDIA_TYPE_TDX_QUOTE,
+    MEDIA_TYPE_TSM_REPORT, NONCE_MAX, NONCE_MIN, PROFILE_URI,
 };
 use crate::error::{AttestationError, Result};
 use crate::utils::MAX_EVIDENCE_FIELD_SIZE;
@@ -793,15 +793,16 @@ impl TpmQuote {
 #[serde(deny_unknown_fields)]
 pub struct TpmAkBinding {
     pub method: TpmAkMethod,
-    /// For `hcl-var-data`: the HCL `var_data` bytes, whose SHA-256 is
-    /// `report_data[0..32]` and which carry the AK public key.
+    /// For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK
+    /// public key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU
+    /// report, and its report type must name the same TEE.
     pub data: Bytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TpmAkMethod {
-    HclVarData,
+    HclReport,
 }
 
 /// NVIDIA device architecture as NRAS names it.
@@ -911,10 +912,11 @@ impl CpuEvidence {
             ));
         }
         let azure = p.hosting == Hosting::Azure;
+        // On Azure the report is the SNP report the HCL report wraps, or the
+        // TD quote; the HCL report itself rides in the vtpm submodule.
         let report_ok = match r.media_type.as_str() {
-            MEDIA_TYPE_SNP_REPORT => p.tee == Tee::SevSnp && !azure,
-            MEDIA_TYPE_TDX_QUOTE => p.tee == Tee::Tdx && !azure,
-            MEDIA_TYPE_HCL_REPORT => azure,
+            MEDIA_TYPE_SNP_REPORT => p.tee == Tee::SevSnp,
+            MEDIA_TYPE_TDX_QUOTE => p.tee == Tee::Tdx,
             MEDIA_TYPE_TSM_REPORT => !azure && p.hosting != Hosting::Dstack,
             _ => {
                 return Err(invalid(format!(
@@ -1663,12 +1665,12 @@ mod tests {
             "submods": {
                 "cpu": {
                     "cvm_platform": {"vendor": "amd", "tee": "sev-snp", "hosting": "azure"},
-                    "cvm_report": [MEDIA_TYPE_HCL_REPORT, b64(&[1u8; 2900]), 4],
+                    "cvm_report": [MEDIA_TYPE_SNP_REPORT, b64(&[1u8; 1184]), 4],
                     "cvm_binding": {"pattern": "challenge", "mode": "vtpm-extradata"}
                 },
                 "vtpm": {
                     "cvm_tpm_quote": {"message": b64(&[1, 2]), "signature": b64(&[3, 4]), "pcrs": pcrs, "bank": "sha256"},
-                    "cvm_tpm_ak": {"method": "hcl-var-data", "data": b64(b"{}")},
+                    "cvm_tpm_ak": {"method": "hcl-report", "data": b64(&[0x48u8; 3000])},
                     "cvm_registers": [
                         {"index": 0, "alg": "sha256", "value": b64(&[0u8; 32]), "source": "vtpm-pcr", "backing": "privileged-service"},
                         {"index": 7, "alg": "sha256", "value": b64(&[7u8; 32]), "source": "vtpm-pcr", "backing": "privileged-service"}
@@ -1705,7 +1707,7 @@ mod tests {
             .pop();
         assert!(err(&v).contains("expected 24"));
         let mut v = azure_envelope();
-        v["submods"]["cpu"]["cvm_report"][0] = json!(MEDIA_TYPE_SNP_REPORT);
+        v["submods"]["cpu"]["cvm_report"][0] = json!(MEDIA_TYPE_TSM_REPORT);
         assert!(err(&v).contains("does not fit"));
     }
 

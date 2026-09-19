@@ -91,6 +91,11 @@ impl Evidence {
             PlatformType::Tdx => (Vendor::Intel, Tee::Tdx, Hosting::Bare),
             PlatformType::GcpTdx => (Vendor::Intel, Tee::Tdx, Hosting::Gcp),
             PlatformType::Dstack => (Vendor::Intel, Tee::Tdx, Hosting::Dstack),
+            #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+            PlatformType::AzSnp => return azure(env.evidence, Tee::SevSnp, nonce, key),
+            #[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+            PlatformType::AzTdx => return azure(env.evidence, Tee::Tdx, nonce, key),
+            #[cfg(not(any(feature = "az-snp", feature = "az-tdx")))]
             PlatformType::AzSnp | PlatformType::AzTdx => {
                 return Err(AttestationError::PlatformNotEnabled(
                     "legacy Azure evidence mapping".to_string(),
@@ -207,4 +212,177 @@ fn tdx_registers(quote: &[u8]) -> Result<Vec<Register>> {
 #[cfg(not(feature = "tdx"))]
 fn tdx_registers(_quote: &[u8]) -> Result<Vec<Register>> {
     Err(AttestationError::PlatformNotEnabled("tdx".to_string()))
+}
+
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+/// Legacy Azure evidence: `hcl_report` and (TDX) `td_quote` base64url, the
+/// VCEK base64url (SNP), and a hex TPM quote.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAzure {
+    version: u32,
+    hcl_report: String,
+    #[serde(default)]
+    vcek: Option<String>,
+    #[serde(default)]
+    td_quote: Option<String>,
+    tpm_quote: LegacyTpmQuote,
+}
+
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTpmQuote {
+    signature: String,
+    message: String,
+    pcrs: Vec<String>,
+}
+
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+fn b64url(field: &str, s: &str) -> Result<Vec<u8>> {
+    crate::utils::decode_base64url(s)
+        .map_err(|e| invalid(format!("legacy {field}: base64url: {e}")))
+}
+
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+fn hexf(field: &str, s: &str) -> Result<Vec<u8>> {
+    hex::decode(s).map_err(|e| invalid(format!("legacy {field}: hex: {e}")))
+}
+
+#[cfg(any(feature = "az-snp", feature = "az-tdx"))]
+fn azure(
+    evidence: serde_json::Value,
+    tee: Tee,
+    nonce: &[u8],
+    key: Option<KeyBinding>,
+) -> Result<Evidence> {
+    use crate::platforms::tpm_common::{parse_hcl_report, parse_quote_info};
+    use crate::profile::{Register, TpmAkBinding, TpmAkMethod, TpmQuote, VtpmEvidence};
+
+    let ev: LegacyAzure = serde_json::from_value(evidence)
+        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+    if ev.version != 1 {
+        return Err(AttestationError::EvidenceDeserialize(format!(
+            "unsupported Azure evidence version {}",
+            ev.version
+        )));
+    }
+    let hcl_bytes = b64url("hcl_report", &ev.hcl_report)?;
+    let hcl = parse_hcl_report(&hcl_bytes)?;
+    let message = hexf("tpm_quote.message", &ev.tpm_quote.message)?;
+    let signature = hexf("tpm_quote.signature", &ev.tpm_quote.signature)?;
+    let pcrs = ev
+        .tpm_quote
+        .pcrs
+        .iter()
+        .map(|p| hexf("tpm_quote.pcrs", p).map(Bytes))
+        .collect::<Result<Vec<_>>>()?;
+    // Only PCRs inside the quote's signed selection are authenticated, so
+    // only those are projected as registers.
+    let (selected, _) = parse_quote_info(&message)?;
+    let registers = selected
+        .iter()
+        .filter_map(|&i| {
+            pcrs.get(i).map(|v| Register {
+                index: i as u16,
+                alg: crate::profile::HashAlg::Sha256,
+                value: v.clone(),
+                source: crate::profile::RegisterSource::VtpmPcr,
+                backing: crate::profile::Backing::PrivilegedService,
+            })
+        })
+        .collect();
+    let vtpm = VtpmEvidence {
+        cvm_tpm_quote: TpmQuote {
+            message: Bytes(message),
+            signature: Bytes(signature),
+            pcrs,
+            bank: crate::profile::HashAlg::Sha256,
+        },
+        cvm_tpm_ak: TpmAkBinding {
+            method: TpmAkMethod::HclReport,
+            data: Bytes(hcl_bytes),
+        },
+        cvm_registers: registers,
+        cvm_log: None,
+    };
+
+    let (vendor, report, endorsements, cpu_registers) = match tee {
+        Tee::SevSnp => {
+            let vek = ev
+                .vcek
+                .as_deref()
+                .ok_or_else(|| invalid("legacy az-snp evidence carries no vcek"))?;
+            let vek = b64url("vcek", vek)?;
+            let mut entries = BTreeMap::new();
+            entries.insert(
+                "snp.vek".to_string(),
+                CmwEntry::Record(CmwRecord::new(
+                    MEDIA_TYPE_PKIX_CERT,
+                    vek,
+                    Some(CMW_IND_ENDORSEMENTS),
+                )),
+            );
+            (
+                Vendor::Amd,
+                CmwRecord::new(
+                    MEDIA_TYPE_SNP_REPORT,
+                    hcl.tee_report.clone(),
+                    Some(CMW_IND_EVIDENCE),
+                ),
+                Some(CmwCollection {
+                    collection_type: Some(ENDORSEMENTS_COLLECTION_TAG.to_string()),
+                    entries,
+                }),
+                None,
+            )
+        }
+        Tee::Tdx => {
+            let quote = ev
+                .td_quote
+                .as_deref()
+                .ok_or_else(|| invalid("legacy az-tdx evidence carries no td_quote"))?;
+            let quote = b64url("td_quote", quote)?;
+            let registers = tdx_registers(&quote)?;
+            (
+                Vendor::Intel,
+                CmwRecord::new(MEDIA_TYPE_TDX_QUOTE, quote, Some(CMW_IND_EVIDENCE)),
+                None,
+                Some(registers),
+            )
+        }
+        Tee::Cca => unreachable!("no legacy CCA platform"),
+    };
+    let cpu = CpuEvidence {
+        cvm_platform: PlatformHint {
+            vendor,
+            tee,
+            generation: None,
+            hosting: Hosting::Azure,
+        },
+        cvm_report: report,
+        cvm_binding: Binding {
+            pattern: FreshnessPattern::Challenge,
+            mode: BindingMode::VtpmExtradata,
+            key,
+        },
+        cvm_endorsements: endorsements,
+        cvm_registers: cpu_registers,
+        cvm_log: None,
+        cvm_chain: None,
+        bootseed: None,
+        dbgstat: None,
+        cvm_provenance: None,
+    };
+    let mut submods = BTreeMap::new();
+    submods.insert("cpu".to_string(), Submod::Cpu(cpu));
+    submods.insert("vtpm".to_string(), Submod::Vtpm(vtpm));
+    let evidence = Evidence {
+        eat_profile: PROFILE_URI.to_string(),
+        eat_nonce: Bytes(nonce.to_vec()),
+        cvm_version: CVM_VERSION,
+        submods,
+    };
+    evidence.validate()?;
+    Ok(evidence)
 }

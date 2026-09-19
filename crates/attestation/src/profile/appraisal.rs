@@ -466,11 +466,13 @@ pub enum CollateralStatus {
     NotApplicable,
 }
 
-/// Which reference values matched.
+/// Which reference values matched. `launch_measurement` is absent for a
+/// submodule that has none (the vtpm).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceOutcome {
-    pub launch_measurement: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_measurement: Option<bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub registers: BTreeMap<u16, bool>,
 }
@@ -587,7 +589,7 @@ mod tests {
             },
         );
         vc.cvm_reference = Some(ReferenceOutcome {
-            launch_measurement: true,
+            launch_measurement: Some(true),
             registers: BTreeMap::from([(0u16, true), (3, false)]),
         });
         let j = serde_json::to_value(&vc).unwrap();

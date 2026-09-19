@@ -542,7 +542,7 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
 
 /// Parse TPMS_QUOTE_INFO from a TPMS_ATTEST message to extract the PCR
 /// selection bitmap and the expected PCR digest.
-fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
+pub(crate) fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
     if message.len() < 10 {
         return Err(AttestationError::QuoteParseFailed(
             "TPMS_ATTEST too short".to_string(),

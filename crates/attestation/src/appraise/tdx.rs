@@ -226,6 +226,17 @@ pub(crate) async fn appraise(
             }
             true
         }
+        #[cfg(feature = "az-tdx")]
+        BindingMode::VtpmExtradata => {
+            let var_data = ctx.vtpm_var_data.as_deref().ok_or_else(|| {
+                invalid("vtpm-extradata binding without a verified vtpm submodule")
+            })?;
+            crate::platforms::tpm_common::verify_hcl_var_data_binding(
+                &quote.body.report_data,
+                var_data,
+            )?;
+            true
+        }
         other => {
             return Err(invalid(format!(
                 "binding mode {other:?} on a TDX cpu submodule"
@@ -300,7 +311,12 @@ pub(crate) async fn appraise(
     let (reference, executables) = evaluate_reference(policy, &assessment)?;
     let backing_min = evaluate_backing(policy, &registers)?;
     let configuration = if debug { 96 } else { 2 };
-    let vector = cpu_vector(instance_identity, executables, hardware, configuration);
+    let vector = cpu_vector(
+        instance_identity,
+        executables,
+        assessment.hardware,
+        configuration,
+    );
 
     let mut compat = BTreeMap::new();
     for (name, value) in [

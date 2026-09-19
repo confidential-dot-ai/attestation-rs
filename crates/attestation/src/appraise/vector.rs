@@ -112,7 +112,7 @@ pub(crate) fn evaluate_reference(
     };
     Ok((
         Some(ReferenceOutcome {
-            launch_measurement: launch_pinned,
+            launch_measurement: Some(launch_pinned),
             registers,
         }),
         executables,
