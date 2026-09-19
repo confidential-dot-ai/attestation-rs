@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use attestation::{snp_vcek_url, ProcessorGeneration, SnpTcb};
+
 use crate::certs::hours_to_duration;
 use crate::certs::store::CollateralStore;
 use crate::config::{normalize_generation, CertsConfig, KNOWN_GENERATIONS};
@@ -186,20 +188,14 @@ impl CertCache {
 
     pub async fn get_vcek(
         &self,
-        processor_gen: &str,
+        processor_gen: ProcessorGeneration,
         chip_id: &[u8; 64],
-        tcb: &attestation::SnpTcb,
+        tcb: &SnpTcb,
     ) -> anyhow::Result<Vec<u8>> {
+        let product = processor_gen.product_name();
         let chip_id_hex = hex::encode(chip_id);
-        let tcb_str = format!(
-            "{:02X}{:02X}{:02X}{:02X}",
-            tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
-        );
-        let key = (
-            processor_gen.to_string(),
-            chip_id_hex.clone(),
-            tcb_str.clone(),
-        );
+        let tcb_str = vcek_tcb_key(tcb);
+        let key = (product.to_string(), chip_id_hex.clone(), tcb_str.clone());
 
         if let Some(cert) = self.vcek_cache.get(&key).await {
             return Ok(cert);
@@ -208,28 +204,21 @@ impl CertCache {
         // A VCEK never changes for this key, so a stored copy is authoritative
         // and lets a cold process verify while KDS is unreachable.
         if let Some(store) = &self.store {
-            if let Some(cert) = store.get_vcek(processor_gen, &chip_id_hex, &tcb_str) {
+            if let Some(cert) = store.get_vcek(product, &chip_id_hex, &tcb_str) {
                 self.vcek_cache.insert(key, cert.clone()).await;
                 return Ok(cert);
             }
         }
 
-        let url = format!(
-            "{}/{}/{}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
-            attestation::AMD_KDS_VCEK_BASE,
-            processor_gen,
-            chip_id_hex,
-            tcb.bootloader,
-            tcb.tee,
-            tcb.snp,
-            tcb.microcode
-        );
+        // The library owns the KDS URL rules (Turin's 8-byte chip id and FMC
+        // SPL); building it here again is how the service drifted before.
+        let url = snp_vcek_url(processor_gen, chip_id, tcb)?;
 
         tracing::info!(%url, "fetching VCEK from AMD KDS");
         let resp = self.http_client.get(&url).send().await?;
         let cert = resp.error_for_status()?.bytes().await?.to_vec();
         if let Some(store) = &self.store {
-            store.put_vcek(processor_gen, &chip_id_hex, &tcb_str, &cert);
+            store.put_vcek(product, &chip_id_hex, &tcb_str, &cert);
         }
         self.vcek_cache.insert(key, cert.clone()).await;
         Ok(cert)
@@ -654,6 +643,19 @@ impl CertCache {
     }
 }
 
+/// Cache and store key for a VCEK's TCB. The FMC SPL is part of the KDS
+/// lookup on Turin, so it is part of the cert's identity here too.
+pub(crate) fn vcek_tcb_key(tcb: &SnpTcb) -> String {
+    let mut key = format!(
+        "{:02X}{:02X}{:02X}{:02X}",
+        tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
+    );
+    if let Some(fmc) = tcb.fmc {
+        key.push_str(&format!("{fmc:02X}"));
+    }
+    key
+}
+
 fn is_signing_chain_key(collateral_type: &str) -> bool {
     collateral_type == TCB_SIGNING_CHAIN
         || collateral_type == QE_IDENTITY_SIGNING_CHAIN
@@ -740,13 +742,20 @@ mod tests {
 
     const TEST_CHIP: [u8; 64] = [0xAB; 64];
 
-    fn test_tcb() -> attestation::SnpTcb {
-        attestation::SnpTcb {
+    fn test_tcb() -> SnpTcb {
+        SnpTcb {
             fmc: None,
             bootloader: 3,
             tee: 0,
             snp: 10,
             microcode: 27,
+        }
+    }
+
+    fn turin_tcb() -> SnpTcb {
+        SnpTcb {
+            fmc: Some(0x10),
+            ..test_tcb()
         }
     }
 
@@ -761,15 +770,12 @@ mod tests {
         store.put_vcek(
             "Genoa",
             &hex::encode(TEST_CHIP),
-            &format!(
-                "{:02X}{:02X}{:02X}{:02X}",
-                tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
-            ),
+            &vcek_tcb_key(&tcb),
             b"stored-vcek",
         );
 
         let cert = cache
-            .get_vcek("Genoa", &TEST_CHIP, &tcb)
+            .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &tcb)
             .await
             .expect("a stored VCEK must be served while the network is unreachable");
         assert_eq!(cert, b"stored-vcek");
@@ -783,7 +789,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
         assert!(cache
-            .get_vcek("Genoa", &TEST_CHIP, &test_tcb())
+            .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &test_tcb())
             .await
             .is_err());
     }
@@ -792,10 +798,7 @@ mod tests {
     async fn a_second_cold_process_reads_the_stored_vcek() {
         let dir = tempfile::tempdir().unwrap();
         let tcb = test_tcb();
-        let tcb_str = format!(
-            "{:02X}{:02X}{:02X}{:02X}",
-            tcb.bootloader, tcb.tee, tcb.snp, tcb.microcode
-        );
+        let tcb_str = vcek_tcb_key(&tcb);
 
         // Populate via one cache, then read with a second one that shares only the
         // directory: that is exactly the cold-process path.
@@ -810,8 +813,51 @@ mod tests {
 
         let second = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
         assert_eq!(
-            second.get_vcek("Genoa", &TEST_CHIP, &tcb).await.unwrap(),
+            second
+                .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &tcb)
+                .await
+                .unwrap(),
             b"written-back"
+        );
+    }
+
+    #[test]
+    fn vcek_tcb_key_carries_the_turin_fmc_spl() {
+        assert_eq!(vcek_tcb_key(&test_tcb()), "03000A1B");
+        assert_eq!(vcek_tcb_key(&turin_tcb()), "03000A1B10");
+    }
+
+    // A Turin VCEK is minted for a specific FMC SPL, so a stored copy for one
+    // FMC must not answer a lookup for another: the miss has to reach KDS.
+    #[tokio::test]
+    async fn a_turin_vcek_is_keyed_by_its_fmc_spl() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CertCache::with_client(&cfg_with_store(Some(dir.path())), offline_client());
+        let store = crate::certs::store::CollateralStore::new(dir.path());
+        store.put_vcek(
+            "Turin",
+            &hex::encode(TEST_CHIP),
+            &vcek_tcb_key(&turin_tcb()),
+            b"turin-fmc-10",
+        );
+
+        assert_eq!(
+            cache
+                .get_vcek(ProcessorGeneration::Turin, &TEST_CHIP, &turin_tcb())
+                .await
+                .unwrap(),
+            b"turin-fmc-10"
+        );
+        let other_fmc = SnpTcb {
+            fmc: Some(0x11),
+            ..test_tcb()
+        };
+        assert!(
+            cache
+                .get_vcek(ProcessorGeneration::Turin, &TEST_CHIP, &other_fmc)
+                .await
+                .is_err(),
+            "a different FMC SPL must miss the store and need the network"
         );
     }
 
@@ -820,7 +866,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = CertCache::with_client(&cfg_with_store(None), offline_client());
         assert!(cache
-            .get_vcek("Genoa", &TEST_CHIP, &test_tcb())
+            .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &test_tcb())
             .await
             .is_err());
         assert_eq!(
