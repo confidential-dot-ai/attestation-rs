@@ -121,7 +121,26 @@ async fn test_az_snp_attest_generates_valid_evidence() {
         b"HCLA",
         "HCL report should have HCLA magic"
     );
-    assert_eq!(hcl_bytes.len(), 2600, "HCL report should be 2600 bytes");
+    // The blob's total size is Azure's to choose (it grew from 2600 to 2900
+    // bytes on the SNP runners in September 2026); what the verifier relies on
+    // is the layout the parser enforces: HCLA magic, a 1184-byte TEE report,
+    // a SNP report type, and var_data bounded by its own length field.
+    let hcl = attestation::platforms::tpm_common::parse_hcl_report(&hcl_bytes)
+        .expect("HCL report should parse");
+    assert_eq!(
+        hcl.tee_report.len(),
+        1184,
+        "TEE report should be 1184 bytes"
+    );
+    assert_eq!(
+        hcl.report_type,
+        attestation::platforms::tpm_common::HCL_REPORT_TYPE_SNP,
+        "HCL report type should be SNP"
+    );
+    assert!(
+        !hcl.var_data.is_empty(),
+        "HCL var_data should carry the AK JWK"
+    );
 
     // VCEK should be valid DER
     let vcek_der = base64::engine::general_purpose::URL_SAFE_NO_PAD
