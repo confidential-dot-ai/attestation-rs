@@ -200,20 +200,6 @@ impl DefaultCertProvider {
             );
         }
     }
-
-    /// Build AMD KDS URL for VCEK certificate. See [`snp_vcek_url`].
-    fn vcek_url(
-        processor_gen: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        tcb: &SnpTcb,
-    ) -> Result<String> {
-        snp_vcek_url(processor_gen, chip_id, tcb)
-    }
-
-    /// Build AMD KDS URL for cert chain (ARK + ASK). See [`snp_cert_chain_url`].
-    pub fn cert_chain_url(processor_gen: ProcessorGeneration) -> String {
-        snp_cert_chain_url(processor_gen)
-    }
 }
 
 /// Read response body with size limit enforcement.
@@ -280,7 +266,7 @@ impl CertProvider for DefaultCertProvider {
         chip_id: &[u8; 64],
         reported_tcb: &SnpTcb,
     ) -> Result<Vec<u8>> {
-        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb)?;
+        let url = snp_vcek_url(processor_gen, chip_id, reported_tcb)?;
         self.fetch_cert(&url).await
     }
 
@@ -288,7 +274,7 @@ impl CertProvider for DefaultCertProvider {
         &self,
         processor_gen: ProcessorGeneration,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
-        let url = Self::cert_chain_url(processor_gen);
+        let url = snp_cert_chain_url(processor_gen);
         let pem_data = self.fetch_cert(&url).await?;
 
         // The cert chain response is PEM with two certificates (ARK + ASK)
@@ -344,7 +330,7 @@ impl CertProvider for DefaultCertProvider {
         reported_tcb: &SnpTcb,
     ) -> Result<Vec<u8>> {
         // Check cache first
-        let url = Self::vcek_url(processor_gen, chip_id, reported_tcb)?;
+        let url = snp_vcek_url(processor_gen, chip_id, reported_tcb)?;
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
@@ -787,8 +773,7 @@ mod tests {
             microcode: 115,
             fmc: None,
         };
-        let url =
-            DefaultCertProvider::vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb).unwrap();
+        let url = snp_vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb).unwrap();
 
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Milan/"));
         assert!(url.contains(&hex::encode(chip_id)));
@@ -809,8 +794,7 @@ mod tests {
             microcode: 0,
             fmc: Some(10),
         };
-        let url =
-            DefaultCertProvider::vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb).unwrap();
+        let url = snp_vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb).unwrap();
 
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Turin/"));
         // Turin uses only first 8 bytes of chip_id
