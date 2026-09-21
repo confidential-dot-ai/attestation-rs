@@ -37,10 +37,10 @@ pub mod types;
 pub mod utils;
 
 pub use collateral::{
-    snp_crl_url, CertProvider, DefaultCertProvider, DefaultTdxCollateralProvider, HttpTimeouts,
-    TdxCollateralProvider, AMD_KDS_VCEK_BASE, AMD_KDS_VLEK_BASE, INTEL_CERTS_BASE,
-    INTEL_PCS_V4_BASE, INTEL_QE_IDENTITY_URL, INTEL_ROOT_CA_CRL_URL, INTEL_TDX_PCS_V4_BASE,
-    INTEL_TD_QE_IDENTITY_URL,
+    snp_cert_chain_url, snp_crl_url, snp_vcek_url, CertProvider, DefaultCertProvider,
+    DefaultTdxCollateralProvider, HttpTimeouts, TdxCollateralProvider, AMD_KDS_VCEK_BASE,
+    AMD_KDS_VLEK_BASE, INTEL_CERTS_BASE, INTEL_PCS_V4_BASE, INTEL_QE_IDENTITY_URL,
+    INTEL_ROOT_CA_CRL_URL, INTEL_TDX_PCS_V4_BASE, INTEL_TD_QE_IDENTITY_URL,
 };
 pub use error::{AttestationError, Result};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]

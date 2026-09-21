@@ -26,7 +26,7 @@ impl attestation::CertProvider for CachedCertProvider {
         reported_tcb: &attestation::SnpTcb,
     ) -> attestation::Result<Vec<u8>> {
         self.cache
-            .get_vcek(processor_gen.product_name(), chip_id, reported_tcb)
+            .get_vcek(processor_gen, chip_id, reported_tcb)
             .await
             .map_err(|e| {
                 attestation::AttestationError::CertFetchError(format!("cached VCEK fetch: {e}"))
