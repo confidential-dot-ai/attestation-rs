@@ -239,22 +239,6 @@ impl DefaultCertProvider {
     }
 }
 
-impl DefaultCertProvider {
-    /// Build AMD KDS URL for VCEK certificate. See [`snp_vcek_url`].
-    pub fn vcek_url(
-        processor_gen: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        tcb: &SnpTcb,
-    ) -> Result<String> {
-        snp_vcek_url(processor_gen, chip_id, tcb)
-    }
-
-    /// Build AMD KDS URL for cert chain (ARK + ASK). See [`snp_cert_chain_url`].
-    pub fn cert_chain_url(processor_gen: ProcessorGeneration) -> String {
-        snp_cert_chain_url(processor_gen)
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl CertProvider for DefaultCertProvider {
@@ -683,8 +667,7 @@ mod tests {
             microcode: 115,
             fmc: None,
         };
-        let url =
-            DefaultCertProvider::vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb).unwrap();
+        let url = snp_vcek_url(ProcessorGeneration::Milan, &chip_id, &tcb).unwrap();
 
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Milan/"));
         assert!(url.contains(&hex::encode(chip_id)));
@@ -705,16 +688,13 @@ mod tests {
             microcode: 0,
             fmc: Some(10),
         };
-        let url =
-            DefaultCertProvider::vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb).unwrap();
+        let url = snp_vcek_url(ProcessorGeneration::Turin, &chip_id, &tcb).unwrap();
         assert!(url.starts_with("https://kdsintf.amd.com/vcek/v1/Turin/"));
         assert!(url.contains(&hex::encode(&chip_id[..8])));
         assert!(!url.contains(&hex::encode(chip_id)));
         assert!(url.contains("fmcSPL=10"));
         let no_fmc = SnpTcb { fmc: None, ..tcb };
-        assert!(
-            DefaultCertProvider::vcek_url(ProcessorGeneration::Turin, &chip_id, &no_fmc).is_err()
-        );
+        assert!(snp_vcek_url(ProcessorGeneration::Turin, &chip_id, &no_fmc).is_err());
     }
 
     #[test]
