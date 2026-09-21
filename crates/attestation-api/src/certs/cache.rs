@@ -3,6 +3,8 @@ use moka::future::Cache;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -19,6 +21,10 @@ type VcekKey = (String, String, String);
 /// Key for TDX collateral cache
 type TdxCollateralKey = (String, String);
 
+/// In-flight fetches during a refresh. Small enough to stay under vendor
+/// rate limits, large enough that a refresh is one round trip deep.
+const REFRESH_CONCURRENCY: usize = 8;
+
 /// TDX cache entries holding the Intel signing chain captured with a body:
 /// the TCB Info chain and the (SGX and TD) QE Identity chains.
 pub(crate) const TCB_SIGNING_CHAIN: &str = "tcb_signing_chain";
@@ -28,6 +34,8 @@ pub(crate) const TD_QE_IDENTITY_SIGNING_CHAIN: &str = "td_qe_identity_signing_ch
 #[derive(Debug, Clone, Serialize)]
 pub struct CrlEntry {
     pub data: Vec<u8>,
+    /// Distribution point the entry was fetched from, so a refresh can refetch it.
+    pub url: String,
     pub last_fetched: DateTime<Utc>,
     pub next_refresh: DateTime<Utc>,
     pub entry_count: u64,
@@ -230,6 +238,15 @@ impl CertCache {
             }
         }
 
+        self.refresh_cert_chain(processor_gen).await
+    }
+
+    /// Fetch the chain from AMD KDS and replace the cached copy. On failure
+    /// the previous copy, if any, keeps serving until its own TTL runs out.
+    pub async fn refresh_cert_chain(
+        &self,
+        processor_gen: &str,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         let url = format!(
             "{}/{}/cert_chain",
             attestation::AMD_KDS_VCEK_BASE,
@@ -237,7 +254,7 @@ impl CertCache {
         );
 
         tracing::info!(%url, "fetching cert chain from AMD KDS");
-        let resp = self.http_client.get(&url).send().await?;
+        let resp = self.http_client.get(self.upstream_url(&url)).send().await?;
         let pem_data = resp.error_for_status()?.bytes().await?;
 
         // The cert chain PEM contains two certificates: ASK then ARK
@@ -263,6 +280,20 @@ impl CertCache {
         if let Some(data) = self.tdx_cache.get(&key).await {
             return Ok(data);
         }
+
+        self.refresh_tdx_collateral(collateral_type, identifier)
+            .await
+    }
+
+    /// Fetch the collateral from Intel PCS and replace the cached copy (and
+    /// its signing chain). On failure the previous copies, if any, keep
+    /// serving until their own TTL runs out.
+    pub async fn refresh_tdx_collateral(
+        &self,
+        collateral_type: &str,
+        identifier: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let key = (collateral_type.to_string(), identifier.to_string());
 
         use attestation::collateral::{
             pcs_issuer_chain_from_header, DefaultTdxCollateralProvider,
@@ -378,9 +409,27 @@ impl CertCache {
             }
         }
 
+        self.fetch_crl(issuer, url, prior).await
+    }
+
+    /// Fetch the CRL regardless of any backoff (a refresh is a deliberate
+    /// retry) and replace the cached copy on success. On failure the previous
+    /// copy keeps serving until its own TTL runs out, and the backoff state
+    /// still advances so request-path lookups keep honouring it.
+    pub async fn refresh_crl(&self, issuer: &str, url: &str) -> anyhow::Result<CrlEntry> {
+        let prior = self.crl_failure_cache.get(issuer).await;
+        self.fetch_crl(issuer, url, prior).await
+    }
+
+    async fn fetch_crl(
+        &self,
+        issuer: &str,
+        url: &str,
+        prior: Option<CrlBackoff>,
+    ) -> anyhow::Result<CrlEntry> {
         tracing::info!(%url, %issuer, "fetching CRL");
         let fetched = async {
-            let resp = self.http_client.get(url).send().await?;
+            let resp = self.http_client.get(self.upstream_url(url)).send().await?;
             let data = resp.error_for_status()?.bytes().await?.to_vec();
             Ok::<Vec<u8>, anyhow::Error>(data)
         }
@@ -413,7 +462,7 @@ impl CertCache {
         };
 
         let now = Utc::now();
-        let entry = build_crl_entry(data, now, self.crl_refresh_hours);
+        let entry = build_crl_entry(data, url, now, self.crl_refresh_hours);
 
         self.crl_cache
             .insert(issuer.to_string(), entry.clone())
@@ -492,6 +541,7 @@ impl CertCache {
                 status.insert(
                     issuer.to_string(),
                     json!({
+                        "url": entry.url,
                         "last_fetched": entry.last_fetched.to_rfc3339(),
                         "next_refresh": entry.next_refresh.to_rfc3339(),
                     }),
@@ -505,32 +555,98 @@ impl CertCache {
         *self.last_crl_refresh.read().await
     }
 
+    /// Refetch what the cache holds and replace each entry only when its fetch
+    /// succeeds. Nothing is invalidated up front: a failed refresh keeps the
+    /// previous copy until its own TTL runs out, so a refresh never leaves the
+    /// service with less collateral than it had. VCEKs are immutable per key
+    /// and are left alone. Fetches run concurrently (bounded), so a refresh
+    /// costs about one round trip or one timeout rather than their sum. Every
+    /// failure is reported.
     pub async fn refresh_all(&self) -> anyhow::Result<()> {
-        // Invalidate all caches to force re-fetch on next access
-        self.vcek_cache.invalidate_all();
-        self.chain_cache.invalidate_all();
-        self.tdx_cache.invalidate_all();
-        self.crl_cache.invalidate_all();
-        self.jwks_cache.invalidate_all();
+        use futures_util::stream::{self, StreamExt};
 
-        // Pre-fetch configured chain types, collecting any failures
-        let mut failures = Vec::new();
-        for gen in &self.configured_generations {
-            if let Err(e) = self.get_cert_chain(gen).await {
-                tracing::error!(gen = gen.as_str(), error = %e, "failed to refresh cert chain after cache invalidation");
-                failures.push(format!("{gen}: {e}"));
+        type Job<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+        let mut jobs: Vec<Job<'_>> = Vec::new();
+
+        // AMD cert chains: the configured generations plus any other held one.
+        let mut generations = self.configured_generations.clone();
+        for (gen, _) in self.chain_cache.iter() {
+            if !generations.contains(&gen) {
+                generations.push((*gen).clone());
             }
+        }
+        for gen in generations {
+            jobs.push(Box::pin(async move {
+                self.refresh_cert_chain(&gen)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("chain {gen}: {e}"))
+            }));
+        }
+
+        // CRLs: every held entry, from the distribution point it came from.
+        for (issuer, entry) in self.crl_cache.iter() {
+            let issuer = (*issuer).clone();
+            let url = entry.url;
+            jobs.push(Box::pin(async move {
+                self.refresh_crl(&issuer, &url)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("crl {issuer}: {e}"))
+            }));
+        }
+
+        // TDX collateral: every held body; the signing chains refresh with them.
+        for (key, _) in self
+            .tdx_cache
+            .iter()
+            .filter(|(key, _)| !is_signing_chain_key(&key.0))
+        {
+            let (collateral_type, identifier) = (*key).clone();
+            jobs.push(Box::pin(async move {
+                self.refresh_tdx_collateral(&collateral_type, &identifier)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("tdx {collateral_type}/{identifier}: {e}"))
+            }));
+        }
+
+        // NRAS JWKS: force-refetch overwrites on success and keeps on failure.
+        for (url, _) in self.jwks_cache.iter() {
+            let url = (*url).clone();
+            jobs.push(Box::pin(async move {
+                self.get_jwks(&url, true)
+                    .await
+                    .map(drop)
+                    .map_err(|e| format!("jwks {url}: {e}"))
+            }));
+        }
+
+        let mut failures: Vec<String> = stream::iter(jobs)
+            .buffer_unordered(REFRESH_CONCURRENCY)
+            .filter_map(|outcome| async move { outcome.err() })
+            .collect()
+            .await;
+        failures.sort();
+        for failure in &failures {
+            tracing::warn!(%failure, "collateral refresh failed; keeping the cached copy");
         }
 
         anyhow::ensure!(
             failures.is_empty(),
-            "cache invalidated but {} chain(s) failed to refresh: {}",
+            "{} collateral refresh(es) failed; the previous copies are still served: {}",
             failures.len(),
             failures.join("; ")
         );
 
         Ok(())
     }
+}
+
+fn is_signing_chain_key(collateral_type: &str) -> bool {
+    collateral_type == TCB_SIGNING_CHAIN
+        || collateral_type == QE_IDENTITY_SIGNING_CHAIN
+        || collateral_type == TD_QE_IDENTITY_SIGNING_CHAIN
 }
 
 /// Cache and store key for a VCEK's TCB. The FMC SPL is part of the KDS
@@ -567,9 +683,15 @@ pub(crate) fn backoff_delay(base_secs: u64, max_secs: u64, consecutive: u32) -> 
 }
 
 /// Build a CRL entry with the given refresh interval (in hours).
-pub(crate) fn build_crl_entry(data: Vec<u8>, now: DateTime<Utc>, refresh_hours: u64) -> CrlEntry {
+pub(crate) fn build_crl_entry(
+    data: Vec<u8>,
+    url: &str,
+    now: DateTime<Utc>,
+    refresh_hours: u64,
+) -> CrlEntry {
     CrlEntry {
         data,
+        url: url.to_string(),
         last_fetched: now,
         next_refresh: now + ChronoDuration::hours(refresh_hours as i64),
         entry_count: 0,
@@ -900,7 +1022,7 @@ mod tests {
     #[test]
     fn build_crl_entry_uses_configured_refresh_interval() {
         let now = Utc::now();
-        let entry = build_crl_entry(vec![1, 2, 3], now, 6);
+        let entry = build_crl_entry(vec![1, 2, 3], "https://x.example/crl", now, 6);
         let diff = entry.next_refresh - entry.last_fetched;
         assert_eq!(
             diff.num_hours(),
@@ -910,7 +1032,7 @@ mod tests {
         assert_eq!(entry.data, vec![1, 2, 3]);
 
         // Verify non-default interval is respected
-        let entry12 = build_crl_entry(vec![], now, 12);
+        let entry12 = build_crl_entry(vec![], "https://x.example/crl", now, 12);
         let diff12 = entry12.next_refresh - entry12.last_fetched;
         assert_eq!(diff12.num_hours(), 12);
     }
@@ -1317,6 +1439,179 @@ mod tests {
         assert!(
             err.to_string().contains("refusing unsigned collateral"),
             "{err}"
+        );
+    }
+
+    // ---- refresh: replace on success, keep on failure ----
+
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_cached_chain_and_reports_it() {
+        let cache = CertCache::with_client(&CertsConfig::default(), offline_client());
+        cache
+            .chain_cache
+            .insert("Genoa".to_string(), (b"ark".to_vec(), b"ask".to_vec()))
+            .await;
+
+        let err = cache
+            .refresh_all()
+            .await
+            .expect_err("an unreachable KDS must be reported");
+        assert!(err.to_string().contains("chain Genoa"), "{err}");
+        assert_eq!(
+            cache.chain_cache.get("Genoa").await,
+            Some((b"ark".to_vec(), b"ask".to_vec())),
+            "the copy held before the refresh must still be served"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_leaves_vceks_alone() {
+        let cache = CertCache::with_client(&CertsConfig::default(), offline_client());
+        let key = (
+            "Genoa".to_string(),
+            hex::encode(TEST_CHIP),
+            "03000A1B".to_string(),
+        );
+        cache.vcek_cache.insert(key.clone(), b"vcek".to_vec()).await;
+
+        let _ = cache.refresh_all().await;
+        assert_eq!(cache.vcek_cache.get(&key).await, Some(b"vcek".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_replaces_held_tdx_collateral_in_place() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(true)).await);
+        let key = ("tcb_info".to_string(), "00806f050000".to_string());
+        cache.tdx_cache.insert(key.clone(), b"stale".to_vec()).await;
+
+        // The AMD chain for the default prefetch generation is unreachable
+        // through the fake PCS, so the refresh reports that and still refreshes
+        // the TDX entry it holds.
+        let err = cache
+            .refresh_all()
+            .await
+            .expect_err("the chain fetch fails");
+        assert!(err.to_string().contains("chain Milan"), "{err}");
+        assert!(!err.to_string().contains("tdx "), "{err}");
+        assert_eq!(
+            cache.tdx_cache.get(&key).await,
+            Some(TCB_INFO_BODY.as_bytes().to_vec())
+        );
+        assert!(cache.get_tdx_signing_chain(TCB_SIGNING_CHAIN).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_refused_tdx_refresh_keeps_the_held_body() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(false)).await);
+        let key = ("tcb_info".to_string(), "00806f050000".to_string());
+        cache.tdx_cache.insert(key.clone(), b"stale".to_vec()).await;
+
+        let err = cache
+            .refresh_all()
+            .await
+            .expect_err("unsigned collateral is refused");
+        assert!(
+            err.to_string().contains("tdx tcb_info/00806f050000"),
+            "{err}"
+        );
+        assert_eq!(cache.tdx_cache.get(&key).await, Some(b"stale".to_vec()));
+    }
+
+    // A refresh is a deliberate retry: it dials even inside a backoff window,
+    // and a failure leaves the held CRL in place.
+    #[tokio::test]
+    async fn a_crl_refresh_dials_through_the_backoff_and_keeps_the_held_entry() {
+        let (url, hits) = counting_crl_endpoint().await;
+        let cache = CertCache::new(&CertsConfig {
+            crl_backoff_base_secs: 300,
+            ..Default::default()
+        });
+        cache
+            .crl_cache
+            .insert(
+                "snp_genoa".to_string(),
+                build_crl_entry(b"held".to_vec(), &url, Utc::now(), 6),
+            )
+            .await;
+        cache
+            .crl_failure_cache
+            .insert(
+                "snp_genoa".to_string(),
+                CrlBackoff {
+                    consecutive: 3,
+                    retry_at: Utc::now() + ChronoDuration::hours(1),
+                },
+            )
+            .await;
+
+        assert!(cache.refresh_crl("snp_genoa", &url).await.is_err());
+        assert_eq!(hits_of(&hits), 1, "a refresh must dial despite the backoff");
+        assert_eq!(
+            cache.crl_cache.get("snp_genoa").await.map(|e| e.data),
+            Some(b"held".to_vec())
+        );
+
+        // refresh_all finds the held CRL through the URL it recorded.
+        let err = cache.refresh_all().await.expect_err("still failing");
+        assert!(err.to_string().contains("crl snp_genoa"), "{err}");
+        assert_eq!(hits_of(&hits), 2);
+    }
+
+    /// Answers 500 after holding the connection for `hold`, and records the peak
+    /// number of connections open at once.
+    async fn slow_endpoint(
+        hold: Duration,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak_w = peak.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let in_flight = in_flight.clone();
+                let peak_w = peak_w.clone();
+                tokio::spawn(async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak_w.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(hold).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        (format!("http://{addr}/crl"), peak)
+    }
+
+    #[tokio::test]
+    async fn a_refresh_runs_its_fetches_concurrently() {
+        let (url, peak) = slow_endpoint(Duration::from_millis(500)).await;
+        let cache = CertCache::new(&CertsConfig {
+            prefetch_chains: vec![],
+            ..Default::default()
+        });
+        for issuer in ["snp_milan", "snp_genoa", "snp_turin", "tdx_root_ca"] {
+            cache
+                .crl_cache
+                .insert(
+                    issuer.to_string(),
+                    build_crl_entry(b"held".to_vec(), &url, Utc::now(), 6),
+                )
+                .await;
+        }
+
+        let err = cache.refresh_all().await.expect_err("every fetch fails");
+        assert_eq!(err.to_string().matches("crl ").count(), 4, "{err}");
+        assert!(
+            peak.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the held CRLs must be refetched concurrently, not one after another"
         );
     }
 
