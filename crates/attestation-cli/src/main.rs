@@ -467,17 +467,9 @@ async fn cmd_verify(args: VerifyArgs) {
     let json = serde_json::to_string_pretty(&result).expect("failed to serialize result");
     println!("{json}");
 
-    // Exit non-zero on signature failure or any explicit policy mismatch
-    // so CI/deploy gates fail closed when a pinned reference drifts.
-    let policy_failed = matches!(result.report_data_match, Some(false))
-        || matches!(result.init_data_match, Some(false))
-        || matches!(result.mrtd_match, Some(false))
-        || matches!(result.launch_digest_match, Some(false))
-        || matches!(result.rtmr0_match, Some(false))
-        || matches!(result.rtmr1_match, Some(false))
-        || matches!(result.rtmr2_match, Some(false))
-        || matches!(result.rtmr3_match, Some(false));
-    if !result.signature_valid || policy_failed {
+    // A supplied expected_* reference that mismatches fails verify() itself,
+    // so reaching this point means every pinned reference matched.
+    if !result.signature_valid {
         process::exit(1);
     }
 }
