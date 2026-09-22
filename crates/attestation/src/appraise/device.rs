@@ -14,7 +14,7 @@ use crate::profile::binding::{nras_gpu_nonce, nras_switch_nonce};
 use crate::profile::{
     AttesterClaims, CollateralCheck, CollateralOutcome, CollateralStatus, DeviceClaims,
     GpuDeviceEvidence, Identity, NvidiaEvidenceOutcome, SubmodAppraisal, Tcb, TrustVector,
-    VerifierClaims, VerifyPolicy, PROFILE_URI,
+    VerifierClaims, VerifyPolicy,
 };
 use crate::types::{NvidiaGpuArch, NvidiaGpuDeviceClaims, NvidiaGpuDeviceEvidence};
 use std::collections::BTreeMap;
@@ -188,7 +188,7 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
         appraisal: SubmodAppraisal {
             ear_status: vector.status(),
             ear_trustworthiness_vector: vector,
-            ear_appraisal_policy_ids: vec![PROFILE_URI.to_string()],
+            ear_appraisal_policy_ids: Vec::new(),
             ear_attester_claims: AttesterClaims::Device(DeviceClaims { claims: map }),
             ear_verifier_claims: VerifierClaims {
                 cvm_collateral: collateral,

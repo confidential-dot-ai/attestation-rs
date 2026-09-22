@@ -9,6 +9,7 @@ use crate::error::{AttestationError, Result};
 use crate::platforms::tdx::dcap;
 use crate::platforms::tdx::verify::{parse_tdx_quote, verify_quote_signature};
 use crate::profile::cel;
+use crate::profile::DebugStatus;
 use crate::profile::{
     AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralOutcome,
     CollateralStatus, CpuClaims, CpuEvidence, Digest, FixedBytes, Freshness, HashAlg, HostData,
@@ -91,6 +92,18 @@ pub(crate) async fn appraise(
     // 4. Guest policy, matching Intel's quote verification policy.
     let attrs = u64::from_le_bytes(quote.body.td_attributes);
     let debug = attrs & ATTR_DEBUG != 0;
+    // TD attributes are fixed at build, so debug is off since boot or on.
+    let dbgstat = if debug {
+        DebugStatus::Enabled
+    } else {
+        DebugStatus::DisabledSinceBoot
+    };
+    if cpu
+        .dbgstat
+        .is_some_and(|hint| hint.is_disabled() != dbgstat.is_disabled())
+    {
+        return Err(invalid("dbgstat contradicts the TD's DEBUG attribute"));
+    }
     let sept_ve_disable = attrs & ATTR_SEPT_VE_DISABLE != 0;
     let migratable = attrs & ATTR_MIGRATABLE != 0;
     let reserved_zero = attrs & !ATTR_DEFINED == 0;
@@ -398,7 +411,7 @@ pub(crate) async fn appraise(
             service_td,
             reserved_bits_zero: Some(reserved_zero),
         },
-        dbgstat: if debug { 0 } else { 2 },
+        dbgstat,
         cvm_tcb: Tcb::Tdx(Box::new(TdxTcb {
             tee_tcb_svn: FixedBytes(quote.body.tee_tcb_svn),
             pck_tcb: FixedBytes(pck_tcb),
@@ -419,7 +432,7 @@ pub(crate) async fn appraise(
         appraisal: SubmodAppraisal {
             ear_status: vector_status,
             ear_trustworthiness_vector: vector,
-            ear_appraisal_policy_ids: vec![crate::profile::PROFILE_URI.to_string()],
+            ear_appraisal_policy_ids: Vec::new(),
             ear_attester_claims: AttesterClaims::Cpu(Box::new(claims)),
             ear_verifier_claims: VerifierClaims {
                 cvm_collateral: outcomes,

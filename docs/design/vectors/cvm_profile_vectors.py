@@ -5,7 +5,9 @@ Every formula is written out with the exact byte strings the profile specifies,
 so a reader can diff this file against the document and an implementation in
 another language can check itself against the printed values.
 """
+import base64
 import hashlib
+import json
 
 
 def sha384(b: bytes) -> bytes:
@@ -39,6 +41,47 @@ def anchor(nonce: bytes, key=None) -> bytes:
 SEED = sha384(b"ats-mr-v1/seed")            # the constant genesis seed, section 4.9
 REG_COUNT = 16
 HEADER16 = b"ATS-MR-1" + bytes([1, 1, REG_COUNT, 0]) + bytes(4)   # section 4.9
+
+
+def b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def jcs(obj) -> bytes:
+    """RFC 8785 for objects of strings, integers, booleans and ASCII keys."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+# Section 5.1: the effective default policy, every member with its default.
+DEFAULT_POLICY = {
+    "commitment": {"header16": b64u(HEADER16), "seed": b64u(SEED)},
+    "freshness": {},
+    "gpu": {
+        "device_policy": {
+            "allow_debug": False,
+            "require_measres_success": True,
+            "require_nonce_match": True,
+            "require_secboot": True,
+        },
+        "required": False,
+    },
+    "min_backing": "hardware",
+    "policy_bits": {
+        "allow_debug": False,
+        "allow_migration": False,
+        "allow_service_td": False,
+        "require_sept_ve_disable": True,
+        "require_vmpl0": True,
+        "require_zero_reserved_attributes": True,
+    },
+    "reference": {"launch_measurement": [], "pcrs": {}, "registers": {}, "slot_owners": {}},
+    "tcb": {
+        "floors": {},
+        "require_revocation": True,
+        "require_signed_collateral": True,
+        "tdx_allowed_status": ["UpToDate"],
+    },
+}
 
 
 def genesis(i: int, seed: bytes = SEED) -> bytes:
@@ -163,6 +206,11 @@ def main() -> None:
     emit("claim_digest", "claim digest d ", dc)
     emit("claim_r4", "R[4] claim only", extend(genesis(4), dc))
     emit("claim_cel_record", "claim CEL rec  ", cel_record(1, 4, dc, claim))
+    # Section 5.1: the default policy's identifier is ni:///sha-384;<base64url(digest)>.
+    emit("policy_jcs_default", "policy JCS     ", jcs(DEFAULT_POLICY))
+    emit("policy_digest_default", "policy SHA-384 ", sha384(jcs(DEFAULT_POLICY)))
+    if not as_json:
+        print("policy id      ", "ni:///sha-384;" + b64u(sha384(jcs(DEFAULT_POLICY))))
     if as_json:
         out["nonce"] = hx(nonce)
         out["key_spki_value"] = hx(key[1])

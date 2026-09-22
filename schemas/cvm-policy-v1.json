@@ -280,6 +280,7 @@
         },
         "pcrs": {
           "additionalProperties": false,
+          "default": {},
           "description": "Acceptable values per vTPM PCR, for the `vtpm` submodule; a PCR absent\nhere is not pinned. Azure's initdata convention pins PCR 8 to\n`SHA-256(zeros32 || initdata_hash)`.",
           "patternProperties": {
             "^\\d+$": {
@@ -293,6 +294,7 @@
         },
         "registers": {
           "additionalProperties": false,
+          "default": {},
           "description": "Acceptable values per slot. A slot absent here is not pinned.",
           "patternProperties": {
             "^\\d+$": {
@@ -306,6 +308,7 @@
         },
         "slot_owners": {
           "additionalProperties": false,
+          "default": {},
           "description": "Required `owner` of a workload slot's claim record (section 4.9).",
           "patternProperties": {
             "^\\d+$": {
@@ -315,6 +318,32 @@
           "type": "object"
         }
       },
+      "type": "object"
+    },
+    "SnpFloor": {
+      "additionalProperties": false,
+      "description": "An SEV-SNP floor: `min` bounds each report TCB value named in `values`.",
+      "properties": {
+        "min": {
+          "$ref": "#/$defs/SnpTcb"
+        },
+        "values": {
+          "default": [
+            "reported",
+            "current",
+            "committed",
+            "launch"
+          ],
+          "description": "The TCB values held to `min`; all four when omitted.",
+          "items": {
+            "$ref": "#/$defs/SnpTcbValue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "min"
+      ],
       "type": "object"
     },
     "SnpTcb": {
@@ -363,13 +392,38 @@
       ],
       "type": "object"
     },
+    "SnpTcbValue": {
+      "description": "The four TCB values an SEV-SNP report carries.",
+      "oneOf": [
+        {
+          "const": "reported",
+          "description": "The TCB the VCEK that signed the report was derived for.",
+          "type": "string"
+        },
+        {
+          "const": "current",
+          "description": "The TCB of the firmware running when the report was signed.",
+          "type": "string"
+        },
+        {
+          "const": "committed",
+          "description": "The anti-rollback floor: SNP_COMMIT refuses firmware below it.",
+          "type": "string"
+        },
+        {
+          "const": "launch",
+          "description": "The current TCB when the guest was launched or imported.",
+          "type": "string"
+        }
+      ]
+    },
     "TcbFloor": {
       "additionalProperties": false,
       "properties": {
         "snp": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SnpTcb"
+              "$ref": "#/$defs/SnpFloor"
             },
             {
               "type": "null"
@@ -402,6 +456,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/TcbFloor"
           },
+          "default": {},
           "description": "Named floors; a machine entry or `default_floor` selects one.",
           "type": "object"
         },
@@ -529,12 +584,16 @@
     "reference": {
       "$ref": "#/$defs/ReferenceValues",
       "default": {
-        "launch_measurement": []
+        "launch_measurement": [],
+        "pcrs": {},
+        "registers": {},
+        "slot_owners": {}
       }
     },
     "tcb": {
       "$ref": "#/$defs/TcbPolicy",
       "default": {
+        "floors": {},
         "require_revocation": true,
         "require_signed_collateral": true,
         "tdx_allowed_status": [

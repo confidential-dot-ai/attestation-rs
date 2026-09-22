@@ -4,8 +4,8 @@
 
 use attestation::collateral::{CertProvider, SignedCollateral, TdxCollateralProvider};
 use attestation::profile::{
-    AttesterClaims, Backing, Bytes, Digest, HashAlg, Identity, KeyBinding, KeyKind, Tier,
-    VerifyPolicy, PROFILE_URI,
+    AttesterClaims, Backing, Bytes, DebugStatus, Digest, HashAlg, Identity, KeyBinding, KeyKind,
+    SnpFloor, SnpTcbValue, Tcb, TcbFloor, Tier, VerifyPolicy, PROFILE_URI,
 };
 use attestation::{ProcessorGeneration, SnpTcb, TdxTcbStatus, Verifier};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -153,18 +153,115 @@ async fn snp_report_with_inline_vek_appraises() {
     };
     assert_eq!(claims.cvm_platform.generation.as_deref(), Some("Genoa"));
     assert!(matches!(claims.cvm_identity, Identity::Snp { .. }));
-    assert_eq!(claims.dbgstat, 2);
+    assert_eq!(claims.dbgstat, DebugStatus::DisabledSinceBoot);
+    assert_eq!(
+        cpu.ear_appraisal_policy_ids,
+        [PROFILE_URI.to_string(), lenient_policy().id()]
+    );
     assert_eq!(
         claims.compat["snp"]["measurement"],
         hex::encode(&claims.cvm_launch_measurement.value.0)
     );
     let j = serde_json::to_value(&appraisal).unwrap();
     assert_eq!(j["submods"]["cpu"]["ear_status"], "affirming");
+    assert_eq!(
+        j["submods"]["cpu"]["ear_attester_claims"]["dbgstat"],
+        "disabled-since-boot"
+    );
     assert_eq!(j["eat_profile"], "tag:ietf.org,2026:rats/ear#04");
     assert!(
         j["submods"]["cpu"]["ear_verifier_claims"]["cvm_collateral"]["snp_crl"]["status"]
             == "skipped"
     );
+}
+
+/// A floor bounds each TCB value it names, and the error names the value.
+#[tokio::test]
+async fn snp_floors_hold_every_named_tcb_value() {
+    let nonce = snp_nonce();
+    let envelope = snp_envelope(&nonce);
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let a = verifier
+        .appraise_json(&envelope, &lenient_policy())
+        .await
+        .unwrap();
+    let AttesterClaims::Cpu(c) = &a.submods["cpu"].ear_attester_claims else {
+        panic!("cpu claims")
+    };
+    let Tcb::Snp(set) = &c.cvm_tcb else {
+        panic!("snp tcb")
+    };
+    let floor_at = |min: SnpTcb, values: Vec<SnpTcbValue>| {
+        let mut p = lenient_policy();
+        p.tcb.floors.insert(
+            "f".to_string(),
+            TcbFloor {
+                snp: Some(SnpFloor { min, values }),
+                tdx: None,
+            },
+        );
+        p.tcb.default_floor = Some("f".to_string());
+        p
+    };
+    let all = [set.reported, set.current, set.committed, set.launch];
+    let lowest = SnpTcb {
+        bootloader: all.iter().map(|t| t.bootloader).min().unwrap(),
+        tee: all.iter().map(|t| t.tee).min().unwrap(),
+        snp: all.iter().map(|t| t.snp).min().unwrap(),
+        microcode: all.iter().map(|t| t.microcode).min().unwrap(),
+        fmc: None,
+    };
+    verifier
+        .appraise_json(&envelope, &floor_at(lowest, SnpTcbValue::all()))
+        .await
+        .expect("a floor at the lowest value holds on all four");
+    for (value, have) in [
+        (SnpTcbValue::Reported, set.reported),
+        (SnpTcbValue::Current, set.current),
+        (SnpTcbValue::Committed, set.committed),
+        (SnpTcbValue::Launch, set.launch),
+    ] {
+        let mut min = have;
+        min.microcode = have.microcode.checked_add(1).unwrap();
+        let err = verifier
+            .appraise_json(&envelope, &floor_at(min, vec![value]))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(&format!("{} TCB", value.as_str())),
+            "{err}"
+        );
+    }
+    // A floor that names the FMC SPL fails a Genoa report, which has none.
+    let with_fmc = SnpTcb {
+        fmc: Some(0),
+        ..lowest
+    };
+    assert!(verifier
+        .appraise_json(&envelope, &floor_at(with_fmc, vec![SnpTcbValue::Reported]))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_dbgstat_hint_that_contradicts_the_report_is_refused() {
+    let nonce = snp_nonce();
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let mut v: serde_json::Value = serde_json::from_slice(&snp_envelope(&nonce)).unwrap();
+    v["submods"]["cpu"]["dbgstat"] = json!("disabled");
+    verifier
+        .appraise_json(&serde_json::to_vec(&v).unwrap(), &lenient_policy())
+        .await
+        .expect("a hint that agrees is accepted");
+    v["submods"]["cpu"]["dbgstat"] = json!("enabled");
+    let err = verifier
+        .appraise_json(&serde_json::to_vec(&v).unwrap(), &lenient_policy())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("dbgstat"), "{err}");
+    // RFC 9711 JSON carries the text value; the CBOR integer is not JSON.
+    v["submods"]["cpu"]["dbgstat"] = json!(2);
+    assert!(attestation::profile::Evidence::from_json(&serde_json::to_vec(&v).unwrap()).is_err());
 }
 
 #[tokio::test]
@@ -377,7 +474,7 @@ async fn tdx_quote_with_fixture_collateral_appraises() {
     assert!(regs
         .iter()
         .all(|r| r.backing == Backing::Hardware && !r.replayed));
-    assert_eq!(claims.dbgstat, 0);
+    assert_eq!(claims.dbgstat, DebugStatus::Enabled);
     assert_eq!(claims.compat["tdx_rtmr0"], hex::encode(&regs[0].value.0));
     let j = serde_json::to_value(&appraisal).unwrap();
     assert_eq!(

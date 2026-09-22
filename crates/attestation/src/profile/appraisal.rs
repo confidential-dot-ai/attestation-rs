@@ -7,8 +7,8 @@
 use super::bytes::{Bytes, FixedBytes};
 use super::cmw::CmwRecord;
 use super::evidence::{
-    Backing, BindingMode, FreshnessPattern, HashAlg, Hosting, KeyBinding, RegisterSource, Tee,
-    Vendor,
+    Backing, BindingMode, DebugStatus, FreshnessPattern, HashAlg, Hosting, KeyBinding,
+    RegisterSource, Tee, Vendor,
 };
 use super::{invalid, EAR_PROFILE_URI};
 use crate::error::Result;
@@ -189,8 +189,9 @@ pub struct CpuClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_owner: Option<Owner>,
     pub cvm_policy: PolicyBits,
-    /// EAT debug status derived from the guest policy: 0 enabled, 2 disabled since boot.
-    pub dbgstat: u8,
+    /// EAT `dbgstat` derived from the guest policy, which is fixed at launch:
+    /// `enabled`, or `disabled-since-boot`.
+    pub dbgstat: DebugStatus,
     pub cvm_tcb: Tcb,
     pub cvm_identity: Identity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -534,9 +535,6 @@ impl Appraisal {
                         return Err(invalid(format!("submodule {name:?}: cvm_host_data length")));
                     }
                 }
-                if c.dbgstat > 4 {
-                    return Err(invalid(format!("submodule {name:?}: dbgstat")));
-                }
                 if let Tcb::Tdx(t) = &c.cvm_tcb {
                     let fmspc = &t.fmspc;
                     if fmspc.len() != 12
@@ -624,7 +622,7 @@ mod tests {
             "cvm_launch_measurement": {"alg": "sha384", "value": Bytes(vec![1; 48]).encode()},
             "cvm_freshness": {"pattern": "challenge", "mode": "report-data"},
             "cvm_policy": {"debug": false, "migratable": false, "smt": true, "vmpl": 0},
-            "dbgstat": 2,
+            "dbgstat": "disabled-since-boot",
             "cvm_tcb": {"reported": {"bootloader": 1, "tee": 2, "snp": 3, "microcode": 4},
                         "committed": {"bootloader": 1, "tee": 2, "snp": 3, "microcode": 4},
                         "current": {"bootloader": 1, "tee": 2, "snp": 3, "microcode": 4},

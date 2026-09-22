@@ -10,8 +10,8 @@ use std::io::Read;
 
 use attestation::profile::{
     Appraisal, AttesterClaims, Backing, BindingMode, Bytes, CollateralCheck, CollateralStatus,
-    CpuClaims, Digest, Evidence, HashAlg, Hosting, Identity, KeyBinding, KeyKind, Submod, Tier,
-    VerifyPolicy, PROFILE_URI,
+    CpuClaims, DebugStatus, Digest, Evidence, HashAlg, Hosting, Identity, KeyBinding, KeyKind,
+    Submod, Tier, VerifyPolicy, PROFILE_URI,
 };
 use attestation::{
     AttestOptions, AttestationError, CachePolicy, CollateralCache, DiskStore, Endpoints,
@@ -165,7 +165,7 @@ async fn live_snp_metal_profile() {
     assert_eq!(c.cvm_freshness.mode, BindingMode::ReportData);
     assert!(matches!(c.cvm_identity, Identity::Snp { .. }));
     assert!(c.cvm_platform.generation.is_some());
-    assert_eq!(c.dbgstat, 2, "debug disabled since boot");
+    assert_eq!(c.dbgstat, DebugStatus::DisabledSinceBoot);
     checked(&a, CollateralCheck::SnpCrl);
 
     // The gate's width: a 64-byte nonce fills report_data exactly.

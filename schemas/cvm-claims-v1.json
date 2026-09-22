@@ -261,11 +261,8 @@
           "$ref": "#/$defs/Tcb"
         },
         "dbgstat": {
-          "description": "EAT debug status derived from the guest policy: 0 enabled, 2 disabled since boot.",
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": "integer"
+          "$ref": "#/$defs/DebugStatus",
+          "description": "EAT `dbgstat` derived from the guest policy, which is fixed at launch:\n`enabled`, or `disabled-since-boot`."
         }
       },
       "required": [
@@ -278,6 +275,17 @@
         "cvm_identity"
       ],
       "type": "object"
+    },
+    "DebugStatus": {
+      "description": "EAT `dbgstat` (RFC 9711 section 4.2.9): the text value in JSON, the\ninteger in CBOR.",
+      "enum": [
+        "enabled",
+        "disabled",
+        "disabled-since-boot",
+        "disabled-permanently",
+        "disabled-fully-and-permanently"
+      ],
+      "type": "string"
     },
     "DeviceClaims": {
       "additionalProperties": true,

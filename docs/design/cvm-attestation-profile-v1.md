@@ -118,7 +118,7 @@ Submodule names are chosen by the attester within these reserved forms: `cpu` (e
 | `cvm_log` | may | bound | event log (section 4.8) |
 | `cvm_chain` | must when binding is `commitment` | bound | `{chain_len}` (section 4.9) |
 | `bootseed` (EAT, key 268) | must when binding is `commitment` | bound | 32 random bytes chosen at boot; the first record extended into slot 3 (section 4.9) |
-| `dbgstat` (EAT, key 263) | may | hint | the verifier derives the real value from the report |
+| `dbgstat` (EAT, key 263) | may | hint | RFC 9711 section 4.2.9: a text value in JSON (`enabled`, `disabled`, `disabled-since-boot`, `disabled-permanently`, `disabled-fully-and-permanently`), the integer 0 to 4 in CBOR. The verifier derives the real value from the report and refuses a hint that disagrees with it on whether debug is enabled |
 | `cvm_provenance` | may | reserved | hosting-provider evidence (a PPID against a provider's host registry, a TPM attestation key bound into the report, a CoRIM-carried proof of environment). No semantics in v1; a v1 verifier ignores it; key reserved in Appendix A |
 
 For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.18.3): the CCA token bytes exactly as the RMM emits them. Per draft-ffm-rats-cca-token-04 that token is a CMW collection under CBOR tag 907 with the platform token at key 0xACCA (44234) and the realm token at key 0xACD1 (44241), each a COSE_Sign1 CWT; shipping firmware still emits the earlier EAT-collection form under tag 399 with the 2023 1.0.0 profiles. Neither tag is in the IANA CBOR tag registry yet; the verifier accepts exactly those two by allowlist, and both profile generations. In delegated mode the platform challenge is the hash of the realm attestation key, in direct mode the hash of the realm claims; the realm challenge is our nonce. No `cvm_report` wrapper is needed because the token is already an EAT.
@@ -269,7 +269,7 @@ Per appraisal:
 | --- | --- |
 | `ear_status` | AR4SI tier |
 | `ear_trustworthiness_vector` | section 5.2 |
-| `ear_appraisal_policy_ids` | the policy identifier the verifier applied |
+| `ear_appraisal_policy_ids` | two identifiers per submodule: the profile URI, which names the verification procedure, and the policy's own name `ni:///sha-384;<base64url>` (RFC 6920), the SHA-384 of the JCS serialization (RFC 8785) of the effective policy, with every member present with its value or default and null members omitted. Two results carry the same second identifier exactly when the same requirements were applied. Vector in Appendix B |
 | `ear_attester_claims` | our normalized claims, section 5.1 |
 | `ear_verifier_claims` | collateral and reference-value outcomes, section 5.1 |
 | `ear_raw_evidence` | a CMW record of type `application/cmw+json` (RFC 9999 section 9.5.2), as the EAR CDDL requires, whose value is a CMW collection carrying the evidence envelope as appraised (indicator bit 2) and the endorsement snapshot the verifier used (bit 1), so the verdict re-verifies after a vendor withdraws collateral; at the top level of the EAR claims set beside `eat_nonce`; optional, on by default in attestation-api |
@@ -288,7 +288,7 @@ Per appraisal:
 | `cvm_host_data` | `{semantics, value}`; semantics in `snp-host-data` (32 bytes), `tdx-mrconfigid` (48), `cca-rpv` (64); a label, see section 10 |
 | `cvm_owner` | SNP `family_id`, `image_id`, `id_key_digest`, `author_key_digest`; TDX `mr_owner`, `mr_owner_config`. On SNP these are guest-owner values authenticated by the ID block, trustworthy only when policy pins `id_key_digest` or `author_key_digest`; on TDX they are host-set labels |
 | `cvm_policy` | `{debug, migratable, smt, single_socket?, vmpl?, sept_ve_disable?, service_td?, reserved_bits_zero?}` normalized booleans and small integers |
-| `dbgstat` | EAT value derived from `cvm_policy.debug`: 0 (enabled) when the guest policy permits debug, 2 (disabled-since-boot) otherwise, because the policy is fixed at launch |
+| `dbgstat` | EAT debug status derived from `cvm_policy.debug`: `enabled` when the guest policy permits debug, `disabled-since-boot` otherwise, because the policy is fixed at launch (CBOR 0 and 2). It covers the TEE's guest-debug facility (the SNP policy DEBUG bit, the TDX DEBUG attribute), through which the host can read and write guest state; it makes no statement about the chip's hardware debug interfaces |
 | `cvm_tcb` | vendor-tagged: SNP `{reported, committed, current, launch}` each with the SPL components; TDX `{tee_tcb_svn, pck_tcb, pcesvn, fmspc, status, advisories}`; CCA `{lifecycle, sw_components}`; GPU `{driver, vbios}` |
 | `cvm_identity` | SNP `chip_id` (64 bytes); TDX `ppid`, the 16-byte Platform Provisioning ID from the PCK certificate's SGX extension (OID 1.2.840.113741.1.13.1.1); CCA `instance_id`; GPU `ueid` |
 | `cvm_workload_id` | reserved: the derived TDX identity `keccak256(MRTD \|\| RTMR0..3 \|\| MRCONFIGID \|\| XFAM \|\| TDATTRIBUTES)` that on-chain policies key on. Never emitted in v1; the name and key are held so a later version cannot collide |
@@ -369,11 +369,14 @@ VerifyPolicy {
   gpu: NvidiaGpuParams (existing)
 }
 
-TcbFloor { snp: { bootloader, tee, snp, microcode, fmc? }?,
+TcbFloor { snp: { min: { bootloader, tee, snp, microcode, fmc? },
+                  values: [reported | current | committed | launch]? }?,   // all four when omitted
            tdx: { min_tee_tcb_svn: bytes16?, min_tcb_evaluation_data_number: int? }? }
 ```
 
 Machine allowlists are first-class: `identity.machines[].id` is the submodule's `cvm_identity` value (SNP `chip_id`, TDX `ppid`, CCA `instance_id`, GPU `ueid`), authenticated by the hardware chain before it is compared. When `identity` is set, an identity absent from the list fails the appraisal (section 5.2); a machine that names a `tcb_floor` is held to that floor and every other machine to `default_floor`. Floors are named so a fleet carries one floor per generation and moves a machine between them without editing every policy.
+
+An SNP floor bounds each TCB value it names, all four by default: `reported`, the TCB the VCEK that signed the report was derived for; `current`, the firmware running when the report was signed; `committed`, the anti-rollback floor SNP_COMMIT sets, below which the firmware cannot be loaded again; and `launch`, the current TCB when the guest was launched or imported. A floor on `reported` alone leaves a host free to roll the firmware back to its committed version between attestations, and a guest launched on vulnerable firmware keeps that exposure after a live update; the default closes both, and a policy narrows `values` only by naming the values it checks. A floor that names the FMC SPL fails a report without one, which is every generation before Turin. For TDX the Intel status and the floor are independent requirements: the status must be in `tdx_allowed_status` for every quote, and a named floor adds `tee_tcb_svn` componentwise and `tcbEvaluationDataNumber`. The evaluation number is what stops an older TCB Info, still inside its own validity window and validly signed, from reporting a status that a later TCB recovery changed.
 
 Reference values come from confos manifests. confos publishes each manifest in two forms that carry the same values: the flat JSON deployments consume today, and a signed CoRIM (draft-ietf-rats-corim-11) whose CoMID reference triples carry the launch measurement in `digests` (measurement-values-map key 2) and the register reference values in `integrity-registers` (key 14), keyed by the slot index as an unsigned integer, with the digests typed by section 4.7's `alg`. The verifier ingests both into `reference` and treats them as one source, and a Veraison or Trustee deployment consumes the CoRIM without a translation.
 
@@ -600,6 +603,14 @@ d            24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f
 R[4]         e314c1b137729a35436b11d4c0b77c17058b210a33c1bbe36a7682f0b222930db389c7dc22868f7bebf75934156a6d34
 CEL record   a4 00 01 01 04 03 81 a2 00 0c 01 5830 <d> 18c8 5852 <content>
              a4000101040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c18c85852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+```
+
+The identifier of the default policy (section 5.1). The canonical form is the JCS serialization of the effective default policy; any implementation that fills the defaults of section 7 and serializes with RFC 8785 reproduces it:
+
+```
+JCS          {"commitment":{"header16":"QVRTLU1SLTEBARAAAAAAAA","seed":"YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"},"freshness":{},"gpu":{"device_policy":{"allow_debug":false,"require_measres_success":true,"require_nonce_match":true,"require_secboot":true},"required":false},"min_backing":"hardware","policy_bits":{"allow_debug":false,"allow_migration":false,"allow_service_td":false,"require_sept_ve_disable":true,"require_vmpl0":true,"require_zero_reserved_attributes":true},"reference":{"launch_measurement":[],"pcrs":{},"registers":{},"slot_owners":{}},"tcb":{"floors":{},"require_revocation":true,"require_signed_collateral":true,"tdx_allowed_status":["UpToDate"]}}
+SHA-384      a678b73c551d1a00857d906715789f89c0f89683086fe8a28a1dfb537a9271520c121a3da5ca0838fb9e0cc8b3d0dc10
+id           ni:///sha-384;pni3PFUdGgCFfZBnFXificD4loMIb-iiih37U3qScVIMEho9pcoIOPueDMiz0NwQ
 ```
 
 These vectors revise the unreleased v1 draft: content-only event digests are no longer accepted as `cvm` records. The pending driver and producers must adopt the sequence-and-index-bound record digest together with the verifier.

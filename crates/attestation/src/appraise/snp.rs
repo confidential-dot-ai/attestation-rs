@@ -7,8 +7,8 @@ use super::{invalid, Ctx, Outcome};
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
 use crate::platforms::snp::verify::{
-    check_vcek_not_revoked, enforce_min_tcb, is_vlek_cert, parse_report, verify_cert_chain,
-    verify_vcek_tcb, verify_vek_validity_period, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
+    check_vcek_not_revoked, is_vlek_cert, parse_report, verify_cert_chain, verify_vcek_tcb,
+    verify_vek_validity_period, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
 };
 #[cfg(feature = "az-snp")]
 use crate::platforms::tpm_common::verify_hcl_var_data_binding;
@@ -22,12 +22,33 @@ use crate::profile::{
     HostDataSemantics, Identity, Owner, PolicyBits, RegisterSource, SnpTcbSet, SubmodAppraisal,
     Tcb, VerifiedPlatform, VerifiedRegister, VerifierClaims,
 };
+use crate::profile::{DebugStatus, SnpTcbValue};
 use crate::types::{ProcessorGeneration, SnpTcb};
 use crate::utils::constant_time_eq;
 use sev::certs::snp::{Certificate, Verifiable};
 use sev::firmware::guest::AttestationReport;
 use sev::firmware::host::TcbVersion;
 use std::collections::BTreeMap;
+
+/// Whether any component of `have` is below `min`. A floor that names the
+/// FMC SPL fails a report that has none (every generation before Turin).
+fn below_floor(have: &SnpTcb, min: &SnpTcb) -> bool {
+    let fmc_below = match (min.fmc, have.fmc) {
+        (Some(m), Some(h)) => h < m,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    have.bootloader < min.bootloader
+        || have.tee < min.tee
+        || have.snp < min.snp
+        || have.microcode < min.microcode
+        || fmc_below
+}
+
+fn spl(t: &SnpTcb) -> String {
+    let fmc = t.fmc.map(|f| format!(".{f}")).unwrap_or_default();
+    format!("{}.{}.{}.{}{fmc}", t.bootloader, t.tee, t.snp, t.microcode)
+}
 
 fn tcb(v: &TcbVersion) -> SnpTcb {
     SnpTcb {
@@ -246,6 +267,18 @@ pub(crate) async fn appraise(
         return Err(AttestationError::VmplCheckFailed(report.vmpl));
     }
     let debug = report.policy.debug_allowed();
+    // The guest policy is fixed at launch, so debug is off since boot or on.
+    let dbgstat = if debug {
+        DebugStatus::Enabled
+    } else {
+        DebugStatus::DisabledSinceBoot
+    };
+    if cpu
+        .dbgstat
+        .is_some_and(|hint| hint.is_disabled() != dbgstat.is_disabled())
+    {
+        return Err(invalid("dbgstat contradicts the report's debug policy bit"));
+    }
     if debug && !policy.policy_bits.allow_debug {
         return Err(AttestationError::DebugPolicyViolation);
     }
@@ -274,8 +307,23 @@ pub(crate) async fn appraise(
 
     // Identity, floor.
     let (floor, instance_identity) = resolve_floor(policy, &report.chip_id)?;
-    if let Some(min) = floor.and_then(|f| f.snp.as_ref()) {
-        enforce_min_tcb(&report.reported_tcb, min)?;
+    if let Some(f) = floor.and_then(|f| f.snp.as_ref()) {
+        for value in &f.values {
+            let have = tcb(match value {
+                SnpTcbValue::Reported => &report.reported_tcb,
+                SnpTcbValue::Current => &report.current_tcb,
+                SnpTcbValue::Committed => &report.committed_tcb,
+                SnpTcbValue::Launch => &report.launch_tcb,
+            });
+            if below_floor(&have, &f.min) {
+                return Err(AttestationError::TcbMismatch(format!(
+                    "{} TCB {} is below the policy floor {}",
+                    value.as_str(),
+                    spl(&have),
+                    spl(&f.min)
+                )));
+            }
+        }
     }
 
     // 5 and 7. Freshness, and the registers it establishes in commitment mode.
@@ -471,7 +519,7 @@ pub(crate) async fn appraise(
             service_td: None,
             reserved_bits_zero: None,
         },
-        dbgstat: if debug { 0 } else { 2 },
+        dbgstat,
         cvm_tcb: Tcb::Snp(Box::new(tcb_set)),
         cvm_identity: Identity::Snp {
             chip_id: FixedBytes(report.chip_id),
@@ -485,7 +533,7 @@ pub(crate) async fn appraise(
         appraisal: SubmodAppraisal {
             ear_status: status,
             ear_trustworthiness_vector: vector,
-            ear_appraisal_policy_ids: vec![crate::profile::PROFILE_URI.to_string()],
+            ear_appraisal_policy_ids: Vec::new(),
             ear_attester_claims: AttesterClaims::Cpu(Box::new(claims)),
             ear_verifier_claims: VerifierClaims {
                 cvm_collateral: collateral_outcomes,

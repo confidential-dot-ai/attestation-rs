@@ -88,6 +88,29 @@ fn appendix_b_vectors() {
     v.check("claim_r4", &extend(&genesis(4, &SEED), &dc));
     v.check("claim_cel_record", &cel_record(1, 4, &dc, &claim));
 
+    // Section 5.1: the default policy's identifier.
+    let policy = attestation::profile::VerifyPolicy::default();
+    let canonical = policy.canonical_json();
+    v.check("policy_jcs_default", canonical.as_bytes());
+    {
+        use sha2::Digest as _;
+        v.check(
+            "policy_digest_default",
+            &sha2::Sha384::digest(canonical.as_bytes()),
+        );
+    }
+    {
+        use base64::Engine;
+        let digest = v.get("policy_digest_default");
+        assert_eq!(
+            policy.id(),
+            format!(
+                "ni:///sha-384;{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+            )
+        );
+    }
+
     let used: std::collections::BTreeSet<_> = v.1.borrow().iter().cloned().collect();
     let unused: Vec<_> = v.0.keys().filter(|k| !used.contains(*k)).collect();
     assert!(unused.is_empty(), "vectors without a check: {unused:?}");

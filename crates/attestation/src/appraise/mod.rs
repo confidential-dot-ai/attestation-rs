@@ -31,6 +31,7 @@ use crate::profile::Tee;
 use crate::profile::{
     Appraisal, Binding, BindingMode, CpuEvidence, Evidence, FreshnessPattern, GpuDeviceEvidence,
     KeyBinding, Submod, SubmodAppraisal, TcbFloor, VerifierId, VerifyPolicy, EAR_PROFILE_URI,
+    PROFILE_URI,
 };
 use crate::Verifier;
 use chrono::Utc;
@@ -188,6 +189,12 @@ impl Verifier {
             submods.insert(name, outcome.appraisal);
         }
 
+        // The profile names the procedure; the policy's own id names what was
+        // required, so two results are comparable exactly when both match.
+        let policy_ids = vec![PROFILE_URI.to_string(), policy.id()];
+        for sub in submods.values_mut() {
+            sub.ear_appraisal_policy_ids = policy_ids.clone();
+        }
         let appraisal = Appraisal {
             eat_profile: EAR_PROFILE_URI.to_string(),
             iat: now.timestamp(),

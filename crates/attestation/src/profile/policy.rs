@@ -54,15 +54,12 @@ pub struct ReferenceValues {
     /// Any of these launch measurements is acceptable. Empty means unpinned.
     pub launch_measurement: Vec<Digest>,
     /// Acceptable values per slot. A slot absent here is not pinned.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub registers: BTreeMap<u16, Vec<Digest>>,
     /// Acceptable values per vTPM PCR, for the `vtpm` submodule; a PCR absent
     /// here is not pinned. Azure's initdata convention pins PCR 8 to
     /// `SHA-256(zeros32 || initdata_hash)`.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub pcrs: BTreeMap<u16, Vec<Digest>>,
     /// Required `owner` of a workload slot's claim record (section 4.9).
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub slot_owners: BTreeMap<u16, String>,
     /// The value `cvm_host_data` must carry, zero-padded to the platform's
     /// length (32 bytes on SNP, 48 on TDX): the Kata initdata gate.
@@ -99,7 +96,6 @@ impl Default for CommitmentPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct TcbPolicy {
     /// Named floors; a machine entry or `default_floor` selects one.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub floors: BTreeMap<String, TcbFloor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_floor: Option<String>,
@@ -124,9 +120,136 @@ impl Default for TcbPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct TcbFloor {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub snp: Option<SnpTcb>,
+    pub snp: Option<SnpFloor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tdx: Option<TdxFloor>,
+}
+
+/// An SEV-SNP floor: `min` bounds each report TCB value named in `values`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SnpFloor {
+    pub min: SnpTcb,
+    /// The TCB values held to `min`; all four when omitted.
+    #[serde(default = "SnpTcbValue::all")]
+    pub values: Vec<SnpTcbValue>,
+}
+
+/// The four TCB values an SEV-SNP report carries.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnpTcbValue {
+    /// The TCB the VCEK that signed the report was derived for.
+    Reported,
+    /// The TCB of the firmware running when the report was signed.
+    Current,
+    /// The anti-rollback floor: SNP_COMMIT refuses firmware below it.
+    Committed,
+    /// The current TCB when the guest was launched or imported.
+    Launch,
+}
+
+impl SnpTcbValue {
+    pub fn all() -> Vec<SnpTcbValue> {
+        vec![
+            SnpTcbValue::Reported,
+            SnpTcbValue::Current,
+            SnpTcbValue::Committed,
+            SnpTcbValue::Launch,
+        ]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SnpTcbValue::Reported => "reported",
+            SnpTcbValue::Current => "current",
+            SnpTcbValue::Committed => "committed",
+            SnpTcbValue::Launch => "launch",
+        }
+    }
+}
+
+impl VerifyPolicy {
+    /// This policy's identifier for `ear_appraisal_policy_ids` (section 5.1):
+    /// `ni:///sha-384;<base64url>` (RFC 6920) over the JCS (RFC 8785)
+    /// serialization of the effective policy, every member present with its
+    /// value or default and null members omitted.
+    pub fn id(&self) -> String {
+        use base64::Engine;
+        use sha2::{Digest as _, Sha384};
+        let digest = Sha384::digest(self.canonical_json().as_bytes());
+        format!(
+            "ni:///sha-384;{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+        )
+    }
+
+    /// The JCS serialization the id digests.
+    pub fn canonical_json(&self) -> String {
+        let value = serde_json::to_value(self).expect("a policy always serializes");
+        let mut out = String::new();
+        jcs(&value, &mut out);
+        out
+    }
+}
+
+/// RFC 8785 for the values a policy holds: members sorted by UTF-16 code
+/// units, no whitespace, integers in decimal, the ECMAScript string escapes.
+fn jcs(v: &serde_json::Value, out: &mut String) {
+    use serde_json::Value;
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => {
+            debug_assert!(n.is_u64() || n.is_i64(), "a policy holds integers only");
+            out.push_str(&n.to_string());
+        }
+        Value::String(s) => jcs_string(s, out),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                jcs(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(members) => {
+            let mut keys: Vec<&String> = members.keys().collect();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                jcs_string(key, out);
+                out.push(':');
+                jcs(&members[key], out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn jcs_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -291,6 +414,16 @@ impl VerifyPolicy {
                     "tcb.floors[{name:?}]: constrains nothing"
                 )));
             }
+            if let Some(snp) = &f.snp {
+                let mut values = snp.values.clone();
+                values.sort();
+                values.dedup();
+                if snp.values.is_empty() || values.len() != snp.values.len() {
+                    return Err(policy_err(format!(
+                        "tcb.floors[{name:?}].snp.values: empty or repeated"
+                    )));
+                }
+            }
         }
         if self.commitment.header16.0 != HEADER16 {
             return Err(policy_err(
@@ -387,7 +520,7 @@ mod tests {
             .to_string()
             .contains("not in tcb.floors"));
         let good = json!({
-            "tcb": {"floors": {"genoa-2026-09": {"snp": {"bootloader": 4, "tee": 0, "snp": 23, "microcode": 209}}}, "default_floor": "genoa-2026-09"},
+            "tcb": {"floors": {"genoa-2026-09": {"snp": {"min": {"bootloader": 4, "tee": 0, "snp": 23, "microcode": 209}}}}, "default_floor": "genoa-2026-09"},
             "identity": {"machines": [{"id": Bytes(vec![1; 64]).encode(), "tcb_floor": "genoa-2026-09"}]}
         });
         VerifyPolicy::from_json(&serde_json::to_vec(&good).unwrap()).unwrap();
@@ -416,5 +549,76 @@ mod tests {
         assert!(msg(json!({"commitment": {"seed": Bytes(vec![0; 48]).encode()}})).contains("seed"));
         let pinned = json!({"commitment": {"header16": FixedBytes(HEADER16).encode(), "seed": FixedBytes(SEED).encode()}});
         VerifyPolicy::from_json(&serde_json::to_vec(&pinned).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_policy_id_names_the_effective_policy() {
+        let id = VerifyPolicy::default().id();
+        assert!(id.starts_with("ni:///sha-384;"), "{id}");
+        // Absent members take their defaults, and member order is immaterial.
+        let empty: VerifyPolicy = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.id(), id);
+        let spelled: VerifyPolicy = serde_json::from_str(
+            r#"{"tcb":{"require_signed_collateral":true,"tdx_allowed_status":["UpToDate"],
+                "require_revocation":true},"min_backing":"hardware","reference":{"pcrs":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spelled.id(), id);
+        // Any change to what is required is a different policy.
+        let mut changed = VerifyPolicy::default();
+        changed.policy_bits.allow_debug = true;
+        assert_ne!(changed.id(), id);
+        let mut pinned = VerifyPolicy::default();
+        pinned.reference.host_data = Some(Bytes(vec![0; 32]));
+        assert_ne!(pinned.id(), id);
+    }
+
+    #[test]
+    fn canonical_json_is_jcs() {
+        let floor = |values| TcbFloor {
+            snp: Some(SnpFloor {
+                min: SnpTcb {
+                    bootloader: 1,
+                    tee: 0,
+                    snp: 2,
+                    microcode: 3,
+                    fmc: None,
+                },
+                values,
+            }),
+            tdx: None,
+        };
+        let mut p = VerifyPolicy::default();
+        p.tcb
+            .floors
+            .insert("b\"\n\u{1}\u{e9}".into(), floor(vec![SnpTcbValue::Launch]));
+        p.tcb.floors.insert("a".into(), floor(SnpTcbValue::all()));
+        let j = p.canonical_json();
+        // `"` and control characters escape; non-ASCII stays literal.
+        assert!(j.contains("\"b\\\"\\n\\u0001\u{e9}\""), "{j}");
+        assert!(j.find("\"a\":").unwrap() < j.find("\"b").unwrap(), "{j}");
+        assert!(!j.contains(": ") && !j.contains(", "), "{j}");
+        let back: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, serde_json::to_value(&p).unwrap());
+    }
+
+    #[test]
+    fn snp_floor_values_default_to_all_four_and_are_distinct() {
+        let p: VerifyPolicy = serde_json::from_str(
+            r#"{"tcb":{"floors":{"f":{"snp":{"min":{"bootloader":1,"tee":0,"snp":1,"microcode":1}}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            p.tcb.floors["f"].snp.as_ref().unwrap().values,
+            SnpTcbValue::all()
+        );
+        p.validate().unwrap();
+        for values in [r#"[]"#, r#"["reported","reported"]"#] {
+            let json = format!(
+                r#"{{"tcb":{{"floors":{{"f":{{"snp":{{"min":{{"bootloader":1,"tee":0,"snp":1,"microcode":1}},"values":{values}}}}}}}}}}}"#
+            );
+            let p: VerifyPolicy = serde_json::from_str(&json).unwrap();
+            assert!(p.validate().is_err(), "{values}");
+        }
     }
 }

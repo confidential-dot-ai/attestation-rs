@@ -177,7 +177,7 @@ pub(crate) fn appraise(
             appraisal: SubmodAppraisal {
                 ear_status: vector.status(),
                 ear_trustworthiness_vector: vector,
-                ear_appraisal_policy_ids: vec![crate::profile::PROFILE_URI.to_string()],
+                ear_appraisal_policy_ids: Vec::new(),
                 ear_attester_claims: AttesterClaims::Vtpm(Box::new(claims)),
                 ear_verifier_claims: VerifierClaims {
                     cvm_collateral: BTreeMap::new(),

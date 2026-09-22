@@ -185,14 +185,15 @@
           "$ref": "#/$defs/CmwRecord"
         },
         "dbgstat": {
-          "description": "EAT `dbgstat` (key 263), a hint; the verifier derives the real value.",
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DebugStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "EAT `dbgstat` (key 263), a hint; the verifier derives the real value\nand refuses a hint that contradicts the signed report."
         }
       },
       "required": [
@@ -201,6 +202,17 @@
         "cvm_binding"
       ],
       "type": "object"
+    },
+    "DebugStatus": {
+      "description": "EAT `dbgstat` (RFC 9711 section 4.2.9): the text value in JSON, the\ninteger in CBOR.",
+      "enum": [
+        "enabled",
+        "disabled",
+        "disabled-since-boot",
+        "disabled-permanently",
+        "disabled-fully-and-permanently"
+      ],
+      "type": "string"
     },
     "EventLog": {
       "additionalProperties": false,

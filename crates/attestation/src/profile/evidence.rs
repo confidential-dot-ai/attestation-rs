@@ -424,9 +424,10 @@ pub struct CpuEvidence {
     /// EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 4.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootseed: Option<FixedBytes<32>>,
-    /// EAT `dbgstat` (key 263), a hint; the verifier derives the real value.
+    /// EAT `dbgstat` (key 263), a hint; the verifier derives the real value
+    /// and refuses a hint that contradicts the signed report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dbgstat: Option<u8>,
+    pub dbgstat: Option<DebugStatus>,
     /// Reserved (section 4.4): carried through, never interpreted in v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_provenance: Option<serde_json::Value>,
@@ -736,6 +737,31 @@ pub enum LogFormat {
     Aael,
 }
 
+/// EAT `dbgstat` (RFC 9711 section 4.2.9): the text value in JSON, the
+/// integer in CBOR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u8)]
+pub enum DebugStatus {
+    Enabled = 0,
+    Disabled = 1,
+    DisabledSinceBoot = 2,
+    DisabledPermanently = 3,
+    DisabledFullyAndPermanently = 4,
+}
+
+impl DebugStatus {
+    /// The CBOR encoding.
+    pub fn cbor(self) -> u8 {
+        self as u8
+    }
+
+    /// Whether the debug facility is off, whatever the qualifier.
+    pub fn is_disabled(self) -> bool {
+        self != DebugStatus::Enabled
+    }
+}
+
 /// `cvm_chain` (section 4.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1037,11 +1063,6 @@ impl CpuEvidence {
                 return Err(invalid(
                     "cpu: cvm_chain and bootseed belong to commitment mode",
                 ))
-            }
-        }
-        if let Some(d) = self.dbgstat {
-            if d > 4 {
-                return Err(invalid(format!("dbgstat: {d} is not an EAT debug status")));
             }
         }
         if let Some(e) = &self.cvm_endorsements {
