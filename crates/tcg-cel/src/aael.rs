@@ -8,7 +8,7 @@
 //! is RTMR 3 (MrIndex 4). The line-based format of earlier releases is not read.
 
 use crate::error::{Error, Result};
-use crate::model::{Content, Record};
+use crate::model::{Content, Index, Record};
 use crate::pcclient::EV_EVENT_TAG;
 
 /// `taggedEventID` of an AAEL entry.
@@ -24,7 +24,9 @@ pub struct Entry {
 
 /// The entry `record` carries, after every digest it has in a bank this crate
 /// can hash is checked against the tagged event. `None` for a record that is
-/// not tagged AAEL.
+/// not tagged AAEL. To list a register's entries use [`entries_in`]: a record's
+/// event type and tag lie outside its digest, so an entry relabeled as another
+/// event is `None` here while the register still replays.
 pub fn entry(record: &Record, position: usize) -> Option<Result<Entry>> {
     let Content::PcClientStd {
         event_type,
@@ -39,13 +41,26 @@ pub fn entry(record: &Record, position: usize) -> Option<Result<Entry>> {
     Some(decode(record, event_data, position))
 }
 
-/// Every AAEL entry in `records`, with its position.
-pub fn entries(records: &[Record]) -> Result<Vec<(usize, Entry)>> {
-    records
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| entry(r, i).map(|e| e.map(|e| (i, e))))
-        .collect()
+/// Every entry extended into `index`, with its position. Each measured record
+/// naming `index` must be an entry whose digests reproduce, so no entry can
+/// drop out of the list by relabeling while the register still replays.
+pub fn entries_in(records: &[Record], index: Index) -> Result<Vec<(usize, Entry)>> {
+    let mut out = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        if r.index != index || !r.is_measured() {
+            continue;
+        }
+        match entry(r, i) {
+            Some(e) => out.push((i, e?)),
+            None => {
+                return Err(Error::Record {
+                    position: i,
+                    reason: format!("a measured record in {index} is not an AAEL entry"),
+                })
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn decode(record: &Record, data: &[u8], position: usize) -> Result<Entry> {

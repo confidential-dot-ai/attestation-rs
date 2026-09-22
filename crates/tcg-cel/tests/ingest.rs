@@ -19,7 +19,7 @@ fn a_ccel_with_attestation_agent_entries() {
     assert_eq!(records.len(), 88);
     assert_eq!(records[0].index, Index::Pcr(0));
     assert!(records.iter().all(|r| matches!(r.index, Index::Pcr(0..=3))));
-    let entries = aael::entries(&records).unwrap();
+    let entries = aael::entries_in(&records, Index::Pcr(3)).unwrap();
     let texts: Vec<_> = entries
         .iter()
         .map(|(i, e)| {
@@ -56,7 +56,31 @@ fn a_ccel_with_attestation_agent_entries() {
     if let Content::PcClientStd { event_data, .. } = &mut forged[i].content {
         *event_data.last_mut().unwrap() ^= 1;
     }
-    assert!(matches!(aael::entries(&forged), Err(Error::Digest { .. })));
+    assert!(matches!(
+        aael::entries_in(&forged, Index::Pcr(3)),
+        Err(Error::Digest { .. })
+    ));
+
+    // An entry relabeled as another event type, or given another tag, keeps
+    // its digest, so RTMR 3 still replays; the entry list refuses the register.
+    let (i, _) = entries[1];
+    let mut relabeled = records.clone();
+    if let Content::PcClientStd { event_type, .. } = &mut relabeled[i].content {
+        *event_type = EventType::Code(0x5);
+    }
+    let mut retagged = records.clone();
+    if let Content::PcClientStd { event_data, .. } = &mut retagged[i].content {
+        event_data[0] ^= 1;
+    }
+    for hidden in [relabeled, retagged] {
+        let again = replay(&hidden, HashAlg::SHA384, zeros, ReplayOptions::default()).unwrap();
+        assert_eq!(
+            again.registers[&Index::Pcr(3)],
+            out.registers[&Index::Pcr(3)]
+        );
+        let e = aael::entries_in(&hidden, Index::Pcr(3)).unwrap_err();
+        assert!(e.to_string().contains("not an AAEL entry"), "{e}");
+    }
 
     // As a TPM log, MrIndex 4 would be PCR 4: the mapping is the caller's.
     let as_pcrs = log.to_cel(IndexMap::Pcr).unwrap();
@@ -96,15 +120,17 @@ fn the_agent_log_without_a_ccel_uses_its_fixed_header() {
             (HashAlg::SM3_256, 32)
         ]
     );
+    // The fixed header sits at MrIndex 0, which the mapping leaves out.
     let records = parsed.to_cel(IndexMap::CcMrToRtmr).unwrap();
-    let (_, e) = &aael::entries(&records).unwrap()[0];
+    assert_eq!(records.len(), 1);
+    let (i, e) = &aael::entries_in(&records, Index::Pcr(3)).unwrap()[0];
     assert_eq!(
         (e.domain.as_str(), e.content.as_str()),
         ("domain", "content")
     );
     // The upstream digest vector for this entry.
     assert_eq!(
-        hex::encode(records[1].digest(HashAlg::SHA384).unwrap()),
+        hex::encode(records[*i].digest(HashAlg::SHA384).unwrap()),
         "dad5f0e226318ffa9839b75a472c6aa7fdb5834949d0a0a22990cf04d5692440fb00f3aa0609db7e49cd8d793f670d02"
     );
     // Only that exact header stands in for the Spec ID event.
@@ -211,13 +237,19 @@ fn tcg2_parsing_is_whole_or_nothing() {
         let e = tcg2::parse(&bytes).unwrap_err().to_string();
         assert!(e.contains(reason), "expected {reason:?}, got {e:?}");
     }
-    // MrIndex 5 names no RTMR; MrIndex 0 only for EV_NO_ACTION.
+    // MrIndex 5 names no RTMR. MrIndex 0 is MRTD: its records, this
+    // header's included, are left out.
     let log = [hdr.clone(), event(5, 4, &[(0x000B, vec![1; 32])], b"")].concat();
     assert!(tcg2::to_cel(&log, IndexMap::CcMrToRtmr).is_err());
-    let log = [hdr.clone(), event(0, 4, &[(0x000B, vec![1; 32])], b"")].concat();
-    assert!(tcg2::to_cel(&log, IndexMap::CcMrToRtmr).is_err());
-    let log = [hdr, event(0, EV_NO_ACTION, &[(0x000B, vec![0; 32])], b"")].concat();
-    assert!(tcg2::to_cel(&log, IndexMap::CcMrToRtmr).is_ok());
+    let log = [
+        hdr,
+        event(0, 4, &[(0x000B, vec![1; 32])], b""),
+        event(1, 4, &[(0x000B, vec![2; 32])], b""),
+    ]
+    .concat();
+    let cel = tcg2::to_cel(&log, IndexMap::CcMrToRtmr).unwrap();
+    assert_eq!(cel.len(), 1);
+    assert_eq!((cel[0].index, cel[0].recnum), (Index::Pcr(0), 0));
 }
 
 fn getquote() -> (String, Vec<Vec<u8>>) {
@@ -243,11 +275,10 @@ fn a_dstack_log_replays_to_the_rtmrs_of_its_quote() {
             "RTMR {i}"
         );
     }
-    let names: Vec<_> = records
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| dstack::runtime_event(r, i))
-        .map(|e| e.unwrap().name)
+    let names: Vec<_> = dstack::runtime_events_in(&records, Index::Pcr(3))
+        .unwrap()
+        .into_iter()
+        .map(|(_, e)| e.name)
         .collect();
     assert_eq!(
         names,
@@ -265,11 +296,30 @@ fn a_dstack_log_replays_to_the_rtmrs_of_its_quote() {
     );
     // The CEL form verifies on its own after a round trip.
     let back = decode_cbor(&encode_cbor(&records).unwrap(), &[]).unwrap();
-    assert!(back
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| dstack::runtime_event(r, i))
-        .all(|e| e.is_ok()));
+    assert_eq!(
+        dstack::runtime_events_in(&back, Index::Pcr(3))
+            .unwrap()
+            .len(),
+        9
+    );
+
+    // An event relabeled as a boot event keeps its digest unchecked and RTMR 3
+    // still replays; the event list refuses the register.
+    let events: Vec<serde_json::Value> = serde_json::from_str(&log).unwrap();
+    let relabeled: Vec<_> = events
+        .into_iter()
+        .map(|mut e| {
+            if e["event"] == "system-ready" {
+                e["event_type"] = 134217730.into();
+            }
+            e
+        })
+        .collect();
+    let hidden = dstack::to_cel(&serde_json::to_vec(&relabeled).unwrap()).unwrap();
+    let again = replay(&hidden, HashAlg::SHA384, zeros, ReplayOptions::default()).unwrap();
+    assert_eq!(&again.registers[&Index::Pcr(3)].value, &rtmrs[3]);
+    let e = dstack::runtime_events_in(&hidden, Index::Pcr(3)).unwrap_err();
+    assert!(e.to_string().contains("not a dstack runtime event"), "{e}");
 }
 
 #[test]

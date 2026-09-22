@@ -52,7 +52,12 @@ impl HashAlg {
         if let Some(&(a, _, _)) = Self::KNOWN.iter().find(|(_, n, _)| *n == s) {
             return Some(a);
         }
-        let hex4 = s.strip_prefix("0x").filter(|h| h.len() == 4)?;
+        // The CDDL's form: "0x" and four digits from 0-9A-F.
+        let hex4 = s.strip_prefix("0x").filter(|h| {
+            h.len() == 4
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        })?;
         u16::from_str_radix(hex4, 16).ok().map(Self)
     }
 
@@ -105,7 +110,8 @@ mod tests {
         assert_eq!(HashAlg::from_json("sha"), Some(HashAlg::SHA1));
         assert_eq!(HashAlg::from_json("sha384"), Some(HashAlg::SHA384));
         assert_eq!(HashAlg::from_json("0x000B"), Some(HashAlg::SHA256));
-        assert_eq!(HashAlg::from_json("0x000b"), Some(HashAlg::SHA256));
+        assert_eq!(HashAlg::from_json("0x000b"), None);
+        assert_eq!(HashAlg::from_json("0x+00B"), None);
         assert_eq!(HashAlg::from_json("0x00B"), None);
         assert_eq!(HashAlg::from_json("SHA256"), None);
         assert_eq!(HashAlg(0x0099).to_json(), "0x0099");

@@ -358,17 +358,44 @@ fn cbor_decoding_refuses_what_the_cddl_or_determinism_forbids() {
     unknown.pop();
     unknown.extend_from_slice(&h("a201000000"));
     assert!(decode_cbor(&unknown, &[]).is_err());
-    // Registering a Table 2 value, or one value twice, is a usage error.
-    static BAD: ContentType = ContentType {
+    // Registering a Table 2 value or name, or one type twice, is a usage error.
+    static BAD_VALUE: ContentType = ContentType {
         value: 9,
         name: "systemd2",
         schema: Schema::Bytes,
     };
-    assert!(matches!(decode_cbor(&log, &[&BAD]), Err(Error::Usage(_))));
+    static BAD_NAME: ContentType = ContentType {
+        value: 201,
+        name: "systemd",
+        schema: Schema::Bytes,
+    };
+    for bad in [&BAD_VALUE, &BAD_NAME] {
+        assert!(matches!(decode_cbor(&log, &[bad]), Err(Error::Usage(_))));
+    }
     assert!(matches!(
         decode_cbor(&log, &[&CVM, &CVM]),
         Err(Error::Usage(_))
     ));
+
+    // A Table 27 event type has one CBOR encoding, its code: the header's
+    // EV_NO_ACTION written as the text label is refused, and so is a record
+    // built with the label.
+    let text = mutated(|b| {
+        let i = b
+            .windows(4)
+            .position(|w| w == [0xa2, 0x00, 0x03, 0x01])
+            .unwrap();
+        drop(b.splice(i + 2..i + 3, [&[0x6c][..], b"EV_NO_ACTION"].concat()));
+    });
+    let e = decode_cbor(&text, &[]).unwrap_err().to_string();
+    assert!(e.contains("written as its code 3"), "{e}");
+    let mut named = decode_cbor(&log, &[]).unwrap();
+    named[0].content = Content::PcClientStd {
+        event_type: EventType::Name("EV_NO_ACTION".into()),
+        event_data: vec![],
+    };
+    assert!(!named[0].is_measured(), "the label means EV_NO_ACTION");
+    assert!(encode_cbor(&named).is_err());
 }
 
 #[test]

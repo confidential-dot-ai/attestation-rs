@@ -279,7 +279,9 @@ fn slot_of(rec: &Record, pos: usize) -> Result<u16> {
 /// must reproduce. With `workload_rules` (an SNP commitment log), every record
 /// must be `cvm`, since other content carries no sequence binding, and slots
 /// from [`FIRST_WORKLOAD_SLOT`] up must open with a claim record and take no
-/// second one (section 4.9).
+/// second one (section 4.9). Without them, other content types replay as
+/// recorded, so a `cvm` record relabeled as one is indistinguishable from it:
+/// such a replay establishes register values, never the set of `cvm` events.
 pub fn replay(
     records: &[Record],
     initial: impl Fn(u16) -> Option<[u8; 48]>,
@@ -334,6 +336,12 @@ pub fn replay(
                 if pos != 0 || index != u16::from(BOOT_SLOT) {
                     return Err(bad(format!(
                         "record {pos}: a boot record is only record 0 into slot {BOOT_SLOT}"
+                    )));
+                }
+                // The seed travels in the `bootseed` claim, never in the log.
+                if e.content.is_some() {
+                    return Err(bad(format!(
+                        "record {pos}: a boot record carries no content"
                     )));
                 }
                 boot_digest = Some(e.content_digest);
@@ -503,6 +511,8 @@ mod tests {
         refused(vec![rec(0, 4, &boot)], "boot record");
         refused(vec![rec(0, 4, &claim), rec(1, 3, &boot)], "boot record");
         refused(vec![rec(0, 3, &claim)], "outside a workload slot");
+        let seeded = event_content("ats", "boot", &[0; 48], Some(&[0x33; 32]));
+        refused(vec![rec(0, 3, &seeded)], "carries no content");
         // a register the platform does not have
         refused(
             vec![rec(0, 16, &start)],

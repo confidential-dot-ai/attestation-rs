@@ -22,6 +22,9 @@ pub const CONTENT_IMA_TLV: u64 = 8;
 pub const CONTENT_SYSTEMD: u64 = 9;
 /// Values Table 2 reserves.
 pub(crate) const CONTENT_RESERVED: [u64; 2] = [6, 10];
+/// The CEL-JSON names of the Table 2 content types.
+pub(crate) const BUILT_IN_NAMES: [&str; 5] =
+    ["cel", "pcclient_std", "ima_template", "ima_tlv", "systemd"];
 
 /// A Canonical Event Log Record (section 4.2, `TPMS_CEL_EVENT`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,8 +173,10 @@ impl StateTrans {
     }
 }
 
-/// A PC Client event type, CDDL `text / uint .size 4`. Decoders turn a Table
-/// 27 label into its code, so only labels outside the table stay text.
+/// A PC Client event type, CDDL `text / uint .size 4`. A Table 27 label is
+/// always its code: the JSON decoder turns one into its code, and the CBOR
+/// decoder and the encoders refuse one as text, so each event type has one
+/// CBOR encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
     Code(u32),
@@ -186,11 +191,11 @@ impl EventType {
         }
     }
 
-    /// The `TCG_PCR_EVENT2.eventType` code.
+    /// The `TCG_PCR_EVENT2.eventType` code, for a code or a Table 27 label.
     pub fn code(&self) -> Option<u32> {
         match self {
             EventType::Code(c) => Some(*c),
-            EventType::Name(_) => None,
+            EventType::Name(n) => event_type_code(n),
         }
     }
 }
@@ -297,6 +302,12 @@ impl ContentType {
     /// A registration decoders can use: a value outside Table 2 and map
     /// fields with ascending keys and distinct names.
     pub(crate) fn check(&self) -> std::result::Result<(), String> {
+        if BUILT_IN_NAMES.contains(&self.name) {
+            return Err(format!(
+                "extension {} takes a CEL-JSON name CEL v1.1 assigns",
+                self.name
+            ));
+        }
         if (CONTENT_CEL..=10).contains(&self.value) {
             return Err(format!(
                 "extension {} takes content_type {}, which CEL v1.1 Table 2 assigns",
@@ -377,6 +388,9 @@ impl Record {
                 event_data,
             } => match event_type {
                 EventType::Name(n) if n.is_empty() || long(n.len()) => Some("event_type name"),
+                EventType::Name(n) if event_type_code(n).is_some() => {
+                    Some("a Table 27 event type is written as its code")
+                }
                 _ if long(event_data.len()) => Some("event_data too long"),
                 _ => None,
             },

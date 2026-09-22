@@ -159,7 +159,10 @@ fn event(v: &J, position: usize) -> Result<Record> {
 }
 
 /// The runtime event `record` carries, after its SHA-384 digest is checked
-/// against the hash input. `None` for a record of any other event type.
+/// against the hash input. `None` for a record of any other event type. To
+/// list a register's events use [`runtime_events_in`]: the event type lies
+/// outside the digest, so a relabeled event is `None` here while the register
+/// still replays.
 pub fn runtime_event(record: &Record, position: usize) -> Option<Result<RuntimeEvent>> {
     let Content::PcClientStd {
         event_type,
@@ -223,4 +226,27 @@ fn decode_runtime(record: &Record, data: &[u8], position: usize) -> Result<Runti
             ),
         }),
     }
+}
+
+/// Every runtime event extended into `index` (`Index::Pcr(3)`, RTMR 3, on
+/// TDX), with its position. Each measured record naming `index` must be a
+/// runtime event whose digest reproduces, so no event can drop out of the list
+/// by relabeling while the register still replays.
+pub fn runtime_events_in(records: &[Record], index: Index) -> Result<Vec<(usize, RuntimeEvent)>> {
+    let mut out = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        if r.index != index || !r.is_measured() {
+            continue;
+        }
+        match runtime_event(r, i) {
+            Some(e) => out.push((i, e?)),
+            None => {
+                return Err(Error::Record {
+                    position: i,
+                    reason: format!("a measured record in {index} is not a dstack runtime event"),
+                })
+            }
+        }
+    }
+    Ok(out)
 }

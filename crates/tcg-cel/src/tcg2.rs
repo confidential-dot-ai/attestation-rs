@@ -234,36 +234,49 @@ pub enum IndexMap {
     Pcr,
     /// The log's index is a UEFI CC measurement register index (MrIndex) and
     /// the CEL `pcr` is the TDX RTMR ordinal: MrIndex 1 to 4 become 0 to 3.
-    /// MrIndex 0 is MRTD, which no event extends; an EV_NO_ACTION event there
-    /// (the header of older TDVF builds) becomes RTMR 0's.
+    /// MrIndex 0 is MRTD, which no event extends; records there (the header
+    /// of older TDVF builds, and informative events some firmware logs) are
+    /// left out, as dstack's CCEL replay leaves them.
     CcMrToRtmr,
 }
 
 impl IndexMap {
-    fn map(self, index: u32, event_type: u32) -> Option<Index> {
+    /// `Ok(None)` for a record the mapping leaves out.
+    fn map(self, index: u32) -> std::result::Result<Option<Index>, ()> {
         match self {
-            IndexMap::Pcr => Some(Index::Pcr(index)).filter(|i| i.is_valid()),
+            IndexMap::Pcr => Some(Index::Pcr(index))
+                .filter(|i| i.is_valid())
+                .map(Some)
+                .ok_or(()),
             IndexMap::CcMrToRtmr => match index {
-                1..=4 => Some(Index::Pcr(index - 1)),
-                0 if event_type == EV_NO_ACTION => Some(Index::Pcr(0)),
-                _ => None,
+                0 => Ok(None),
+                1..=4 => Ok(Some(Index::Pcr(index - 1))),
+                _ => Err(()),
             },
         }
     }
 }
 
 impl Tcg2Log {
-    /// The CEL form (CEL v1.1 section 5.1.7): the header and every event as
-    /// `pcclient_std` records with all their digests, numbered per index.
+    /// The CEL form (CEL v1.1 section 5.1.7): the header and every event the
+    /// mapping keeps, as `pcclient_std` records with all their digests,
+    /// numbered per index.
     pub fn to_cel(&self, map: IndexMap) -> Result<Vec<Record>> {
         let mut out = Vec::with_capacity(1 + self.events.len());
         for (i, ev) in std::iter::once(&self.header)
             .chain(&self.events)
             .enumerate()
         {
-            let index = map.map(ev.index, ev.event_type).ok_or_else(|| {
-                crate::error::record(i, format!("index {} has no {map:?} mapping", ev.index))
-            })?;
+            let index = match map.map(ev.index) {
+                Ok(Some(index)) => index,
+                Ok(None) => continue,
+                Err(()) => {
+                    return Err(crate::error::record(
+                        i,
+                        format!("index {} has no {map:?} mapping", ev.index),
+                    ))
+                }
+            };
             out.push(Record {
                 recnum: 0,
                 index,

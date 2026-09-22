@@ -146,7 +146,17 @@ fn decode_content(
                     u32::try_from(r.uint()?)
                         .map_err(|_| r.err(at_type, "event_type exceeds 32 bits"))?,
                 ),
-                _ => EventType::from_text(r.tstr(MAX_BYTES)?),
+                _ => {
+                    let at_text = r.pos();
+                    let text = r.tstr(MAX_BYTES)?;
+                    if let Some(code) = crate::pcclient::event_type_code(text) {
+                        return Err(r.err(
+                            at_text,
+                            format!("event_type {text} is written as its code {code}"),
+                        ));
+                    }
+                    EventType::Name(text.to_string())
+                }
             };
             r.key(1, "event_data")?;
             let event_data = r.bstr(MAX_BYTES)?.to_vec();
