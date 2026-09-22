@@ -63,6 +63,13 @@ This writes an ES module and the `.wasm` binary to `pkg/`:
 - `pkg/attestation_wasm.js` — JS bindings and the `init` loader
 - `pkg/attestation_wasm_bg.wasm` — the WASM blob
 
+The build's profile entry points are `appraise`, `appraise_with` (evaluation
+time and held collateral as inputs) and `appraise_legacy`; a refusal is a thrown
+`Error` whose `code` is a refusal code of the design doc's section 14.4. The
+conformance corpus runs against the Node build with
+`wasm-pack build --target nodejs --release && node conformance.mjs` (see
+`conformance/README.md`).
+
 Serve `pkg/` over HTTP (browsers won't load WASM from `file://`) and use it from a
 module script:
 

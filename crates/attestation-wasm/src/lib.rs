@@ -1,6 +1,11 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
-use attestation::collateral::{CertProvider, DefaultCertProvider};
+use attestation::collateral::{CertProvider, DefaultCertProvider, HeldCollateral};
 use attestation::error::Result as AttestationResult;
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
 use attestation::platforms::az_snp::verify::{verify_report, VerifiedReport};
@@ -16,6 +21,7 @@ use attestation::platforms::tdx::evidence::TdxEvidence;
 use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
 use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
+use attestation::{AttestationError, RefusalCode};
 
 /// Parse the optional minimum-TCB policy JSON (the [`SnpTcb`] shape:
 /// `{ "bootloader": u8, "tee": u8, "snp": u8, "microcode": u8, "fmc"?: u8 }`).
@@ -145,6 +151,67 @@ pub async fn verify(
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
 
+/// A JS `Error` whose `code` is a refusal code of profile section 14.4, so a
+/// caller acts on the rule family that failed and never on the message.
+fn coded(code: RefusalCode, message: &str) -> JsValue {
+    let err = js_sys::Error::new(message);
+    // Setting a data property on a fresh Error cannot fail.
+    let _ = js_sys::Reflect::set(
+        &err,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(code.as_str()),
+    );
+    err.into()
+}
+
+/// The implementation's refusal, coded by its section 14.4 mapping.
+fn refusal(e: AttestationError) -> JsValue {
+    coded(e.refusal_code(), &format!("appraise: {e}"))
+}
+
+/// A caller's usage error: no code, since no rule of the profile decided.
+fn usage(message: String) -> JsValue {
+    js_sys::Error::new(&message).into()
+}
+
+fn parse_policy(policy_json: &str) -> Result<attestation::profile::VerifyPolicy, JsValue> {
+    serde_json::from_str(policy_json).map_err(|e| {
+        coded(
+            RefusalCode::PolicyInvalid,
+            &format!("policy deserialize: {e}"),
+        )
+    })
+}
+
+/// The envelope's `eat_nonce`, or empty when it has none it can decode.
+fn carried_nonce(evidence_json: &str) -> Vec<u8> {
+    use base64::Engine;
+    serde_json::from_str::<serde_json::Value>(evidence_json)
+        .ok()
+        .and_then(|v| {
+            v.get("eat_nonce")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .and_then(|s| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s)
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
+fn check_issued_nonce(evidence_json: &str, issued: &[u8]) -> Result<(), JsValue> {
+    if constant_time_eq(issued, &carried_nonce(evidence_json)) {
+        Ok(())
+    } else {
+        Err(coded(
+            RefusalCode::BindingMismatch,
+            "appraise: eat_nonce differs from the nonce this relying party issued",
+        ))
+    }
+}
+
 /// Appraise a profile envelope (`tag:confidential.ai,2026:cvm#1`, section 6)
 /// against a policy and return the EAR appraisal as JSON.
 ///
@@ -158,34 +225,19 @@ pub async fn verify(
 ///
 /// Offline: SNP endorsements ride inline in `cvm_endorsements` (or the CRL
 /// here), and TDX collateral must be inline when the policy requires it.
+/// Windows are judged against this host's clock; [`appraise_with`] takes the
+/// evaluation time and held collateral as inputs.
+///
+/// Throws a JS `Error` whose `code` is the refusal code (section 14.4).
 #[wasm_bindgen]
 pub async fn appraise(
     evidence_json: String,
     nonce: Vec<u8>,
     policy_json: String,
     snp_crl_der: Option<Vec<u8>>,
-) -> Result<String, JsError> {
-    let policy: attestation::profile::VerifyPolicy = serde_json::from_str(&policy_json)
-        .map_err(|e| JsError::new(&format!("policy deserialize: {e}")))?;
-    let carried = serde_json::from_str::<serde_json::Value>(&evidence_json)
-        .ok()
-        .and_then(|v| {
-            v.get("eat_nonce")
-                .and_then(|n| n.as_str())
-                .map(String::from)
-        })
-        .and_then(|s| {
-            use base64::Engine;
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(s)
-                .ok()
-        })
-        .unwrap_or_default();
-    if !constant_time_eq(&nonce, &carried) {
-        return Err(JsError::new(
-            "appraise: eat_nonce differs from the nonce this relying party issued",
-        ));
-    }
+) -> Result<String, JsValue> {
+    let policy = parse_policy(&policy_json)?;
+    check_issued_nonce(&evidence_json, &nonce)?;
     let appraisal = attestation::Verifier::offline()
         .with_cert_provider(StaticSnpCollateral {
             inner: DefaultCertProvider::new(),
@@ -193,14 +245,129 @@ pub async fn appraise(
         })
         .appraise_json(evidence_json.as_bytes(), &policy)
         .await
-        .map_err(|e| JsError::new(&format!("appraise: {e}")))?;
-    serde_json::to_string_pretty(&appraisal)
-        .map_err(|e| JsError::new(&format!("json serialize: {e}")))
+        .map_err(refusal)?;
+    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
+}
+
+/// What an appraisal depends on beyond the envelope and the policy (profile
+/// section 14.2), as JSON. Every member is optional:
+///
+/// ```json
+/// {
+///   "now": "2026-09-22T00:00:00Z",
+///   "nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+///   "collateral": {
+///     "snp_crl/Genoa": { "body": "<base64>" },
+///     "tdx_tcb_info/50806f000000": { "body": "<base64>", "signing_chain": "<base64>" }
+///   }
+/// }
+/// ```
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Inputs {
+    /// RFC 3339 evaluation time; every window is judged against it. Absent
+    /// means this host's clock.
+    #[serde(default)]
+    now: Option<String>,
+    /// The nonce this relying party issued, base64url without padding, which
+    /// must be the envelope's `eat_nonce`. A relying party passes it; absent,
+    /// the caller compares the appraisal's `eat_nonce` itself.
+    #[serde(default)]
+    nonce: Option<String>,
+    /// Section 8 collateral keys to artifacts, base64; a key not given is
+    /// unavailable collateral, and inline endorsements stay inputs.
+    #[serde(default)]
+    collateral: BTreeMap<String, Artifact>,
+    /// Recorded NRAS exchanges. This build carries no GPU verifier, so any
+    /// entry is refused as `unsupported`.
+    #[serde(default)]
+    nras: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Artifact {
+    body: String,
+    #[serde(default)]
+    signing_chain: Option<String>,
+}
+
+/// Appraise a profile envelope with every input fixed: the evaluation time,
+/// the issued nonce and the collateral the caller holds (`inputs_json`, see
+/// [`Inputs`]). This is the entry the conformance corpus (section 14) runs,
+/// and the one for a relying party that fetches collateral itself.
+///
+/// - `evidence_json`: the envelope
+/// - `policy_json`: a `VerifyPolicy`, or absent for the section 7 default
+/// - `inputs_json`: the [`Inputs`] object
+///
+/// Throws a JS `Error` whose `code` is the refusal code (section 14.4); an
+/// error without a `code` is a usage error, never a decision.
+#[wasm_bindgen]
+pub async fn appraise_with(
+    evidence_json: String,
+    policy_json: Option<String>,
+    inputs_json: String,
+) -> Result<String, JsValue> {
+    use base64::Engine;
+    let inputs: Inputs =
+        serde_json::from_str(&inputs_json).map_err(|e| usage(format!("inputs: {e}")))?;
+    let policy = match &policy_json {
+        Some(p) => parse_policy(p)?,
+        None => attestation::profile::VerifyPolicy::default(),
+    };
+    if !inputs.nras.is_empty() {
+        return Err(coded(
+            RefusalCode::Unsupported,
+            "nras: this build carries no GPU verifier",
+        ));
+    }
+    if let Some(nonce) = &inputs.nonce {
+        let issued = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(nonce)
+            .map_err(|e| usage(format!("inputs.nonce: {e}")))?;
+        check_issued_nonce(&evidence_json, &issued)?;
+    }
+    let std64 = base64::engine::general_purpose::STANDARD;
+    let mut held = HeldCollateral::new();
+    for (key, artifact) in inputs.collateral {
+        let body = std64
+            .decode(&artifact.body)
+            .map_err(|e| usage(format!("inputs.collateral[{key}].body: {e}")))?;
+        held = match artifact.signing_chain {
+            Some(chain) => {
+                let chain = std64
+                    .decode(&chain)
+                    .map_err(|e| usage(format!("inputs.collateral[{key}].signing_chain: {e}")))?;
+                held.with_signed(key, body, chain)
+            }
+            None => held.with_bytes(key, body),
+        };
+    }
+    let mut verifier = attestation::Verifier::offline();
+    if let Some(now) = &inputs.now {
+        let now = DateTime::parse_from_rfc3339(now)
+            .map_err(|e| usage(format!("inputs.now: {e}")))?
+            .with_timezone(&Utc);
+        held = held.at(now);
+        verifier = verifier.with_clock(Arc::new(move || now));
+    }
+    if held.holds_tdx() {
+        verifier = verifier.with_tdx_provider(held.clone());
+    }
+    let appraisal = verifier
+        .with_cert_provider(held)
+        .appraise_json(evidence_json.as_bytes(), &policy)
+        .await
+        .map_err(refusal)?;
+    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
 }
 
 /// Appraise a pre-profile `{ platform, evidence }` envelope through the
 /// section 9 mapping. `nonce` is what the relying party issued (the anchor
 /// with no key); `key_json` is an optional `KeyBinding` (`{kind, value}`).
+///
+/// Throws a JS `Error` whose `code` is the refusal code (section 14.4).
 #[wasm_bindgen]
 pub async fn appraise_legacy(
     envelope_json: String,
@@ -208,13 +375,17 @@ pub async fn appraise_legacy(
     key_json: Option<String>,
     policy_json: String,
     snp_crl_der: Option<Vec<u8>>,
-) -> Result<String, JsError> {
-    let policy: attestation::profile::VerifyPolicy = serde_json::from_str(&policy_json)
-        .map_err(|e| JsError::new(&format!("policy deserialize: {e}")))?;
+) -> Result<String, JsValue> {
+    let policy = parse_policy(&policy_json)?;
     let key: Option<attestation::profile::KeyBinding> = key_json
         .map(|k| serde_json::from_str(&k))
         .transpose()
-        .map_err(|e| JsError::new(&format!("key deserialize: {e}")))?;
+        .map_err(|e| {
+            coded(
+                RefusalCode::EnvelopeInvalid,
+                &format!("key deserialize: {e}"),
+            )
+        })?;
     let appraisal = attestation::Verifier::offline()
         .with_cert_provider(StaticSnpCollateral {
             inner: DefaultCertProvider::new(),
@@ -222,9 +393,8 @@ pub async fn appraise_legacy(
         })
         .appraise_legacy_json(envelope_json.as_bytes(), &nonce, key, &policy)
         .await
-        .map_err(|e| JsError::new(&format!("appraise: {e}")))?;
-    serde_json::to_string_pretty(&appraisal)
-        .map_err(|e| JsError::new(&format!("json serialize: {e}")))
+        .map_err(refusal)?;
+    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
 }
 
 /// Verify live SNP evidence in WASM.
