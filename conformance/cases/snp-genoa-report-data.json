@@ -1,0 +1,13 @@
+{
+  "id": "snp-genoa-report-data",
+  "rule": {
+    "section": "4.5",
+    "statement": "report-data: report_data == pad64(anchor); a Genoa report with its VEK inline appraises"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-genoa-report-data.json",
+  "policy": "policy/snp-genoa-report-data.json",
+  "expect": {
+    "appraisal": "expected/snp-genoa-report-data.json"
+  }
+}

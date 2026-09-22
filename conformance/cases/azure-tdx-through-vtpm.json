@@ -1,0 +1,13 @@
+{
+  "id": "azure-tdx-through-vtpm",
+  "rule": {
+    "section": "4.4",
+    "statement": "vtpm: the TD quote binds through vtpm-extradata and the quoted PCRs become privileged-service registers"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-tdx-through-vtpm.json",
+  "policy": "policy/azure-tdx-through-vtpm.json",
+  "expect": {
+    "appraisal": "expected/azure-tdx-through-vtpm.json"
+  }
+}

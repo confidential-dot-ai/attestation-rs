@@ -1,0 +1,13 @@
+{
+  "id": "snp-nonce-not-bound",
+  "rule": {
+    "section": "4.5",
+    "statement": "report-data: report_data == pad64(anchor); another nonce is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-nonce-not-bound.json",
+  "policy": "policy/snp-nonce-not-bound.json",
+  "expect": {
+    "refusal": "binding-mismatch"
+  }
+}

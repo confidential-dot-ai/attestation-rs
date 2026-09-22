@@ -1,0 +1,13 @@
+{
+  "id": "tdx-register-differs-from-quote",
+  "rule": {
+    "section": "4.7",
+    "statement": "for tdx-rtmr the envelope values must equal the signed report"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-register-differs-from-quote.json",
+  "policy": "policy/tdx-register-differs-from-quote.json",
+  "expect": {
+    "refusal": "register-mismatch"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "snp-dbgstat-hint-contradicts-report",
+  "rule": {
+    "section": "5.1",
+    "statement": "an attester dbgstat hint that contradicts the signed report is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-dbgstat-hint-contradicts-report.json",
+  "policy": "policy/snp-dbgstat-hint-contradicts-report.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

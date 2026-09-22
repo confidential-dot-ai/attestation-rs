@@ -1,0 +1,13 @@
+{
+  "id": "snp-launch-measurement-not-in-reference",
+  "rule": {
+    "section": "7",
+    "statement": "a pinned launch measurement the report does not match is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-launch-measurement-not-in-reference.json",
+  "policy": "policy/snp-launch-measurement-not-in-reference.json",
+  "expect": {
+    "refusal": "reference-mismatch"
+  }
+}

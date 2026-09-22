@@ -1,0 +1,46 @@
+{
+  "reference": {
+    "launch_measurement": [],
+    "registers": {},
+    "pcrs": {
+      "8": [
+        {
+          "alg": "sha256",
+          "value": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+        }
+      ]
+    },
+    "slot_owners": {}
+  },
+  "min_backing": "privileged-service",
+  "freshness": {},
+  "commitment": {
+    "header16": "QVRTLU1SLTEBARAAAAAAAA",
+    "seed": "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"
+  },
+  "tcb": {
+    "floors": {},
+    "tdx_allowed_status": [
+      "UpToDate"
+    ],
+    "require_revocation": false,
+    "require_signed_collateral": false
+  },
+  "policy_bits": {
+    "allow_debug": false,
+    "allow_migration": false,
+    "require_vmpl0": true,
+    "require_sept_ve_disable": true,
+    "require_zero_reserved_attributes": true,
+    "allow_service_td": false
+  },
+  "gpu": {
+    "required": false,
+    "device_policy": {
+      "allow_debug": false,
+      "require_secboot": true,
+      "require_nonce_match": true,
+      "require_measres_success": true
+    }
+  }
+}

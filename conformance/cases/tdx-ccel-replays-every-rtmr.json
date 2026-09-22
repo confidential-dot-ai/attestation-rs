@@ -1,0 +1,13 @@
+{
+  "id": "tdx-ccel-replays-every-rtmr",
+  "rule": {
+    "section": "4.8",
+    "statement": "tdx-ccel: the log replays into RTMR 0 to 3, each reproducing the signed value"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-ccel-replays-every-rtmr.json",
+  "policy": "policy/tdx-ccel-replays-every-rtmr.json",
+  "expect": {
+    "appraisal": "expected/tdx-ccel-replays-every-rtmr.json"
+  }
+}
