@@ -13,7 +13,7 @@ filter = 'binary(az_snp_live) or binary(az_tdx_live) or test(/^live_azure_/)'
 test-group = 'vtpm'
 
 [[profile.default.overrides]]
-filter = 'test(/^live_(snp_metal|tdx_metal|metal)_/)'
+filter = 'test(/^live_(snp_metal|tdx_metal|metal)_/) or test(=attest_then_verify_roundtrip)'
 test-group = 'tee'
 
 # A passing hardware test is only evidence if its output is kept: the live

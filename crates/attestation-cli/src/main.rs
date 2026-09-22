@@ -101,6 +101,13 @@ struct VerifyArgs {
     #[arg(long)]
     nonce_hex: Option<String>,
 
+    /// Keep fetched collateral (VCEKs, AMD chains and CRLs, Intel TCB Info,
+    /// QE identity and CRLs) in this directory and serve it from there while
+    /// each artifact is inside its own validity window, so repeated runs on
+    /// one machine do not refetch from AMD KDS, which rate-limits.
+    #[arg(long)]
+    collateral_dir: Option<PathBuf>,
+
     /// Expected report data (hex-encoded) for nonce binding verification.
     #[arg(long)]
     expected_report_data: Option<String>,
@@ -459,6 +466,22 @@ fn pin_digest(
     Ok(())
 }
 
+/// The default verifier, or one whose collateral cache is backed by
+/// `--collateral-dir`.
+fn verifier(args: &VerifyArgs) -> attestation::Verifier {
+    match &args.collateral_dir {
+        None => attestation::Verifier::new(),
+        Some(dir) => attestation::Verifier::offline().with_collateral(std::sync::Arc::new(
+            attestation::CollateralCache::new(
+                attestation::CachePolicy::default(),
+                &attestation::HttpTimeouts::default(),
+                attestation::Endpoints::default(),
+                Some(attestation::DiskStore::new(dir)),
+            ),
+        )),
+    }
+}
+
 async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool) {
     let policy: attestation::profile::VerifyPolicy = match &args.policy {
         Some(path) => match std::fs::read(path)
@@ -523,7 +546,7 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
             process::exit(1);
         }
     };
-    let verifier = attestation::Verifier::new();
+    let verifier = verifier(args);
     eprintln!("Appraising evidence...");
     let t0 = Instant::now();
     let appraisal = verifier.appraise(&evidence, &policy).await;
@@ -666,7 +689,7 @@ async fn cmd_verify(args: VerifyArgs) {
     eprintln!("Verifying evidence...");
 
     let t0 = Instant::now();
-    let result = match attestation::verify(&evidence_json, &params).await {
+    let result = match verifier(&args).verify(&evidence_json, &params).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Verification failed: {e}");

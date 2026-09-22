@@ -23,9 +23,24 @@ fn random_hex(n: usize) -> String {
     hex::encode(buf)
 }
 
+/// Every verify on a runner shares one collateral store, so a VCEK is
+/// fetched from AMD KDS once per run; KDS answers 429 to repeated fetches.
+fn collateral_dir() -> String {
+    std::env::temp_dir()
+        .join("attestation-live-collateral")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 fn cli(args: &[&str]) -> Output {
+    let store = collateral_dir();
+    let mut args = args.to_vec();
+    if args.first() == Some(&"verify") {
+        args.extend_from_slice(&["--collateral-dir", &store]);
+    }
     let out = Command::new(CLI)
-        .args(args)
+        .args(&args)
         .output()
         .expect("run attestation-cli");
     eprintln!(
@@ -198,8 +213,10 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
     assert!(String::from_utf8_lossy(&bare.stderr).contains("--format legacy"));
 }
 
-/// The exact commands `attest-runner.yml` runs, with this commit's CLI on both
-/// sides and no policy file: what the runner gate does once this lands.
+/// The commands `attest-runner.yml` runs, with this commit's CLI on both sides
+/// and no policy file: what the runner gate does once this lands. The only
+/// addition is the shared collateral store, which changes where collateral
+/// comes from and not what is checked.
 fn gate_command(platform: &str, device: &str) {
     require(device);
     let run = Run::new();

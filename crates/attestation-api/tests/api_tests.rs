@@ -26,6 +26,29 @@ fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     }
 }
 
+/// A test state whose collateral cache is backed by the runner's shared
+/// store, so the hardware tests fetch a VCEK from AMD KDS once per run.
+fn live_state() -> AppState {
+    let certs = attestation_api::config::CertsConfig {
+        local_collateral_dir: Some(
+            std::env::temp_dir()
+                .join("attestation-live-collateral")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+    let cert_cache = attestation_api::certs::build(&certs).unwrap();
+    let verifier = Arc::new(attestation::Verifier::new().with_collateral(cert_cache.clone()));
+    AppState {
+        config: Arc::new(Config::default()),
+        cert_cache,
+        token_issuer: None,
+        verifier,
+    }
+}
+
 fn has_tee() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -695,7 +718,7 @@ async fn live_metal_api_profile_round_trip() {
         .and_then(|mut f| f.read_exact(&mut raw))
         .unwrap();
     let nonce = b64(&raw);
-    let state = test_state();
+    let state = live_state();
 
     let resp = build_api_router(state.clone())
         .oneshot(
@@ -757,7 +780,7 @@ async fn attest_then_verify_roundtrip() {
         return;
     }
 
-    let state = test_state();
+    let state = live_state();
 
     // Step 1: Attest
     let app = build_api_router(state.clone());

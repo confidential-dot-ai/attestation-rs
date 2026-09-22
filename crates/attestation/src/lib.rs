@@ -260,10 +260,19 @@ pub async fn attest_profile(
     .ok_or_else(|| {
         AttestationError::ProfileEvidenceInvalid("binding key too long for the anchor".to_string())
     })?;
-    // Azure binds the anchor as the vTPM quote's extraData verbatim; every
+    // Azure binds the anchor as the vTPM quote's extraData verbatim, a
+    // TPM2B_DATA of at most sizeof(TPMT_HA) = 50 bytes on Azure's vTPM; every
     // other platform carries pad64(anchor) in report_data (section 4.5).
     let report_data = match platform {
-        PlatformType::AzSnp | PlatformType::AzTdx => anchor,
+        PlatformType::AzSnp | PlatformType::AzTdx => {
+            const AZURE_QUALIFYING_DATA_MAX: usize = 50;
+            if anchor.len() > AZURE_QUALIFYING_DATA_MAX {
+                return Err(AttestationError::ReportDataTooLarge {
+                    max: AZURE_QUALIFYING_DATA_MAX,
+                });
+            }
+            anchor
+        }
         _ => profile::binding::pad64(&anchor)
             .ok_or_else(|| {
                 AttestationError::ProfileEvidenceInvalid("anchor longer than 64 bytes".to_string())

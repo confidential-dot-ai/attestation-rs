@@ -14,8 +14,22 @@ use attestation::profile::{
     VerifyPolicy, PROFILE_URI,
 };
 use attestation::{
-    AttestOptions, AttestationError, PlatformType, TdxTcbStatus, Verifier, VerifyParams,
+    AttestOptions, AttestationError, CachePolicy, CollateralCache, DiskStore, Endpoints,
+    HttpTimeouts, PlatformType, TdxTcbStatus, Verifier, VerifyParams,
 };
+
+/// Every live test on a runner shares one collateral store, so a VCEK is
+/// fetched from AMD KDS once per run; KDS answers 429 to repeated fetches.
+fn verifier() -> Verifier {
+    Verifier::offline().with_collateral(std::sync::Arc::new(CollateralCache::new(
+        CachePolicy::default(),
+        &HttpTimeouts::default(),
+        Endpoints::default(),
+        Some(DiskStore::new(
+            std::env::temp_dir().join("attestation-live-collateral"),
+        )),
+    )))
+}
 
 fn random(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
@@ -132,7 +146,7 @@ async fn common(platform: PlatformType, verifier: &Verifier, policy: &VerifyPoli
 #[ignore = "needs the SEV-SNP metal runner"]
 async fn live_snp_metal_profile() {
     require("/dev/sev-guest", PlatformType::Snp);
-    let verifier = Verifier::new();
+    let verifier = verifier();
     let strict = VerifyPolicy::default();
 
     let nonce = random(32);
@@ -168,7 +182,7 @@ async fn live_snp_metal_profile() {
 #[ignore = "needs the TDX metal runner"]
 async fn live_tdx_metal_profile() {
     require("/dev/tdx_guest", PlatformType::Tdx);
-    let verifier = Verifier::new();
+    let verifier = verifier();
 
     let nonce = random(32);
     let envelope = attest(PlatformType::Tdx, &nonce, None).await;
@@ -230,7 +244,7 @@ async fn live_tdx_metal_profile() {
 }
 
 async fn azure(platform: PlatformType, policy: VerifyPolicy) {
-    let verifier = Verifier::new();
+    let verifier = verifier();
     let nonce = random(32);
     let envelope = attest(platform, &nonce, None).await;
     let evidence = Evidence::from_json(&envelope).expect("the envelope parses");
@@ -331,12 +345,10 @@ async fn azure(platform: PlatformType, policy: VerifyPolicy) {
         }
         Err(e) => {
             eprintln!("a 64-byte nonce is refused on {platform}: {e}");
-            if platform == PlatformType::AzSnp {
-                assert!(
-                    matches!(e, AttestationError::ReportDataTooLarge { max: 50 }),
-                    "{e}"
-                );
-            }
+            assert!(
+                matches!(e, AttestationError::ReportDataTooLarge { max: 50 }),
+                "refused before the TPM, with the limit: {e}"
+            );
         }
     }
 
