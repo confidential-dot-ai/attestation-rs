@@ -713,10 +713,11 @@ async fn live_metal_api_profile_round_trip() {
         "this test belongs on a metal SEV-SNP or TDX runner"
     );
     let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
-    let mut raw = [0u8; 32];
+    let mut raw = Vec::with_capacity(32);
     std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
+        .and_then(|f| f.take(32).read_to_end(&mut raw))
         .unwrap();
+    assert_eq!(raw.len(), 32);
     let nonce = b64(&raw);
     let state = live_state();
 

@@ -32,10 +32,11 @@ fn verifier() -> Verifier {
 }
 
 fn random(n: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; n];
+    let mut buf = Vec::with_capacity(n);
     std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
+        .and_then(|f| f.take(n as u64).read_to_end(&mut buf))
         .expect("read /dev/urandom");
+    assert_eq!(buf.len(), n, "short read from /dev/urandom");
     buf
 }
 

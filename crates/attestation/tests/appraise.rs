@@ -616,14 +616,25 @@ async fn a_legacy_tdx_log_must_replay_to_the_signed_rtmrs() {
     );
 }
 
+/// The nonce a recorded Azure attestation bound (its TPM quote's extraData),
+/// and the same nonce with its last byte changed.
+fn recorded_nonce(evidence: &serde_json::Value) -> (Vec<u8>, Vec<u8>) {
+    let message = hex::decode(evidence["tpm_quote"]["message"].as_str().unwrap()).unwrap();
+    let nonce = attestation::platforms::tpm_common::extract_tpm_nonce(&message).unwrap();
+    let mut wrong = nonce.clone();
+    *wrong.last_mut().unwrap() ^= 1;
+    (nonce, wrong)
+}
+
 #[tokio::test]
 async fn azure_tdx_evidence_appraises_through_the_vtpm() {
-    // Recorded on an Azure TDX VM with the 24-byte nonce "attestation-test-fixture".
+    // Recorded on an Azure TDX VM; the nonce is the one the recording bound.
     let raw: serde_json::Value =
         serde_json::from_slice(include_bytes!("../test_data/az_tdx/live-evidence.json")).unwrap();
+    let (nonce, wrong) = recorded_nonce(&raw);
+    let nonce = nonce.as_slice();
     let legacy = serde_json::to_vec(&json!({"platform": "az-tdx", "evidence": raw})).unwrap();
     let legacy = legacy.as_slice();
-    let nonce = b"attestation-test-fixture";
     // The recorded platform has no TCB Info fixture, so collateral is
     // skipped under a policy that allows it; the DCAP chain still anchors at
     // the pinned Intel root, and a vTPM register is privileged-service.
@@ -659,7 +670,7 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
 
     // A wrong nonce fails in the vTPM quote, before any CPU work.
     let err = verifier
-        .appraise_legacy_json(legacy, b"attestation-test-fixturX", None, &policy)
+        .appraise_legacy_json(legacy, &wrong, None, &policy)
         .await
         .unwrap_err();
     assert!(
@@ -723,9 +734,11 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
 
 #[tokio::test]
 async fn azure_snp_evidence_appraises_through_the_vtpm() {
-    // Recorded on an Azure SEV-SNP (Milan) VM with the same 24-byte nonce.
+    // Recorded on an Azure SEV-SNP (Milan) VM; the nonce is the one it bound.
     let legacy = include_bytes!("../test_data/az_snp/live-evidence.json");
-    let nonce = b"attestation-test-fixture";
+    let envelope: serde_json::Value = serde_json::from_slice(legacy).unwrap();
+    let (nonce, wrong) = recorded_nonce(&envelope["evidence"]);
+    let nonce = nonce.as_slice();
     let mut policy = lenient_policy();
     policy.min_backing = Backing::PrivilegedService;
     let verifier = Verifier::offline().with_cert_provider(NoCollateral);
@@ -770,7 +783,7 @@ async fn azure_snp_evidence_appraises_through_the_vtpm() {
 
     // The vTPM quote is only as good as its nonce.
     let err = verifier
-        .appraise_legacy_json(legacy, b"attestation-test-fixturX", None, &policy)
+        .appraise_legacy_json(legacy, &wrong, None, &policy)
         .await
         .unwrap_err();
     assert!(

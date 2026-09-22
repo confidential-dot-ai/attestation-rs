@@ -16,10 +16,11 @@ use base64::Engine;
 const CLI: &str = env!("CARGO_BIN_EXE_attestation-cli");
 
 fn random_hex(n: usize) -> String {
-    let mut buf = vec![0u8; n];
+    let mut buf = Vec::with_capacity(n);
     std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
+        .and_then(|f| f.take(n as u64).read_to_end(&mut buf))
         .expect("read /dev/urandom");
+    assert_eq!(buf.len(), n, "short read from /dev/urandom");
     hex::encode(buf)
 }
 

@@ -853,17 +853,30 @@ mod tests {
         assert!(apply_expectation_flags(VerifyPolicy::default(), &conflicting, &evidence).is_err());
     }
 
+    /// The nonce a recorded Azure attestation bound: its TPM quote's
+    /// extraData, after TPMS_ATTEST's magic, type and qualifiedSigner.
+    fn recorded_nonce(evidence: &serde_json::Value) -> Vec<u8> {
+        let m = hex::decode(evidence["tpm_quote"]["message"].as_str().unwrap()).unwrap();
+        let at = 8 + usize::from(u16::from_be_bytes([m[6], m[7]]));
+        let len = usize::from(u16::from_be_bytes([m[at], m[at + 1]]));
+        m[at + 2..at + 2 + len].to_vec()
+    }
+
     fn azure_evidence(tee: &str) -> Evidence {
-        let legacy = if tee == "snp" {
-            include_bytes!("../../attestation/test_data/az_snp/live-evidence.json").to_vec()
+        let envelope: serde_json::Value = if tee == "snp" {
+            serde_json::from_slice(include_bytes!(
+                "../../attestation/test_data/az_snp/live-evidence.json"
+            ))
+            .unwrap()
         } else {
             let raw: serde_json::Value = serde_json::from_slice(include_bytes!(
                 "../../attestation/test_data/az_tdx/live-evidence.json"
             ))
             .unwrap();
-            serde_json::to_vec(&json!({"platform": "az-tdx", "evidence": raw})).unwrap()
+            json!({"platform": "az-tdx", "evidence": raw})
         };
-        Evidence::from_legacy(&legacy, b"attestation-test-fixture", None).unwrap()
+        let nonce = recorded_nonce(&envelope["evidence"]);
+        Evidence::from_legacy(&serde_json::to_vec(&envelope).unwrap(), &nonce, None).unwrap()
     }
 
     #[test]
