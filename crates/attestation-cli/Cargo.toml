@@ -21,3 +21,6 @@ base64 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
