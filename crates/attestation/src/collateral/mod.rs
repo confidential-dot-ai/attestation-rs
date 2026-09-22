@@ -25,6 +25,7 @@ pub mod cache;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
+pub mod held;
 pub mod key;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store;
@@ -37,6 +38,7 @@ pub use cache::{
 pub use error::{CollateralError, CollateralResult};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fetch::{Endpoints, Fetcher};
+pub use held::{HeldArtifact, HeldCollateral};
 pub use key::{CollateralKey, CollateralKind, Fmspc, PckCa};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::DiskStore;

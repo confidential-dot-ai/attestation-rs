@@ -5,17 +5,13 @@
 //! appraisals are rewritten from this implementation, which is the reference.
 
 use attestation::collateral::{
-    CertProvider, CollateralKey, Jwks, NrasProvider, NrasRequest, SignedCollateral,
-    TdxCollateralProvider, NRAS_GPU_URL, NRAS_SWITCH_URL,
+    HeldCollateral, Jwks, NrasProvider, NrasRequest, NRAS_GPU_URL, NRAS_SWITCH_URL,
 };
 use attestation::profile::{
     Backing, Bytes, Digest, HashAlg, IdentityPolicy, MachineEntry, SnpFloor, SnpTcbValue, TcbFloor,
     VerifyPolicy, PROFILE_URI,
 };
-use attestation::{
-    AttestationError, NvidiaGpuArch, ProcessorGeneration, RefusalCode, SnpTcb, TdxTcbStatus,
-    Verifier,
-};
+use attestation::{AttestationError, NvidiaGpuArch, RefusalCode, SnpTcb, TdxTcbStatus, Verifier};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,105 +80,19 @@ fn write(path: &str, bytes: &[u8]) {
     std::fs::write(&p, bytes).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
 }
 
-/// The case's collateral, served by key; nothing else exists.
-#[derive(Clone)]
-struct CaseCollateral {
-    files: BTreeMap<String, CollateralRef>,
-    now: DateTime<Utc>,
-}
-
-impl CaseCollateral {
-    fn bytes(&self, key: &str) -> attestation::Result<Vec<u8>> {
-        match self.files.get(key) {
-            Some(CollateralRef::File(p)) => Ok(read(p)),
-            Some(CollateralRef::Signed { .. }) => Err(AttestationError::CertFetchError(format!(
-                "{key}: the case carries a signed artifact where bytes were expected"
-            ))),
-            None => Err(AttestationError::CertFetchError(format!(
-                "{key}: the case carries no such collateral"
-            ))),
-        }
-    }
-
-    fn signed(&self, key: &str) -> attestation::Result<SignedCollateral> {
-        match self.files.get(key) {
-            Some(CollateralRef::Signed {
+/// The case's collateral, held by key; nothing else exists.
+fn held_for(case: &Case, now: DateTime<Utc>) -> HeldCollateral {
+    let mut held = HeldCollateral::new().at(now);
+    for (key, r) in &case.collateral {
+        held = match r {
+            CollateralRef::File(p) => held.with_bytes(key, read(p)),
+            CollateralRef::Signed {
                 body,
                 signing_chain,
-            }) => Ok(SignedCollateral {
-                body: read(body),
-                signing_chain: read(signing_chain),
-            }),
-            Some(CollateralRef::File(_)) => Err(AttestationError::CertFetchError(format!(
-                "{key}: the case carries bytes where a signed artifact was expected"
-            ))),
-            None => Err(AttestationError::CertFetchError(format!(
-                "{key}: the case carries no such collateral"
-            ))),
-        }
-    }
-
-    fn has_tdx(&self) -> bool {
-        self.files.keys().any(|k| k.starts_with("tdx_"))
-    }
-}
-
-#[async_trait::async_trait]
-impl CertProvider for CaseCollateral {
-    async fn get_snp_vcek(
-        &self,
-        generation: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        tcb: &SnpTcb,
-    ) -> attestation::Result<Vec<u8>> {
-        let key = CollateralKey::SnpVcek {
-            generation,
-            chip_id: *chip_id,
-            tcb: *tcb,
+            } => held.with_signed(key, read(body), read(signing_chain)),
         };
-        self.bytes(&key.id())
     }
-    async fn get_snp_cert_chain(
-        &self,
-        generation: ProcessorGeneration,
-    ) -> attestation::Result<(Vec<u8>, Vec<u8>)> {
-        Err(AttestationError::CertFetchError(format!(
-            "snp_cert_chain/{}: the corpus carries no vendor chains; the roots are embedded",
-            generation.product_name()
-        )))
-    }
-    async fn get_snp_crl(
-        &self,
-        generation: ProcessorGeneration,
-    ) -> attestation::Result<Option<Vec<u8>>> {
-        let key = CollateralKey::SnpCrl { generation }.id();
-        match self.files.get(&key) {
-            Some(_) => self.bytes(&key).map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TdxCollateralProvider for CaseCollateral {
-    async fn get_tcb_info(&self, fmspc: &str) -> attestation::Result<SignedCollateral> {
-        self.signed(&format!("tdx_tcb_info/{}", fmspc.to_ascii_lowercase()))
-    }
-    async fn get_qe_identity(&self) -> attestation::Result<SignedCollateral> {
-        self.signed("tdx_qe_identity/sgx")
-    }
-    async fn get_td_qe_identity(&self) -> attestation::Result<SignedCollateral> {
-        self.signed("tdx_qe_identity/td")
-    }
-    async fn get_root_ca_crl(&self) -> attestation::Result<Vec<u8>> {
-        self.bytes("tdx_root_crl")
-    }
-    async fn get_pck_crl(&self, ca: &str) -> attestation::Result<Vec<u8>> {
-        self.bytes(&format!("tdx_pck_crl/{ca}"))
-    }
-    fn now(&self) -> DateTime<Utc> {
-        self.now
-    }
+    held
 }
 
 /// The case's recorded NRAS exchanges; a request the case did not record is
@@ -234,18 +144,15 @@ fn verifier_for(case: &Case) -> Verifier {
         .parse::<DateTime<chrono::FixedOffset>>()
         .unwrap_or_else(|e| panic!("{}: now: {e}", case.id))
         .with_timezone(&Utc);
-    let collateral = CaseCollateral {
-        files: case.collateral.clone(),
-        now,
-    };
+    let held = held_for(case, now);
     let mut v = Verifier::offline()
-        .with_cert_provider(collateral.clone())
+        .with_cert_provider(held.clone())
         .with_nras_provider(CaseNras {
             exchanges: case.nras.clone(),
         })
         .with_clock(std::sync::Arc::new(move || now));
-    if collateral.has_tdx() {
-        v = v.with_tdx_provider(collateral);
+    if held.holds_tdx() {
+        v = v.with_tdx_provider(held);
     }
     v
 }
