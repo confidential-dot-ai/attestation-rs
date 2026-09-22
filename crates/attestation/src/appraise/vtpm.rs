@@ -14,7 +14,6 @@ use crate::platforms::tpm_common::{
     parse_hcl_report, quote_selection, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
     HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
 };
-use crate::profile::tcg2;
 use crate::profile::{
     AttesterClaims, Backing, Binding, Freshness, HashAlg, LogFormat, ReferenceOutcome,
     RegisterSource, SubmodAppraisal, Tee, TpmAkMethod, TrustVector, VerifiedRegister,
@@ -63,7 +62,7 @@ pub(crate) fn appraise(
     verify_tpm_nonce(quote.message.as_slice(), &ctx.anchor)?;
     // Only the SHA-256 bank's selection counts: a PCR selected in another
     // bank is not what the quoted values cover.
-    let selected = quote_selection(quote.message.as_slice(), tcg2::TPM_ALG_SHA256)?;
+    let selected = quote_selection(quote.message.as_slice(), tcg_cel::HashAlg::SHA256.0)?;
 
     // 8. A TCG2 log replays into the quoted PCRs in the quoted bank; a PCR
     // the log names must reproduce, and only those are marked replayed.
@@ -78,14 +77,31 @@ pub(crate) fn appraise(
         if quote.bank != HashAlg::Sha256 {
             return Err(invalid("vtpm log replay is defined for the SHA-256 bank"));
         }
-        let events = tcg2::parse(log.data.as_slice(), tcg2::TPM_ALG_SHA256)?;
-        let regs = tcg2::replay::<32>(&events, |i| u16::try_from(i).ok().filter(|&i| i < 24))?;
-        for (pcr, value) in regs {
+        let integrity =
+            |e: tcg_cel::Error| AttestationError::EventlogIntegrityFailed(e.to_string());
+        let records = tcg_cel::tcg2::to_cel(log.data.as_slice(), tcg_cel::tcg2::IndexMap::Pcr)
+            .map_err(integrity)?;
+        let bank = tcg_cel::HashAlg::SHA256;
+        let out = tcg_cel::replay(
+            &records,
+            bank,
+            |i| tcg_cel::pc_client_initial(i, bank),
+            tcg_cel::ReplayOptions {
+                startup_locality: true,
+            },
+        )
+        .map_err(integrity)?;
+        // A PCR the log only mentions in EV_NO_ACTION events is not replayed.
+        for (index, reg) in out.registers.into_iter().filter(|(_, r)| r.extended > 0) {
+            let tcg_cel::Index::Pcr(pcr) = index else {
+                unreachable!("TCG2 records name PCRs")
+            };
+            let pcr = u16::try_from(pcr).expect("PC Client PCRs are below 24");
             let quoted = pcrs
                 .get(usize::from(pcr))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            if !constant_time_eq(&value, quoted) {
+            if !constant_time_eq(&reg.value, quoted) {
                 return Err(AttestationError::EventlogIntegrityFailed(format!(
                     "PCR {pcr} does not replay to the quoted value"
                 )));

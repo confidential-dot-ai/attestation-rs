@@ -56,7 +56,9 @@ Goals, restated from the standard-format document with one correction each:
 | draft-kykdxy-rats-tdx-cgpu-ear-profile-02 | the Microsoft, Intel and NVIDIA EAR profile for TDX with confidential GPUs; this profile composes with it (section 5.3) |
 | draft-sun-rats-composite-eat-00 | detached-digest binding of multiple attesters under one nonce; adopted for v2 (section 12) |
 | draft-ffm-rats-cca-token-04 | the CCA token as a CMW collection under tag 907, keys 0xACCA and 0xACD1, profiles `tag:arm.com,2026:cca_platform#2.0.0` and `tag:arm.com,2026:realm#2.0.0` |
-| TCG Canonical Event Log Format v1.1 r11 | record layout (`recnum`, register index, `digests`, typed `content`), CBOR and JSON encodings, replay |
+| TCG Canonical Event Log Format v1.1 r11 | record layout (`recnum` per index, register index, `digests`, `content_type` and `content`), the CBOR and JSON encodings of the section 5.2 CDDL, the `$TPMS_CEL_EVENT-extension` socket, replay |
+| TCG PC Client Platform Firmware Profile v1.06 r52 | the TCG2 log (the Spec ID header and `TCG_PCR_EVENT2`), event types (Table 27), the `StartupLocality` event, tagged events |
+| TCG PC Client Platform TPM Profile v1.05 r14, TPM 2.0 Library Part 1 r1.83 | PCR starting values (PTP Table 7; Part 1 section 34.3 for PCR 0 and the startup locality) |
 | TCG TPM 2.0 Library Part 2 | hash algorithm identifiers used in CEL digests and in `alg` fields |
 | Arm CCA token (RMM specification; profiles `tag:arm.com,2023:cca_platform#1.0.0`, `tag:arm.com,2023:realm#1.0.0` as shipping firmware emits, and the 2026 2.x profiles of the draft above) | nested as a token submodule, verified by the CCA rules |
 | Intel PCK Certificate and CRL Specification | SGX extension OIDs under 1.2.840.113741.1.13.1 (PPID .1, TCB .2, PCE-ID .3, FMSPC .4, SGX type .5, platform instance id .6) |
@@ -217,18 +219,32 @@ Slot semantics are fixed across platforms so policy is portable: slots 0 to 3 ca
 
 | Format | Notes |
 | --- | --- |
-| `tcg-cel-cbor` | the target. CEL v1.1 records: `recnum`, register index (the CEL `pcr` field, an integer), `digests`, typed `content`. Deterministic CBOR; `data` is the CBOR sequence (RFC 8742) of records. |
-| `tcg-cel-json` | same records, JSON encoding, for human inspection only: a JSON array of `{recnum, pcr, digests: [{hashAlg, digest}], <content type name>: hex}` |
-| `tdx-ccel` | the ACPI CCEL as the guest exposes it (TCG2 binary), accepted during transition |
-| `tpm2-event-log` | TCG2 binary log from a vTPM, accepted during transition; replayed in the quoted bank into every PCR it names, skipping `EV_NO_ACTION`, and each named PCR must reproduce the quoted value |
-| `dstack-json` | dstack's runtime log, an array of `{imr, event_type, digest, event, event_payload}`; record digest version 1 is `SHA-384(event_type_le32 \|\| ":" \|\| event \|\| ":" \|\| event_payload)`, version 2 is `SHA-384(JCS({"name", "type", "payload": hex}))`; replay is `R = SHA-384(R \|\| digest)` from zero |
-| `aael` | the Confidential Containers attestation-agent log, carried inside a CCEL as `EV_EVENT_TAG` records with tag 0x4141454c; replayed as part of `tdx-ccel` |
+| `tcg-cel-cbor` | the target. CEL v1.1 records in deterministic CBOR, each the section 5.2 CDDL map `{0: recnum, 1: pcr, 3: digests, 9: content_type, 10: content}`; `data` is the CDDL's `tcg-canonical-event-log`, one array of records. `recnum` counts each index's records from 0 (CEL section 4.2.2) and `pcr` carries our register index. |
+| `tcg-cel-json` | the same records in CEL-JSON, for human inspection only: a JSON array of `{recnum, pcr, digests: [{hashAlg, digest}], content_type, content}` with byte strings in hex |
+| `tdx-ccel` | the ACPI CCEL as the guest exposes it (TCG2 binary), accepted during transition. MrIndex 1 to 4 become RTMR 0 to 3. The Confidential Containers attestation agent (guest-components v0.15.0 and later) appends its entries to the CCEL it reports: `EV_EVENT_TAG` records whose tagged event has ID 0x4141454C around the text `domain operation content`, with the hash of the whole tagged event as digest and MrIndex 4 (RTMR 3) by default |
+| `tpm2-event-log` | TCG2 binary log from a vTPM, accepted during transition; replayed in the quoted bank into every PCR it extends, each from its PC Client starting value (PCR 17 to 22 all ones, the others zero, PCR 0 at the locality of a `StartupLocality` event), skipping `EV_NO_ACTION`, and each extended PCR must reproduce the quoted value |
+| `dstack-json` | dstack's event log as its guest agent returns it, an array of `{imr, event_type, digest, event, event_payload, version?, preimage?}` with `imr` the RTMR ordinal. Boot events keep their TCG digest. Runtime events (event type 0x08000001) are recomputed under their declared `version`, absent meaning 1: version 1 is `SHA-384(event_type_le32 \|\| ":" \|\| event \|\| ":" \|\| event_payload)`, and a name containing `:` is refused so the hash input splits back into one name; version 2 is `SHA-384(JCS({"name", "payload": hex, "type"}))` and must carry that JCS text as `preimage`. Replay is `R = SHA-384(R \|\| digest)` from zero |
+| `aael` | the attestation agent's log where the platform has no CCEL: its fixed 73-byte header, then the same records as above. Parsed; not appraised by this release |
 
-A c8s runtime event is one CEL record: `recnum` sequential from 0 within the log, `pcr` the slot index, `digests` a single entry (`hashAlg` 12, TPM_ALG_SHA384, and `digest` d), and `content` of content type `cvm` (value 200, 0xC8) whose bytes are the deterministic CBOR encoding of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, optional)}`. `d = SHA-384("ats-mr-v1/record" || u64le(recnum) || u16le(pcr) || content_bytes)`, and `d` is the value that was extended. Replay recomputes `d` from the sequence number, register index and stored content bytes, requires it to equal the recorded digest, and extends it; the verifier never re-encodes content. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result; policy decides which slots must replay (today: RTMR 0 to 2 must, RTMR 3 reports). A `tcg-cel-*` or `dstack-json` log on a TDX submodule replays from zero into the RTMRs it names, each of which must reproduce the signed value; on an SNP submodule in `commitment` mode the log is required, `chain_len` must equal its record count, and section 4.9 governs the replay from genesis. Policy may name a `replay_until_event` (dstack's `system-ready` is the model), in which case the verified register value is the replay up to and including that record and later records are reported, not enforced.
+Every format becomes CEL records before replay (the `tcg-cel` crate, section 13): a TCG2 event is a `pcclient_std` record with all its digests, the Spec ID header included as an unmeasured record, and a dstack runtime event is a `pcclient_std` record whose `event_data` is its digest's hash input, so it verifies on its own.
 
-For SNP `commitment` logs, every record must use `cvm` content; uninterpreted CEL content is rejected because its digest would not authenticate the sequence number. The driver assigns `recnum` from its global extension counter and computes `d` while holding the same lock used for extension and log append; callers cannot supply the sequence number or substitute a precomputed digest. Swapping records across registers and renumbering them therefore either fails digest validation or changes the register bank and commitment. Imported CCEL, TPM and dstack logs retain their native ordering guarantees.
+A c8s runtime event is one CEL record: `recnum` its number within its slot, `pcr` the slot index, `digests` a single entry (`hashAlg` 12, TPM_ALG_SHA384, and `digest` d), `content_type` `cvm` (value 200, 0xC8), and `content` the map `{0: seq (uint), 1: event (bstr)}`. `seq` is the record's place among the log's `cvm` records, from 0. `event` is the deterministic CBOR encoding of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, optional)}`. `d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)`, and `d` is the value that was extended. Replay requires `seq` to count the log's `cvm` records without a gap, recomputes `d` from `seq`, the register index and the stored event bytes, requires it to equal the recorded digest, and extends it; the verifier never re-encodes content. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result; policy decides which slots must replay (today: RTMR 0 to 2 must, RTMR 3 reports, and counts as replayed when the log accounts for every extend into it). A `tcg-cel-*` or `dstack-json` log on a TDX submodule replays from zero into the RTMRs it names, each of which must reproduce the signed value; on an SNP submodule in `commitment` mode the log is required, `chain_len` must equal its record count, and section 4.9 governs the replay from genesis. Policy may name a `replay_until_event` (dstack's `system-ready` is the model), in which case the verified register value is the replay up to and including that record and later records are reported, not enforced.
 
-The content type `cvm` is profile-private. CEL v1.1 Table 2 assigns values 4 to 10 (`cel`, `pcclient_std`, reserved, `ima_template`, `ima_tlv`, `systemd`, reserved) and defines no private range, so 200 is taken through the `$TPMS_CEL_EVENT-extension` socket the CEL CDDL provides, and a TCG registration request for it is filed in parallel. In CEL-CBOR the record is the map `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 200: content}` with `content` a byte string, so the bytes that were hashed are the bytes that are stored; in CEL-JSON the content entry is keyed `"cvm"` and carries the same bytes hex-encoded. Vectors in Appendix B.
+For SNP `commitment` logs, every record must use `cvm` content; other CEL content is rejected because its digest would not authenticate the sequence. The driver assigns `seq` from its global extension counter and `recnum` from the slot's counter, and computes `d` while holding the same lock used for extension and log append; callers cannot supply either number or substitute a precomputed digest. Swapping records across registers and renumbering them therefore either fails digest validation or changes the register bank and commitment. Imported CCEL, TPM and dstack logs retain their native ordering guarantees.
+
+The order across registers lives in the content because CEL keeps `recnum` per index (section 4.2.2) and requires a record to carry what its digest covers (section 4.2.1.2); how a digest derives from content is the content type's to define (section 4.2.5).
+
+The content type `cvm` is profile-private. CEL v1.1 Table 2 assigns values 4 to 10 (`cel`, `pcclient_std`, reserved, `ima_template`, `ima_tlv`, `systemd`, reserved) and defines no private range, so 200 is taken through the `$TPMS_CEL_EVENT-extension` socket the CEL CDDL provides, and a TCG registration request for it is filed in parallel:
+
+```
+$TPMS_CEL_EVENT-extension /= TPMS_CEL_EVENT<CVM, CVM_CONTENT>
+CVM = JC<"cvm", 200>
+CVM_CONTENT = { seq => uint, event => BYTEBUFFER }
+seq = JC<"seq", 0>
+event = JC<"event", 1>
+```
+
+In CEL-CBOR a record is the map `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 9: 200, 10: {0: seq, 1: event}}` with `event` a byte string, so the bytes that were hashed are the bytes that are stored; in CEL-JSON it is `{"recnum", "pcr", "digests", "content_type": "cvm", "content": {"seq", "event": hex}}`. Vectors in Appendix B.
 
 ### 4.9 SNP registers and the commitment (`ats-mr-v1`)
 
@@ -499,7 +515,7 @@ Each step is one reviewable PR in `attestation-rs` unless noted, in this order, 
 5. `registers`: CEL parsing and replay, register establishment per source, claim records, `ats-mr-v1` commitment verification behind a feature until the driver ships; attestation-api's fork memory lands with the driver.
 6. attestation-go and c8s-verify-js: schema pins, vectors, `appraise` parity; EAR 04 and the anchor derivation in c8s in the same release.
 7. Arm CCA: nested token submodule and the CCA verification rules, when Vera Rubin hardware is available.
-8. `cel`: a standalone crate for CEL-CBOR and CEL-JSON encoding, parsing and replay, with ingest from CCEL, TPM2 logs, dstack JSON and AAEL; no such library exists in any language, and the log half of this profile is only reusable if it does.
+8. `tcg-cel` (`cel` on crates.io is the Common Expression Language): a standalone crate for CEL-CBOR and CEL-JSON encoding, parsing and replay, with ingest from TCG2 logs (TPM and CCEL), the attestation-agent entries a CCEL carries, and dstack JSON; no such library exists in any language, and the log half of this profile is only reusable if it does. On the design branch as `crates/tcg-cel`, without the CEL-TLV encoding.
 9. NRAS: the attestation API now documents `/v4/attest/gpu` and `/v4/attest/switch` beside v3; confirm the request and claims differences and move the provider.
 
 Each PR carries the premises it rests on and how they were verified, per the review standard the hotfixes set.
@@ -582,7 +598,7 @@ C            22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21
 report_data  4154532d4d522d310101100000000000 22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21e98ba4dab9034d02ddb5d596415c4
 ```
 
-One extend at sequence number 0 into slot 3 with content bytes `a3006373386301706d73746172742d636f6e7461696e65720258300102` (any bytes serve for the vector; the profile's content is the CBOR map of section 4.8), then a commit with `chain_len = 1` and `caller_data = pad64(anchor with key)`:
+One extend at `seq` 0 into slot 3 with event bytes `a3006373386301706d73746172742d636f6e7461696e65720258300102` (any bytes serve for the vector; the profile's event is the CBOR map of section 4.8), then a commit with `chain_len = 1` and `caller_data = pad64(anchor with key)`:
 
 ```
 d            fd21b47ecf576057b92765553b8e264949fcd74aae46c8cd023a2c34cba68233f765919d4405fdb9b4e5bc25b86235f5
@@ -591,25 +607,35 @@ C            7290cc8b8f2476f8565f33573a72c37eb834e96f0684823ea5705a4f78cb734d981
 report_data  4154532d4d522d310101100000000000 7290cc8b8f2476f8565f33573a72c37eb834e96f0684823ea5705a4f78cb734d98171c605eb73c47bdec78526f903101
 ```
 
-The boot record of section 4.9 with `bootseed` = 0x33 repeated 32 times, as record 0 of the log in slot 3 (`a3` map of three: 0 `ats`, 1 `boot`, 2 `SHA-384(bootseed)`; no content entry):
+The boot record of section 4.9 with `bootseed` = 0x33 repeated 32 times, as record 0 of the log in slot 3: `seq` 0 and `recnum` 0 (the event is an `a3` map of three: 0 `ats`, 1 `boot`, 2 `SHA-384(bootseed)`; no content entry):
 
 ```
 content      a300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d
 d            74eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc
 R[3]         fa415452924a55dba8c716598ebfa8abe0808e94cffa6ed4abf28db4c0f18999ffd0f2c14ff2b5b6130a343c63155d69
-CEL record   a4 00 00 01 03 03 81 a2 00 0c 01 5830 <d> 18c8 583f <content>
-             a4000001030381a2000c01583074eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc18c8583fa300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d
+CEL record   a5 00 00 01 03 03 81 a2 00 0c 01 5830 <d> 09 18c8 0a a2 00 00 01 583f <event>
+             a5000001030381a2000c01583074eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc0918c80aa2000001583fa300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d
 ```
 
-The claim record of section 4.9 for slot 4 with owner `c8s` and purpose `workload`, as record 1 of the log (`R[3]` above is genesis(3) extended with the boot record alone; `R[4]` below is genesis(4) extended with the claim record alone):
+The claim record of section 4.9 for slot 4 with owner `c8s` and purpose `workload`, as record 1 of the log: `seq` 1, and `recnum` 0 as the first record of slot 4 (`R[3]` above is genesis(3) extended with the boot record alone; `R[4]` below is genesis(4) extended with the claim record alone):
 
 ```
 claim body   a200636338730168776f726b6c6f6164
 content      a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
 d            24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c
 R[4]         e314c1b137729a35436b11d4c0b77c17058b210a33c1bbe36a7682f0b222930db389c7dc22868f7bebf75934156a6d34
-CEL record   a4 00 01 01 04 03 81 a2 00 0c 01 5830 <d> 18c8 5852 <content>
-             a4000101040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c18c85852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+CEL record   a5 00 00 01 04 03 81 a2 00 0c 01 5830 <d> 09 18c8 0a a2 00 01 01 5852 <event>
+             a5000001040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c0918c80aa20001015852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+```
+
+The log of those two records, as `tcg-cel-cbor` (the CDDL's array: `82`, then the two records above) and as `tcg-cel-json`:
+
+```
+82a5000001030381a2000c01583074eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc0918c80aa2000001583fa300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2da5000001040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c0918c80aa20001015852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+```
+
+```
+[{"recnum":0,"pcr":3,"digests":[{"hashAlg":"sha384","digest":"74eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc"}],"content_type":"cvm","content":{"seq":0,"event":"a300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d"}},{"recnum":0,"pcr":4,"digests":[{"hashAlg":"sha384","digest":"24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c"}],"content_type":"cvm","content":{"seq":1,"event":"a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164"}}]
 ```
 
 The identifier of the default policy (section 5.1). The canonical form is the JCS serialization of the effective default policy; any implementation that fills the defaults of section 7 and serializes with RFC 8785 reproduces it:
@@ -620,6 +646,6 @@ SHA-384      a678b73c551d1a00857d906715789f89c0f89683086fe8a28a1dfb537a9271520c1
 id           ni:///sha-384;pni3PFUdGgCFfZBnFXificD4loMIb-iiih37U3qScVIMEho9pcoIOPueDMiz0NwQ
 ```
 
-These vectors revise the unreleased v1 draft: content-only event digests are no longer accepted as `cvm` records. The pending driver and producers must adopt the sequence-and-index-bound record digest together with the verifier.
+These vectors revise the unreleased v1 draft twice: content-only event digests are no longer accepted as `cvm` records, and the records follow CEL v1.1, with `recnum` counted per slot, the content under `content_type` 9 and `content` 10, the global sequence in the `cvm` content and the log as one CBOR array. The record digests are unchanged by the second revision. The pending driver and producers must adopt both together with the verifier.
 
 The vectors were produced with SHA-384 and SHA-256 from a standard library over the exact byte strings written above; the generating script is committed beside the schemas so any implementation can regenerate them.

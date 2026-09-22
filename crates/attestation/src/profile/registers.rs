@@ -20,11 +20,27 @@ pub const SEED: [u8; 48] = [
 /// The pinned commitment header: `ATS-MR-1`, version 1, alg 1 (SHA-384),
 /// reg_count 16, flags 0, four reserved zero bytes.
 pub const HEADER16: [u8; 16] = *b"ATS-MR-1\x01\x01\x10\x00\x00\x00\x00\x00";
-/// CEL content type of a c8s runtime event (section 4.8): value 200, name `cvm`.
-pub const CEL_CONTENT_TYPE_CVM: u64 = 200;
-pub const CEL_CONTENT_NAME_CVM: &str = "cvm";
-/// TPM_ALG_SHA384, the `hashAlg` of every c8s record digest.
-pub const TPM_ALG_SHA384: u64 = 0x000C;
+const CVM_FIELDS: [tcg_cel::Field; 2] = [
+    tcg_cel::Field {
+        key: 0,
+        name: "seq",
+        schema: tcg_cel::Schema::Uint,
+        optional: false,
+    },
+    tcg_cel::Field {
+        key: 1,
+        name: "event",
+        schema: tcg_cel::Schema::Bytes,
+        optional: false,
+    },
+];
+/// The CEL content type of a c8s runtime event (section 4.8), taken through
+/// the CEL extension socket: value 200, name `cvm`, content `{0: seq, 1: event}`.
+pub static CVM: tcg_cel::ContentType = tcg_cel::ContentType {
+    value: 200,
+    name: "cvm",
+    schema: tcg_cel::Schema::Map(&CVM_FIELDS),
+};
 /// Domain and operations of the records the profile itself defines.
 pub const DOMAIN_ATS: &str = "ats";
 pub const OP_BOOT: &str = "boot";
@@ -142,14 +158,15 @@ pub fn event_content(
 }
 
 /// The value extended into the register:
-/// `SHA-384("ats-mr-v1/record" || u64le(recnum) || u16le(index) || content_bytes)`.
-/// Binding the global sequence number prevents reordering across registers.
-pub fn record_digest(recnum: u64, index: u16, content_bytes: &[u8]) -> [u8; 48] {
+/// `SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(index) || event)`.
+/// `seq` is the record's place among the log's `cvm` records; binding it
+/// authenticates the order of extensions across registers.
+pub fn record_digest(seq: u64, index: u16, event: &[u8]) -> [u8; 48] {
     sha384(&[
         b"ats-mr-v1/record",
-        &recnum.to_le_bytes(),
+        &seq.to_le_bytes(),
         &index.to_le_bytes(),
-        content_bytes,
+        event,
     ])
 }
 
@@ -186,25 +203,25 @@ pub fn claim_record(owner: &str, purpose: &str) -> Option<Vec<u8>> {
     ))
 }
 
-/// One CEL-CBOR record of content type `cvm`:
-/// `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 200: content}` with `content` a byte string.
-pub fn cel_record(recnum: u64, slot: u8, d: &[u8; 48], content: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(content.len() + 70);
-    cbor::map_head(4, &mut out);
-    cbor::uint(0, &mut out);
-    cbor::uint(recnum, &mut out);
-    cbor::uint(1, &mut out);
-    cbor::uint(u64::from(slot), &mut out);
-    cbor::uint(3, &mut out);
-    cbor::array_head(1, &mut out);
-    cbor::map_head(2, &mut out);
-    cbor::uint(0, &mut out);
-    cbor::uint(TPM_ALG_SHA384, &mut out);
-    cbor::uint(1, &mut out);
-    cbor::bstr(d, &mut out);
-    cbor::uint(CEL_CONTENT_TYPE_CVM, &mut out);
-    cbor::bstr(content, &mut out);
-    out
+/// One CEL record of content type `cvm`: `recnum` counts the slot's records
+/// (CEL v1.1 section 4.2.2), `seq` the log's `cvm` records, and `d` is the
+/// record digest, SHA-384 its only bank.
+pub fn cel_record(recnum: u64, slot: u8, seq: u64, d: &[u8; 48], event: &[u8]) -> tcg_cel::Record {
+    tcg_cel::Record {
+        recnum,
+        index: tcg_cel::Index::Pcr(u32::from(slot)),
+        digests: vec![tcg_cel::Digest {
+            alg: tcg_cel::HashAlg::SHA384,
+            value: d.to_vec(),
+        }],
+        content: tcg_cel::Content::Extension {
+            ty: &CVM,
+            value: tcg_cel::Value::Map(vec![
+                (0, tcg_cel::Value::Uint(seq)),
+                (1, tcg_cel::Value::Bytes(event.to_vec())),
+            ]),
+        },
+    }
 }
 
 #[cfg(test)]

@@ -610,9 +610,10 @@ async fn a_legacy_tdx_log_must_replay_to_the_signed_rtmrs() {
         panic!()
     };
     let regs = claims.cvm_registers.as_ref().unwrap();
+    // This guest made no runtime extend, so the log reproduces RTMR 3 as well.
     assert_eq!(
         regs.iter().map(|r| r.replayed).collect::<Vec<_>>(),
-        vec![true, true, true, false]
+        vec![true, true, true, true]
     );
 }
 

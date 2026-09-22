@@ -59,6 +59,8 @@ pub use platforms::tdx::attest::TdxQuoteMethod;
 pub use platforms::tdx::dcap::{
     check_cert_revocation, check_intermediate_ca_revocation, determine_ca_type,
 };
+/// The CEL implementation behind `profile::cel`, whose types that module uses.
+pub use tcg_cel;
 pub use types::*;
 
 /// Detect the current TEE platform.

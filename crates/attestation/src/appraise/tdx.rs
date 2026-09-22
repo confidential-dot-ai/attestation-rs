@@ -279,20 +279,22 @@ pub(crate) async fn appraise(
             }
         }
     }
-    // 8. Replay the log when present. The CCEL reproduces RTMR 0 to 2; RTMR 3
-    // takes runtime extends the firmware log does not carry.
+    // 8. Replay the log when present. The CCEL must reproduce RTMR 0 to 2;
+    // RTMR 3 takes runtime extends the firmware log does not carry, and counts
+    // as replayed only when every one was logged (the attestation agent's
+    // records appended to the CCEL are).
     let mut replayed = [false; 4];
     if let Some(log) = &cpu.cvm_log {
         match log.format {
             LogFormat::TdxCcel => {
-                crate::platforms::tdx::ccel::verify_ccel_against_rtmrs(
+                let rtmr3 = crate::platforms::tdx::ccel::verify_ccel_against_rtmrs(
                     log.data.as_slice(),
                     &rtmrs[0],
                     &rtmrs[1],
                     &rtmrs[2],
                     &rtmrs[3],
                 )?;
-                replayed = [true, true, true, false];
+                replayed = [true, true, true, rtmr3];
             }
             LogFormat::TcgCelCbor | LogFormat::TcgCelJson | LogFormat::DstackJson => {
                 // Runtime logs replay from zero into the RTMRs they name,
@@ -303,7 +305,8 @@ pub(crate) async fn appraise(
                     _ => cel::parse_dstack_json(log.data.as_slice())?,
                 };
                 let out = cel::replay(&records, |i| (i < 4).then_some([0u8; 48]), false)?;
-                for (index, slot) in out.slots {
+                // An RTMR the log names only in unmeasured records is not replayed.
+                for (index, slot) in out.slots.into_iter().filter(|(_, s)| s.extended > 0) {
                     if !constant_time_eq(&slot.value, &rtmrs[usize::from(index)]) {
                         return Err(AttestationError::EventlogIntegrityFailed(format!(
                             "RTMR[{index}] does not replay to the signed value"

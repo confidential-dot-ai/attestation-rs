@@ -23,6 +23,14 @@ impl Vectors {
         )
         .unwrap()
     }
+    fn check_text(&self, key: &str, actual: &str) {
+        self.1.borrow_mut().push(key.to_string());
+        let expected = self
+            .0
+            .get(key)
+            .unwrap_or_else(|| panic!("vector {key} missing"));
+        assert_eq!(actual, expected, "vector {key}");
+    }
     fn check(&self, key: &str, actual: &[u8]) {
         assert_eq!(
             hex::encode(actual),
@@ -78,7 +86,11 @@ fn appendix_b_vectors() {
     let db = record_digest(0, 3, &boot);
     v.check("boot_digest", &db);
     v.check("boot_r3", &extend(&genesis(3, &SEED), &db));
-    v.check("boot_cel_record", &cel_record(0, 3, &db, &boot));
+    let boot_rec = cel_record(0, 3, 0, &db, &boot);
+    v.check(
+        "boot_cel_record",
+        &tcg_cel::encode_cbor_record(&boot_rec).unwrap(),
+    );
 
     v.check("claim_body", &claim_body("c8s", "workload").unwrap());
     let claim = claim_record("c8s", "workload").unwrap();
@@ -86,7 +98,16 @@ fn appendix_b_vectors() {
     let dc = record_digest(1, 4, &claim);
     v.check("claim_digest", &dc);
     v.check("claim_r4", &extend(&genesis(4, &SEED), &dc));
-    v.check("claim_cel_record", &cel_record(1, 4, &dc, &claim));
+    // The claim is the log's second cvm record and its slot's first record.
+    let claim_rec = cel_record(0, 4, 1, &dc, &claim);
+    v.check(
+        "claim_cel_record",
+        &tcg_cel::encode_cbor_record(&claim_rec).unwrap(),
+    );
+    let log = [boot_rec, claim_rec];
+    v.check("cel_log", &tcg_cel::encode_cbor(&log).unwrap());
+    let json = tcg_cel::encode_json(&log).unwrap();
+    v.check_text("cel_log_json", &json);
 
     // Section 5.1: the default policy's identifier.
     let policy = attestation::profile::VerifyPolicy::default();

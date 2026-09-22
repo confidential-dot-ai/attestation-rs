@@ -590,7 +590,7 @@ mod tests {
         let v = vectors();
         let log = EventLog {
             format: LogFormat::TcgCelCbor,
-            data: Bytes([hexv(&v, "boot_cel_record"), hexv(&v, "claim_cel_record")].concat()),
+            data: Bytes(hexv(&v, "cel_log")),
         };
         let bootseed: [u8; 32] = hexv(&v, "bootseed").try_into().unwrap();
         let mut regs = bank(&v);

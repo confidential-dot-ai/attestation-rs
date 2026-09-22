@@ -92,8 +92,9 @@ def extend(r: bytes, d: bytes) -> bytes:
     return sha384(r + d)
 
 
-def record_digest(recnum: int, index: int, content: bytes) -> bytes:
-    return sha384(b"ats-mr-v1/record" + recnum.to_bytes(8, "little") + index.to_bytes(2, "little") + content)
+def record_digest(seq: int, index: int, event: bytes) -> bytes:
+    """Section 4.8: `seq` is the record's place among the log's cvm records."""
+    return sha384(b"ats-mr-v1/record" + seq.to_bytes(8, "little") + index.to_bytes(2, "little") + event)
 
 
 def commit(regs, chain_len: int, caller_data: bytes) -> bytes:
@@ -126,9 +127,10 @@ def cbor_bstr(b: bytes) -> bytes:
 
 
 def cbor_map(pairs) -> bytes:
-    """Map with unsigned integer keys; deterministic order is by encoded key, length first."""
+    """Map with unsigned integer keys, in the bytewise order of the encoded keys
+    (RFC 8949 section 4.2.1), which for these keys is ascending numeric order."""
     enc = [(cbor_uint(k), v) for k, v in pairs]
-    assert [k for k, _ in enc] == sorted((k for k, _ in enc), key=lambda k: (len(k), k))
+    assert [k for k, _ in enc] == sorted(k for k, _ in enc)
     return cbor_head(5, len(enc)) + b"".join(k + v for k, v in enc)
 
 
@@ -144,10 +146,20 @@ CVM_CONTENT_TYPE = 200      # CEL content type `cvm`, section 4.8 (decision 3)
 TPM_ALG_SHA384 = 0x000C
 
 
-def cel_record(recnum: int, slot: int, d: bytes, content: bytes) -> bytes:
-    """Section 4.8: one CEL-CBOR record {0: recnum, 1: pcr, 3: digests, 200: content}."""
+def cel_record(recnum: int, slot: int, seq: int, d: bytes, event: bytes) -> bytes:
+    """Section 4.8: one CEL-CBOR record (CEL v1.1 section 5.2)
+    {0: recnum, 1: pcr, 3: [{0: hashAlg, 1: digest}], 9: content_type, 10: content}
+    with `cvm` content {0: seq, 1: event}. `recnum` counts per slot; `seq` counts the log's cvm records."""
     digests = cbor_head(4, 1) + cbor_map([(0, cbor_uint(TPM_ALG_SHA384)), (1, cbor_bstr(d))])
-    return cbor_map([(0, cbor_uint(recnum)), (1, cbor_uint(slot)), (3, digests), (CVM_CONTENT_TYPE, cbor_bstr(content))])
+    content = cbor_map([(0, cbor_uint(seq)), (1, cbor_bstr(event))])
+    return cbor_map([(0, cbor_uint(recnum)), (1, cbor_uint(slot)), (3, digests),
+                     (9, cbor_uint(CVM_CONTENT_TYPE)), (10, content)])
+
+
+def cel_json_record(recnum: int, slot: int, seq: int, d: bytes, event: bytes) -> dict:
+    """The same record in CEL-JSON, members in CDDL order."""
+    return {"recnum": recnum, "pcr": slot, "digests": [{"hashAlg": "sha384", "digest": d.hex()}],
+            "content_type": "cvm", "content": {"seq": seq, "event": event.hex()}}
 
 
 def main() -> None:
@@ -196,8 +208,8 @@ def main() -> None:
     emit("boot_content", "boot content   ", boot)
     emit("boot_digest", "boot digest d  ", db)
     emit("boot_r3", "R[3] boot only ", extend(genesis(3), db))
-    emit("boot_cel_record", "boot CEL record", cel_record(0, 3, db, boot))
-    # Section 4.9: the claim record, record 1 of the log, first record of workload slot 4.
+    emit("boot_cel_record", "boot CEL record", cel_record(0, 3, 0, db, boot))
+    # Section 4.9: the claim record, seq 1 of the log and recnum 0 of workload slot 4.
     claim_body = cbor_map([(0, cbor_tstr("c8s")), (1, cbor_tstr("workload"))])
     claim = c8s_event("ats", "claim", sha384(claim_body), claim_body)
     dc = record_digest(1, 4, claim)
@@ -205,7 +217,14 @@ def main() -> None:
     emit("claim_content", "claim content  ", claim)
     emit("claim_digest", "claim digest d ", dc)
     emit("claim_r4", "R[4] claim only", extend(genesis(4), dc))
-    emit("claim_cel_record", "claim CEL rec  ", cel_record(1, 4, dc, claim))
+    emit("claim_cel_record", "claim CEL rec  ", cel_record(0, 4, 1, dc, claim))
+    # The log of those two records: the CEL CDDL's array, and its CEL-JSON form.
+    emit("cel_log", "CEL-CBOR log   ", cbor_head(4, 2) + cel_record(0, 3, 0, db, boot) + cel_record(0, 4, 1, dc, claim))
+    cel_json = json.dumps([cel_json_record(0, 3, 0, db, boot), cel_json_record(0, 4, 1, dc, claim)],
+                          separators=(",", ":"))
+    out["cel_log_json"] = cel_json
+    if not as_json:
+        print("CEL-JSON log   ", cel_json)
     # Section 5.1: the default policy's identifier is ni:///sha-384;<base64url(digest)>.
     emit("policy_jcs_default", "policy JCS     ", jcs(DEFAULT_POLICY))
     emit("policy_digest_default", "policy SHA-384 ", sha384(jcs(DEFAULT_POLICY)))
