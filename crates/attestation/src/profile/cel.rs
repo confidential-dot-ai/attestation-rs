@@ -5,7 +5,7 @@
 //! Parsing is strict: deterministic CBOR only (definite lengths, minimal
 //! integer encodings, keys in order), one SHA-384 digest per record, bounded
 //! sizes and counts, and every `cvm` record's digest recomputed from its
-//! content bytes before it is extended.
+//! sequence number, index and content bytes before it is extended.
 
 use super::registers::{
     extend, record_digest, BOOT_SLOT, CEL_CONTENT_NAME_CVM, CEL_CONTENT_TYPE_CVM, CLAIM_STRING_MAX,
@@ -37,7 +37,7 @@ pub struct CelRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CelContent {
-    /// Content type `cvm` (200): the c8s event bytes, whose SHA-384 is the digest.
+    /// Content type `cvm` (200): the c8s event bytes, hashed with recnum and index.
     Cvm(Vec<u8>),
     /// A content type this verifier does not interpret; the digest is
     /// extended as recorded.
@@ -533,8 +533,8 @@ pub struct Replay {
 }
 
 /// Replay records in order from `initial(index)`. `recnum` must run from 0
-/// without gaps; every `cvm` record's digest must reproduce from its content.
-/// With `workload_rules`, slots from [`FIRST_WORKLOAD_SLOT`] up must open with
+/// without gaps; every `cvm` digest must bind its recnum, index and content.
+/// With `workload_rules`, only `cvm` records are accepted and slots from [`FIRST_WORKLOAD_SLOT`] up must open with
 /// a claim record and take no second one (section 4.9).
 pub fn replay(
     records: &[CelRecord],
@@ -552,12 +552,20 @@ pub fn replay(
         }
         let event = match &rec.content {
             CelContent::Cvm(bytes) => {
-                if !crate::utils::constant_time_eq(&record_digest(bytes), &rec.digest) {
+                if !crate::utils::constant_time_eq(
+                    &record_digest(rec.recnum, rec.index, bytes),
+                    &rec.digest,
+                ) {
                     return Err(bad(format!(
                         "record {pos}: digest does not reproduce from the content"
                     )));
                 }
                 Some(parse_cvm_event(bytes)?)
+            }
+            CelContent::Other { .. } if workload_rules => {
+                return Err(bad(format!(
+                    "record {pos}: commitment logs require cvm content to authenticate ordering"
+                )));
             }
             CelContent::Other { .. } => None,
         };
@@ -702,42 +710,30 @@ mod tests {
         let v = vectors();
         let boot_content = hexv(&v, "boot_content");
         let claim_content = hexv(&v, "claim_content");
-        let d = |c: &[u8]| record_digest(c);
+        let record = |n, i, c: &[u8]| cel_record(n, i, &record_digest(n, u16::from(i), c), c);
         let init = |i: u16| Some(genesis(i as u8, &SEED));
 
         // recnum gap
-        let log = [
-            cel_record(0, 3, &d(&boot_content), &boot_content),
-            cel_record(2, 4, &d(&claim_content), &claim_content),
-        ]
-        .concat();
+        let log = [record(0, 3, &boot_content), record(2, 4, &claim_content)].concat();
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a digest that does not reproduce from the content
         let log = cel_record(0, 3, &[9u8; 48], &boot_content);
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // an extend into slot 4 before its claim
         let extend_content = event_content("c8s", "start-container", &[1u8; 48], None);
-        let log = cel_record(0, 4, &d(&extend_content), &extend_content);
+        let log = record(0, 4, &extend_content);
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a second claim on an open slot
-        let log = [
-            cel_record(0, 4, &d(&claim_content), &claim_content),
-            cel_record(1, 4, &d(&claim_content), &claim_content),
-        ]
-        .concat();
+        let log = [record(0, 4, &claim_content), record(1, 4, &claim_content)].concat();
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a boot record into a workload slot
-        let log = cel_record(0, 4, &d(&boot_content), &boot_content);
+        let log = record(0, 4, &boot_content);
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a boot record after record 0
-        let log = [
-            cel_record(0, 4, &d(&claim_content), &claim_content),
-            cel_record(1, 3, &d(&boot_content), &boot_content),
-        ]
-        .concat();
+        let log = [record(0, 4, &claim_content), record(1, 3, &boot_content)].concat();
         assert!(replay(&parse_cbor(&log).unwrap(), init, true).is_err());
         // a register the platform does not have
-        let log = cel_record(0, 16, &d(&extend_content), &extend_content);
+        let log = record(0, 16, &extend_content);
         assert!(replay(
             &parse_cbor(&log).unwrap(),
             |i| (i < 16).then(|| genesis(i as u8, &SEED)),
@@ -745,14 +741,90 @@ mod tests {
         )
         .is_err());
         // without workload rules (TDX), slot 3 replays from zero
-        let log = cel_record(0, 3, &d(&extend_content), &extend_content);
+        let log = record(0, 3, &extend_content);
         let out = replay(
             &parse_cbor(&log).unwrap(),
             |i| (i < 4).then_some([0u8; 48]),
             false,
         )
         .unwrap();
-        assert_eq!(out.slots[&3].value, extend(&[0u8; 48], &d(&extend_content)));
+        assert_eq!(
+            out.slots[&3].value,
+            extend(&[0u8; 48], &record_digest(0, 3, &extend_content))
+        );
+    }
+
+    #[test]
+    fn cross_register_reordering_cannot_preserve_the_commitment() {
+        use crate::profile::registers::{boot_record, claim_record, commit, REG_COUNT};
+        let record = |n, i, c: Vec<u8>| cel_record(n, i, &record_digest(n, u16::from(i), &c), &c);
+        let log = [
+            record(0, 3, boot_record(&[7; 32])),
+            record(1, 4, claim_record("c8s", "workload-a").unwrap()),
+            record(2, 5, claim_record("c8s", "workload-b").unwrap()),
+            record(
+                3,
+                4,
+                event_content("c8s", "start-container", &[1; 48], None),
+            ),
+            record(
+                4,
+                5,
+                event_content("c8s", "start-container", &[2; 48], None),
+            ),
+        ]
+        .concat();
+        let records = parse_cbor(&log).unwrap();
+        let init = |i: u16| (i < REG_COUNT as u16).then(|| genesis(i as u8, &SEED));
+        let bank = |out: Replay| {
+            let mut regs = std::array::from_fn::<_, REG_COUNT, _>(|i| genesis(i as u8, &SEED));
+            for (i, slot) in out.slots {
+                regs[usize::from(i)] = slot.value;
+            }
+            regs
+        };
+        let original = bank(replay(&records, init, true).unwrap());
+        let mut reordered = records.clone();
+        reordered.swap(3, 4);
+        reordered[3].recnum = 3;
+        reordered[4].recnum = 4;
+        // Renumbering two otherwise unchanged records fails digest validation.
+        assert!(replay(&reordered, init, true)
+            .unwrap_err()
+            .to_string()
+            .contains("digest"));
+        // Recomputing the two digests gives a valid log, but changes the
+        // committed registers, so it cannot match the original signed report.
+        for r in &mut reordered[3..] {
+            let CelContent::Cvm(content) = &r.content else {
+                panic!()
+            };
+            r.digest = record_digest(r.recnum, r.index, content);
+        }
+        let changed = bank(replay(&reordered, init, true).unwrap());
+        assert_ne!(
+            commit(&original, 5, &[3; 64]),
+            commit(&changed, 5, &[3; 64])
+        );
+        // Relabeling the records as an uninterpreted CEL type must not bypass
+        // the position binding in an SNP commitment log.
+        let mut opaque = records.clone();
+        opaque.swap(3, 4);
+        for (n, r) in opaque.iter_mut().enumerate().skip(3) {
+            r.recnum = n as u64;
+            r.content = CelContent::Other { content_type: 201 };
+        }
+        assert!(replay(&opaque, init, true)
+            .unwrap_err()
+            .to_string()
+            .contains("require cvm"));
+        // Moving a record to another register is authenticated too.
+        let mut moved = records;
+        moved[3].index = 5;
+        assert!(replay(&moved, init, true)
+            .unwrap_err()
+            .to_string()
+            .contains("digest"));
     }
 
     #[test]

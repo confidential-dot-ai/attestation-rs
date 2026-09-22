@@ -341,8 +341,9 @@ async fn cmd_attest(args: AttestArgs) {
 fn apply_expectation_flags(
     mut policy: attestation::profile::VerifyPolicy,
     args: &VerifyArgs,
+    evidence: &attestation::profile::Evidence,
 ) -> Result<attestation::profile::VerifyPolicy, String> {
-    use attestation::profile::{Bytes, Digest, HashAlg};
+    use attestation::profile::{Bytes, Digest, HashAlg, Hosting, Submod};
     let digest48 = |hex_str: &str, name: &str| -> Result<Digest, String> {
         let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex for --{name}: {e}"))?;
         if bytes.len() != 48 {
@@ -361,7 +362,11 @@ fn apply_expectation_flags(
         (&args.expected_mrtd, "expected-mrtd"),
     ] {
         if let Some(h) = flag {
-            policy.reference.launch_measurement.push(digest48(h, name)?);
+            pin_digest(
+                &mut policy.reference.launch_measurement,
+                digest48(h, name)?,
+                name,
+            )?;
         }
     }
     for (i, flag) in [
@@ -374,18 +379,34 @@ fn apply_expectation_flags(
     .enumerate()
     {
         if let Some(h) = flag {
-            policy
-                .reference
-                .registers
-                .entry(i as u16)
-                .or_default()
-                .push(digest48(h, &format!("expected-rtmr{i}"))?);
+            let name = format!("expected-rtmr{i}");
+            pin_digest(
+                policy.reference.registers.entry(i as u16).or_default(),
+                digest48(h, &name)?,
+                &name,
+            )?;
         }
     }
     if let Some(h) = &args.expected_init_data {
         let bytes =
             hex::decode(h).map_err(|e| format!("invalid hex for --expected-init-data: {e}"))?;
-        policy.reference.host_data = Some(Bytes(bytes));
+        let azure = matches!(evidence.cpu(), Some(Submod::Cpu(cpu))
+            if cpu.cvm_platform.hosting == Hosting::Azure);
+        if azure {
+            if bytes.len() != 32 {
+                return Err("--expected-init-data must be 32 bytes for Azure".to_string());
+            }
+            pin_digest(
+                policy.reference.pcrs.entry(8).or_default(),
+                Digest {
+                    alg: HashAlg::Sha256,
+                    value: Bytes(attestation::utils::sha256_two(&[0; 32], &bytes)),
+                },
+                "expected-init-data",
+            )?;
+        } else {
+            policy.reference.host_data = Some(Bytes(bytes));
+        }
     }
     #[cfg(feature = "nvidia-gpu")]
     {
@@ -410,6 +431,22 @@ fn apply_expectation_flags(
     Ok(policy)
 }
 
+/// CLI expectations are additional constraints: retain only the expected value
+/// when the policy already permits it, and refuse a conflicting policy.
+fn pin_digest(
+    accepted: &mut Vec<attestation::profile::Digest>,
+    expected: attestation::profile::Digest,
+    flag: &str,
+) -> Result<(), String> {
+    if !accepted.is_empty() && !accepted.contains(&expected) {
+        return Err(format!(
+            "--{flag} conflicts with the policy reference values"
+        ));
+    }
+    *accepted = vec![expected];
+    Ok(())
+}
+
 async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool) {
     let policy: attestation::profile::VerifyPolicy = match &args.policy {
         Some(path) => match std::fs::read(path)
@@ -423,13 +460,6 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
             }
         },
         None => attestation::profile::VerifyPolicy::default(),
-    };
-    let policy = match apply_expectation_flags(policy, args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
     };
     // The relying party's nonce: --nonce-hex, or the legacy --expected-report-data,
     // which is the same value (the anchor with no key).
@@ -454,50 +484,37 @@ async fn cmd_appraise(args: &VerifyArgs, evidence_json: &[u8], is_profile: bool)
             process::exit(1);
         }
     }
+    let Some(nonce) = &nonce else {
+        eprintln!("Error: appraisal needs the nonce this relying party issued: --nonce-hex or --expected-report-data");
+        process::exit(1);
+    };
+    let evidence = if is_profile {
+        attestation::profile::Evidence::from_json(evidence_json)
+    } else {
+        attestation::profile::Evidence::from_legacy(evidence_json, nonce, None)
+    };
+    let evidence = match evidence {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Appraisal failed: {e}");
+            process::exit(1);
+        }
+    };
+    if !attestation::utils::constant_time_eq(nonce, evidence.eat_nonce.as_slice()) {
+        eprintln!("Appraisal failed: eat_nonce differs from the nonce this relying party issued");
+        process::exit(1);
+    }
+    let policy = match apply_expectation_flags(policy, args, &evidence) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
     let verifier = attestation::Verifier::new();
     eprintln!("Appraising evidence...");
     let t0 = Instant::now();
-    let appraisal = if is_profile {
-        let Some(n) = &nonce else {
-            eprintln!(
-                "Error: a profile envelope needs the nonce this relying party issued: --nonce-hex or --expected-report-data"
-            );
-            process::exit(1);
-        };
-        {
-            let carried = serde_json::from_slice::<serde_json::Value>(evidence_json)
-                .ok()
-                .and_then(|v| {
-                    v.get("eat_nonce")
-                        .and_then(|n| n.as_str())
-                        .map(String::from)
-                })
-                .and_then(|s| {
-                    use base64::Engine;
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .decode(s)
-                        .ok()
-                })
-                .unwrap_or_default();
-            if !attestation::utils::constant_time_eq(n, &carried) {
-                eprintln!(
-                    "Appraisal failed: eat_nonce differs from the nonce this relying party issued"
-                );
-                process::exit(1);
-            }
-        }
-        verifier.appraise_json(evidence_json, &policy).await
-    } else {
-        let Some(n) = &nonce else {
-            eprintln!(
-                "Error: a legacy envelope needs --nonce-hex (or --expected-report-data), the nonce the relying party issued"
-            );
-            process::exit(1);
-        };
-        verifier
-            .appraise_legacy_json(evidence_json, n, None, &policy)
-            .await
-    };
+    let appraisal = verifier.appraise(&evidence, &policy).await;
     let appraisal = match appraisal {
         Ok(a) => a,
         Err(e) => {
@@ -702,5 +719,189 @@ async fn cmd_verify(args: VerifyArgs) {
         || matches!(result.rtmr3_match, Some(false));
     if !result.signature_valid || policy_failed {
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attestation::profile::{Bytes, Digest, Evidence, HashAlg, VerifyPolicy, PROFILE_URI};
+    use serde_json::json;
+
+    fn args(flags: &[&str]) -> VerifyArgs {
+        let cli = Cli::try_parse_from(
+            ["attestation-cli", "verify"]
+                .into_iter()
+                .chain(flags.iter().copied()),
+        )
+        .unwrap();
+        match cli.command {
+            Commands::Verify(args) => *args,
+            #[cfg(all(feature = "attest", target_os = "linux"))]
+            _ => panic!("expected verify"),
+        }
+    }
+
+    fn cpu_evidence(vendor: &str, tee: &str, hosting: &str) -> Evidence {
+        Evidence::from_json(
+            &serde_json::to_vec(&json!({
+                "eat_profile": PROFILE_URI,
+                "eat_nonce": Bytes(vec![1; 32]).encode(),
+                "cvm_version": 1,
+                "submods": {"cpu": {
+                    "cvm_platform": {"vendor": vendor, "tee": tee, "hosting": hosting},
+                    "cvm_report": [if tee == "tdx" { "application/vnd.confidential-ai.tdx-quote" }
+                        else { "application/vnd.confidential-ai.sev-snp-report" }, "AQ", 4],
+                    "cvm_binding": {"pattern": "challenge", "mode": "report-data"}
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn digest(b: u8) -> Digest {
+        Digest {
+            alg: HashAlg::Sha384,
+            value: Bytes(vec![b; 48]),
+        }
+    }
+
+    #[test]
+    fn cli_measurements_narrow_policy_allowlists_and_reject_conflicts() {
+        let evidence = cpu_evidence("intel", "tdx", "bare");
+        let expected = "22".repeat(48);
+        for (flag, slot) in [
+            ("--expected-mrtd", None),
+            ("--expected-launch-digest", None),
+            ("--expected-rtmr0", Some(0)),
+            ("--expected-rtmr1", Some(1)),
+            ("--expected-rtmr2", Some(2)),
+            ("--expected-rtmr3", Some(3)),
+        ] {
+            let args = args(&[flag, &expected]);
+            for accepted in [vec![], vec![digest(0x22)], vec![digest(0x11), digest(0x22)]] {
+                let mut policy = VerifyPolicy::default();
+                match slot {
+                    Some(slot) => {
+                        policy.reference.registers.insert(slot, accepted);
+                    }
+                    None => policy.reference.launch_measurement = accepted,
+                }
+                let result = apply_expectation_flags(policy, &args, &evidence).unwrap();
+                let actual = match slot {
+                    Some(slot) => &result.reference.registers[&slot],
+                    None => &result.reference.launch_measurement,
+                };
+                assert_eq!(actual, &[digest(0x22)], "{flag}");
+            }
+            let mut policy = VerifyPolicy::default();
+            match slot {
+                Some(slot) => {
+                    policy.reference.registers.insert(slot, vec![digest(0x11)]);
+                }
+                None => policy.reference.launch_measurement = vec![digest(0x11)],
+            }
+            assert!(
+                apply_expectation_flags(policy, &args, &evidence)
+                    .unwrap_err()
+                    .contains("conflicts"),
+                "{flag}"
+            );
+        }
+        let conflicting = args(&[
+            "--expected-mrtd",
+            &expected,
+            "--expected-launch-digest",
+            &"11".repeat(48),
+        ]);
+        assert!(apply_expectation_flags(VerifyPolicy::default(), &conflicting, &evidence).is_err());
+    }
+
+    fn azure_evidence(tee: &str) -> Evidence {
+        let legacy = if tee == "snp" {
+            include_bytes!("../../attestation/test_data/az_snp/live-evidence.json").to_vec()
+        } else {
+            let raw: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../attestation/test_data/az_tdx/live-evidence.json"
+            ))
+            .unwrap();
+            serde_json::to_vec(&json!({"platform": "az-tdx", "evidence": raw})).unwrap()
+        };
+        Evidence::from_legacy(&legacy, b"attestation-test-fixture", None).unwrap()
+    }
+
+    #[test]
+    fn azure_init_data_pins_pcr8_in_legacy_and_profile_evidence() {
+        let expected = Digest {
+            alg: HashAlg::Sha256,
+            value: Bytes(
+                hex::decode("8878b15a7d6a3a4f464e8f9f42591dbc0cf4bedea0ec309003d2b2ee53655ef8")
+                    .unwrap(),
+            ),
+        };
+        let args = args(&["--expected-init-data", &"11".repeat(32)]);
+        for tee in ["snp", "tdx"] {
+            let legacy = azure_evidence(tee);
+            let profile = Evidence::from_json(&legacy.to_json().unwrap()).unwrap();
+            for evidence in [legacy, profile] {
+                let mut policy = VerifyPolicy::default();
+                let host_data = Some(Bytes(vec![7; 32]));
+                policy.reference.host_data = host_data.clone();
+                policy.reference.pcrs.insert(
+                    8,
+                    vec![
+                        expected.clone(),
+                        Digest {
+                            alg: HashAlg::Sha256,
+                            value: Bytes(vec![0; 32]),
+                        },
+                    ],
+                );
+                let result = apply_expectation_flags(policy, &args, &evidence).unwrap();
+                assert_eq!(result.reference.pcrs[&8], vec![expected.clone()]);
+                assert_eq!(result.reference.host_data, host_data);
+                let mut conflicting = VerifyPolicy::default();
+                conflicting.reference.pcrs.insert(
+                    8,
+                    vec![Digest {
+                        alg: HashAlg::Sha256,
+                        value: Bytes(vec![0; 32]),
+                    }],
+                );
+                assert!(apply_expectation_flags(conflicting, &args, &evidence).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn azure_init_data_requires_a_sha256_hash() {
+        let evidence = azure_evidence("snp");
+        for size in [0, 31, 33] {
+            let args = args(&["--expected-init-data", &"11".repeat(size)]);
+            assert!(
+                apply_expectation_flags(VerifyPolicy::default(), &args, &evidence)
+                    .unwrap_err()
+                    .contains("32 bytes")
+            );
+        }
+    }
+
+    #[test]
+    fn other_platforms_keep_the_host_data_expectation() {
+        let args = args(&["--expected-init-data", &"11".repeat(32)]);
+        for (vendor, tee, hosting) in [
+            ("amd", "sev-snp", "bare"),
+            ("amd", "sev-snp", "gcp"),
+            ("intel", "tdx", "bare"),
+            ("intel", "tdx", "gcp"),
+            ("intel", "tdx", "dstack"),
+        ] {
+            let evidence = cpu_evidence(vendor, tee, hosting);
+            let result =
+                apply_expectation_flags(VerifyPolicy::default(), &args, &evidence).unwrap();
+            assert_eq!(result.reference.host_data, Some(Bytes(vec![0x11; 32])));
+            assert!(result.reference.pcrs.is_empty());
+        }
     }
 }

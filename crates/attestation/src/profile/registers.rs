@@ -141,9 +141,16 @@ pub fn event_content(
     out
 }
 
-/// The record digest `d = SHA-384(content_bytes)`, the value that is extended.
-pub fn record_digest(content_bytes: &[u8]) -> [u8; 48] {
-    sha384(&[content_bytes])
+/// The value extended into the register:
+/// `SHA-384("ats-mr-v1/record" || u64le(recnum) || u16le(index) || content_bytes)`.
+/// Binding the global sequence number prevents reordering across registers.
+pub fn record_digest(recnum: u64, index: u16, content_bytes: &[u8]) -> [u8; 48] {
+    sha384(&[
+        b"ats-mr-v1/record",
+        &recnum.to_le_bytes(),
+        &index.to_le_bytes(),
+        content_bytes,
+    ])
 }
 
 /// The boot record: domain `ats`, operation `boot`, `content_digest = SHA-384(bootseed)`,

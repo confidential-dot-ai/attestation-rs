@@ -64,7 +64,7 @@ fn appendix_b_vectors() {
     v.check("report_data_chain0", &report_data(&HEADER16, &c0));
 
     let content = v.get("extend_content");
-    let d = record_digest(&content);
+    let d = record_digest(0, 3, &content);
     v.check("extend_digest", &d);
     regs[3] = extend(&regs[3], &d);
     v.check("extend_r3", &regs[3]);
@@ -75,7 +75,7 @@ fn appendix_b_vectors() {
     let bootseed: [u8; 32] = v.get("bootseed").try_into().unwrap();
     let boot = boot_record(&bootseed);
     v.check("boot_content", &boot);
-    let db = record_digest(&boot);
+    let db = record_digest(0, 3, &boot);
     v.check("boot_digest", &db);
     v.check("boot_r3", &extend(&genesis(3, &SEED), &db));
     v.check("boot_cel_record", &cel_record(0, 3, &db, &boot));
@@ -83,7 +83,7 @@ fn appendix_b_vectors() {
     v.check("claim_body", &claim_body("c8s", "workload").unwrap());
     let claim = claim_record("c8s", "workload").unwrap();
     v.check("claim_content", &claim);
-    let dc = record_digest(&claim);
+    let dc = record_digest(1, 4, &claim);
     v.check("claim_digest", &dc);
     v.check("claim_r4", &extend(&genesis(4, &SEED), &dc));
     v.check("claim_cel_record", &cel_record(1, 4, &dc, &claim));

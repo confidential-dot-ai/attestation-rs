@@ -49,6 +49,10 @@ def extend(r: bytes, d: bytes) -> bytes:
     return sha384(r + d)
 
 
+def record_digest(recnum: int, index: int, content: bytes) -> bytes:
+    return sha384(b"ats-mr-v1/record" + recnum.to_bytes(8, "little") + index.to_bytes(2, "little") + content)
+
+
 def commit(regs, chain_len: int, caller_data: bytes) -> bytes:
     assert len(regs) == REG_COUNT and all(len(r) == 48 for r in regs) and len(caller_data) == 64
     return sha384(b"ats-mr-v1/commit" + b"".join(regs) + chain_len.to_bytes(8, "little") + caller_data)
@@ -134,7 +138,7 @@ def main() -> None:
     emit("commit_chain0", "commit chain0  ", c0)
     emit("report_data_chain0", "report_data 0  ", HEADER16 + c0)
     content = bytes.fromhex("a3006373386301706d73746172742d636f6e7461696e65720258300102")
-    d = sha384(content)
+    d = record_digest(0, 3, content)
     regs[3] = extend(regs[3], d)
     emit("extend_content", "extend content ", content)
     emit("extend_digest", "record digest d", d)
@@ -145,7 +149,7 @@ def main() -> None:
     # Section 4.9: the boot record, record 0 of the log, slot 3, bootseed 0x33 repeated 32 times.
     bootseed = bytes([0x33]) * 32
     boot = c8s_event("ats", "boot", sha384(bootseed))
-    db = sha384(boot)
+    db = record_digest(0, 3, boot)
     emit("boot_content", "boot content   ", boot)
     emit("boot_digest", "boot digest d  ", db)
     emit("boot_r3", "R[3] boot only ", extend(genesis(3), db))
@@ -153,7 +157,7 @@ def main() -> None:
     # Section 4.9: the claim record, record 1 of the log, first record of workload slot 4.
     claim_body = cbor_map([(0, cbor_tstr("c8s")), (1, cbor_tstr("workload"))])
     claim = c8s_event("ats", "claim", sha384(claim_body), claim_body)
-    dc = sha384(claim)
+    dc = record_digest(1, 4, claim)
     emit("claim_body", "claim body     ", claim_body)
     emit("claim_content", "claim content  ", claim)
     emit("claim_digest", "claim digest d ", dc)
