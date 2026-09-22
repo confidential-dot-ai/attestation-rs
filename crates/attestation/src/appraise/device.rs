@@ -196,7 +196,7 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
                 cvm_backing_min: None,
                 ear_nvidia_evidence: Some(NvidiaEvidenceOutcome {
                     signature_verified: claims.report_signature_verified,
-                    parsed: Some(true),
+                    parsed: claims.report_parsed,
                     nonce_match: claims.nonce_match,
                 }),
             },
@@ -235,6 +235,7 @@ mod tests {
             driver_version: Some("570.86.15".to_string()),
             vbios_version: Some("96.00.9F.00.01".to_string()),
             report_signature_verified: Some(true),
+            report_parsed: Some(true),
             nonce_match: Some(true),
             raw: json!({
                 "ueid": ueid,

@@ -1,4 +1,12 @@
-//! Verify a [`NvidiaGpuEvidenceBundle`] using NRAS.
+//! Verify a [`NvidiaGpuEvidenceBundle`] using NRAS (API v4, claims 3.0).
+//!
+//! NRAS answers with a detached EAT: an overall JWT and one JWT per device.
+//! Every token must verify against the JWKS under the pinned NVIDIA anchor,
+//! carry the endpoint's issuer, and be in its validity window. The overall
+//! token names each device token in `submods` as `["DIGEST", ["SHA-256",
+//! hex]]` over the device token's compact form, which binds the set of device
+//! tokens to the overall result; each device token then binds to the session
+//! through its own `eat_nonce`.
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -172,9 +180,13 @@ pub(crate) async fn attest_arch(
     let response = provider.attest(&request).await?;
     let (overall_jwt, submodule_jwts) = split_eat_response(&response)?;
     let mut jwks = provider.jwks(arch).await?;
+    let issuer = provider.issuer(arch)?;
 
     let overall_claims =
         verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider).await?;
+    check_issuer(&overall_claims, &issuer)?;
+    check_claims_version(&overall_claims, &request.claims_version)?;
+    check_submods(&overall_claims, &submodule_jwts)?;
     let overall_ok = overall_claims
         .get("x-nvidia-overall-att-result")
         .and_then(|v| v.as_bool())
@@ -199,14 +211,9 @@ pub(crate) async fn attest_arch(
     let mut device_claims = Vec::with_capacity(submodule_jwts.len());
     for (name, sub_jwt) in submodule_jwts {
         let sub_claims = verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider).await?;
-        // Bind this submodule to the session: its `eat_nonce` must equal the
-        // SPDM nonce we derived. The overall token's `eat_nonce` alone does not
-        // cover the submodule JWTs (NRAS's RFC 9711 `submods` DIGEST is computed
-        // over an intermediate that excludes the issued JWT's time claims, so it
-        // is not byte-verifiable against the returned compact JWS — see the
-        // module docs). Per-submodule `eat_nonce` is the cheaper, robust subset:
-        // a submodule spliced from another session carries a different nonce and
-        // is rejected here.
+        check_issuer(&sub_claims, &issuer)?;
+        // The `submods` digests bind this token to the overall result; its own
+        // `eat_nonce` binds it to the session.
         check_submodule_nonce(&name, &sub_claims, &nonce_bytes)?;
         let mut dc = device_claims_from_submodule(&sub_claims);
         if dc.arch.is_none() {
@@ -260,6 +267,74 @@ fn final_checks(aggregated: &NvidiaGpuClaims, expected_devices: usize) -> Result
     if !aggregated.nonce_binding_ok {
         log::warn!("NVIDIA GPU attestation: nonce binding mismatch");
         return Err(AttestationError::NvidiaGpuBindingMismatch);
+    }
+    Ok(())
+}
+
+/// `iss` must be the endpoint's origin, as NRAS issues it. This is what tells
+/// a production token from a staging one signed under the same vendor.
+fn check_issuer(claims: &serde_json::Value, expected: &str) -> Result<()> {
+    let got = claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+    if got != expected {
+        return Err(AttestationError::NrasIssuerMismatch {
+            expected: expected.to_string(),
+            got: got.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The overall token's `x-nvidia-ver` must be the claims schema the request
+/// asked for; claim names differ between schemas.
+fn check_claims_version(overall: &serde_json::Value, expected: &str) -> Result<()> {
+    let got = overall
+        .get("x-nvidia-ver")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if got != expected {
+        return Err(AttestationError::NrasClaimsVersionMismatch {
+            expected: expected.to_string(),
+            got: got.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The overall token's `submods` (RFC 9711 section 4.2.18 detached digests)
+/// must name exactly the returned device tokens, each as
+/// `["DIGEST", ["SHA-256", hex]]` over the token's compact form. NVIDIA's
+/// v4 responses write the algorithm as `SHA-256`; its SDK writes `SHA256`.
+fn check_submods(overall: &serde_json::Value, submodule_jwts: &[(String, String)]) -> Result<()> {
+    use sha2::Digest as _;
+    use subtle::ConstantTimeEq as _;
+    let submods = overall
+        .get("submods")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            AttestationError::NrasResponseParse("overall token has no submods".into())
+        })?;
+    if submods.len() != submodule_jwts.len() {
+        return Err(AttestationError::NrasResponseParse(format!(
+            "overall token digests {} submodules, the response carries {}",
+            submods.len(),
+            submodule_jwts.len()
+        )));
+    }
+    for (name, jwt) in submodule_jwts {
+        let mismatch = || AttestationError::NrasSubmoduleDigestMismatch { name: name.clone() };
+        let entry = submods.get(name).ok_or_else(mismatch)?;
+        let digest = entry
+            .as_array()
+            .filter(|e| e.len() == 2 && e[0].as_str() == Some("DIGEST"))
+            .and_then(|e| e[1].as_array())
+            .filter(|d| d.len() == 2 && matches!(d[0].as_str(), Some("SHA-256") | Some("SHA256")))
+            .and_then(|d| d[1].as_str())
+            .and_then(|h| hex::decode(h).ok())
+            .ok_or_else(mismatch)?;
+        let actual = sha2::Sha256::digest(jwt.as_bytes());
+        if digest.len() != actual.len() || !bool::from(digest.ct_eq(&actual)) {
+            return Err(mismatch());
+        }
     }
     Ok(())
 }
@@ -841,10 +916,23 @@ fn apply_device_policy(
     Ok(())
 }
 
-/// Decode a single GPU submodule JWT body into [`NvidiaGpuDeviceClaims`].
+/// Decode one device token's body into [`NvidiaGpuDeviceClaims`]. A GPU's
+/// claims are `x-nvidia-gpu-*` (driver and VBIOS RIMs); an NVSwitch's are
+/// `x-nvidia-switch-*` with one BIOS RIM, which lands in the `vbios` fields.
+/// The device kind is read from which attestation-report cert-chain claim the
+/// token carries, as NVIDIA's SDK reads it.
 fn device_claims_from_submodule(body: &serde_json::Value) -> NvidiaGpuDeviceClaims {
     let s = |k: &str| body.get(k).and_then(|v| v.as_str()).map(String::from);
     let b = |k: &str| body.get(k).and_then(|v| v.as_bool());
+    let switch = body
+        .get("x-nvidia-switch-attestation-report-cert-chain")
+        .is_some();
+    let (kind, firmware) = if switch {
+        ("switch", "bios")
+    } else {
+        ("gpu", "vbios")
+    };
+    let claim = |suffix: &str| format!("x-nvidia-{kind}-{suffix}");
 
     NvidiaGpuDeviceClaims {
         arch: body
@@ -856,13 +944,18 @@ fn device_claims_from_submodule(body: &serde_json::Value) -> NvidiaGpuDeviceClai
         measres: s("measres"),
         secboot: b("secboot"),
         dbgstat: s("dbgstat"),
-        driver_version: s("x-nvidia-gpu-driver-version"),
-        vbios_version: s("x-nvidia-gpu-vbios-version"),
-        arch_check: b("x-nvidia-gpu-arch-check"),
-        nonce_match: b("x-nvidia-gpu-attestation-report-nonce-match"),
-        report_signature_verified: b("x-nvidia-gpu-attestation-report-signature-verified"),
-        driver_rim_fetched: b("x-nvidia-gpu-driver-rim-fetched"),
-        vbios_rim_fetched: b("x-nvidia-gpu-vbios-rim-fetched"),
+        driver_version: (!switch)
+            .then(|| s("x-nvidia-gpu-driver-version"))
+            .flatten(),
+        vbios_version: s(&claim(&format!("{firmware}-version"))),
+        arch_check: b(&claim("arch-check")),
+        nonce_match: b(&claim("attestation-report-nonce-match")),
+        report_signature_verified: b(&claim("attestation-report-signature-verified")),
+        report_parsed: b(&claim("attestation-report-parsed")),
+        driver_rim_fetched: (!switch)
+            .then(|| b("x-nvidia-gpu-driver-rim-fetched"))
+            .flatten(),
+        vbios_rim_fetched: b(&claim(&format!("{firmware}-rim-fetched"))),
         raw: body.clone(),
     }
 }
@@ -873,7 +966,7 @@ fn arch_from_hwmodel(s: &str) -> Option<NvidiaGpuArch> {
         Some(NvidiaGpuArch::Hopper)
     } else if up.contains("BLACKWELL") || up.starts_with("GB") {
         Some(NvidiaGpuArch::Blackwell)
-    } else if up.contains("LS10") || up.contains("SWITCH") {
+    } else if up.contains("LS10") || up.contains("LS_10") || up.contains("SWITCH") {
         Some(NvidiaGpuArch::Ls10)
     } else {
         None
@@ -967,6 +1060,158 @@ mod tests {
     /// A bare JWT string carries no per-device submodules. It used to parse to
     /// zero submodules and fail later as a `DeviceCountMismatch`; now it errors
     /// at the parse site with a precise message.
+    /// NVIDIA's recorded v4 responses (see test_data/nvidia_gpu/README.md):
+    /// the overall and device tokens, split, with the decoded claims bodies.
+    fn recorded(file: &str) -> (serde_json::Value, Vec<(String, String, serde_json::Value)>) {
+        let text = match file {
+            "hopper" => {
+                include_str!("../../../test_data/nvidia_gpu/nras_v4_hopper_detached_eat.json")
+            }
+            "switch" => {
+                include_str!("../../../test_data/nvidia_gpu/nras_v4_switch_detached_eat.json")
+            }
+            other => panic!("no recording {other}"),
+        };
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        let (overall, subs) = split_eat_response(&v).unwrap();
+        let body = |jwt: &str| -> serde_json::Value {
+            let payload = URL_SAFE_NO_PAD
+                .decode(jwt.split('.').nth(1).unwrap())
+                .unwrap();
+            serde_json::from_slice(&payload).unwrap()
+        };
+        let overall_claims = body(&overall);
+        let subs = subs
+            .into_iter()
+            .map(|(name, jwt)| {
+                let claims = body(&jwt);
+                (name, jwt, claims)
+            })
+            .collect();
+        (overall_claims, subs)
+    }
+
+    #[test]
+    fn recorded_v4_responses_bind_their_device_tokens() {
+        for (file, issuer) in [
+            ("hopper", "https://nras.attestation.nvidia.com"),
+            ("switch", "https://nras.attestation-stg.nvidia.com"),
+        ] {
+            let (overall, subs) = recorded(file);
+            let jwts: Vec<(String, String)> = subs
+                .iter()
+                .map(|(n, j, _)| (n.clone(), j.clone()))
+                .collect();
+            check_issuer(&overall, issuer).unwrap();
+            check_claims_version(&overall, "3.0").unwrap();
+            check_submods(&overall, &jwts).unwrap();
+            for (_, _, claims) in &subs {
+                check_issuer(claims, issuer).unwrap();
+            }
+            assert!(matches!(
+                check_issuer(&overall, "https://nras.attestation.nvidia.com/"),
+                Err(AttestationError::NrasIssuerMismatch { .. })
+            ));
+            assert!(matches!(
+                check_claims_version(&overall, "2.0"),
+                Err(AttestationError::NrasClaimsVersionMismatch { .. })
+            ));
+
+            // A device token that is not the one NRAS digested: one byte of
+            // its signature changed, the token renamed, one dropped, one added.
+            let (name, jwt) = jwts[0].clone();
+            let mut altered = jwt.clone();
+            altered.pop();
+            altered.push(if jwt.ends_with('A') { 'B' } else { 'A' });
+            for bad in [
+                vec![(name.clone(), altered)],
+                vec![("GPU-9".to_string(), jwt.clone())],
+                vec![],
+                vec![
+                    (name.clone(), jwt.clone()),
+                    ("GPU-9".to_string(), jwt.clone()),
+                ],
+            ] {
+                assert!(check_submods(&overall, &bad).is_err(), "{file}: {bad:?}");
+            }
+            let mut no_submods = overall.clone();
+            no_submods["submods"] = serde_json::Value::Null;
+            assert!(check_submods(&no_submods, &jwts).is_err());
+            let mut wrong_alg = overall.clone();
+            wrong_alg["submods"][&name][1][0] = serde_json::json!("SHA-384");
+            assert!(matches!(
+                check_submods(&wrong_alg, &jwts),
+                Err(AttestationError::NrasSubmoduleDigestMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn recorded_v4_claims_map_for_gpus_and_switches() {
+        let (_, subs) = recorded("hopper");
+        let gpu = device_claims_from_submodule(&subs[0].2);
+        assert_eq!(subs[0].0, "GPU-0");
+        assert_eq!(gpu.arch, Some(NvidiaGpuArch::Hopper));
+        assert_eq!(gpu.driver_version.as_deref(), Some("550.90.07"));
+        assert_eq!(gpu.vbios_version.as_deref(), Some("96.00.9F.00.01"));
+        assert_eq!(
+            (
+                gpu.arch_check,
+                gpu.nonce_match,
+                gpu.report_signature_verified,
+                gpu.report_parsed,
+                gpu.driver_rim_fetched,
+                gpu.vbios_rim_fetched
+            ),
+            (
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true)
+            )
+        );
+        apply_device_policy(
+            "GPU-0",
+            &gpu,
+            &crate::types::NvidiaGpuDevicePolicy::default(),
+        )
+        .unwrap();
+
+        let (_, subs) = recorded("switch");
+        let sw = device_claims_from_submodule(&subs[0].2);
+        assert_eq!(subs[0].0, "SWITCH-0");
+        assert_eq!(sw.arch, Some(NvidiaGpuArch::Ls10));
+        assert_eq!(sw.hwmodel.as_deref(), Some("LS_10 A01 FSP BROM"));
+        assert_eq!(sw.driver_version, None);
+        assert_eq!(sw.vbios_version.as_deref(), Some("96.10.55.00.01"));
+        assert_eq!(
+            (
+                sw.arch_check,
+                sw.nonce_match,
+                sw.report_signature_verified,
+                sw.report_parsed,
+                sw.driver_rim_fetched,
+                sw.vbios_rim_fetched
+            ),
+            (
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(true),
+                None,
+                Some(true)
+            )
+        );
+        apply_device_policy(
+            "SWITCH-0",
+            &sw,
+            &crate::types::NvidiaGpuDevicePolicy::default(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn split_eat_rejects_bare_jwt_string() {
         let v = serde_json::json!("just.a.jwt");

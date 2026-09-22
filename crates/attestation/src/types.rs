@@ -521,6 +521,10 @@ pub struct NvidiaGpuDeviceClaims {
     pub nonce_match: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_signature_verified: Option<bool>,
+    /// NRAS's `x-nvidia-{gpu,switch}-attestation-report-parsed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_parsed: Option<bool>,
+    /// For a GPU, `x-nvidia-gpu-driver-rim-fetched`; an NVSwitch has no driver RIM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_rim_fetched: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -134,7 +134,7 @@ For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.
 | `cvm_registers` | must | bound | the PCRs projected as registers, source `vtpm-pcr`, backing `privileged-service` |
 | `cvm_log` | may | bound | TPM2 event log or CEL |
 
-`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the existing NVIDIA device evidence (`arch`, `evidence_b64`, `cert_chain_b64`) plus `cvm_binding` with mode `nras-nonce`. The verifier's NRAS interaction and the resulting per-device EAT are unchanged from today.
+`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the existing NVIDIA device evidence (`arch`, `evidence_b64`, `cert_chain_b64`) plus `cvm_binding` with mode `nras-nonce`. The verifier sends it to NRAS API v4 (`/v4/attest/gpu`, `/v4/attest/switch`) with claims version 3.0, the request body NVIDIA's own SDK sends, and reads the detached EAT it answers with: an overall token and one token per device, all ES384 under the pinned NVIDIA anchor, each carrying the endpoint's origin as `iss`. The overall token's `submods` holds `["DIGEST", ["SHA-256", hex]]` over each device token's compact form, which the verifier checks, together with the device count, before it reads a device token; each device token's `eat_nonce` then binds it to the session.
 
 ### 4.5 Freshness and binding modes
 
@@ -340,7 +340,7 @@ An `isSafe` boolean is not part of the profile. A relying party that wants one d
 
 draft-kykdxy-rats-tdx-cgpu-ear-profile (Microsoft, Intel, NVIDIA) defines EAR submodules `tdx`, `cvm_guest` and `gpu_N`, reuses Intel Trust Authority claim names for the TDX report (`tdx_mrtd`, `tdx_rtmr0` to `tdx_rtmr3`, `tdx_mrconfigid`, `tdx_mrowner`, `tdx_mrownerconfig`, `tdx_td_attributes`, `tdx_tee_tcb_svn`, `tdx_xfam`, `tdx_mrseam`, `tdx_mrsignerseam`), Azure MAA names for the guest (`tpm_*`), and defines `ear_all_submods_bound`, `ear_managed_keysets` and the `ear_nvidia_*` result claims. It covers no SEV-SNP, no Arm, no runtime registers beyond the RTMRs and no event logs.
 
-This profile composes with it: for a TDX submodule the verifier emits the `tdx_*` claims above verbatim inside `ear_attester_claims` beside the vendor-neutral `cvm_*` claims, GPU submodules carry the NRAS claim names unchanged in `ear_attester_claims` (with `cvm_identity` and `cvm_tcb` beside them) and the draft's `ear_nvidia_evidence` (`signature_verified`, `parsed`, `nonce_match`, derived from NRAS's signed `x-nvidia-gpu-attestation-report-*` claims) in `ear_verifier_claims`, and `ear_all_submods_bound` is set from the binding checks of section 4.5. A relying party written against that draft reads our tokens without a mapping; a relying party written against this profile gains SNP, Arm, registers and logs.
+This profile composes with it: for a TDX submodule the verifier emits the `tdx_*` claims above verbatim inside `ear_attester_claims` beside the vendor-neutral `cvm_*` claims, GPU submodules carry the NRAS claim names unchanged in `ear_attester_claims` (with `cvm_identity` and `cvm_tcb` beside them) and the draft's `ear_nvidia_evidence` (`signature_verified`, `parsed`, `nonce_match`, taken from NRAS's signed `x-nvidia-gpu-attestation-report-*` claims, or `x-nvidia-switch-attestation-report-*` for an NVSwitch) in `ear_verifier_claims`, and `ear_all_submods_bound` is set from the binding checks of section 4.5. A relying party written against that draft reads our tokens without a mapping; a relying party written against this profile gains SNP, Arm, registers and logs.
 
 Multi-attester binding in v1 is `ear_all_submods_bound`, set from the per-submodule nonce checks of section 4.5. The detached-digest bundle of draft-sun-rats-composite-eat (SHA-384 digests, tag 602, one nonce for every sub-attester) is v2, so the GPU submodule ships now.
 
@@ -516,7 +516,7 @@ Each step is one reviewable PR in `attestation-rs` unless noted, in this order, 
 6. attestation-go and c8s-verify-js: schema pins, vectors, `appraise` parity; EAR 04 and the anchor derivation in c8s in the same release.
 7. Arm CCA: nested token submodule and the CCA verification rules, when Vera Rubin hardware is available.
 8. `tcg-cel` (`cel` on crates.io is the Common Expression Language): a standalone crate for CEL-CBOR and CEL-JSON encoding, parsing and replay, with ingest from TCG2 logs (TPM and CCEL), the attestation-agent entries a CCEL carries, and dstack JSON; no such library exists in any language, and the log half of this profile is only reusable if it does. On the design branch as `crates/tcg-cel`, without the CEL-TLV encoding.
-9. NRAS: the attestation API now documents `/v4/attest/gpu` and `/v4/attest/switch` beside v3; confirm the request and claims differences and move the provider.
+9. NRAS: the provider is on `/v4/attest/gpu` and `/v4/attest/switch` with claims version 3.0, as NVIDIA's attestation SDK is. The request body is the v3 body; the difference that matters is that the overall token's `submods` digests are SHA-256 over the returned device tokens, which the verifier now checks along with `iss` and `x-nvidia-ver`. NVSwitch tokens carry `x-nvidia-switch-*` claims, which the verifier now maps (before this step every NVSwitch failed the nonce-match gate).
 
 Each PR carries the premises it rests on and how they were verified, per the review standard the hotfixes set.
 

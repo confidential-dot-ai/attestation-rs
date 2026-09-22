@@ -123,11 +123,11 @@ pub struct CertsConfig {
     /// If true, prefetch GPU+switch JWKS on startup and refresh in background.
     pub prefetch_nras_jwks: bool,
     /// Override the NRAS GPU endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/gpu`, honoring
+    /// (`https://nras.attestation.nvidia.com/v4/attest/gpu`, honoring
     /// `NV_NRAS_GPU_URL` env var) when empty.
     pub nras_gpu_url: String,
     /// Override the NRAS switch endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/switch`, honoring
+    /// (`https://nras.attestation.nvidia.com/v4/attest/switch`, honoring
     /// `NV_NRAS_SWITCH_URL` env var) when empty.
     pub nras_switch_url: String,
 }

@@ -8,8 +8,9 @@
 
 #[cfg(feature = "nvidia-gpu")]
 pub use crate::platforms::nvidia_gpu::provider::{
-    jwks_url_for_endpoint, DefaultNrasProvider, Jwks, JwksKey, NrasEvidenceEntry, NrasProvider,
-    NrasRequest, HEADER_OCSP_ALLOW_CERT_HOLD, NRAS_GPU_URL, NRAS_SWITCH_URL,
+    jwks_url_for_endpoint, origin_of, DefaultNrasProvider, Jwks, JwksKey, NrasEvidenceEntry,
+    NrasProvider, NrasRequest, HEADER_OCSP_ALLOW_CERT_HOLD, NRAS_BASE_URL, NRAS_CLAIMS_VERSION,
+    NRAS_GPU_URL, NRAS_SWITCH_URL,
 };
 use std::time::Duration;
 
@@ -433,6 +434,9 @@ impl<T: crate::platforms::nvidia_gpu::NrasProvider + ?Sized>
     }
     fn claims_version(&self) -> &str {
         (**self).claims_version()
+    }
+    fn issuer(&self, arch: crate::types::NvidiaGpuArch) -> Result<String> {
+        (**self).issuer(arch)
     }
     async fn attest(
         &self,

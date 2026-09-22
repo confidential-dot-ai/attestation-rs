@@ -846,7 +846,7 @@ mod devices {
     #[async_trait::async_trait]
     impl NrasProvider for Recording {
         fn url_for(&self, _arch: NvidiaGpuArch) -> &str {
-            "https://nras.invalid/v3/attest/gpu"
+            "https://nras.invalid/v4/attest/gpu"
         }
         async fn attest(&self, request: &NrasRequest) -> attestation::Result<serde_json::Value> {
             self.requests.lock().unwrap().push(request.clone());
@@ -898,7 +898,7 @@ mod devices {
         assert_eq!(requests[0].arch, NvidiaGpuArch::Hopper);
         assert_eq!(requests[0].nonce, hex::encode(nras_gpu_nonce(&nonce)));
         assert_eq!(requests[0].evidence_list.len(), 2);
-        assert_eq!(requests[0].claims_version, "2.0");
+        assert_eq!(requests[0].claims_version, "3.0");
     }
 
     #[tokio::test]

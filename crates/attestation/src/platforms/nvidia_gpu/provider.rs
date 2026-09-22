@@ -9,17 +9,25 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AttestationError, Result};
 use crate::types::NvidiaGpuArch;
 
-/// Default NRAS GPU endpoint. Override via `NV_NRAS_GPU_URL`.
-pub const NRAS_GPU_URL: &str = "https://nras.attestation.nvidia.com/v3/attest/gpu";
+/// The production NRAS origin: the `iss` of every token it signs, and the
+/// host of its JWKS.
+pub const NRAS_BASE_URL: &str = "https://nras.attestation.nvidia.com";
 
-/// Default NRAS NVSwitch endpoint. Override via `NV_NRAS_SWITCH_URL`.
-pub const NRAS_SWITCH_URL: &str = "https://nras.attestation.nvidia.com/v3/attest/switch";
+/// Default NRAS GPU endpoint (API v4). Override via `NV_NRAS_GPU_URL`.
+pub const NRAS_GPU_URL: &str = "https://nras.attestation.nvidia.com/v4/attest/gpu";
+
+/// Default NRAS NVSwitch endpoint (API v4). Override via `NV_NRAS_SWITCH_URL`.
+pub const NRAS_SWITCH_URL: &str = "https://nras.attestation.nvidia.com/v4/attest/switch";
+
+/// The claims schema the v4 endpoints answer with, and the one NVIDIA's own
+/// SDK requests from them: the `x-nvidia-ver` of the overall token.
+pub const NRAS_CLAIMS_VERSION: &str = "3.0";
 
 /// Header name nvtrust uses to opt in to "certificate hold" OCSP statuses.
 pub const HEADER_OCSP_ALLOW_CERT_HOLD: &str = "X-NVIDIA-OCSP-ALLOW-CERT-HOLD";
 
-/// NRAS POST body. Matches the schema implemented by nvtrust's
-/// `attest_gpu_remote.build_payload`.
+/// NRAS POST body: the `NRASAttestRequestV4` of NVIDIA's attestation SDK,
+/// unchanged from the v3 body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NrasRequest {
     /// Hex-encoded SPDM nonce. All entries in `evidence_list` were collected
@@ -27,7 +35,7 @@ pub struct NrasRequest {
     pub nonce: String,
     pub evidence_list: Vec<NrasEvidenceEntry>,
     pub arch: NvidiaGpuArch,
-    /// Claims schema version (`"2.0"` or `"3.0"`).
+    /// Claims schema version; the v4 endpoints take `"3.0"`.
     pub claims_version: String,
 }
 
@@ -79,10 +87,17 @@ pub trait NrasProvider: Send + Sync {
     fn url_for(&self, arch: NvidiaGpuArch) -> &str;
 
     /// Claims schema version to request from NRAS (the `claims_version` field
-    /// of the POST body). Defaults to `"2.0"`, which pairs with the
-    /// `/v3/attest/*` endpoints.
+    /// of the POST body); the verifier requires the overall token's
+    /// `x-nvidia-ver` to equal it. Defaults to [`NRAS_CLAIMS_VERSION`].
     fn claims_version(&self) -> &str {
-        "2.0"
+        NRAS_CLAIMS_VERSION
+    }
+
+    /// The `iss` every token from `arch`'s endpoint must carry. Defaults to
+    /// the endpoint's origin, which is what NRAS issues; a provider that
+    /// routes through a proxy overrides this with the real NRAS origin.
+    fn issuer(&self, arch: NvidiaGpuArch) -> Result<String> {
+        origin_of(self.url_for(arch))
     }
 
     /// POST `request` to the appropriate NRAS endpoint and return the raw
@@ -108,15 +123,20 @@ pub trait NrasProvider: Send + Sync {
 /// `wasm32` (browser `fetch` / Workers / Node / Deno). JWKS is cached in
 /// memory; on a `kid` miss the cache is bypassed and refetched.
 ///
-/// Browser caveat: NRAS's `/v3/attest/{gpu,switch}` endpoints do not respond
-/// to CORS preflight (`OPTIONS` returns 403), so browser callers must route
-/// attest requests through a same-origin proxy or inject a custom
-/// [`NrasProvider`]. The JWKS endpoint *is* CORS-open
-/// (`access-control-allow-origin: *`) and works directly from browsers.
+/// Browser caveat: NRAS's attest endpoints did not respond to CORS preflight
+/// on v3 (`OPTIONS` returned 403; v4 is unchecked), so browser callers must
+/// route attest requests through a same-origin proxy or inject a custom
+/// [`NrasProvider`], setting `issuer` to the real NRAS origin. The JWKS
+/// endpoint *is* CORS-open (`access-control-allow-origin: *`) and works
+/// directly from browsers.
 pub struct DefaultNrasProvider {
     pub gpu_url: String,
     pub switch_url: String,
     pub claims_version: String,
+    /// The `iss` to require, when the endpoints are not NRAS's own origin
+    /// (a proxy). `None` requires each endpoint's origin. Override via
+    /// `NV_NRAS_ISSUER`.
+    pub issuer: Option<String>,
     pub allow_hold_cert: bool,
     pub service_key: Option<String>,
     client: reqwest::Client,
@@ -176,7 +196,8 @@ impl DefaultNrasProvider {
         Self {
             gpu_url,
             switch_url,
-            claims_version: "2.0".into(),
+            claims_version: NRAS_CLAIMS_VERSION.into(),
+            issuer: env_issuer(),
             allow_hold_cert: env_allow_hold_cert(),
             service_key: env_service_key(),
             client,
@@ -221,20 +242,26 @@ impl DefaultNrasProvider {
     }
 }
 
-/// Derive the JWKS URL for a given NRAS endpoint by replacing the path with
-/// `/.well-known/jwks.json` and dropping any query/fragment.
+/// The origin (`scheme://host`) of an NRAS endpoint URL.
 ///
 /// Hand-rolled to avoid pulling in the `url` crate (keeps the WASM bundle
 /// small); the input space is the tightly controlled NRAS endpoint URLs.
-pub fn jwks_url_for_endpoint(endpoint: &str) -> Result<String> {
+pub fn origin_of(endpoint: &str) -> Result<String> {
     let (scheme, rest) = endpoint
         .split_once("://")
         .ok_or_else(|| AttestationError::JwksFetch(format!("invalid NRAS URL: {endpoint}")))?;
     let host = rest
         .split('/')
         .next()
+        .filter(|h| !h.is_empty())
         .ok_or_else(|| AttestationError::JwksFetch(format!("invalid NRAS URL: {endpoint}")))?;
-    Ok(format!("{scheme}://{host}/.well-known/jwks.json"))
+    Ok(format!("{scheme}://{host}"))
+}
+
+/// Derive the JWKS URL for a given NRAS endpoint by replacing the path with
+/// `/.well-known/jwks.json` and dropping any query/fragment.
+pub fn jwks_url_for_endpoint(endpoint: &str) -> Result<String> {
+    Ok(format!("{}/.well-known/jwks.json", origin_of(endpoint)?))
 }
 
 fn default_gpu_url() -> String {
@@ -256,6 +283,19 @@ fn default_switch_url() -> String {
     #[cfg(target_arch = "wasm32")]
     {
         NRAS_SWITCH_URL.into()
+    }
+}
+
+fn env_issuer() -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("NV_NRAS_ISSUER")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
     }
 }
 
@@ -293,6 +333,13 @@ impl NrasProvider for DefaultNrasProvider {
 
     fn claims_version(&self) -> &str {
         &self.claims_version
+    }
+
+    fn issuer(&self, arch: NvidiaGpuArch) -> Result<String> {
+        match &self.issuer {
+            Some(issuer) => Ok(issuer.clone()),
+            None => origin_of(self.url_for(arch)),
+        }
     }
 
     async fn attest(&self, request: &NrasRequest) -> Result<serde_json::Value> {
@@ -358,19 +405,39 @@ mod tests {
 
     #[test]
     fn jwks_url_replaces_path_with_well_known() {
+        for endpoint in [NRAS_GPU_URL, NRAS_SWITCH_URL] {
+            assert_eq!(
+                jwks_url_for_endpoint(endpoint).unwrap(),
+                "https://nras.attestation.nvidia.com/.well-known/jwks.json"
+            );
+            assert_eq!(origin_of(endpoint).unwrap(), NRAS_BASE_URL);
+        }
         assert_eq!(
-            jwks_url_for_endpoint("https://nras.attestation.nvidia.com/v3/attest/gpu").unwrap(),
-            "https://nras.attestation.nvidia.com/.well-known/jwks.json"
-        );
-        assert_eq!(
-            jwks_url_for_endpoint("https://nras.attestation.nvidia.com/v3/attest/switch").unwrap(),
-            "https://nras.attestation.nvidia.com/.well-known/jwks.json"
+            origin_of("https://nras.attestation-stg.nvidia.com/v4/attest/switch?x=1").unwrap(),
+            "https://nras.attestation-stg.nvidia.com"
         );
     }
 
     #[test]
-    fn jwks_url_rejects_missing_scheme() {
+    fn jwks_url_rejects_missing_scheme_or_host() {
         assert!(jwks_url_for_endpoint("nras.attestation.nvidia.com/x").is_err());
+        assert!(origin_of("https:///v4/attest/gpu").is_err());
+    }
+
+    #[test]
+    fn the_default_provider_requires_its_endpoints_origin_unless_told_otherwise() {
+        let mut p = DefaultNrasProvider::with_urls(
+            "https://proxy.example/nras/gpu".into(),
+            "https://proxy.example/nras/switch".into(),
+        );
+        p.issuer = None;
+        assert_eq!(
+            p.issuer(NvidiaGpuArch::Hopper).unwrap(),
+            "https://proxy.example"
+        );
+        p.issuer = Some(NRAS_BASE_URL.into());
+        assert_eq!(p.issuer(NvidiaGpuArch::Ls10).unwrap(), NRAS_BASE_URL);
+        assert_eq!(p.claims_version(), "3.0");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

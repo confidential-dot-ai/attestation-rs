@@ -80,7 +80,7 @@ pub enum AttestationError {
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuUserNonceMissing,
 
-    #[error("nvidia_gpu_user_nonce is set but expected_report_data is not — both are required for CPU-GPU binding")]
+    #[error("nvidia_gpu_user_nonce is set but expected_report_data is not; both are required for CPU-GPU binding")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuReportDataRequired,
 
@@ -119,6 +119,18 @@ pub enum AttestationError {
     #[error("NRAS overall attestation result is false")]
     #[cfg(feature = "nvidia-gpu")]
     NrasOverallFailed,
+
+    #[error("NRAS token issuer is {got:?}, expected {expected:?}")]
+    #[cfg(feature = "nvidia-gpu")]
+    NrasIssuerMismatch { expected: String, got: String },
+
+    #[error("NRAS answered with claims version {got:?}, the request asked for {expected:?}")]
+    #[cfg(feature = "nvidia-gpu")]
+    NrasClaimsVersionMismatch { expected: String, got: String },
+
+    #[error("NRAS submodule \"{name}\" is not the token the overall result digests")]
+    #[cfg(feature = "nvidia-gpu")]
+    NrasSubmoduleDigestMismatch { name: String },
 
     #[error("JWS verification failed: {0}")]
     #[cfg(feature = "nvidia-gpu")]
