@@ -272,7 +272,12 @@ pub fn verify_cert_chain(ark_der: &[u8], ask_der: &[u8], vcek_der: &[u8]) -> Res
 }
 
 /// Verify a report signature against a VCEK certificate.
-/// Delegates to the sev crate's Verifiable trait.
+/// Delegates to the sev crate's Verifiable trait. Azure SNP and the wasm
+/// crate's pre-profile verify_snp export call it.
+#[cfg_attr(
+    not(any(feature = "az-snp", feature = "unstable-internals")),
+    allow(dead_code)
+)]
 pub fn verify_report_signature(report_bytes: &[u8], vcek_der: &[u8]) -> Result<()> {
     let report = AttestationReport::from_bytes(report_bytes)
         .map_err(|e| AttestationError::QuoteParseFailed(format!("SNP report parse: {e}")))?;
@@ -313,6 +318,8 @@ pub fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
 /// [`verify_evidence`] as one unit, for callers that resolve the VEK
 /// themselves (notably the WASM `verify_snp` entry point). Revocation is out
 /// of scope — pair with [`check_vcek_not_revoked`] when CRL data is available.
+// Called by the wasm crate's pre-profile verify_snp export.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn verify_vek_endorsement(
     report: &AttestationReport,
     vek_der: &[u8],

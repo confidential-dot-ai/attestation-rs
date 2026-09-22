@@ -29,6 +29,11 @@ nvidia-gpu = []
 # (nv-attestation-sdk). Build prereqs documented in README.md.
 nvidia-gpu-attest = ["nvidia-gpu", "dep:nv-attestation-sdk"]
 
+# The per-platform internals under `attestation::platforms`, with no stability
+# promise. For this repository's hardware tests and benches, and the wasm
+# crate's pre-profile exports until they are removed with the legacy envelope.
+unstable-internals = []
+
 # Guest-side evidence generation (Linux-only, requires TEE hardware).
 # Combine with platform features for per-platform builds:
 #   attest                 → default SEV-SNP + TDX attestation set
@@ -114,6 +119,8 @@ chrono = { version = "0.4", default-features = false, features = ["std", "now", 
 time = { version = "0.3", default-features = false, features = ["wasm-bindgen"] }
 
 [dev-dependencies]
+# The crate's own tests and benches exercise platform internals.
+attestation = { path = ".", features = ["unstable-internals"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 async-trait = "0.1"

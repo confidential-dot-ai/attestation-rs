@@ -84,7 +84,7 @@ pub fn build(config: &CertsConfig) -> anyhow::Result<Arc<CollateralCache>> {
     cache.pin(CollateralKey::TdxRootCrl);
     if config.prefetch_nras_jwks {
         for url in [&gpu_url, &switch_url] {
-            let jwks = attestation::platforms::nvidia_gpu::jwks_url_for_endpoint(url)?;
+            let jwks = attestation::collateral::jwks_url_for_endpoint(url)?;
             cache.pin(CollateralKey::NrasJwks { url: jwks });
         }
     }

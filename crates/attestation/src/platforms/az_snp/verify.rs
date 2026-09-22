@@ -16,6 +16,8 @@ use super::evidence::AzSnpEvidence;
 /// [`verify_evidence`]) has the pieces it needs to locate and run the CRL check:
 /// the matched generation pins the AMD root, and the VCEK is what the CRL is
 /// checked against.
+// report_version is read by the wasm crate's pre-profile verify_az_snp export.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub struct VerifiedReport {
     /// Verification result with `collateral_verified = false` (no CRL checked yet).
     pub result: VerificationResult,

@@ -382,43 +382,50 @@ Reference values come from confos manifests. confos publishes each manifest in t
 
 ## 8. Rust surface
 
-Types are the profile, one to one. Names are indicative; the PR that lands them is the source of truth.
+The types are the profile, one to one, in `attestation::profile`; the code is the source of truth and the sketch below names the shape.
 
 ```rust
-pub struct Evidence { pub nonce: Vec<u8>, pub submods: BTreeMap<String, Submod> }
-pub enum Submod { Cpu(CpuEvidence), Vtpm(VtpmEvidence), Gpu(GpuDeviceEvidence), Cca(CcaToken) }
+pub struct Evidence { pub eat_profile: String, pub eat_nonce: Bytes, pub cvm_version: u32, pub submods: BTreeMap<String, Submod> }
+pub enum Submod { Cpu(CpuEvidence), CcaToken(NestedToken), Vtpm(VtpmEvidence), Device(GpuDeviceEvidence) }
 
 pub struct CpuEvidence {
-    pub platform: PlatformHint,
-    pub report: Report,                 // SevSnp(bytes) | TdxQuote(bytes); on Azure the HCL report is in the vtpm submodule
-    pub binding: Binding,               // ReportData | Commitment | VtpmExtraData, each with its key option
-    pub endorsements: Option<Collateral>,
-    pub registers: Option<Vec<Register>>,
-    pub log: Option<EventLog>,
-    pub chain: Option<ChainInfo>,       // chain_len
-    pub bootseed: Option<[u8; 32]>,
+    pub cvm_platform: PlatformHint,
+    pub cvm_report: CmwRecord,               // the SNP report or TD quote; on Azure the HCL report is in the vtpm submodule
+    pub cvm_binding: Binding,                // pattern, mode and optional key (section 4.5)
+    pub cvm_endorsements: Option<CmwCollection>,
+    pub cvm_registers: Option<Vec<Register>>,
+    pub cvm_log: Option<EventLog>,
+    pub cvm_chain: Option<ChainInfo>,
+    pub bootseed: Option<FixedBytes<32>>,
+    pub dbgstat: Option<DebugStatus>,
 }
 
-pub struct Register { pub index: u16, pub alg: HashAlg, pub value: Vec<u8>, pub source: RegisterSource, pub backing: Backing }
-pub enum Backing { Virtualized, KernelService, PrivilegedService, Hardware }   // ordered, weakest first
-pub struct EventLog { pub format: LogFormat, pub data: Vec<u8> }
-
-pub struct Appraisal {
-    pub status: Tier,
-    pub vector: TrustVector,
-    pub attester: AttesterClaims,       // section 5.1
-    pub verifier: VerifierClaims,       // section 5.1
+pub struct Appraisal {                       // an EAR claims set (section 5)
+    pub eat_profile: String, pub iat: i64, pub ear_verifier_id: VerifierId, pub eat_nonce: Bytes,
+    pub ear_all_submods_bound: bool, pub submods: BTreeMap<String, SubmodAppraisal>,
+}
+pub struct SubmodAppraisal {
+    pub ear_status: Tier, pub ear_trustworthiness_vector: TrustVector, pub ear_appraisal_policy_ids: Vec<String>,
+    pub ear_attester_claims: AttesterClaims, pub ear_verifier_claims: VerifierClaims,
 }
 
 impl Verifier {
     pub async fn appraise(&self, evidence: &Evidence, policy: &VerifyPolicy) -> Result<Appraisal>;
     pub async fn appraise_json(&self, json: &[u8], policy: &VerifyPolicy) -> Result<Appraisal>;
+    pub async fn appraise_legacy_json(&self, json: &[u8], nonce: &[u8], key: Option<KeyBinding>, policy: &VerifyPolicy) -> Result<Appraisal>;
 }
 ```
 
-Collateral is one type with three transports (inline, cached, fetched), keyed by `CollateralKey`, with `valid_until` taken from each artifact, exactly as the sweep plan describes. The service becomes a router over the library cache.
+The public surface is the verifier, the attester functions and the vocabulary; the per-platform parsers and verifiers are not part of it:
 
-Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schemas/cvm-policy-v1.json` are generated from the Rust types (`attestation::profile::schema`) and committed; a library test fails on drift, and attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as `docs/design/vectors/cvm_profile_vectors.json`, emitted by the same script, and every implementation consumes that file; the Rust test fails when a vector has no check. The WASM export becomes `appraise(envelope_json, policy_json)`; the four per-platform exports are deleted.
+- `Verifier` appraises the profile (`appraise`, `appraise_json`, `appraise_legacy_json`) and keeps `verify` for the pre-profile envelope during the transition. Its providers are set with `with_collateral`, `with_cert_provider`, `with_tdx_provider` and `with_nras_provider`.
+- The attester side is `attest_profile`, with `attest` and `attest_with_nvidia_gpu` kept for the pre-profile envelope, and `detect` (Linux, `attest` feature).
+- `profile` holds the evidence, policy and appraisal types and the section 4.5, 4.8 and 4.9 primitives. `collateral` holds the collateral keys, the cache and disk store, and every provider trait, NRAS included. `error` holds the errors, and `types` holds the pre-profile types, kept for two minor releases.
+- `platforms` and the appraisal engine are private. The `unstable-internals` feature exposes `platforms` with no stability promise, for this repository's hardware tests and benches and for the wasm crate's pre-profile exports.
+
+Collateral is one type with three transports (inline, cached, fetched), keyed by `CollateralKey`, with `valid_until` taken from each artifact, exactly as the sweep plan describes. The service is a router over the library cache.
+
+Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schemas/cvm-policy-v1.json` are generated from the Rust types (`attestation::profile::schema`) and committed; a library test fails on drift, and attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as `docs/design/vectors/cvm_profile_vectors.json`, emitted by the same script, and every implementation consumes that file; the Rust test fails when a vector has no check. The WASM build exports `appraise(evidence_json, nonce, policy_json, snp_crl_der)` and `appraise_legacy`; its four per-platform exports stay for the transition and are removed with the pre-profile envelope.
 
 ## 9. Compatibility and migration
 

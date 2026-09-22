@@ -37,7 +37,7 @@ pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
         return certs.nras_gpu_url.clone();
     }
     std::env::var("NV_NRAS_GPU_URL")
-        .unwrap_or_else(|_| attestation::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string())
+        .unwrap_or_else(|_| attestation::collateral::NRAS_GPU_URL.to_string())
 }
 
 /// Resolve the effective NRAS switch endpoint URL.
@@ -48,9 +48,8 @@ pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
     if !certs.nras_switch_url.is_empty() {
         return certs.nras_switch_url.clone();
     }
-    std::env::var("NV_NRAS_SWITCH_URL").unwrap_or_else(|_| {
-        attestation::platforms::nvidia_gpu::provider::NRAS_SWITCH_URL.to_string()
-    })
+    std::env::var("NV_NRAS_SWITCH_URL")
+        .unwrap_or_else(|_| attestation::collateral::NRAS_SWITCH_URL.to_string())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

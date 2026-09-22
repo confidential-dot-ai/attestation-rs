@@ -30,10 +30,15 @@
 #[cfg(all(feature = "attest", target_os = "linux"))]
 use std::sync::OnceLock;
 
-pub mod appraise;
+mod appraise;
 pub mod collateral;
 pub mod error;
+/// Per-platform internals, with no stability promise (`unstable-internals`).
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
 pub mod platforms;
+#[cfg(not(feature = "unstable-internals"))]
+mod platforms;
 pub mod profile;
 pub mod types;
 pub mod utils;

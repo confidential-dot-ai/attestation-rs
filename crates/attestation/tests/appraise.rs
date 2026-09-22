@@ -818,7 +818,7 @@ async fn legacy_envelopes_map_to_the_profile() {
 #[cfg(feature = "nvidia-gpu")]
 mod devices {
     use super::*;
-    use attestation::platforms::nvidia_gpu::{Jwks, NrasProvider, NrasRequest};
+    use attestation::collateral::{Jwks, NrasProvider, NrasRequest};
     use attestation::profile::binding::nras_gpu_nonce;
     use attestation::profile::GpuArch;
     use attestation::{AttestationError, NvidiaGpuArch};

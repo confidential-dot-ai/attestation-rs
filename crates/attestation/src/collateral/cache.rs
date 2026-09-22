@@ -756,7 +756,8 @@ impl crate::platforms::nvidia_gpu::NrasProvider for CollateralCache {
         &self,
         arch: crate::types::NvidiaGpuArch,
     ) -> Result<crate::platforms::nvidia_gpu::Jwks> {
-        let url = crate::platforms::nvidia_gpu::jwks_url_for_endpoint(self.nras.url_for(arch))?;
+        let url =
+            crate::platforms::nvidia_gpu::provider::jwks_url_for_endpoint(self.nras.url_for(arch))?;
         let c = self.get(&CollateralKey::NrasJwks { url }).await?;
         serde_json::from_slice(&c.bytes)
             .map_err(|e| AttestationError::JwksFetch(format!("JWKS parse: {e}")))
@@ -766,7 +767,8 @@ impl crate::platforms::nvidia_gpu::NrasProvider for CollateralCache {
         &self,
         arch: crate::types::NvidiaGpuArch,
     ) -> Result<crate::platforms::nvidia_gpu::Jwks> {
-        let url = crate::platforms::nvidia_gpu::jwks_url_for_endpoint(self.nras.url_for(arch))?;
+        let url =
+            crate::platforms::nvidia_gpu::provider::jwks_url_for_endpoint(self.nras.url_for(arch))?;
         let c = self.refresh(&CollateralKey::NrasJwks { url }).await?;
         serde_json::from_slice(&c.bytes)
             .map_err(|e| AttestationError::JwksFetch(format!("JWKS parse: {e}")))

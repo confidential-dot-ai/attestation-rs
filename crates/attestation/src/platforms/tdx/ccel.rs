@@ -21,6 +21,8 @@ use crate::error::{AttestationError, Result};
 /// Maximum digest algorithms per event (TCG spec allows ~3; cap at 16 for safety).
 /// A parsed CCEL event.
 #[derive(Debug, Clone)]
+// Parsed for callers of parse_ccel; replay reads only the index and digest.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub struct CcelEvent {
     /// MR index: 1=RTMR[0], 2=RTMR[1], 3=RTMR[2], 4=RTMR[3].
     pub mr_index: u32,

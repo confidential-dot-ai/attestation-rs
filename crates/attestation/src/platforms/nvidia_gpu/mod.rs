@@ -59,9 +59,7 @@ pub mod verify;
 #[cfg(all(feature = "nvidia-gpu-attest", target_os = "linux"))]
 pub mod attest;
 
-pub use provider::{
-    jwks_url_for_endpoint, DefaultNrasProvider, Jwks, JwksKey, NrasProvider, NrasRequest,
-};
+pub use provider::{DefaultNrasProvider, Jwks, NrasProvider, NrasRequest};
 pub use verify::verify_bundle;
 
 use crate::error::{AttestationError, Result};

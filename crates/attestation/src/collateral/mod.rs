@@ -6,6 +6,11 @@
 //! `CertProvider` and `TdxCollateralProvider` traits remain the seam a caller
 //! can replace, and the default providers are handles on the shared cache.
 
+#[cfg(feature = "nvidia-gpu")]
+pub use crate::platforms::nvidia_gpu::provider::{
+    jwks_url_for_endpoint, DefaultNrasProvider, Jwks, JwksKey, NrasEvidenceEntry, NrasProvider,
+    NrasRequest, HEADER_OCSP_ALLOW_CERT_HOLD, NRAS_GPU_URL, NRAS_SWITCH_URL,
+};
 use std::time::Duration;
 
 use async_trait::async_trait;

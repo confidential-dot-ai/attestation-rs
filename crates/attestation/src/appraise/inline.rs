@@ -47,16 +47,19 @@ impl<'a> InlineCollateral<'a> {
         }
     }
 
+    #[cfg_attr(not(feature = "tdx"), allow(dead_code))]
     pub fn tdx(&self) -> Option<&'a dyn TdxCollateralProvider> {
         self.tdx
     }
 
     /// Whether the envelope carries an entry under this label.
+    #[cfg_attr(not(any(feature = "snp", feature = "tdx")), allow(dead_code))]
     pub fn has(&self, label: &str) -> bool {
         self.entry(label).is_some()
     }
 
     /// The raw bytes under a label, unchecked; callers bind them themselves.
+    #[cfg_attr(not(feature = "snp"), allow(dead_code))]
     pub fn raw(&self, label: &str) -> Option<&'a [u8]> {
         self.entry(label)
     }

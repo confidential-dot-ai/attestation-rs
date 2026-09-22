@@ -12,6 +12,8 @@ use super::evidence::TdxEvidence;
 
 /// TDX Quote header (48 bytes).
 #[derive(Debug, Clone)]
+// The whole header is parsed; verification reads the version and key type it needs.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub struct QuoteHeader {
     pub version: u16,
     pub att_key_type: u16,
