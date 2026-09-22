@@ -36,6 +36,12 @@ pub enum AttestationError {
     #[error("eventlog integrity check failed: {0}")]
     EventlogIntegrityFailed(String),
 
+    #[error("eventlog cannot be parsed: {0}")]
+    EventlogParseFailed(String),
+
+    #[error("{reason}")]
+    Refused { code: RefusalCode, reason: String },
+
     #[error("TEE hardware access failed: {0}")]
     HardwareAccessFailed(String),
 
@@ -156,3 +162,155 @@ pub enum AttestationError {
 }
 
 pub type Result<T> = std::result::Result<T, AttestationError>;
+
+/// The rule family a refusal belongs to: the codes of design doc section 14.4,
+/// which the conformance corpus compares across implementations.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefusalCode {
+    EnvelopeInvalid,
+    PolicyInvalid,
+    PlatformUnsupported,
+    ReportInvalid,
+    SignatureInvalid,
+    ChainInvalid,
+    MachineNotAllowed,
+    GuestPolicy,
+    BindingMismatch,
+    CollateralUnavailable,
+    CollateralInvalid,
+    Revoked,
+    TcbNotAllowed,
+    RegisterMismatch,
+    LogRequired,
+    LogInvalid,
+    ReplayMismatch,
+    ReferenceMismatch,
+    BackingBelowMinimum,
+    DeviceRequired,
+    DeviceNotAllowed,
+    DeviceTokenInvalid,
+    DevicePolicy,
+    Unsupported,
+}
+
+impl RefusalCode {
+    /// The kebab-case name of section 14.4.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefusalCode::EnvelopeInvalid => "envelope-invalid",
+            RefusalCode::PolicyInvalid => "policy-invalid",
+            RefusalCode::PlatformUnsupported => "platform-unsupported",
+            RefusalCode::ReportInvalid => "report-invalid",
+            RefusalCode::SignatureInvalid => "signature-invalid",
+            RefusalCode::ChainInvalid => "chain-invalid",
+            RefusalCode::MachineNotAllowed => "machine-not-allowed",
+            RefusalCode::GuestPolicy => "guest-policy",
+            RefusalCode::BindingMismatch => "binding-mismatch",
+            RefusalCode::CollateralUnavailable => "collateral-unavailable",
+            RefusalCode::CollateralInvalid => "collateral-invalid",
+            RefusalCode::Revoked => "revoked",
+            RefusalCode::TcbNotAllowed => "tcb-not-allowed",
+            RefusalCode::RegisterMismatch => "register-mismatch",
+            RefusalCode::LogRequired => "log-required",
+            RefusalCode::LogInvalid => "log-invalid",
+            RefusalCode::ReplayMismatch => "replay-mismatch",
+            RefusalCode::ReferenceMismatch => "reference-mismatch",
+            RefusalCode::BackingBelowMinimum => "backing-below-minimum",
+            RefusalCode::DeviceRequired => "device-required",
+            RefusalCode::DeviceNotAllowed => "device-not-allowed",
+            RefusalCode::DeviceTokenInvalid => "device-token-invalid",
+            RefusalCode::DevicePolicy => "device-policy",
+            RefusalCode::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl std::fmt::Display for RefusalCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AttestationError {
+    /// A refusal with its section 14.4 code.
+    pub fn refused(code: RefusalCode, reason: impl Into<String>) -> Self {
+        AttestationError::Refused {
+            code,
+            reason: reason.into(),
+        }
+    }
+
+    /// The section 14.4 code of this error. Errors of the attester side and
+    /// of collateral fetching map to the code a verifier would report.
+    pub fn refusal_code(&self) -> RefusalCode {
+        use AttestationError as E;
+        use RefusalCode as C;
+        match self {
+            E::Refused { code, .. } => *code,
+            E::NoPlatformDetected | E::PlatformNotEnabled(_) | E::HardwareAccessFailed(_) => {
+                C::PlatformUnsupported
+            }
+            E::ReportDataTooLarge { .. }
+            | E::EvidenceDeserialize(_)
+            | E::EvidenceTooLarge { .. }
+            | E::ProfileEvidenceInvalid(_) => C::EnvelopeInvalid,
+            E::PolicyInvalid(_) => C::PolicyInvalid,
+            E::SignatureVerificationFailed(_) => C::SignatureInvalid,
+            E::CertChainError(_) => C::ChainInvalid,
+            E::CertFetchError(_) => C::CollateralUnavailable,
+            E::QuoteParseFailed(_) | E::UnsupportedReportVersion { .. } => C::ReportInvalid,
+            E::VmplCheckFailed(_) | E::DebugPolicyViolation => C::GuestPolicy,
+            E::EventlogIntegrityFailed(_) => C::ReplayMismatch,
+            E::EventlogParseFailed(_) => C::LogInvalid,
+            E::TcbMismatch(_) => C::TcbNotAllowed,
+            E::ReportDataMismatch => C::BindingMismatch,
+            E::InitDataMismatch => C::ReferenceMismatch,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NvidiaGpuRequired => C::DeviceRequired,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NvidiaGpuBindingMismatch
+            | E::NvidiaGpuSubmoduleNonceMismatch { .. }
+            | E::NvidiaGpuUserNonceMissing
+            | E::NvidiaGpuReportDataRequired
+            | E::NvidiaGpuBindingNotAllowed
+            | E::NvidiaGpuNonceTooShort(_) => C::BindingMismatch,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NvidiaGpuDevicePolicyFailed { .. }
+            | E::NrasOverallFailed
+            | E::NvidiaGpuDeviceCountMismatch { .. } => C::DevicePolicy,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NvidiaGpuArchNotAllowed(_)
+            | E::NvidiaGpuBundleEmpty
+            | E::NvidiaGpuTooManyDevices(_, _) => C::DeviceNotAllowed,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NrasRequestFailed(_) | E::JwksFetch(_) => C::CollateralUnavailable,
+            #[cfg(feature = "nvidia-gpu")]
+            E::NrasResponseParse(_)
+            | E::NrasIssuerMismatch { .. }
+            | E::NrasClaimsVersionMismatch { .. }
+            | E::NrasSubmoduleDigestMismatch { .. }
+            | E::JwsVerification(_)
+            | E::JwksKidNotFound(_) => C::DeviceTokenInvalid,
+            #[cfg(all(feature = "nvidia-gpu-attest", target_os = "linux"))]
+            E::NvidiaGpuEvidenceCollection(_) => C::PlatformUnsupported,
+            E::Collateral(e) => match e {
+                crate::collateral::CollateralError::Parse { .. }
+                | crate::collateral::CollateralError::Expired { .. }
+                | crate::collateral::CollateralError::Unsigned { .. } => C::CollateralInvalid,
+                _ => C::CollateralUnavailable,
+            },
+            E::Other(_) => C::EnvelopeInvalid,
+        }
+    }
+}

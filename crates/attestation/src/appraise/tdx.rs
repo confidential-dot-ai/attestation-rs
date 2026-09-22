@@ -3,9 +3,9 @@
 use super::inline::InlineCollateral;
 use super::resolve_floor;
 use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, Assessment};
-use super::{invalid, Ctx, Outcome};
+use super::{invalid, refuse, Ctx, Outcome};
 use crate::collateral::TdxCollateralProvider;
-use crate::error::{AttestationError, Result};
+use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::tdx::dcap;
 use crate::platforms::tdx::verify::{parse_tdx_quote, verify_quote_signature};
 use crate::profile::cel;
@@ -81,7 +81,7 @@ pub(crate) async fn appraise(
 
     // 3. Signature, then the DCAP chain to the embedded Intel root.
     verify_quote_signature(quote_bytes, &quote)?;
-    dcap::verify_dcap_chain(quote_bytes, quote.quote_version, None)?;
+    dcap::verify_dcap_chain_at(quote_bytes, quote.quote_version, None, ctx.now)?;
     let body_end = dcap::compute_body_end(quote_bytes, quote.quote_version)?;
     let auth = dcap::parse_auth_data(quote_bytes, body_end)?;
     let pck_pem = auth.pck_cert_chain_pem;
@@ -113,18 +113,26 @@ pub(crate) async fn appraise(
         return Err(AttestationError::DebugPolicyViolation);
     }
     if migratable && !bits.allow_migration {
-        return Err(invalid("TD is migratable and policy does not allow it"));
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
+            "TD is migratable and policy does not allow it",
+        ));
     }
     if bits.require_sept_ve_disable && !sept_ve_disable {
-        return Err(invalid("TD attributes lack SEPT_VE_DISABLE"));
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
+            "TD attributes lack SEPT_VE_DISABLE",
+        ));
     }
     if bits.require_zero_reserved_attributes && !reserved_zero {
-        return Err(invalid(format!(
-            "TD attributes carry reserved bits: {attrs:#018x}"
-        )));
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
+            format!("TD attributes carry reserved bits: {attrs:#018x}"),
+        ));
     }
     if service_td == Some(true) && !bits.allow_service_td {
-        return Err(invalid(
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
             "a migration service TD is bound and policy does not allow it",
         ));
     }
@@ -161,11 +169,12 @@ pub(crate) async fn appraise(
             outcomes.insert(CollateralCheck::TdxPckCrl, checked(None));
             outcomes.insert(CollateralCheck::TdxRootCrl, checked(None));
             let tcb_info = collateral.get_tcb_info(&fmspc).await?;
-            let evaluated = dcap::evaluate_tcb_status(
+            let evaluated = dcap::evaluate_tcb_status_at(
                 &tcb_info.body,
                 &quote.body.tee_tcb_svn,
                 pck_pem,
                 &tcb_info.signing_chain,
+                ctx.now,
             )?;
             if evaluated.tcb_status == TdxTcbStatus::Revoked {
                 return Err(AttestationError::TcbMismatch(
@@ -184,7 +193,12 @@ pub(crate) async fn appraise(
             }
             if let Some(min) = tdx_floor.and_then(|f| f.min_tcb_evaluation_data_number) {
                 let have = pcs_u32(&tcb_info.body, "tcbInfo", "tcbEvaluationDataNumber")
-                    .ok_or_else(|| invalid("TCB Info carries no tcbEvaluationDataNumber"))?;
+                    .ok_or_else(|| {
+                        refuse(
+                            RefusalCode::CollateralInvalid,
+                            "TCB Info carries no tcbEvaluationDataNumber",
+                        )
+                    })?;
                 if have < min {
                     return Err(AttestationError::TcbMismatch(format!(
                         "tcbEvaluationDataNumber {have} is below the policy floor {min}"
@@ -196,7 +210,7 @@ pub(crate) async fn appraise(
                 checked(pcs_next_update(&tcb_info.body, "tcbInfo")),
             );
             let qe = collateral.get_td_qe_identity().await?;
-            dcap::verify_qe_identity(auth.qe_report_body, &qe.body, &qe.signing_chain)?;
+            dcap::verify_qe_identity_at(auth.qe_report_body, &qe.body, &qe.signing_chain, ctx.now)?;
             outcomes.insert(
                 CollateralCheck::TdxQeIdentity,
                 checked(pcs_next_update(&qe.body, "enclaveIdentity")),
@@ -272,10 +286,13 @@ pub(crate) async fn appraise(
                 || usize::from(r.index) >= rtmrs.len()
                 || !constant_time_eq(r.value.as_slice(), &rtmrs[usize::from(r.index)])
             {
-                return Err(invalid(format!(
-                    "cvm_registers entry {} differs from the signed RTMR",
-                    r.index
-                )));
+                return Err(refuse(
+                    RefusalCode::RegisterMismatch,
+                    format!(
+                        "cvm_registers entry {} differs from the signed RTMR",
+                        r.index
+                    ),
+                ));
             }
         }
     }
@@ -316,14 +333,16 @@ pub(crate) async fn appraise(
                 }
             }
             other => {
-                return Err(invalid(format!(
-                    "event log format {other:?} cannot be replayed by this release"
-                )))
+                return Err(refuse(
+                    RefusalCode::Unsupported,
+                    format!("event log format {other:?} cannot be replayed by this release"),
+                ))
             }
         }
     }
     if !policy.reference.slot_owners.is_empty() {
-        return Err(invalid(
+        return Err(refuse(
+            RefusalCode::ReferenceMismatch,
             "policy pins slot owners but a TDX cpu submodule has no workload slots",
         ));
     }

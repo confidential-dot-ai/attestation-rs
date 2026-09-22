@@ -14,7 +14,7 @@ We propose a common CVM attestation contract using existing message vocabularies
 - Runtime measurements are a register array with an explicit algorithm, index, source and `backing` label per register, plus a TCG Canonical Event Log (CEL, v1.1) that replays to them. TDX RTMRs, Azure vTPM PCRs, Arm CCA REMs and the new SNP registers all populate the same array.
 - Freshness is one nonce bound per platform in a declared mode. On SNP with the register driver, `report_data` becomes the `ats-mr-v1` commitment and the nonce lives in the committed caller data.
 - Attestation results are EAR (draft-ietf-rats-ear-04) with our normalized claims in `ear_attester_claims`, collateral outcomes in `ear_verifier_claims`, and the trustworthiness vector filled per AR4SI-10. c8s already mints EAR; it moves from profile 03 to 04 and drops its private claims for the profiled ones.
-- The Rust library publishes types, JSON Schemas and vectors for the contract. Pinning them in attestation-go and c8s-verify-js and validating cross-implementation behavior are rollout requirements; schema agreement alone does not prevent semantic drift.
+- The Rust library publishes types, JSON Schemas and vectors for the contract, and the conformance corpus of section 14 is the contract's executable form: an implementation conforms when it reproduces every case's decision. Schema agreement alone does not prevent semantic drift; the corpus is what does.
 
 ## 2. Scope and roles
 
@@ -434,7 +434,7 @@ impl Verifier {
 
 The public surface is the verifier, the attester functions and the vocabulary; the per-platform parsers and verifiers are not part of it:
 
-- `Verifier` appraises the profile (`appraise`, `appraise_json`, `appraise_legacy_json`) and keeps `verify` for the pre-profile envelope during the transition. Its providers are set with `with_collateral`, `with_cert_provider`, `with_tdx_provider` and `with_nras_provider`.
+- `Verifier` appraises the profile (`appraise`, `appraise_json`, `appraise_legacy_json`) and keeps `verify` for the pre-profile envelope during the transition. `Verifier::with_clock` sets the evaluation time of section 14; every error carries its section 14.4 code through `AttestationError::refusal_code`. Its providers are set with `with_collateral`, `with_cert_provider`, `with_tdx_provider` and `with_nras_provider`.
 - The attester side is `attest_profile`, with `attest` and `attest_with_nvidia_gpu` kept for the pre-profile envelope, and `detect` (Linux, `attest` feature).
 - `profile` holds the evidence, policy and appraisal types and the section 4.5, 4.8 and 4.9 primitives. `collateral` holds the collateral keys, the cache and disk store, and every provider trait, NRAS included. `error` holds the errors, and `types` holds the pre-profile types, kept for two minor releases.
 - `platforms` and the appraisal engine are private. The `unstable-internals` feature exposes `platforms` with no stability promise, for this repository's hardware tests and benches and for the wasm crate's pre-profile exports.
@@ -518,7 +518,111 @@ Each step is one reviewable PR in `attestation-rs` unless noted, in this order, 
 8. `tcg-cel` (`cel` on crates.io is the Common Expression Language): a standalone crate for CEL-CBOR and CEL-JSON encoding, parsing and replay, with ingest from TCG2 logs (TPM and CCEL), the attestation-agent entries a CCEL carries, and dstack JSON; no such library exists in any language, and the log half of this profile is only reusable if it does. On the design branch as `crates/tcg-cel`, without the CEL-TLV encoding.
 9. NRAS: the provider is on `/v4/attest/gpu` and `/v4/attest/switch` with claims version 3.0, as NVIDIA's attestation SDK is. The request body is the v3 body; the difference that matters is that the overall token's `submods` digests are SHA-256 over the returned device tokens, which the verifier now checks along with `iss` and `x-nvidia-ver`. NVSwitch tokens carry `x-nvidia-switch-*` claims, which the verifier now maps (before this step every NVSwitch failed the nonce-match gate).
 
+10. Conformance (section 14): the corpus, the Rust runner that generates and checks it, then the Go and JavaScript runners; every later change to a decision in sections 4 to 7 lands with its case.
+
 Each PR carries the premises it rests on and how they were verified, per the review standard the hotfixes set.
+
+## 14. Conformance
+
+An implementation of this profile conforms when it passes the conformance corpus at the corpus version it declares. The corpus is the executable form of the normative statements in sections 4 to 7: the schemas of section 8 constrain the shape of evidence, policy and results, the vectors of Appendix B constrain the hash formulas, and the corpus constrains the decisions. A decision that has no case is not part of the contract, and a statement in sections 4 to 7 that has no case is a gap the corpus lists until it is closed.
+
+### 14.1 Layout and versioning
+
+The corpus lives in `conformance/` at the root of the attestation-rs repository, beside the schemas, and is consumed as data by every implementation:
+
+```
+conformance/
+  VERSION            the corpus version
+  README.md          how to run the corpus against an implementation
+  UNCOVERED.md       the normative statements that have no case yet
+  cases/<id>.json    one case per file
+  inputs/            the evidence, policies, collateral and recorded NRAS exchanges the cases reference
+```
+
+The corpus version is `<profile version>.<revision>`, `1.0` at the first publication. A change to any case, including a new case, raises the revision; a change that alters a decision in sections 4 to 7 lands in one commit with the case that shows it. A case id is never reused. An implementation states the corpus version it passes (`conforms to tag:confidential.ai,2026:cvm#1, corpus 1.<n>`) and pins that version in its continuous integration the way it pins the schemas.
+
+The Rust library is the reference implementation: it generates the expected results and reviewers read them as part of the change. Every other implementation only checks. A case the reference implementation fails is a defect in the reference implementation or in the case, and the corpus is corrected before the implementation.
+
+### 14.2 Case format
+
+A case is one JSON object:
+
+```
+case = {
+  "id": text,                         ; kebab-case, unique, permanent
+  "rule": { "section": text, "statement": text },
+  "now": text,                        ; RFC 3339 UTC: the evaluation time
+  "evidence": path,                   ; the profile envelope, JSON
+  ? "policy": path,                   ; the VerifyPolicy, JSON; absent means the section 7 default
+  ? "collateral": { * collateral-key => (path / { "body": path, "signing_chain": path }) },
+  ? "nras": [ * nras-exchange ],
+  "expect": { "appraisal": path } / { "refusal": refusal-code },
+}
+path = text                           ; relative to conformance/inputs, forward slashes
+collateral-key = text                 ; the text form of the collateral key (section 8)
+nras-exchange = { "arch": text, "nonce": text, "response": path, "jwks": path }
+```
+
+`rule.section` names the section the case exercises and `rule.statement` quotes it, so a case is traceable to the text and the text to its cases. Every input is a file under `inputs/`, so a case is self-contained and identical for every implementation.
+
+A case fixes everything a decision depends on:
+
+- `now` is the evaluation time. Every validity window in the appraisal (certificate notBefore and notAfter, CRL thisUpdate and nextUpdate, TCB Info and QE Identity nextUpdate, NRAS token nbf and exp, the age bounds of section 4.5) is judged against it. A conforming verifier takes the evaluation time as an input; one that reads the wall clock cannot run the corpus.
+- `collateral` is the whole collateral the appraisal may use, keyed as section 8 keys collateral (`snp_vcek/<generation>/<chip id>-<tcb>`, `snp_cert_chain/<generation>`, `snp_crl/<generation>`, `tdx_tcb_info/<fmspc>`, `tdx_qe_identity/td`, `tdx_pck_crl/<ca>`, `tdx_root_crl`, `nras_jwks/<url>`), each file the artifact's bytes as the source serves them, with signed Intel artifacts carrying their signing chain beside the body. A request for a key the case does not carry fails as unavailable collateral. The envelope's inline endorsements are inputs to the case like any other, and the provider-first rule of section 4.6 applies.
+- `nras` holds the recorded exchange for each architecture batch the appraisal sends: the nonce it will send (section 4.5), the detached EAT NRAS returned and the JWKS that verifies it. A request the case does not carry fails as unavailable collateral. Nothing in the corpus reaches a network.
+- `policy` is the complete policy; a case that omits it runs under the section 7 defaults, and its identifier (section 5.1) is the one the expected result carries.
+
+A case exercises one statement. Where an input breaks several, the verification order of section 6 decides which refusal the case expects, and the case says so in `rule.statement`.
+
+### 14.3 Comparison rules
+
+For `expect.appraisal`, the runner produces the appraisal, encodes it as the section 5 JSON, and compares it with the expected file as parsed JSON values after removing, from both, the members that are the implementation's own and never part of the decision:
+
+- `iat`;
+- `ear_verifier_id`;
+- `ear_raw_evidence`;
+- `reason` inside every `cvm_collateral` entry.
+
+Everything else must be equal: `eat_profile`, `eat_nonce`, `ear_all_submods_bound`, the set of submodule names, and for each submodule `ear_status`, `ear_trustworthiness_vector`, `ear_appraisal_policy_ids`, `ear_attester_claims` and `ear_verifier_claims` in full, `cvm_collateral` statuses, dates and `signed` included, since the case fixes the collateral and the clock. An implementation that emits an extra claim fails the case; the contract is the claim set of section 5.
+
+For `expect.refusal`, the runner maps the implementation's error to one code of section 14.4 and compares codes. An implementation documents its mapping. A refusal with another code is a different decision and fails the case, as does an appraisal where a refusal was expected or the reverse.
+
+### 14.4 Refusal codes
+
+A refusal names the rule family that failed, never the implementation's error type or message. The codes, with the section each belongs to:
+
+| Code | Section | Meaning |
+| --- | --- | --- |
+| `envelope-invalid` | 4, 4.10, step 1 and 2 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, version or consistency rule, including an attester hint that contradicts the signed report and a reserved kind or claim of section 12 |
+| `policy-invalid` | 7 | the policy fails its own validation |
+| `platform-unsupported` | 2 | the TEE or hosting is one this verifier does not implement |
+| `report-invalid` | step 2 | the hardware report cannot be parsed, or its version is outside the supported range |
+| `signature-invalid` | step 3 | a hardware or vendor signature does not verify: the report, the quote, the TPM quote, the HCL report |
+| `chain-invalid` | step 3 | a certificate chain does not reach the pinned root, contradicts the report, or is outside its validity at `now` |
+| `machine-not-allowed` | step 3, 7 | the authenticated machine identity is missing from the policy's allowlist |
+| `guest-policy` | step 4 | a guest policy bit, TD attribute, VMPL, debug state or lifecycle violates policy |
+| `binding-mismatch` | step 5, 4.5 | the freshness binding of the submodule's mode does not hold |
+| `collateral-unavailable` | step 6 | an artifact policy requires could not be obtained |
+| `collateral-invalid` | step 6 | an artifact fails its signature, chain or validity window, or an inline endorsement contradicts the provider's |
+| `revoked` | step 6 | a certificate is revoked |
+| `tcb-not-allowed` | step 6, 7 | a TCB status outside the allowed set, an advisory the policy refuses, or a TCB value below its floor |
+| `register-mismatch` | step 7 | an envelope register differs from the authoritative value, or is unauthenticated |
+| `log-required` | 4.8, 4.9 | a log the mode requires is absent, or `chain_len` and the log disagree |
+| `log-invalid` | 4.8 | the log cannot be parsed whole under its format's rules |
+| `replay-mismatch` | step 8, 4.9 | a replay does not reproduce a register that must reproduce, a record digest does not reproduce, or a slot rule of section 4.9 is broken |
+| `reference-mismatch` | step 9, 7 | a pinned launch measurement, register, PCR, host data or slot owner differs |
+| `backing-below-minimum` | step 9, 7 | a register's backing is below the policy minimum |
+| `device-required` | 7 | policy requires a device and the envelope carries none |
+| `device-not-allowed` | 7 | a device's architecture is outside the allowed set, or the envelope carries more devices than the verifier accepts |
+| `device-token-invalid` | 4.4 | NRAS answered with a token the verifier refuses: signature, issuer, claims version, `submods` digest, key identifier |
+| `device-policy` | 7 | NRAS's overall result is false, or a per-device gate failed |
+| `unsupported` | | a format or feature this release does not implement, such as the standalone `aael` log |
+
+### 14.5 Coverage and change control
+
+Every normative statement in sections 4 to 7 has at least one case, and every rule the verifier enforces has a case that shows the refusal. `UNCOVERED.md` lists the statements without one; the list shrinks and never grows without a stated reason. A pull request that changes a decision carries the case that shows the new decision, the doc change that states it, and the corpus revision; the reference implementation's runner refuses a corpus whose cases cite a section that does not exist.
+
+The corpus is published with the profile. A relying party that reads a result token can ask which corpus version the verifier passes, and two implementations that pass the same version agree on every decision it covers.
 
 ## Appendix A. CBOR claim keys
 

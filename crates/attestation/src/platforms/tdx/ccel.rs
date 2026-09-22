@@ -20,7 +20,7 @@ use crate::error::{AttestationError, Result};
 /// mapping MrIndex 1 to 4 onto them. Records the Confidential Containers
 /// attestation agent appends (MrIndex 4 by default) replay into RTMR 3.
 pub fn replay_rtmrs(ccel: &[u8]) -> Result<[[u8; 48]; 4]> {
-    let integrity = |e: tcg_cel::Error| AttestationError::EventlogIntegrityFailed(e.to_string());
+    let integrity = crate::profile::cel::cel_err;
     let records =
         tcg_cel::tcg2::to_cel(ccel, tcg_cel::tcg2::IndexMap::CcMrToRtmr).map_err(integrity)?;
     let out = tcg_cel::replay(

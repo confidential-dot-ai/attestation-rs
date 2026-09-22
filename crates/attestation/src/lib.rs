@@ -52,7 +52,7 @@ pub use collateral::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use collateral::{CachePolicy, CollateralCache, DiskStore, Endpoints};
 pub use collateral::{CollateralError, CollateralKey, CollateralKind, Fmspc, SignedCollateral};
-pub use error::{AttestationError, Result};
+pub use error::{AttestationError, RefusalCode, Result};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]
 pub use platforms::tdx::attest::TdxQuoteMethod;
 #[cfg(feature = "tdx")]
@@ -356,8 +356,13 @@ pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
 ///     .with_cert_provider(my_cached_provider);
 /// let result = verifier.verify(&evidence_json, &VerifyParams::default()).await?;
 /// ```
+/// The evaluation time an appraisal judges every validity window against.
+pub type Clock = std::sync::Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
+
 pub struct Verifier {
     cert_provider: Box<dyn CertProvider>,
+    /// Section 14: the wall clock unless a caller pins it.
+    clock: Clock,
     /// `None` = offline: TDX collateral checks (PCK CRL, TCB status, QE
     /// identity) are skipped and `collateral_verified` stays `false`. See
     /// [`Verifier::offline`].
@@ -381,6 +386,7 @@ impl Verifier {
         {
             Self {
                 cert_provider: Box::new(DefaultCertProvider::new()),
+                clock: std::sync::Arc::new(chrono::Utc::now),
                 tdx_provider: Some(Box::new(DefaultTdxCollateralProvider::new())),
                 #[cfg(feature = "nvidia-gpu")]
                 nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
@@ -424,10 +430,21 @@ impl Verifier {
     pub fn offline() -> Self {
         Self {
             cert_provider: Box::new(DefaultCertProvider::new()),
+            clock: std::sync::Arc::new(chrono::Utc::now),
             tdx_provider: None,
             #[cfg(feature = "nvidia-gpu")]
             nras_provider: Box::new(platforms::nvidia_gpu::DefaultNrasProvider::new()),
         }
+    }
+
+    /// Judge every validity window against `clock` instead of the wall clock:
+    /// certificate and CRL windows, TCB Info and QE Identity `nextUpdate`, NRAS
+    /// token times, and the appraisal's own `iat`. This is what lets a recorded
+    /// case of the conformance corpus (section 14) run on any day.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     #[cfg(feature = "nvidia-gpu")]

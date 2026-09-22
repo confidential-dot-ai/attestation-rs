@@ -24,8 +24,19 @@ fn bad(msg: impl Into<String>) -> AttestationError {
     AttestationError::EventlogIntegrityFailed(msg.into())
 }
 
-fn cel_err(e: tcg_cel::Error) -> AttestationError {
-    bad(e.to_string())
+/// A log that cannot be read is `log-invalid`; one that reads and breaks a
+/// rule is an integrity failure (section 14.4).
+pub(crate) fn cel_err(e: tcg_cel::Error) -> AttestationError {
+    match e {
+        tcg_cel::Error::Cbor { .. }
+        | tcg_cel::Error::Json(_)
+        | tcg_cel::Error::Tcg2 { .. }
+        | tcg_cel::Error::Dstack { .. }
+        | tcg_cel::Error::Usage(_) => AttestationError::EventlogParseFailed(e.to_string()),
+        tcg_cel::Error::Record { .. }
+        | tcg_cel::Error::Digest { .. }
+        | tcg_cel::Error::Replay(_) => bad(e.to_string()),
+    }
 }
 
 /// A c8s event (section 4.8): `{0: domain, 1: operation, 2: content_digest, 3: content?}`.

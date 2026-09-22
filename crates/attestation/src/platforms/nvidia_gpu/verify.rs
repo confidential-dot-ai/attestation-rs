@@ -143,6 +143,7 @@ async fn verify_arch_group(
         _ => gpu_nonce(user_nonce, &bundle.binding),
     };
     attest_arch(
+        chrono::Utc::now(),
         arch,
         devices,
         nonce_bytes,
@@ -156,6 +157,7 @@ async fn verify_arch_group(
 /// overall and each submodule JWT, bind every submodule to `nonce_bytes` and
 /// apply the per-device policy.
 pub(crate) async fn attest_arch(
+    now: chrono::DateTime<chrono::Utc>,
     arch: NvidiaGpuArch,
     devices: &[&crate::types::NvidiaGpuDeviceEvidence],
     nonce_bytes: [u8; 32],
@@ -183,7 +185,7 @@ pub(crate) async fn attest_arch(
     let issuer = provider.issuer(arch)?;
 
     let overall_claims =
-        verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider).await?;
+        verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider, now).await?;
     check_issuer(&overall_claims, &issuer)?;
     check_claims_version(&overall_claims, &request.claims_version)?;
     check_submods(&overall_claims, &submodule_jwts)?;
@@ -210,7 +212,8 @@ pub(crate) async fn attest_arch(
 
     let mut device_claims = Vec::with_capacity(submodule_jwts.len());
     for (name, sub_jwt) in submodule_jwts {
-        let sub_claims = verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider).await?;
+        let sub_claims =
+            verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider, now).await?;
         check_issuer(&sub_claims, &issuer)?;
         // The `submods` digests bind this token to the overall result; its own
         // `eat_nonce` binds it to the session.
@@ -352,11 +355,12 @@ async fn verify_jws_with_kid_rotation(
     jwks: &mut Jwks,
     arch: NvidiaGpuArch,
     provider: &dyn NrasProvider,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<serde_json::Value> {
-    match verify_jws_es384(token, jwks) {
+    match verify_jws_es384_at(token, jwks, now) {
         Err(AttestationError::JwksKidNotFound(_)) => {
             *jwks = provider.jwks_force(arch).await?;
-            verify_jws_es384(token, jwks)
+            verify_jws_es384_at(token, jwks, now)
         }
         other => other,
     }
@@ -432,7 +436,17 @@ fn split_eat_response(v: &serde_json::Value) -> Result<(String, Vec<(String, Str
 
 /// Verify an ES384-signed compact JWS against a JWKS, returning the decoded
 /// claims body.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
+    verify_jws_es384_at(token, jwks, chrono::Utc::now())
+}
+
+/// [`verify_jws_es384`] with the signing chain and the time claims judged at `now`.
+pub fn verify_jws_es384_at(
+    token: &str,
+    jwks: &Jwks,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<serde_json::Value> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(AttestationError::JwsVerification(
@@ -467,7 +481,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
         .find(|k| k.kid == kid)
         .ok_or_else(|| AttestationError::JwksKidNotFound(kid.to_string()))?;
 
-    let verifying_key = es384_verifying_key_from_jwks_entry(key)?;
+    let verifying_key = es384_verifying_key_from_jwks_entry_at(key, now.timestamp())?;
 
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let sig_bytes = URL_SAFE_NO_PAD
@@ -488,7 +502,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
     let claims: serde_json::Value = serde_json::from_slice(&payload)
         .map_err(|e| AttestationError::JwsVerification(format!("payload json: {e}")))?;
 
-    enforce_time_claims(&claims)?;
+    enforce_time_claims(&claims, now.timestamp())?;
 
     Ok(claims)
 }
@@ -507,9 +521,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
 /// Runs on all targets including wasm32: `chrono::Utc::now()` works on wasm via
 /// the `wasmbind` feature (see Cargo.toml), unlike `SystemTime`, which traps on
 /// wasm32-unknown-unknown.
-fn enforce_time_claims(claims: &serde_json::Value) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-
+fn enforce_time_claims(claims: &serde_json::Value, now: i64) -> Result<()> {
     let exp = claims
         .get("exp")
         .and_then(serde_json::Value::as_f64)
@@ -536,8 +548,16 @@ fn enforce_time_claims(claims: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn es384_verifying_key_from_jwks_entry(
     key: &crate::platforms::nvidia_gpu::provider::JwksKey,
+) -> Result<p384::ecdsa::VerifyingKey> {
+    es384_verifying_key_from_jwks_entry_at(key, chrono::Utc::now().timestamp())
+}
+
+fn es384_verifying_key_from_jwks_entry_at(
+    key: &crate::platforms::nvidia_gpu::provider::JwksKey,
+    now_secs: i64,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     // The signing key MUST come from an x5c chain that validates up to the
     // pinned NVIDIA trust anchor. The raw JWK `(x, y)` coordinates carry no
@@ -546,7 +566,7 @@ fn es384_verifying_key_from_jwks_entry(
     // serving a JWKS of attacker-chosen coordinates could forge every EAT. We
     // therefore require x5c and never fall back to bare coordinates.
     match &key.x5c {
-        Some(chain) if !chain.is_empty() => verify_x5c_chain_and_extract_key(chain),
+        Some(chain) if !chain.is_empty() => verify_x5c_chain_and_extract_key_at(chain, now_secs),
         _ => Err(AttestationError::JwsVerification(
             "JWKS entry has no x5c chain; raw (x,y) coordinates are not accepted \
              because they bypass the pinned NVIDIA trust anchor"
@@ -578,7 +598,15 @@ const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
 /// This is the load-bearing trust check: there is no raw-coordinate fallback
 /// (see `es384_verifying_key_from_jwks_entry`), so every accepted signing key
 /// chains to the pinned anchor through these constraints.
+#[cfg(test)]
 fn verify_x5c_chain_and_extract_key(chain: &[String]) -> Result<p384::ecdsa::VerifyingKey> {
+    verify_x5c_chain_and_extract_key_at(chain, chrono::Utc::now().timestamp())
+}
+
+fn verify_x5c_chain_and_extract_key_at(
+    chain: &[String],
+    now_secs: i64,
+) -> Result<p384::ecdsa::VerifyingKey> {
     use sha2::Digest;
     use spki::DecodePublicKey;
     use x509_cert::der::Decode;
@@ -603,11 +631,9 @@ fn verify_x5c_chain_and_extract_key(chain: &[String]) -> Result<p384::ecdsa::Ver
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Enforce certificate validity periods on all targets, including wasm32.
-    // `chrono::Utc::now()` works on wasm (unlike `SystemTime`, which we used to
-    // cfg out — silently accepting expired NRAS signing certs in the browser).
+    // Enforce certificate validity periods at the evaluation time, on every
+    // target including wasm32.
     {
-        let now_secs = chrono::Utc::now().timestamp();
         for (i, (_der, cert)) in certs.iter().enumerate() {
             let validity = &cert.tbs_certificate.validity;
             let nb_unix: i64 = validity
@@ -1291,33 +1317,33 @@ mod tests {
     fn time_claims_reject_missing_or_non_numeric_exp() {
         // No exp, or an exp that is not a number, must fail closed (no fail-open
         // "accept a token with no expiry").
-        assert!(enforce_time_claims(&serde_json::json!({ "foo": 1 })).is_err());
-        assert!(enforce_time_claims(&serde_json::json!({ "exp": "not-a-number" })).is_err());
+        assert!(enforce_time_claims(&serde_json::json!({ "foo": 1 }), now()).is_err());
+        assert!(enforce_time_claims(&serde_json::json!({ "exp": "not-a-number" }), now()).is_err());
     }
 
     #[test]
     fn time_claims_reject_expired() {
         let claims = serde_json::json!({ "exp": now() - 60 });
-        assert!(enforce_time_claims(&claims).is_err());
+        assert!(enforce_time_claims(&claims, now()).is_err());
     }
 
     #[test]
     fn time_claims_accept_fractional_future_exp() {
         // RFC 7519 permits a fractional NumericDate; `as_i64` would reject it.
         let claims = serde_json::json!({ "exp": (now() + 3600) as f64 + 0.5 });
-        enforce_time_claims(&claims).expect("fractional future exp must be accepted");
+        enforce_time_claims(&claims, now()).expect("fractional future exp must be accepted");
     }
 
     #[test]
     fn time_claims_reject_not_yet_valid_nbf() {
         let claims = serde_json::json!({ "exp": now() + 3600, "nbf": now() + 600 });
-        assert!(enforce_time_claims(&claims).is_err());
+        assert!(enforce_time_claims(&claims, now()).is_err());
     }
 
     #[test]
     fn time_claims_accept_past_nbf_and_future_exp() {
         let claims = serde_json::json!({ "exp": now() + 3600, "nbf": now() - 600 });
-        enforce_time_claims(&claims).expect("past nbf with valid exp must be accepted");
+        enforce_time_claims(&claims, now()).expect("past nbf with valid exp must be accepted");
     }
 
     // SEC-3: per-submodule eat_nonce binding.

@@ -291,11 +291,19 @@ pub fn verify_report_signature(report_bytes: &[u8], vcek_der: &[u8]) -> Result<(
 
 /// Verify a VEK (VCEK/VLEK) certificate's validity period (notBefore/notAfter).
 pub fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
+    verify_vek_validity_period_at(vek_der, chrono::Utc::now())
+}
+
+/// [`verify_vek_validity_period`] judged at `now`.
+pub fn verify_vek_validity_period_at(
+    vek_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vek_der).map_err(|e| {
         AttestationError::CertChainError(format!("VEK x509 parse for validity: {e}"))
     })?;
     let validity = cert.validity();
-    let now = x509_parser::time::ASN1Time::now();
+    let now = snp_asn1_time(now)?;
     if now < validity.not_before {
         return Err(AttestationError::CertChainError(format!(
             "VEK certificate is not yet valid (notBefore: {})",
@@ -527,6 +535,22 @@ pub fn verify_vcek_tcb(
 // INVARIANT CLASS: Correctness
 // INVARIANT: CRL signature verified against issuing CA before trusting revocation data.
 pub fn check_vcek_not_revoked(vcek_der: &[u8], crl_der: &[u8], issuer_der: &[u8]) -> Result<()> {
+    check_vcek_not_revoked_at(vcek_der, crl_der, issuer_der, chrono::Utc::now())
+}
+
+/// `now` as the type x509-parser compares against.
+fn snp_asn1_time(now: chrono::DateTime<chrono::Utc>) -> Result<x509_parser::time::ASN1Time> {
+    x509_parser::time::ASN1Time::from_timestamp(now.timestamp())
+        .map_err(|e| AttestationError::CertChainError(format!("evaluation time: {e}")))
+}
+
+/// [`check_vcek_not_revoked`] with the CRL window judged at `now`.
+pub fn check_vcek_not_revoked_at(
+    vcek_der: &[u8],
+    crl_der: &[u8],
+    issuer_der: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     // 1. Parse the issuing CA cert to extract its public key
     let (_, issuer_cert) = X509Certificate::from_der(issuer_der)
         .map_err(|e| AttestationError::CertChainError(format!("CRL issuer x509 parse: {e}")))?;
@@ -544,7 +568,7 @@ pub fn check_vcek_not_revoked(vcek_der: &[u8], crl_der: &[u8], issuer_der: &[u8]
     // newer list may have revoked. AMD CRLs always carry nextUpdate; one
     // without it has no defined shelf life, so it is rejected rather than
     // trusted forever.
-    let now = x509_parser::time::ASN1Time::now();
+    let now = snp_asn1_time(now)?;
     if crl.last_update() > now {
         return Err(AttestationError::CertChainError(format!(
             "AMD CRL thisUpdate {} is in the future",

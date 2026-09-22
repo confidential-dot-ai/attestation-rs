@@ -22,7 +22,7 @@ mod snp;
 #[cfg(feature = "tdx")]
 mod tdx;
 
-use crate::error::{AttestationError, Result};
+use crate::error::{AttestationError, RefusalCode, Result};
 use crate::profile::binding::anchor;
 #[cfg(any(feature = "snp", feature = "tdx"))]
 use crate::profile::binding::pad64;
@@ -34,7 +34,7 @@ use crate::profile::{
     PROFILE_URI,
 };
 use crate::Verifier;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
 use inline::InlineCollateral;
@@ -45,17 +45,25 @@ pub(crate) struct Ctx<'a> {
     /// The relying party's binding input (section 4.5).
     pub anchor: Vec<u8>,
     pub policy: &'a VerifyPolicy,
+    /// The evaluation time every validity window is judged against (section 14).
+    pub now: DateTime<Utc>,
     /// The HCL `var_data` a verified vtpm submodule established, which the CPU
     /// report must bind in `vtpm-extradata` mode.
     pub vtpm_var_data: Option<Vec<u8>>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(nonce: &[u8], binding: &Binding, policy: &'a VerifyPolicy) -> Result<Self> {
+    fn new(
+        nonce: &[u8],
+        binding: &Binding,
+        policy: &'a VerifyPolicy,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
         let key = binding.key.as_ref();
         if let Some(required) = &policy.freshness.key {
             if Some(required) != key {
-                return Err(invalid(
+                return Err(refuse(
+                    RefusalCode::BindingMismatch,
                     "cvm_binding.key does not match the key the policy requires",
                 ));
             }
@@ -63,7 +71,7 @@ impl<'a> Ctx<'a> {
             // Section 4.5.1: the verifier compares the certificate it was
             // presented with, which reaches it as the policy's key. Without
             // it the evidence would vouch for a certificate nobody saw.
-            return Err(invalid(
+            return Err(refuse(RefusalCode::BindingMismatch,
                 "the certificate pattern needs the presented certificate's key in policy.freshness.key",
             ));
         }
@@ -71,6 +79,7 @@ impl<'a> Ctx<'a> {
             .ok_or_else(|| invalid("anchor inputs are out of range"))?;
         Ok(Ctx {
             anchor,
+            now,
             policy,
             vtpm_var_data: None,
         })
@@ -92,6 +101,11 @@ pub(crate) struct Outcome {
 
 pub(crate) fn invalid(msg: impl Into<String>) -> AttestationError {
     AttestationError::ProfileEvidenceInvalid(msg.into())
+}
+
+/// A refusal with its section 14.4 code; `invalid` is the `envelope-invalid` case.
+pub(crate) fn refuse(code: RefusalCode, reason: impl Into<String>) -> AttestationError {
+    AttestationError::refused(code, reason)
 }
 
 impl Verifier {
@@ -118,7 +132,7 @@ impl Verifier {
     pub async fn appraise(&self, evidence: &Evidence, policy: &VerifyPolicy) -> Result<Appraisal> {
         evidence.validate()?;
         policy.validate()?;
-        let now = Utc::now();
+        let now = (self.clock)();
         let nonce = evidence.eat_nonce.as_slice();
         let mut submods = BTreeMap::new();
         let mut all_bound = true;
@@ -133,7 +147,7 @@ impl Verifier {
                         "cpu binds through vtpm-extradata but there is no vtpm submodule",
                     ));
                 };
-                let out = self.appraise_vtpm(v, cpu, nonce, policy)?;
+                let out = self.appraise_vtpm(v, cpu, nonce, policy, now)?;
                 var_data = Some(out.var_data);
                 all_bound &= out.outcome.bound;
                 submods.insert("vtpm".to_string(), out.outcome.appraisal);
@@ -144,7 +158,7 @@ impl Verifier {
         for (name, submod) in &evidence.submods {
             let outcome = match submod {
                 Submod::Cpu(cpu) => {
-                    let mut ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
+                    let mut ctx = Ctx::new(nonce, &cpu.cvm_binding, policy, now)?;
                     ctx.vtpm_var_data = var_data.clone();
                     let collateral = InlineCollateral::new(
                         cpu.cvm_endorsements.as_ref(),
@@ -178,13 +192,14 @@ impl Verifier {
 
         // A pin that nothing checked is a pin that failed.
         if !policy.reference.pcrs.is_empty() && !submods.contains_key("vtpm") {
-            return Err(invalid(
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
                 "policy pins vTPM PCRs but the evidence carries no vtpm submodule",
             ));
         }
 
         // Devices go to NRAS in one request per architecture (section 6).
-        for (name, outcome) in self.appraise_devices(devices, nonce, policy).await? {
+        for (name, outcome) in self.appraise_devices(devices, nonce, policy, now).await? {
             all_bound &= outcome.bound;
             submods.insert(name, outcome.appraisal);
         }
@@ -220,8 +235,9 @@ impl Verifier {
         cpu: &CpuEvidence,
         nonce: &[u8],
         policy: &VerifyPolicy,
+        now: DateTime<Utc>,
     ) -> Result<vtpm::VtpmOutcome> {
-        let ctx = Ctx::new(nonce, &cpu.cvm_binding, policy)?;
+        let ctx = Ctx::new(nonce, &cpu.cvm_binding, policy, now)?;
         vtpm::appraise(v, cpu.cvm_platform.tee, &cpu.cvm_binding, &ctx)
     }
 
@@ -232,6 +248,7 @@ impl Verifier {
         _cpu: &CpuEvidence,
         _nonce: &[u8],
         _policy: &VerifyPolicy,
+        _now: DateTime<Utc>,
     ) -> Result<VtpmOutcome> {
         Err(AttestationError::PlatformNotEnabled(
             "Azure (vtpm submodule) appraisal".to_string(),
@@ -252,8 +269,9 @@ impl Verifier {
         devices: Vec<(String, &GpuDeviceEvidence)>,
         nonce: &[u8],
         policy: &VerifyPolicy,
+        now: DateTime<Utc>,
     ) -> Result<Vec<(String, Outcome)>> {
-        device::appraise_devices(devices, nonce, policy, self.nras_provider.as_ref()).await
+        device::appraise_devices(devices, nonce, policy, self.nras_provider.as_ref(), now).await
     }
 
     #[cfg(not(feature = "nvidia-gpu"))]
@@ -262,6 +280,7 @@ impl Verifier {
         devices: Vec<(String, &GpuDeviceEvidence)>,
         _nonce: &[u8],
         policy: &VerifyPolicy,
+        _now: DateTime<Utc>,
     ) -> Result<Vec<(String, Outcome)>> {
         if devices.is_empty() && !policy.gpu.required {
             return Ok(Vec::new());
@@ -298,10 +317,13 @@ pub(crate) fn resolve_floor<'p>(
         .find(|m| crate::utils::constant_time_eq(m.id.as_slice(), identity))
     else {
         // AR4SI 97: the attester is not recognized, and policy says it should be.
-        return Err(invalid(format!(
-            "identity {} is not on the machine allowlist",
-            hex::encode(identity)
-        )));
+        return Err(refuse(
+            RefusalCode::MachineNotAllowed,
+            format!(
+                "identity {} is not on the machine allowlist",
+                hex::encode(identity)
+            ),
+        ));
     };
     let floor_name = entry
         .tcb_floor

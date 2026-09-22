@@ -159,7 +159,8 @@ impl CertProvider for InlineCollateral<'_> {
             // checked here.
             #[cfg(feature = "snp")]
             if crate::platforms::snp::verify::is_vlek_cert(bytes).unwrap_or(false)
-                && crate::platforms::snp::verify::verify_vek_validity_period(bytes).is_ok()
+                && crate::platforms::snp::verify::verify_vek_validity_period_at(bytes, self.now)
+                    .is_ok()
             {
                 return Ok(bytes.to_vec());
             }

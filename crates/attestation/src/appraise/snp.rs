@@ -3,12 +3,12 @@
 use super::inline::InlineCollateral;
 use super::resolve_floor;
 use super::vector::{cpu_vector, evaluate_backing, evaluate_reference, Assessment};
-use super::{invalid, Ctx, Outcome};
+use super::{invalid, refuse, Ctx, Outcome};
 use crate::collateral::CertProvider;
-use crate::error::{AttestationError, Result};
+use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::snp::verify::{
-    check_vcek_not_revoked, is_vlek_cert, parse_report, verify_cert_chain, verify_vcek_tcb,
-    verify_vek_validity_period, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
+    check_vcek_not_revoked_at, is_vlek_cert, parse_report, verify_cert_chain, verify_vcek_tcb,
+    verify_vek_validity_period_at, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
 };
 #[cfg(feature = "az-snp")]
 use crate::platforms::tpm_common::verify_hcl_var_data_binding;
@@ -126,16 +126,20 @@ fn replay_chain(
         LogFormat::TcgCelCbor => cel::parse_cbor(log.data.as_slice())?,
         LogFormat::TcgCelJson => cel::parse_json(log.data.as_slice())?,
         other => {
-            return Err(invalid(format!(
-                "event log format {other:?} does not carry the register chain"
-            )))
+            return Err(refuse(
+                RefusalCode::LogRequired,
+                format!("event log format {other:?} does not carry the register chain"),
+            ))
         }
     };
     if records.len() as u64 != chain_len {
-        return Err(invalid(format!(
-            "cvm_chain claims {chain_len} extensions but the log carries {}",
-            records.len()
-        )));
+        return Err(refuse(
+            RefusalCode::LogRequired,
+            format!(
+                "cvm_chain claims {chain_len} extensions but the log carries {}",
+                records.len()
+            ),
+        ));
     }
     let out = cel::replay(
         &records,
@@ -148,7 +152,12 @@ fn replay_chain(
     };
     match out.boot_digest {
         Some(d) if constant_time_eq(&d, &expected_boot) => {}
-        _ => return Err(invalid("record 0 is not the boot record for this bootseed")),
+        _ => {
+            return Err(refuse(
+                RefusalCode::ReplayMismatch,
+                "record 0 is not the boot record for this bootseed",
+            ))
+        }
     }
     for r in registers.iter_mut() {
         match out.slots.get(&r.index) {
@@ -221,11 +230,11 @@ pub(crate) async fn appraise(
         crate::platforms::snp::certs::get_ask(generation)
     };
     verify_cert_chain(ark_der, intermediate, &vek_der)?;
-    verify_vek_validity_period(&vek_der)?;
+    verify_vek_validity_period_at(&vek_der, ctx.now)?;
     let mut collateral_outcomes = BTreeMap::new();
     match collateral.get_snp_crl(generation).await? {
         Some(crl) => {
-            check_vcek_not_revoked(&vek_der, &crl, ark_der)?;
+            check_vcek_not_revoked_at(&vek_der, &crl, ark_der, ctx.now)?;
             collateral_outcomes.insert(
                 CollateralCheck::SnpCrl,
                 CollateralOutcome {
@@ -284,7 +293,10 @@ pub(crate) async fn appraise(
     }
     let migratable = report.policy.migrate_ma_allowed();
     if migratable && !policy.policy_bits.allow_migration {
-        return Err(invalid("guest policy allows migration and policy does not"));
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
+            "guest policy allows migration and policy does not",
+        ));
     }
     if let Some(owner) = &policy.owner {
         if !owner
@@ -292,7 +304,8 @@ pub(crate) async fn appraise(
             .iter()
             .any(|d| constant_time_eq(&d.0, &report.id_key_digest))
         {
-            return Err(invalid(
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
                 "id_key_digest is not among the owner keys policy accepts",
             ));
         }
@@ -362,7 +375,8 @@ pub(crate) async fn appraise(
             if chain_len >= 1
                 && bank[usize::from(BOOT_SLOT)] == genesis(BOOT_SLOT, &policy.commitment.seed.0)
             {
-                return Err(invalid(
+                return Err(refuse(
+                    RefusalCode::RegisterMismatch,
                     "slot 3 is at genesis but the chain claims a boot record",
                 ));
             }
@@ -391,7 +405,10 @@ pub(crate) async fn appraise(
             // 0 is the boot record for this bootseed, every slot that left
             // genesis replays, and workload slots open with their claim.
             let log = cpu.cvm_log.as_ref().ok_or_else(|| {
-                invalid("commitment mode without a log: the boot record cannot be checked")
+                refuse(
+                    RefusalCode::LogRequired,
+                    "commitment mode without a log: the boot record cannot be checked",
+                )
             })?;
             let seed_bytes = cpu
                 .bootseed
@@ -406,9 +423,10 @@ pub(crate) async fn appraise(
             for (slot, owner) in &policy.reference.slot_owners {
                 let reg = registers.iter().find(|r| r.index == *slot);
                 if reg.and_then(|r| r.owner.as_deref()) != Some(owner.as_str()) {
-                    return Err(invalid(format!(
-                        "slot {slot} is not owned by {owner:?} as policy requires"
-                    )));
+                    return Err(refuse(
+                        RefusalCode::ReferenceMismatch,
+                        format!("slot {slot} is not owned by {owner:?} as policy requires"),
+                    ));
                 }
             }
             chain = cpu.cvm_chain;
@@ -430,7 +448,8 @@ pub(crate) async fn appraise(
         }
     };
     if !policy.reference.slot_owners.is_empty() && cpu.cvm_binding.mode != BindingMode::Commitment {
-        return Err(invalid(
+        return Err(refuse(
+            RefusalCode::ReferenceMismatch,
             "policy pins slot owners but the evidence carries no workload slots",
         ));
     }

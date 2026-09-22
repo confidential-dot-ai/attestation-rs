@@ -1,8 +1,8 @@
 //! Reference values, machine allowlists, backing floors and the AR4SI
 //! trustworthiness vector (sections 5.2 and 7).
 
-use super::invalid;
-use crate::error::Result;
+use super::refuse;
+use crate::error::{RefusalCode, Result};
 use crate::profile::{
     BackingMin, Digest, HashAlg, ReferenceOutcome, TrustVector, VerifiedRegister, VerifyPolicy,
 };
@@ -34,35 +34,46 @@ pub(crate) fn evaluate_reference(
     let refs = &policy.reference;
     let launch_pinned = !refs.launch_measurement.is_empty();
     if launch_pinned && !matches_any(&refs.launch_measurement, a.launch_alg, a.launch) {
-        return Err(invalid(
+        return Err(refuse(
+            RefusalCode::ReferenceMismatch,
             "launch measurement is not among the reference values",
         ));
     }
     let mut registers = BTreeMap::new();
     for (slot, expected) in &refs.registers {
         let Some(reg) = a.registers.iter().find(|r| r.index == *slot) else {
-            return Err(invalid(format!(
-                "register {slot} is pinned by policy but the evidence carries no such register"
-            )));
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!(
+                    "register {slot} is pinned by policy but the evidence carries no such register"
+                ),
+            ));
         };
         if !matches_any(expected, reg.alg, reg.value.as_slice()) {
-            return Err(invalid(format!(
-                "register {slot} is not among its reference values"
-            )));
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!("register {slot} is not among its reference values"),
+            ));
         }
         registers.insert(*slot, true);
     }
     for (slot, owner) in &refs.slot_owners {
         let Some(reg) = a.registers.iter().find(|r| r.index == *slot) else {
-            return Err(invalid(format!(
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!(
                 "slot {slot} owner is pinned by policy but the evidence carries no such register"
-            )));
+            ),
+            ));
         };
         if reg.owner.as_deref() != Some(owner.as_str()) {
-            return Err(invalid(format!(
-                "slot {slot} is owned by {:?}, policy requires {owner:?}",
-                reg.owner
-            )));
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!(
+                    "slot {slot} is owned by {:?}, policy requires {owner:?}",
+                    reg.owner
+                ),
+            ));
         }
     }
     if !launch_pinned && registers.is_empty() {
@@ -94,10 +105,13 @@ pub(crate) fn evaluate_backing(
         return Ok(None);
     };
     if weakest < policy.min_backing {
-        return Err(invalid(format!(
-            "a register is backed by {weakest:?}, policy requires at least {:?}",
-            policy.min_backing
-        )));
+        return Err(refuse(
+            RefusalCode::BackingBelowMinimum,
+            format!(
+                "a register is backed by {weakest:?}, policy requires at least {:?}",
+                policy.min_backing
+            ),
+        ));
     }
     Ok(Some(BackingMin {
         required: policy.min_backing,

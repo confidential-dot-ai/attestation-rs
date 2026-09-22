@@ -226,7 +226,16 @@ pub fn verify_qe_report_signature(
 ///   - Leaf is signed by Intermediate
 ///
 /// Returns the PCK leaf's ECDSA P-256 public key for QE report signature verification.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
+    verify_pck_cert_chain_at(pem_data, chrono::Utc::now())
+}
+
+/// [`verify_pck_cert_chain`] with validity judged at `now`.
+pub fn verify_pck_cert_chain_at(
+    pem_data: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("PEM data is not valid UTF-8: {e}"))
     })?;
@@ -274,7 +283,7 @@ pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
         (&der_certs[1], "PCK Platform CA"),
         (&der_certs[2], "Intel SGX Root CA"),
     ] {
-        verify_cert_validity_period(der, label)?;
+        verify_cert_validity_period(der, label, now)?;
     }
 
     extract_p256_pub_key(&leaf_cert.pub_key_bytes, "PCK leaf")
@@ -292,7 +301,16 @@ pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
 ///   - Root CA self-signs correctly
 ///   - Signing cert is signed by Root CA
 ///   - Both certificates are within their validity periods
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub fn verify_signing_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
+    verify_signing_cert_chain_at(pem_data, chrono::Utc::now())
+}
+
+/// [`verify_signing_cert_chain`] with validity judged at `now`.
+pub fn verify_signing_cert_chain_at(
+    pem_data: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
     })?;
@@ -335,7 +353,7 @@ pub fn verify_signing_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
         (&der_certs[0], "TCB Signing"),
         (&der_certs[1], "Intel SGX Root CA"),
     ] {
-        verify_cert_validity_period(der, label)?;
+        verify_cert_validity_period(der, label, now)?;
     }
 
     extract_p256_pub_key(&signing_cert.pub_key_bytes, "TCB Signing")
@@ -405,14 +423,18 @@ fn verify_cert_signature(cert: &CertData, issuer_key: &VerifyingKey, label: &str
     })
 }
 
-/// Verify a certificate's validity period (NotBefore/NotAfter) against the current time.
-fn verify_cert_validity_period(der: &[u8], label: &str) -> Result<()> {
+/// Verify a certificate's validity period (NotBefore/NotAfter) at `now`.
+fn verify_cert_validity_period(
+    der: &[u8],
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(der).map_err(|e| {
         AttestationError::CertChainError(format!("{label} x509 parse for validity: {e}"))
     })?;
 
     let validity = cert.validity();
-    let now = x509_parser::time::ASN1Time::now();
+    let now = asn1_time(now)?;
 
     if now < validity.not_before {
         return Err(AttestationError::CertChainError(format!(
@@ -501,9 +523,19 @@ pub fn verify_dcap_chain(
     quote_version: QuoteVersion,
     pck_crl_der: Option<&[u8]>,
 ) -> Result<()> {
+    verify_dcap_chain_at(quote_bytes, quote_version, pck_crl_der, chrono::Utc::now())
+}
+
+/// [`verify_dcap_chain`] with certificate validity judged at `now`.
+pub fn verify_dcap_chain_at(
+    quote_bytes: &[u8],
+    quote_version: QuoteVersion,
+    pck_crl_der: Option<&[u8]>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let body_end = compute_body_end(quote_bytes, quote_version)?;
     let auth = parse_auth_data(quote_bytes, body_end)?;
-    let pck_pub_key = verify_pck_cert_chain(auth.pck_cert_chain_pem)?;
+    let pck_pub_key = verify_pck_cert_chain_at(auth.pck_cert_chain_pem, now)?;
     verify_qe_report_signature(&auth, &pck_pub_key)?;
     verify_qe_report_binding(&auth)?;
 
@@ -847,7 +879,11 @@ fn extract_integer_value(obj: &x509_parser::der_parser::ber::BerObject) -> Resul
 /// The signature covers the raw JSON string of the `tcbInfo` field.
 /// `signing_certs_pem`: PEM-encoded signing certificate chain from the
 /// `TCB-Info-Issuer-Chain` response header, rooted to Intel SGX Root CA.
-pub fn verify_tcb_info_signature(tcb_info_json: &[u8], signing_certs_pem: &[u8]) -> Result<()> {
+pub fn verify_tcb_info_signature_at(
+    tcb_info_json: &[u8],
+    signing_certs_pem: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let envelope: TcbInfoSignedEnvelope<'_> = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info envelope parse: {e}")))?;
 
@@ -858,7 +894,7 @@ pub fn verify_tcb_info_signature(tcb_info_json: &[u8], signing_certs_pem: &[u8])
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info signature parse: {e}")))?;
 
     // Verify the signing cert chain roots to Intel SGX Root CA (2-cert chain)
-    let signing_key = verify_signing_cert_chain(signing_certs_pem)?;
+    let signing_key = verify_signing_cert_chain_at(signing_certs_pem, now)?;
 
     // RawValue preserves the exact bytes Intel signed — no re-serialization.
     signing_key
@@ -887,7 +923,24 @@ pub fn evaluate_tcb_status(
     pck_pem: &[u8],
     signing_certs_pem: &[u8],
 ) -> Result<DcapVerificationStatus> {
-    verify_tcb_info_signature(tcb_info_json, signing_certs_pem)?;
+    evaluate_tcb_status_at(
+        tcb_info_json,
+        tee_tcb_svn,
+        pck_pem,
+        signing_certs_pem,
+        chrono::Utc::now(),
+    )
+}
+
+/// [`evaluate_tcb_status`] with the signing chain and `nextUpdate` judged at `now`.
+pub fn evaluate_tcb_status_at(
+    tcb_info_json: &[u8],
+    tee_tcb_svn: &[u8; 16],
+    pck_pem: &[u8],
+    signing_certs_pem: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<DcapVerificationStatus> {
+    verify_tcb_info_signature_at(tcb_info_json, signing_certs_pem, now)?;
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
 
@@ -898,8 +951,7 @@ pub fn evaluate_tcb_status(
         .as_deref()
         .and_then(|ts| {
             // Intel PCS uses ISO 8601: "2024-03-07T00:00:00Z"
-            // Try common formats
-            chrono_parse_is_past(ts)
+            chrono_parse_is_past_at(ts, now)
         })
         .unwrap_or(false);
     if collateral_expired {
@@ -977,9 +1029,21 @@ pub fn evaluate_tcb_status(
 
 /// Check if an ISO 8601 timestamp (e.g. "2024-03-07T00:00:00Z") is in the past.
 /// Returns `None` if the timestamp cannot be parsed.
+#[cfg(test)]
 fn chrono_parse_is_past(ts: &str) -> Option<bool> {
+    chrono_parse_is_past_at(ts, chrono::Utc::now())
+}
+
+/// Whether an ISO 8601 timestamp is before `now`; `None` if it does not parse.
+fn chrono_parse_is_past_at(ts: &str, now: chrono::DateTime<chrono::Utc>) -> Option<bool> {
     let dt = chrono::DateTime::parse_from_rfc3339(ts.trim()).ok()?;
-    Some(chrono::Utc::now() > dt)
+    Some(now > dt)
+}
+
+/// `now` as the type x509-parser compares validity against.
+fn asn1_time(now: chrono::DateTime<chrono::Utc>) -> Result<x509_parser::time::ASN1Time> {
+    x509_parser::time::ASN1Time::from_timestamp(now.timestamp())
+        .map_err(|e| AttestationError::CertChainError(format!("evaluation time: {e}")))
 }
 
 /// Parse a TCB status string from Intel PCS into our enum.
@@ -1095,6 +1159,21 @@ pub fn verify_qe_identity(
     qe_identity_json: &[u8],
     signing_certs_pem: &[u8],
 ) -> Result<()> {
+    verify_qe_identity_at(
+        qe_report_body,
+        qe_identity_json,
+        signing_certs_pem,
+        chrono::Utc::now(),
+    )
+}
+
+/// [`verify_qe_identity`] with the signing chain judged at `now`.
+pub fn verify_qe_identity_at(
+    qe_report_body: &[u8],
+    qe_identity_json: &[u8],
+    signing_certs_pem: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     if qe_report_body.len() < QE_REPORT_BODY_SIZE {
         return Err(AttestationError::QuoteParseFailed(format!(
             "QE report body too short: {} bytes, expected {}",
@@ -1116,7 +1195,7 @@ pub fn verify_qe_identity(
     let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
         AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
     })?;
-    let signing_key = verify_signing_cert_chain(signing_certs_pem)?;
+    let signing_key = verify_signing_cert_chain_at(signing_certs_pem, now)?;
     signing_key
         .verify(envelope.enclave_identity.get().as_bytes(), &signature)
         .map_err(|e| {

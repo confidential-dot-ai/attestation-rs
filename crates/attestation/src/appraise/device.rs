@@ -6,8 +6,8 @@
 //! `eat_nonce` (the SPDM nonce derived from the envelope's nonce) and gated by
 //! the per-device policy before it becomes a submodule appraisal.
 
-use super::{invalid, resolve_floor, Outcome};
-use crate::error::{AttestationError, Result};
+use super::{invalid, refuse, resolve_floor, Outcome};
+use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::nvidia_gpu::verify::{attest_arch, ArchGroupResult, MAX_GPU_DEVICES};
 use crate::platforms::nvidia_gpu::NrasProvider;
 use crate::profile::binding::{nras_gpu_nonce, nras_switch_nonce};
@@ -24,6 +24,7 @@ pub(crate) async fn appraise_devices(
     nonce: &[u8],
     policy: &VerifyPolicy,
     provider: &dyn NrasProvider,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<(String, Outcome)>> {
     if devices.is_empty() {
         return if policy.gpu.required {
@@ -64,7 +65,7 @@ pub(crate) async fn appraise_devices(
             .map(|(_, d)| NvidiaGpuDeviceEvidence::from(*d))
             .collect();
         let refs: Vec<&NvidiaGpuDeviceEvidence> = entries.iter().collect();
-        let result = attest_arch(arch, &refs, nonce_bytes, &device_policy, provider).await?;
+        let result = attest_arch(now, arch, &refs, nonce_bytes, &device_policy, provider).await?;
         out.extend(outcomes_for_group(&group, result, policy)?);
     }
     Ok(out)
@@ -140,7 +141,8 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
     let (_floor, instance_identity) = match claims.ueid.as_deref() {
         Some(ueid) => resolve_floor(policy, ueid.as_bytes())?,
         None if policy.identity.is_some() => {
-            return Err(invalid(
+            return Err(refuse(
+                RefusalCode::MachineNotAllowed,
                 "NRAS submodule carries no ueid to check against the machine allowlist",
             ))
         }

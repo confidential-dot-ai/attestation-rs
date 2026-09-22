@@ -8,8 +8,8 @@
 //! registers, and an envelope listing any other PCR is refused.
 
 use super::vector::evaluate_backing;
-use super::{invalid, Ctx, Outcome};
-use crate::error::{AttestationError, Result};
+use super::{invalid, refuse, Ctx, Outcome};
+use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::tpm_common::{
     parse_hcl_report, quote_selection, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
     HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
@@ -69,16 +69,21 @@ pub(crate) fn appraise(
     let mut replayed: BTreeMap<u16, bool> = BTreeMap::new();
     if let Some(log) = &v.cvm_log {
         if log.format != LogFormat::Tpm2EventLog {
-            return Err(invalid(format!(
-                "vtpm event log format {:?} is not a TPM2 event log",
-                log.format
-            )));
+            return Err(refuse(
+                RefusalCode::Unsupported,
+                format!(
+                    "vtpm event log format {:?} is not a TPM2 event log",
+                    log.format
+                ),
+            ));
         }
         if quote.bank != HashAlg::Sha256 {
-            return Err(invalid("vtpm log replay is defined for the SHA-256 bank"));
+            return Err(refuse(
+                RefusalCode::Unsupported,
+                "vtpm log replay is defined for the SHA-256 bank",
+            ));
         }
-        let integrity =
-            |e: tcg_cel::Error| AttestationError::EventlogIntegrityFailed(e.to_string());
+        let integrity = crate::profile::cel::cel_err;
         let records = tcg_cel::tcg2::to_cel(log.data.as_slice(), tcg_cel::tcg2::IndexMap::Pcr)
             .map_err(integrity)?;
         let bank = tcg_cel::HashAlg::SHA256;
@@ -117,14 +122,18 @@ pub(crate) fn appraise(
     for r in &v.cvm_registers {
         let index = usize::from(r.index);
         if !selected.contains(&index) {
-            return Err(invalid(format!(
+            return Err(refuse(
+                RefusalCode::RegisterMismatch,
+                format!(
                 "PCR {index} is not in the quote's signed selection; its value is unauthenticated"
-            )));
+            ),
+            ));
         }
         if !constant_time_eq(r.value.as_slice(), &pcrs[index]) {
-            return Err(invalid(format!(
-                "PCR {index} differs from the quoted value"
-            )));
+            return Err(refuse(
+                RefusalCode::RegisterMismatch,
+                format!("PCR {index} differs from the quoted value"),
+            ));
         }
         registers.push(VerifiedRegister {
             index: r.index,
@@ -143,17 +152,19 @@ pub(crate) fn appraise(
     let mut pinned = BTreeMap::new();
     for (pcr, expected) in &policy.reference.pcrs {
         let Some(reg) = registers.iter().find(|r| r.index == *pcr) else {
-            return Err(invalid(format!(
-                "PCR {pcr} is pinned by policy but the evidence carries no such register"
-            )));
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!("PCR {pcr} is pinned by policy but the evidence carries no such register"),
+            ));
         };
         let ok = expected.iter().any(|d| {
             d.alg == reg.alg && constant_time_eq(d.value.as_slice(), reg.value.as_slice())
         });
         if !ok {
-            return Err(invalid(format!(
-                "PCR {pcr} is not among its reference values"
-            )));
+            return Err(refuse(
+                RefusalCode::ReferenceMismatch,
+                format!("PCR {pcr} is not among its reference values"),
+            ));
         }
         pinned.insert(*pcr, true);
     }
