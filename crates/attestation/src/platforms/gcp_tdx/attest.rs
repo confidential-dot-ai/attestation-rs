@@ -41,6 +41,8 @@ pub fn is_available() -> bool {
 /// requests through the hypervisor (QEMU `quote-generation-socket`), not
 /// a guest-reachable QGS on vsock. Using `Auto` would waste ~10s on a
 /// vsock connection timeout before falling back to ConfigFS.
+// The crate calls generate_evidence_with; tests call this default.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub async fn generate_evidence(report_data: &[u8]) -> Result<TdxEvidence> {
     crate::platforms::tdx::attest::generate_evidence_with(report_data, TdxQuoteMethod::ConfigFs)
         .await

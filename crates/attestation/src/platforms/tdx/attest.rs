@@ -95,6 +95,8 @@ fn check_tsm_provider() -> bool {
 /// Generate TDX attestation evidence using the default quote method ([`TdxQuoteMethod::Auto`]).
 ///
 /// Equivalent to `generate_evidence_with(report_data, TdxQuoteMethod::Auto)`.
+// The crate calls generate_evidence_with; tests call this default.
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 pub async fn generate_evidence(report_data: &[u8]) -> Result<TdxEvidence> {
     generate_evidence_with(report_data, TdxQuoteMethod::Auto).await
 }
