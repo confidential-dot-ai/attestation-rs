@@ -432,6 +432,8 @@ mod author {
     const ROOT_CRL: &[u8] = include_bytes!("../test_data/collateral/root_ca_crl.der");
     const AZ_TDX: &[u8] = include_bytes!("../test_data/az_tdx/live-evidence.json");
     const AZ_SNP: &[u8] = include_bytes!("../test_data/az_snp/live-evidence.json");
+    /// AMD KDS, fetched 2026-09-22: thisUpdate 2026-08-19, nextUpdate 2026-10-04.
+    const GENOA_CRL: &[u8] = include_bytes!("../test_data/snp/genoa-crl-2026-08-19.der");
 
     const SNP_NOW: &str = "2026-09-22T00:00:00Z";
     /// The Intel fixtures were captured 2026-03-16 and expire 2026-04-15.
@@ -592,6 +594,72 @@ mod author {
         )
     }
 
+    /// An inline PCS artifact: `{body, issuer_chain}` as the profile carries it.
+    fn pcs(body: &[u8], chain: &[u8]) -> String {
+        b64url(
+            serde_json::to_vec(&json!({"body": b64url(body), "issuer_chain": b64url(chain)}))
+                .unwrap()
+                .as_slice(),
+        )
+    }
+
+    /// The v4 TDX envelope carrying the March fixtures inline, with the root
+    /// CRL's signature corrupted.
+    fn tdx_envelope_with_forged_inline_root_crl() -> Value {
+        let mut forged = ROOT_CRL.to_vec();
+        let n = forged.len();
+        forged[n - 1] ^= 0xff;
+        forged[n - 2] ^= 0xff;
+        let mut env = tdx_envelope(V4_QUOTE);
+        env["submods"]["cpu"]["cvm_endorsements"] = json!({
+            "__cmwc_t": "tag:confidential.ai,2026:cvm-endorsements#1",
+            "tdx.root_crl": ["application/pkix-crl", b64url(&forged), 2],
+            "tdx.pck_crl": ["application/pkix-crl", b64url(PCK_CRL), 2],
+            "tdx.tcb_info": ["application/vnd.confidential-ai.pcs-signed+json", pcs(TCB_INFO, TCB_SIGNING_CHAIN), 2],
+            "tdx.qe_identity": ["application/vnd.confidential-ai.pcs-signed+json", pcs(TD_QE_IDENTITY, QE_SIGNING_CHAIN), 2]
+        });
+        env
+    }
+
+    /// The fixture collateral with the TCB Info body altered under its
+    /// signature (the issue date's year).
+    fn tdx_fixture_collateral_with_forged_tcb_info() -> BTreeMap<String, CollateralRef> {
+        let text = std::str::from_utf8(TCB_INFO).unwrap();
+        let forged = text.replacen("2026-03-16T", "2025-03-16T", 1);
+        assert_ne!(forged, text, "the TCB Info fixture carries its issue date");
+        write(
+            "collateral/tcb_info_50806f000000.forged.json",
+            forged.as_bytes(),
+        );
+        let mut map = tdx_fixture_collateral();
+        map.insert(
+            "tdx_tcb_info/50806f000000".to_string(),
+            CollateralRef::Signed {
+                body: "collateral/tcb_info_50806f000000.forged.json".into(),
+                signing_chain: "collateral/tcb_signing_chain.pem".into(),
+            },
+        );
+        map
+    }
+
+    fn snp_crl_collateral(forged: bool) -> BTreeMap<String, CollateralRef> {
+        let path = if forged {
+            let mut bytes = GENOA_CRL.to_vec();
+            let n = bytes.len();
+            bytes[n - 1] ^= 0xff;
+            bytes[n - 2] ^= 0xff;
+            write("collateral/amd_genoa_crl_2026-08-19.forged.der", &bytes);
+            "collateral/amd_genoa_crl_2026-08-19.forged.der"
+        } else {
+            write("collateral/amd_genoa_crl_2026-08-19.der", GENOA_CRL);
+            "collateral/amd_genoa_crl_2026-08-19.der"
+        };
+        BTreeMap::from([(
+            "snp_crl/Genoa".to_string(),
+            CollateralRef::File(path.into()),
+        )])
+    }
+
     struct Authored {
         id: &'static str,
         section: &'static str,
@@ -685,6 +753,8 @@ mod author {
         let mut live_lenient = v4_policy();
         live_lenient.tcb.require_revocation = false;
         live_lenient.tcb.require_signed_collateral = false;
+        let mut revocation_checked = lenient();
+        revocation_checked.tcb.require_revocation = true;
 
         vec![
             Authored {
@@ -836,6 +906,66 @@ mod author {
                 policy: Some(v4_policy()),
                 collateral: BTreeMap::new(),
                 expect: Some(RefusalCode::CollateralUnavailable),
+            },
+            Authored {
+                id: "tdx-inline-root-crl-forged",
+                section: "4.6",
+                statement: "inline endorsements are inputs, never authority: a root CRL whose signature does not verify is refused",
+                now: TDX_FIXTURE_NOW,
+                evidence: tdx_envelope_with_forged_inline_root_crl(),
+                policy: Some(v4_policy()),
+                collateral: BTreeMap::new(),
+                expect: Some(RefusalCode::CollateralInvalid),
+            },
+            Authored {
+                id: "tdx-collateral-past-its-window",
+                section: "4.6",
+                statement: "every validity window and nextUpdate is checked before use: the March fixtures evaluated in May are refused",
+                now: "2026-05-01T00:00:00Z",
+                evidence: tdx_envelope(V4_QUOTE),
+                policy: Some(v4_policy()),
+                collateral: tdx.clone(),
+                expect: Some(RefusalCode::CollateralInvalid),
+            },
+            Authored {
+                id: "tdx-tcb-info-signature-forged",
+                section: "6",
+                statement: "step 6: TCB status comes from TCB Info with its signing chain anchored; a body altered under the signature is refused",
+                now: TDX_FIXTURE_NOW,
+                evidence: tdx_envelope(V4_QUOTE),
+                policy: Some(v4_policy()),
+                collateral: tdx_fixture_collateral_with_forged_tcb_info(),
+                expect: Some(RefusalCode::CollateralInvalid),
+            },
+            Authored {
+                id: "snp-crl-checked",
+                section: "6",
+                statement: "step 6: revocation checked against AMD's CRL for the generation, signed by the ARK and inside its window",
+                now: SNP_NOW,
+                evidence: snp_envelope(&nonce),
+                policy: Some(revocation_checked.clone()),
+                collateral: snp_crl_collateral(false),
+                expect: None,
+            },
+            Authored {
+                id: "snp-crl-past-its-window",
+                section: "4.6",
+                statement: "every validity window and nextUpdate is checked before use: AMD's CRL after its nextUpdate is refused",
+                now: "2026-12-01T00:00:00Z",
+                evidence: snp_envelope(&nonce),
+                policy: Some(revocation_checked.clone()),
+                collateral: snp_crl_collateral(false),
+                expect: Some(RefusalCode::CollateralInvalid),
+            },
+            Authored {
+                id: "snp-crl-forged",
+                section: "6",
+                statement: "step 6: a CRL whose signature does not verify against the ARK is refused",
+                now: SNP_NOW,
+                evidence: snp_envelope(&nonce),
+                policy: Some(revocation_checked),
+                collateral: snp_crl_collateral(true),
+                expect: Some(RefusalCode::CollateralInvalid),
             },
             Authored {
                 id: "tdx-ccel-replays-every-rtmr",

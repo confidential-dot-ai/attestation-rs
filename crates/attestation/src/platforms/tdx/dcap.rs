@@ -312,13 +312,13 @@ pub fn verify_signing_cert_chain_at(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
-        AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
+        AttestationError::CollateralInvalid(format!("signing chain PEM not UTF-8: {e}"))
     })?;
 
     let der_certs = split_pem_to_der(pem_str)?;
 
     if der_certs.len() < 2 {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::CollateralInvalid(format!(
             "expected at least 2 certificates in signing chain, got {}",
             der_certs.len()
         )));
@@ -333,7 +333,7 @@ pub fn verify_signing_cert_chain_at(
         .map_err(|e| AttestationError::CertChainError(format!("Intel Root CA key parse: {e}")))?;
 
     if root_pub_key.to_encoded_point(false) != intel_root_key.to_encoded_point(false) {
-        return Err(AttestationError::CertChainError(
+        return Err(AttestationError::CollateralInvalid(
             "signing chain Root CA public key does not match Intel SGX Root CA".into(),
         ));
     }
@@ -884,14 +884,17 @@ pub fn verify_tcb_info_signature_at(
     signing_certs_pem: &[u8],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
-    let envelope: TcbInfoSignedEnvelope<'_> = serde_json::from_slice(tcb_info_json)
-        .map_err(|e| AttestationError::CertChainError(format!("TCB Info envelope parse: {e}")))?;
+    let envelope: TcbInfoSignedEnvelope<'_> =
+        serde_json::from_slice(tcb_info_json).map_err(|e| {
+            AttestationError::CollateralInvalid(format!("TCB Info envelope parse: {e}"))
+        })?;
 
     let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
-        AttestationError::CertChainError(format!("TCB Info signature hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("TCB Info signature hex decode: {e}"))
     })?;
-    let signature = Signature::from_slice(&sig_bytes)
-        .map_err(|e| AttestationError::CertChainError(format!("TCB Info signature parse: {e}")))?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
+        AttestationError::CollateralInvalid(format!("TCB Info signature parse: {e}"))
+    })?;
 
     // Verify the signing cert chain roots to Intel SGX Root CA (2-cert chain)
     let signing_key = verify_signing_cert_chain_at(signing_certs_pem, now)?;
@@ -900,7 +903,9 @@ pub fn verify_tcb_info_signature_at(
     signing_key
         .verify(envelope.tcb_info.get().as_bytes(), &signature)
         .map_err(|e| {
-            AttestationError::CertChainError(format!("TCB Info signature verification failed: {e}"))
+            AttestationError::CollateralInvalid(format!(
+                "TCB Info signature verification failed: {e}"
+            ))
         })?;
 
     Ok(())
@@ -942,7 +947,7 @@ pub fn evaluate_tcb_status_at(
 ) -> Result<DcapVerificationStatus> {
     verify_tcb_info_signature_at(tcb_info_json, signing_certs_pem, now)?;
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
-        .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("TCB Info JSON parse: {e}")))?;
 
     // Check if collateral has expired (nextUpdate is in the past)
     let collateral_expired = wrapper
@@ -1185,28 +1190,30 @@ pub fn verify_qe_identity_at(
     // Parse the envelope and verify its signature
     let envelope: QeIdentityEnvelope<'_> =
         serde_json::from_slice(qe_identity_json).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
+            AttestationError::CollateralInvalid(format!("QE Identity envelope parse: {e}"))
         })?;
 
     // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
     let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity signature hex decode: {e}"))
     })?;
     let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity signature parse: {e}"))
     })?;
     let signing_key = verify_signing_cert_chain_at(signing_certs_pem, now)?;
     signing_key
         .verify(envelope.enclave_identity.get().as_bytes(), &signature)
         .map_err(|e| {
-            AttestationError::CertChainError(format!(
+            AttestationError::CollateralInvalid(format!(
                 "QE Identity signature verification failed: {e}"
             ))
         })?;
 
     // Parse the identity fields from the raw JSON
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
-        .map_err(|e| AttestationError::CertChainError(format!("QE Identity fields parse: {e}")))?;
+        .map_err(|e| {
+            AttestationError::CollateralInvalid(format!("QE Identity fields parse: {e}"))
+        })?;
 
     // Extract QE report fields at known offsets
     let qe_miscselect = &qe_report_body[QE_MISCSELECT_OFFSET..QE_MISCSELECT_OFFSET + 4];
@@ -1223,7 +1230,7 @@ pub fn verify_qe_identity_at(
 
     // Check MRSIGNER (exact match)
     let expected_mrsigner = hex::decode(&identity.mrsigner).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MRSIGNER hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity MRSIGNER hex decode: {e}"))
     })?;
     if !crate::utils::constant_time_eq(qe_mrsigner, &expected_mrsigner) {
         return Err(AttestationError::CertChainError(
@@ -1241,10 +1248,10 @@ pub fn verify_qe_identity_at(
 
     // Check MISCSELECT (masked comparison)
     let expected_miscselect = hex::decode(&identity.miscselect).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MISCSELECT hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity MISCSELECT hex decode: {e}"))
     })?;
     let miscselect_mask = hex::decode(&identity.miscselect_mask).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MISCSELECT_MASK hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity MISCSELECT_MASK hex decode: {e}"))
     })?;
     if expected_miscselect.len() != 4 || miscselect_mask.len() != 4 {
         return Err(AttestationError::CertChainError(format!(
@@ -1264,10 +1271,10 @@ pub fn verify_qe_identity_at(
 
     // Check ATTRIBUTES (masked comparison)
     let expected_attributes = hex::decode(&identity.attributes).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity ATTRIBUTES hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity ATTRIBUTES hex decode: {e}"))
     })?;
     let attributes_mask = hex::decode(&identity.attributes_mask).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity ATTRIBUTES_MASK hex decode: {e}"))
+        AttestationError::CollateralInvalid(format!("QE Identity ATTRIBUTES_MASK hex decode: {e}"))
     })?;
     if expected_attributes.len() != 16 || attributes_mask.len() != 16 {
         return Err(AttestationError::CertChainError(format!(
@@ -1292,7 +1299,7 @@ pub fn verify_qe_identity_at(
         if qe_isvsvn >= level.tcb.isvsvn {
             // Reject revoked QE TCB levels
             if level.tcb_status == "Revoked" {
-                return Err(AttestationError::CertChainError(
+                return Err(AttestationError::TcbMismatch(
                     "QE TCB status is Revoked".into(),
                 ));
             }
@@ -1301,7 +1308,7 @@ pub fn verify_qe_identity_at(
         }
     }
     if !svn_ok {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::TcbMismatch(format!(
             "QE ISVSVN {qe_isvsvn} does not meet any published TCB level"
         )));
     }
@@ -1317,7 +1324,7 @@ pub fn verify_qe_identity_at(
 fn normalize_crl_to_der(data: &[u8]) -> Result<Vec<u8>> {
     if crate::utils::is_pem(data) {
         crate::utils::decode_pem_to_der(data)
-            .map_err(|_| AttestationError::CertChainError("CRL PEM decode failed".into()))
+            .map_err(|_| AttestationError::CollateralInvalid("CRL PEM decode failed".into()))
     } else {
         Ok(data.to_vec())
     }
@@ -1367,7 +1374,7 @@ pub fn check_intermediate_ca_revocation_from_der_at(
 
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == intermediate_serial {
-            return Err(AttestationError::CertChainError(
+            return Err(AttestationError::Revoked(
                 "Intermediate CA certificate has been revoked by Root CA CRL".into(),
             ));
         }
@@ -1408,14 +1415,14 @@ pub fn check_cert_revocation_from_der_at(
 
     let crl_der_bytes = normalize_crl_to_der(crl_der)?;
     let (_, crl) = CertificateRevocationList::from_der(&crl_der_bytes)
-        .map_err(|e| AttestationError::CertChainError(format!("CRL DER parse: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("CRL DER parse: {e}")))?;
     let issuer = parse_x509_cert(&der_certs[1], "PCK CA")?;
     let issuer_key = extract_p256_pub_key(&issuer.pub_key_bytes, "PCK CA")?;
     verify_intel_crl(&crl, &issuer_key, now, "PCK CA")?;
 
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == leaf_serial {
-            return Err(AttestationError::CertChainError(
+            return Err(AttestationError::Revoked(
                 "PCK certificate has been revoked".into(),
             ));
         }
@@ -1437,33 +1444,33 @@ fn verify_intel_crl(
 ) -> Result<()> {
     let alg = crl.signature_algorithm.algorithm.to_string();
     if alg != OID_ECDSA_WITH_SHA256 {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::CollateralInvalid(format!(
             "{label} CRL signature algorithm {alg} is not ecdsa-with-SHA256"
         )));
     }
     let sig = Signature::from_der(crl.signature_value.as_ref()).map_err(|e| {
-        AttestationError::CertChainError(format!("{label} CRL signature parse: {e}"))
+        AttestationError::CollateralInvalid(format!("{label} CRL signature parse: {e}"))
     })?;
     issuer_key
         .verify(crl.tbs_cert_list.as_ref(), &sig)
         .map_err(|e| {
-            AttestationError::CertChainError(format!(
+            AttestationError::CollateralInvalid(format!(
                 "{label} CRL signature verification failed: {e}"
             ))
         })?;
     let now_asn1 = x509_parser::time::ASN1Time::from_timestamp(now.timestamp())
-        .map_err(|e| AttestationError::CertChainError(format!("clock out of range: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("clock out of range: {e}")))?;
     if crl.last_update() > now_asn1 {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::CollateralInvalid(format!(
             "{label} CRL thisUpdate {} is in the future",
             crl.last_update()
         )));
     }
     match crl.next_update() {
-        None => Err(AttestationError::CertChainError(format!(
+        None => Err(AttestationError::CollateralInvalid(format!(
             "{label} CRL has no nextUpdate; refusing a revocation list with no defined freshness"
         ))),
-        Some(next) if next < now_asn1 => Err(AttestationError::CertChainError(format!(
+        Some(next) if next < now_asn1 => Err(AttestationError::CollateralInvalid(format!(
             "{label} CRL is stale: nextUpdate {next} has passed; fetch a current CRL"
         ))),
         Some(_) => Ok(()),

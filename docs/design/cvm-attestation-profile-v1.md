@@ -598,14 +598,14 @@ A refusal names the rule family that failed, never the implementation's error ty
 | `platform-unsupported` | 2 | the TEE or hosting is one this verifier does not implement |
 | `report-invalid` | step 2 | the hardware report cannot be parsed, or its version is outside the supported range |
 | `signature-invalid` | step 3 | a hardware or vendor signature does not verify: the report, the quote, the TPM quote, the HCL report |
-| `chain-invalid` | step 3 | a certificate chain does not reach the pinned root, contradicts the report, or is outside its validity at `now` |
+| `chain-invalid` | step 3 | a certificate chain does not reach the pinned root, contradicts the report, or is outside its validity at `now`; a quoting enclave that is not the one Intel's QE Identity names |
 | `machine-not-allowed` | step 3, 7 | the authenticated machine identity is missing from the policy's allowlist |
 | `guest-policy` | step 4 | a guest policy bit, TD attribute, VMPL, debug state or lifecycle violates policy |
 | `binding-mismatch` | step 5, 4.5 | the freshness binding of the submodule's mode does not hold |
 | `collateral-unavailable` | step 6 | an artifact policy requires could not be obtained |
-| `collateral-invalid` | step 6 | an artifact fails its signature, chain or validity window, or an inline endorsement contradicts the provider's |
+| `collateral-invalid` | step 6, 4.6 | an artifact fails its signature, its signing chain or its window at `now` (a CRL's thisUpdate and nextUpdate, TCB Info's and QE Identity's nextUpdate), cannot be parsed, or contradicts the provider's copy |
 | `revoked` | step 6 | a certificate is revoked |
-| `tcb-not-allowed` | step 6, 7 | a TCB status outside the allowed set, an advisory the policy refuses, or a TCB value below its floor |
+| `tcb-not-allowed` | step 6, 7 | a TCB status outside the allowed set, an advisory the policy refuses, a TCB value below its floor, or a QE TCB level the QE Identity revokes or does not list |
 | `register-mismatch` | step 7 | an envelope register differs from the authoritative value, or is unauthenticated |
 | `log-required` | 4.8, 4.9 | a log the mode requires is absent, or `chain_len` and the log disagree |
 | `log-invalid` | 4.8 | the log cannot be parsed whole under its format's rules |

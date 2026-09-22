@@ -176,6 +176,12 @@ pub(crate) async fn appraise(
                 &tcb_info.signing_chain,
                 ctx.now,
             )?;
+            if evaluated.collateral_expired {
+                return Err(refuse(
+                    RefusalCode::CollateralInvalid,
+                    "TCB Info nextUpdate has passed",
+                ));
+            }
             if evaluated.tcb_status == TdxTcbStatus::Revoked {
                 return Err(AttestationError::TcbMismatch(
                     "TDX TCB status is Revoked".into(),
@@ -211,6 +217,18 @@ pub(crate) async fn appraise(
             );
             let qe = collateral.get_td_qe_identity().await?;
             dcap::verify_qe_identity_at(auth.qe_report_body, &qe.body, &qe.signing_chain, ctx.now)?;
+            if let Some(next) = pcs_next_update(&qe.body, "enclaveIdentity") {
+                let past = next
+                    .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                    .map(|t| t.with_timezone(&chrono::Utc) < ctx.now)
+                    .unwrap_or(true);
+                if past {
+                    return Err(refuse(
+                        RefusalCode::CollateralInvalid,
+                        "QE Identity nextUpdate has passed",
+                    ));
+                }
+            }
             outcomes.insert(
                 CollateralCheck::TdxQeIdentity,
                 checked(pcs_next_update(&qe.body, "enclaveIdentity")),

@@ -53,9 +53,15 @@ const LIVE_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_live.dat");
 const LIVE_CCEL: &[u8] = include_bytes!("../test_data/tdx_ccel_live.bin");
 const LIVE_CCEL2: &[u8] = include_bytes!("../test_data/tdx_ccel_live2.dat");
 
-/// Fixture collateral, captured 2026-03-16 and expiring 2026-04-15, so the
-/// provider's clock is pinned to the day after capture.
+/// Fixture collateral, captured 2026-03-16 and expiring 2026-04-15, so a
+/// verifier using it runs at the day after capture.
 struct Fixtures;
+
+fn fixture_clock() -> attestation::Clock {
+    std::sync::Arc::new(|| {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 3, 17, 0, 0, 0).unwrap()
+    })
+}
 
 #[async_trait::async_trait]
 impl TdxCollateralProvider for Fixtures {
@@ -452,7 +458,8 @@ async fn tdx_quote_with_fixture_collateral_appraises() {
     let nonce = tdx_nonce();
     let verifier = Verifier::offline()
         .with_cert_provider(NoCollateral)
-        .with_tdx_provider(Fixtures);
+        .with_tdx_provider(Fixtures)
+        .with_clock(fixture_clock());
     let appraisal = verifier
         .appraise_json(&tdx_envelope(&nonce), &v4_policy())
         .await
@@ -489,7 +496,8 @@ async fn tdx_policy_bits_and_collateral_requirements() {
     let nonce = tdx_nonce();
     let verifier = Verifier::offline()
         .with_cert_provider(NoCollateral)
-        .with_tdx_provider(Fixtures);
+        .with_tdx_provider(Fixtures)
+        .with_clock(fixture_clock());
     let strict = VerifyPolicy::default();
     let err = verifier
         .appraise_json(&tdx_envelope(&nonce), &strict)
@@ -557,7 +565,8 @@ async fn a_forged_inline_crl_is_rejected_and_the_provider_wins() {
     // inline copy never matters.
     let with_provider = Verifier::offline()
         .with_cert_provider(NoCollateral)
-        .with_tdx_provider(Fixtures);
+        .with_tdx_provider(Fixtures)
+        .with_clock(fixture_clock());
     with_provider
         .appraise_json(&serde_json::to_vec(&env).unwrap(), &v4_policy())
         .await
@@ -797,7 +806,8 @@ async fn azure_snp_evidence_appraises_through_the_vtpm() {
 async fn legacy_envelopes_map_to_the_profile() {
     let verifier = Verifier::offline()
         .with_cert_provider(NoCollateral)
-        .with_tdx_provider(Fixtures);
+        .with_tdx_provider(Fixtures)
+        .with_clock(fixture_clock());
     let legacy_tdx = serde_json::to_vec(&json!({
         "platform": "tdx",
         "evidence": {"quote": BASE64.encode(V4_QUOTE)}

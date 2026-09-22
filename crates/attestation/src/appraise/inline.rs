@@ -267,7 +267,9 @@ impl TdxCollateralProvider for InlineCollateral<'_> {
         self.provider_first(provider, inline, "PCK CRL").await
     }
 
+    /// The appraisal's evaluation time (section 14): one clock for every
+    /// window, whatever clock the provider keeps for its own serving.
     fn now(&self) -> DateTime<Utc> {
-        self.tdx.map_or(self.now, |p| p.now())
+        self.now
     }
 }

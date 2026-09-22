@@ -557,7 +557,7 @@ pub fn check_vcek_not_revoked_at(
 
     // 2. Parse the CRL
     let (_, crl) = CertificateRevocationList::from_der(crl_der)
-        .map_err(|e| AttestationError::CertChainError(format!("AMD CRL parse: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("AMD CRL parse: {e}")))?;
 
     // 3. Verify CRL signature against the issuing CA's public key.
     // We use our own implementation because x509-parser's verify_signature
@@ -570,20 +570,20 @@ pub fn check_vcek_not_revoked_at(
     // trusted forever.
     let now = snp_asn1_time(now)?;
     if crl.last_update() > now {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::CollateralInvalid(format!(
             "AMD CRL thisUpdate {} is in the future",
             crl.last_update()
         )));
     }
     match crl.next_update() {
         None => {
-            return Err(AttestationError::CertChainError(
+            return Err(AttestationError::CollateralInvalid(
                 "AMD CRL has no nextUpdate; refusing a revocation list with no defined freshness"
                     .into(),
             ));
         }
         Some(next_update) if next_update < now => {
-            return Err(AttestationError::CertChainError(format!(
+            return Err(AttestationError::CollateralInvalid(format!(
                 "AMD CRL is stale: nextUpdate {next_update} has passed; fetch a current CRL"
             )));
         }
@@ -597,7 +597,7 @@ pub fn check_vcek_not_revoked_at(
 
     for revoked in crl.iter_revoked_certificates() {
         if revoked.raw_serial() == cert_serial {
-            return Err(AttestationError::CertChainError(
+            return Err(AttestationError::Revoked(
                 "VCEK/VLEK certificate has been revoked by AMD CRL".into(),
             ));
         }
@@ -615,18 +615,18 @@ pub fn check_vcek_not_revoked_at(
 /// x509-parser's `TbsCertList` does not expose raw bytes publicly.
 fn extract_tbs_from_crl_der(crl_der: &[u8]) -> Result<&[u8]> {
     let mut reader = der::SliceReader::new(crl_der)
-        .map_err(|e| AttestationError::CertChainError(format!("CRL DER: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("CRL DER: {e}")))?;
     // Skip past the outer SEQUENCE tag+length to reach its content
     let header = der::Header::decode(&mut reader)
-        .map_err(|e| AttestationError::CertChainError(format!("CRL DER header: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("CRL DER header: {e}")))?;
     header
         .tag
         .assert_eq(der::Tag::Sequence)
-        .map_err(|e| AttestationError::CertChainError(format!("CRL: expected SEQUENCE: {e}")))?;
+        .map_err(|e| AttestationError::CollateralInvalid(format!("CRL: expected SEQUENCE: {e}")))?;
     // First element inside the SEQUENCE is TBSCertList
     reader
         .tlv_bytes()
-        .map_err(|e| AttestationError::CertChainError(format!("CRL TBS extract: {e}")))
+        .map_err(|e| AttestationError::CollateralInvalid(format!("CRL TBS extract: {e}")))
 }
 
 /// Verify a CRL signature against the issuing CA certificate.
@@ -650,17 +650,17 @@ fn verify_crl_signature(
             // Milan ASK uses RSA 4096 with PSS SHA-384
             let spki_der = issuer_cert.public_key().raw;
             let rsa_pub = rsa::RsaPublicKey::from_public_key_der(spki_der).map_err(|e| {
-                AttestationError::CertChainError(format!("CRL issuer RSA key parse: {e}"))
+                AttestationError::CollateralInvalid(format!("CRL issuer RSA key parse: {e}"))
             })?;
             // ALGORITHM: RSA-PSS SHA-384 verification. The AMD Milan ARK signs
             // CRLs with RSASSA-PSS using SHA-384 as both hash and MGF1 hash,
             // salt length = hash length (48 bytes).
             let verifying_key = rsa::pss::VerifyingKey::<sha2::Sha384>::new(rsa_pub);
             let sig = rsa::pss::Signature::try_from(sig_value).map_err(|e| {
-                AttestationError::CertChainError(format!("CRL RSA-PSS signature parse: {e}"))
+                AttestationError::CollateralInvalid(format!("CRL RSA-PSS signature parse: {e}"))
             })?;
             verifying_key.verify(tbs_der, &sig).map_err(|e| {
-                AttestationError::CertChainError(format!(
+                AttestationError::CollateralInvalid(format!(
                     "CRL RSA-PSS signature verification failed: {e}"
                 ))
             })?;
@@ -674,19 +674,19 @@ fn verify_crl_signature(
                 p384::ecdsa::VerifyingKey::from_public_key_der(issuer_cert.public_key().raw)
             })
             .map_err(|e| {
-                AttestationError::CertChainError(format!("CRL issuer ECDSA key parse: {e}"))
+                AttestationError::CollateralInvalid(format!("CRL issuer ECDSA key parse: {e}"))
             })?;
             let sig = p384::ecdsa::DerSignature::from_bytes(sig_value).map_err(|e| {
-                AttestationError::CertChainError(format!("CRL ECDSA signature parse: {e}"))
+                AttestationError::CollateralInvalid(format!("CRL ECDSA signature parse: {e}"))
             })?;
             verifying_key.verify(tbs_der, &sig).map_err(|e| {
-                AttestationError::CertChainError(format!(
+                AttestationError::CollateralInvalid(format!(
                     "CRL ECDSA signature verification failed: {e}"
                 ))
             })?;
         }
         _ => {
-            return Err(AttestationError::CertChainError(format!(
+            return Err(AttestationError::CollateralInvalid(format!(
                 "unsupported CRL signature algorithm OID: {sig_alg_oid}"
             )));
         }

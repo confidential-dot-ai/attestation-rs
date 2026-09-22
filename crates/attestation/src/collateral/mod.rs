@@ -353,8 +353,9 @@ pub trait TdxCollateralProvider: Send + Sync {
     /// Fetch the PCK CRL for a given CA type ("platform" or "processor").
     async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>>;
 
-    /// The clock CRL windows are checked against. Caches with a pinned clock
-    /// and fixture providers override it; everything else is the wall clock.
+    /// The clock this provider serves by (a cache's refetch and serving
+    /// decisions). The appraisal judges every window against the verifier's
+    /// own clock (`Verifier::with_clock`), never this one.
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc::now()
     }

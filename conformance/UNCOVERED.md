@@ -14,5 +14,5 @@ removed in the commit that adds its case.
 | 4.8 | `tcg-cel-cbor`, `tcg-cel-json`, `dstack-json` and `tpm2-event-log` on a live quote | a TDX recording with a CEL log, a dstack GetQuote recording with its quote, and an Azure recording that includes the vTPM event log; the unit tests of `tcg-cel` and `profile::cel` cover the parsing and replay rules against recorded logs without a quote |
 | 4.10 | the size bounds (submodule count, CMW collection size, byte string and envelope limits) and CBOR encoding | synthetic envelopes at each bound; the CBOR encoding needs the CBOR entry point |
 | 5.3 | `ear_all_submods_bound` false with an unbound submodule | a multi-submodule envelope with one failing binding |
-| 6 | step 3 VLEK detection, step 6 `revoked` and `collateral-invalid` outcomes, TCB Info `nextUpdate` in the past | a VLEK recording; a CRL fixture that revokes the fixture's certificate; the fixture collateral evaluated after 2026-04-15 |
+| 6 | step 3 VLEK detection, step 6 `revoked` | a VLEK recording; a CRL that revokes a recorded certificate, which no vendor has issued for one we hold |
 | 7 | `reference.registers`, `reference.host_data`, `reference.slot_owners`, `default_floor` selection per machine, `owner` policy | synthetic policies against the existing recordings; slot owners need the driver |

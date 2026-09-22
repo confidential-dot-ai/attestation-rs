@@ -1,0 +1,16 @@
+{
+  "id": "snp-crl-checked",
+  "rule": {
+    "section": "6",
+    "statement": "step 6: revocation checked against AMD's CRL for the generation, signed by the ARK and inside its window"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-crl-checked.json",
+  "policy": "policy/snp-crl-checked.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.der"
+  },
+  "expect": {
+    "appraisal": "expected/snp-crl-checked.json"
+  }
+}

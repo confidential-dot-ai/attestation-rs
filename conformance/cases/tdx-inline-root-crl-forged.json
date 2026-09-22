@@ -1,0 +1,13 @@
+{
+  "id": "tdx-inline-root-crl-forged",
+  "rule": {
+    "section": "4.6",
+    "statement": "inline endorsements are inputs, never authority: a root CRL whose signature does not verify is refused"
+  },
+  "now": "2026-03-17T00:00:00Z",
+  "evidence": "evidence/tdx-inline-root-crl-forged.json",
+  "policy": "policy/tdx-inline-root-crl-forged.json",
+  "expect": {
+    "refusal": "collateral-invalid"
+  }
+}

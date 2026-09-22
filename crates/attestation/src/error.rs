@@ -24,6 +24,12 @@ pub enum AttestationError {
     #[error("certificate fetch failed: {0}")]
     CertFetchError(String),
 
+    #[error("collateral invalid: {0}")]
+    CollateralInvalid(String),
+
+    #[error("revoked: {0}")]
+    Revoked(String),
+
     #[error("quote parsing failed: {0}")]
     QuoteParseFailed(String),
 
@@ -269,6 +275,8 @@ impl AttestationError {
             E::SignatureVerificationFailed(_) => C::SignatureInvalid,
             E::CertChainError(_) => C::ChainInvalid,
             E::CertFetchError(_) => C::CollateralUnavailable,
+            E::CollateralInvalid(_) => C::CollateralInvalid,
+            E::Revoked(_) => C::Revoked,
             E::QuoteParseFailed(_) | E::UnsupportedReportVersion { .. } => C::ReportInvalid,
             E::VmplCheckFailed(_) | E::DebugPolicyViolation => C::GuestPolicy,
             E::EventlogIntegrityFailed(_) => C::ReplayMismatch,
