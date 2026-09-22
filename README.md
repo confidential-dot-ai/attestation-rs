@@ -12,6 +12,7 @@ Rust workspace for TEE attestation libraries, tools, and services.
 | `attestation-cli` | `crates/attestation-cli` | CLI for generating and verifying attestation evidence |
 | `attestation-api` | `crates/attestation-api` | REST API service wrapping the attestation library |
 | `attestation-wasm` | `crates/attestation-wasm` | WASM verification harness |
+| `tcg-cel` | `crates/tcg-cel` | TCG Canonical Event Log v1.1: CEL-CBOR and CEL-JSON, replay, and ingest from TCG2, CCEL, attestation-agent and dstack logs |
 
 ## Common Commands
 

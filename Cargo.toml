@@ -5,12 +5,14 @@ members = [
     "crates/attestation-cli",
     "crates/attestation-api",
     "crates/attestation-wasm",
+    "crates/tcg-cel",
 ]
 default-members = [
     "crates/attestation",
     "crates/attestation-cli",
     "crates/attestation-api",
     "crates/attestation-wasm",
+    "crates/tcg-cel",
 ]
 
 [workspace.dependencies]
