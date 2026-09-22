@@ -275,6 +275,18 @@ async fn cmd_attest(args: AttestArgs) {
     } else {
         eprintln!("Report data: {} bytes", report_data.len());
     }
+    let (min, max) = (
+        attestation::profile::NONCE_MIN,
+        attestation::profile::NONCE_MAX,
+    );
+    if args.format == FormatArg::CvmV1 && !(min..=max).contains(&report_data.len()) {
+        eprintln!(
+            "Error: the cvm-v1 format binds a nonce of {min} to {max} bytes and got {}; \
+             pass it with --report-data-hex, or use --format legacy",
+            report_data.len()
+        );
+        process::exit(1);
+    }
 
     let t0 = Instant::now();
     let opts = attestation::AttestOptions::default();

@@ -4,7 +4,20 @@
 # are #[ignore]d and only run on real CVM hardware, so the race stayed latent.
 [test-groups]
 vtpm = { max-threads = 1 }
+# The metal live tests each attest several times; one at a time keeps a failure
+# attributable to its test rather than to contention on the guest device.
+tee = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(az_snp_live) or binary(az_tdx_live)'
+filter = 'binary(az_snp_live) or binary(az_tdx_live) or test(/^live_azure_/)'
 test-group = 'vtpm'
+
+[[profile.default.overrides]]
+filter = 'test(/^live_(snp_metal|tdx_metal|metal)_/)'
+test-group = 'tee'
+
+# A passing hardware test is only evidence if its output is kept: the live
+# tests print the appraisal they accepted.
+[[profile.default.overrides]]
+filter = 'test(/^live_/)'
+success-output = 'final'

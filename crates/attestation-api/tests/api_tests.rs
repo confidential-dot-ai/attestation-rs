@@ -677,6 +677,78 @@ async fn jwks_returns_error_when_token_not_configured() {
 
 // --- End-to-end test: attest then verify ---
 
+/// The profile through the service on a metal runner: POST /attest with a
+/// nonce, then POST /verify with that nonce and a policy the runner meets.
+#[tokio::test]
+#[ignore = "requires an accessible TEE attestation device"]
+async fn live_metal_api_profile_round_trip() {
+    use base64::Engine;
+    use std::io::Read;
+    assert!(
+        std::path::Path::new("/dev/sev-guest").exists()
+            || std::path::Path::new("/dev/tdx_guest").exists(),
+        "this test belongs on a metal SEV-SNP or TDX runner"
+    );
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let mut raw = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut raw))
+        .unwrap();
+    let nonce = b64(&raw);
+    let state = test_state();
+
+    let resp = build_api_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/attest")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({"platform": "auto", "nonce": nonce}))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let envelope: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(envelope["eat_profile"], "tag:confidential.ai,2026:cvm#1");
+    assert_eq!(envelope["eat_nonce"], nonce);
+
+    // The TDX runner's host may lag Intel's TCB; any status short of Revoked.
+    let policy = serde_json::json!({"tcb": {"tdx_allowed_status": [
+        "UpToDate", "SWHardeningNeeded", "ConfigurationNeeded",
+        "ConfigurationAndSWHardeningNeeded", "OutOfDate", "OutOfDateConfigurationNeeded"
+    ]}});
+    let (status, json) = post_verify(
+        build_api_router(state.clone()),
+        serde_json::json!({"evidence": envelope, "nonce": nonce, "policy": policy}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    eprintln!("{}", serde_json::to_string_pretty(&json).unwrap());
+    assert!(json.get("result").is_none());
+    assert_eq!(json["appraisal"]["ear_all_submods_bound"], true);
+    assert_ne!(
+        json["appraisal"]["submods"]["cpu"]["ear_status"],
+        "contraindicated"
+    );
+
+    raw[0] ^= 1;
+    let (status, _) = post_verify(
+        build_api_router(state),
+        serde_json::json!({"evidence": envelope, "nonce": b64(&raw), "policy": policy}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 #[ignore = "requires an accessible TEE attestation device"]
 async fn attest_then_verify_roundtrip() {

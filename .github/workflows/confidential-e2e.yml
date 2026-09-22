@@ -56,20 +56,22 @@ jobs:
           - platform: snp-metal
             runs_on: snp-metal-cvm
             features: attest
-            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
+            # az_* are the azure cells and capture_fixture is TDX; live_* tests
+            # carry their runner in their name and run only there.
+            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture) | test(/^live_(tdx_metal|azure_snp|azure_tdx)_/))"
             test_threads: "2"
             tee_dev: /dev/sev-guest
           - platform: azure-snp
             runs_on: azure-snp-cvm
             features: "attest,az-snp"
-            filter: "binary(az_snp_live)"             # the Azure vTPM tests, runnable nowhere else
+            filter: "binary(az_snp_live) | test(/^live_azure_snp_/)"   # the Azure vTPM tests, runnable nowhere else
             test_threads: "1"                         # the emulated vTPM serialises — 1 proc avoids session contention
             tee_dev: /dev/tpmrm0
           # tdx-metal: native TDX via /dev/tdx_guest (UNDERSCORE; the hyphen
           #   spelling is qemu's -object tdx-guest, a different string). Runner is
           #   the in-guest ARC scale set from confidential-ci provision-tdx-metal-cvm.yml,
           #   standing on tdx-gh-runner and scaling to zero at idle.
-          #   The filter names the ONE native test rather than the whole binary:
+          #   The filter names the native tests rather than whole binaries:
           #   capture_fixture also holds capture_az_snp_evidence_fixture and
           #   capture_az_tdx_evidence_fixture, and since snp/tdx/az-snp/az-tdx are
           #   all DEFAULT features they compile in here too. A bare
@@ -78,7 +80,7 @@ jobs:
           - platform: tdx-metal
             runs_on: tdx-metal-cvm
             features: attest
-            filter: "binary(capture_fixture) & test(capture_tdx_evidence_fixture)"
+            filter: "(binary(capture_fixture) & test(capture_tdx_evidence_fixture)) | test(/^live_(tdx_metal|metal)_/)"
             test_threads: "2"
             tee_dev: /dev/tdx_guest
           # azure-tdx: Azure vTPM TDX (az_tdx_live, runnable nowhere else). Runner =
@@ -87,13 +89,14 @@ jobs:
           #   node pools (Azure/AKS#5618), hence not an azure-cvm AKS twin. Attests
           #   via vTPM + IMDS /acc/tdquote, so the device gate is /dev/tpmrm0, same
           #   as the SNP azure cell; nextest already serialises both az binaries in
-          #   the max-1 vtpm group. Expect 14 EXECUTED tests here: az_tdx_live
-          #   skips itself silently when IMDS says the VM is not TDX, and a
-          #   skipped-green run tests nothing.
+          #   the max-1 vtpm group. Expect the 14 az_tdx_live tests plus the
+          #   live_azure_tdx_* tests EXECUTED here: az_tdx_live skips itself
+          #   silently when IMDS says the VM is not TDX, and a skipped-green run
+          #   tests nothing. The live_* tests fail instead of skipping.
           - platform: azure-tdx
             runs_on: azure-tdx-cvm
             features: "attest,az-tdx"
-            filter: "binary(az_tdx_live)"
+            filter: "binary(az_tdx_live) | test(/^live_azure_tdx_/)"
             test_threads: "1"
             tee_dev: /dev/tpmrm0
     name: tee (${{ matrix.runs_on }})   # job name == runner label, matching kettle — grep-able straight to the runner

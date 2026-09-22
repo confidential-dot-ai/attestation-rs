@@ -22,8 +22,8 @@ pub struct AttestRequest {
     #[serde(default)]
     pub nvidia_gpu: bool,
     /// `"cvm-v1"` (the profile envelope) or `"legacy"`. Absent: the profile
-    /// when `nonce` is given; a request carrying only `report_data` keeps the
-    /// legacy envelope for one release.
+    /// when `nonce` is given, otherwise the legacy envelope, so a client that
+    /// predates the profile keeps its response shape for one release.
     #[serde(default)]
     pub format: Option<String>,
     /// The relying party's nonce, base64url without padding, 16 to 64 bytes
@@ -41,11 +41,7 @@ enum AttestMode {
     Legacy,
 }
 
-fn attest_mode(
-    format: Option<&str>,
-    has_nonce: bool,
-    has_report_data: bool,
-) -> Result<AttestMode, ApiError> {
+fn attest_mode(format: Option<&str>, has_nonce: bool) -> Result<AttestMode, ApiError> {
     match format {
         Some("cvm-v1") => Ok(AttestMode::Profile),
         Some("legacy") => Ok(AttestMode::Legacy),
@@ -53,8 +49,7 @@ fn attest_mode(
             "unknown format {other:?}; want cvm-v1 or legacy"
         ))),
         None if has_nonce => Ok(AttestMode::Profile),
-        None if has_report_data => Ok(AttestMode::Legacy),
-        None => Ok(AttestMode::Profile),
+        None => Ok(AttestMode::Legacy),
     }
 }
 
@@ -81,11 +76,7 @@ pub async fn handler(
     if !state.config.attestation.enabled {
         return Err(ApiError::AttestNotAvailable);
     }
-    let mode = attest_mode(
-        req.format.as_deref(),
-        req.nonce.is_some(),
-        req.report_data.is_some(),
-    )?;
+    let mode = attest_mode(req.format.as_deref(), req.nonce.is_some())?;
 
     #[cfg(target_os = "linux")]
     {
@@ -213,21 +204,17 @@ mod tests {
     use super::{attest_mode, AttestMode};
 
     #[test]
-    fn the_profile_is_the_default_and_old_clients_keep_the_old_envelope() {
-        assert_eq!(attest_mode(None, true, false).unwrap(), AttestMode::Profile);
+    fn a_nonce_selects_the_profile_and_old_requests_keep_the_old_envelope() {
+        assert_eq!(attest_mode(None, true).unwrap(), AttestMode::Profile);
+        assert_eq!(attest_mode(None, false).unwrap(), AttestMode::Legacy);
         assert_eq!(
-            attest_mode(None, false, false).unwrap(),
-            AttestMode::Profile
-        );
-        assert_eq!(attest_mode(None, false, true).unwrap(), AttestMode::Legacy);
-        assert_eq!(
-            attest_mode(Some("cvm-v1"), false, true).unwrap(),
+            attest_mode(Some("cvm-v1"), false).unwrap(),
             AttestMode::Profile
         );
         assert_eq!(
-            attest_mode(Some("legacy"), true, false).unwrap(),
+            attest_mode(Some("legacy"), true).unwrap(),
             AttestMode::Legacy
         );
-        assert!(attest_mode(Some("v2"), true, false).is_err());
+        assert!(attest_mode(Some("v2"), true).is_err());
     }
 }
