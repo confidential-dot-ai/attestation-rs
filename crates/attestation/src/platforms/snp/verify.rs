@@ -1149,7 +1149,7 @@ mod tests {
             let subject = format!("{}", cert.tbs_certificate.subject);
             assert!(
                 subject.contains("VLEK"),
-                "{gen:?} ASVK subject should contain VLEK: {subject}"
+                "{gen:?} ASVK subject should contain VLEK"
             );
         }
     }
@@ -1373,7 +1373,10 @@ mod tests {
         );
         let err = verify_vek_validity_period_at(&leaf, chrono::Utc::now())
             .expect_err("expired VEK must be rejected");
-        assert!(err.to_string().contains("expired"), "got: {err}");
+        assert!(
+            err.to_string().contains("expired"),
+            "the expired VEK must be refused as expired"
+        );
     }
 
     #[test]
@@ -1385,7 +1388,10 @@ mod tests {
         );
         let err = verify_vek_validity_period_at(&leaf, chrono::Utc::now())
             .expect_err("future VEK must be rejected");
-        assert!(err.to_string().contains("not yet valid"), "got: {err}");
+        assert!(
+            err.to_string().contains("not yet valid"),
+            "the future VEK must be refused as not yet valid"
+        );
     }
 
     #[test]

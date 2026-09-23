@@ -33,11 +33,7 @@ async fn main() {
     )
     .await
     .expect("attestation failed");
-    eprintln!(
-        "[attest]  {:?} ({} bytes)",
-        t0.elapsed(),
-        evidence_json.len()
-    );
+    eprintln!("[attest]  {:?}", t0.elapsed());
 
     eprintln!("Verifying...");
     let t1 = Instant::now();

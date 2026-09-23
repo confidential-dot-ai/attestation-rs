@@ -1077,7 +1077,7 @@ mod tests {
             Err(AttestationError::NvidiaGpuNonceTooShort(n)) => {
                 assert_eq!(n, too_short.len());
             }
-            other => panic!("expected NvidiaGpuNonceTooShort, got {other:?}"),
+            _ => panic!("expected NvidiaGpuNonceTooShort"),
         }
     }
 
@@ -1481,7 +1481,7 @@ mod tests {
         chain.reverse();
         match verify_x5c_chain_and_extract_key(&chain) {
             Err(AttestationError::JwsVerification(_)) => {}
-            other => panic!("reversed chain must be rejected, got {other:?}"),
+            _ => panic!("reversed chain must be rejected as a JWS verification error"),
         }
     }
 
@@ -1493,7 +1493,7 @@ mod tests {
         let chain = vec![nras_x5c_fixture()[0].clone()];
         match verify_x5c_chain_and_extract_key(&chain) {
             Err(AttestationError::JwsVerification(_)) => {}
-            other => panic!("leaf-only chain must be rejected, got {other:?}"),
+            _ => panic!("leaf-only chain must be rejected as a JWS verification error"),
         }
     }
 

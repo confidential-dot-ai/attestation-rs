@@ -29,7 +29,7 @@ async fn main() {
             .await
             .expect("attest_with_nvidia_gpu failed");
 
-    eprintln!("Envelope: {} bytes", envelope.len());
+    eprintln!("Envelope generated");
 
     eprintln!("Verifying via NRAS…");
     let params = VerifyParams {

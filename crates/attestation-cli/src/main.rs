@@ -325,11 +325,7 @@ async fn cmd_attest(args: AttestArgs) {
     };
     let elapsed = t0.elapsed();
 
-    eprintln!(
-        "Evidence generated in {:?} ({} bytes)",
-        elapsed,
-        evidence_json.len()
-    );
+    eprintln!("Evidence generated in {elapsed:?}");
 
     if let Some(path) = &args.output {
         if let Err(e) = std::fs::write(path, &evidence_json) {
@@ -338,8 +334,8 @@ async fn cmd_attest(args: AttestArgs) {
         }
         eprintln!("Written to {}", path.display());
     } else {
-        if let Err(e) = io::stdout().write_all(&evidence_json) {
-            eprintln!("Failed to write to stdout: {e}");
+        if io::stdout().write_all(&evidence_json).is_err() {
+            eprintln!("Failed to write the evidence to stdout");
             process::exit(1);
         }
         // Ensure trailing newline for terminal readability

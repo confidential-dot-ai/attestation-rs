@@ -24,7 +24,7 @@ async fn main() {
     .await
     .expect("attestation failed");
 
-    eprintln!("Evidence: {} bytes", evidence_json.len());
+    eprintln!("Evidence generated");
 
     eprintln!("Verifying...");
     let params = VerifyParams::default();

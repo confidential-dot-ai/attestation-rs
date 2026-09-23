@@ -150,8 +150,8 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         Some(g) => vec![g],
         None => {
             log::warn!(
-                "could not determine processor generation from CPUID \
-                 (family=0x{cpuid_fam_id:02X}, model=0x{cpuid_mod_id:02X}); trying all known generations"
+                "could not determine processor generation from the report's CPUID fields; \
+                 trying all known generations"
             );
             vec![
                 ProcessorGeneration::Milan,
