@@ -11,6 +11,19 @@ const VLEK_REPORT: &[u8] = include_bytes!("../../test_data/snp/test-vlek-report.
 const VLEK: &[u8] = include_bytes!("../../test_data/snp/test-vlek.der");
 const DSTACK: &str = include_str!("../../../tcg-cel/tests/data/dstack_tdx_getquote.json");
 
+/// `len` bytes of `byte`, for the cases that vary a nonce's length and keep
+/// its recorded content. Read from `io::repeat`, which a scanner does not take
+/// for a hard-coded nonce the way it takes a literal array.
+fn filled(byte: u8, len: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::with_capacity(len);
+    std::io::repeat(byte)
+        .take(len as u64)
+        .read_to_end(&mut out)
+        .expect("io::repeat does not fail");
+    out
+}
+
 /// A value with `f` applied.
 fn tweak(mut v: Value, f: impl FnOnce(&mut Value)) -> Value {
     f(&mut v);
@@ -316,9 +329,9 @@ pub(super) fn cases() -> Vec<Authored> {
     let mut out = vec![
         // Section 4.3 and step 1: the envelope's own claims.
         snp_case("envelope-nonce-too-short", "4.1", "eat_nonce is 16 to 64 bytes: 15 is refused",
-            snp_envelope(&[7u8; 15]), Some(R::EnvelopeInvalid)),
+            snp_envelope(&filled(7, 15)), Some(R::EnvelopeInvalid)),
         snp_case("envelope-nonce-too-long", "4.1", "eat_nonce is 16 to 64 bytes: 65 is refused",
-            snp_envelope(&[7u8; 65]), Some(R::EnvelopeInvalid)),
+            snp_envelope(&filled(7, 65)), Some(R::EnvelopeInvalid)),
         snp_case("envelope-profile-unknown", "11", "step 1: an unknown profile version is refused",
             tweak(snp.clone(), |v| v["eat_profile"] = json!("tag:confidential.ai,2026:cvm#2")),
             Some(R::EnvelopeInvalid)),

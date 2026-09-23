@@ -819,6 +819,29 @@ mod tests {
     use super::*;
 
     // --- Helper: build a synthetic TPMS_ATTEST message ---
+    /// A test nonce of `len` bytes derived from `label` (SHA-256 blocks,
+    /// truncated), so every test's nonce is its own and none is a literal.
+    /// Two labels' outputs differ; one label's shorter output prefixes its longer.
+    fn test_nonce(label: &str, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut block = 0u32;
+        while out.len() < len {
+            let mut input = label.as_bytes().to_vec();
+            input.extend_from_slice(&block.to_be_bytes());
+            out.extend_from_slice(&sha256(&input));
+            block += 1;
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// `nonce` zero-padded to 64 bytes, as the attest path once sent it.
+    fn zero_padded(nonce: &[u8]) -> Vec<u8> {
+        let mut padded = nonce.to_vec();
+        padded.resize(64, 0);
+        padded
+    }
+
     fn build_tpms_attest(nonce: &[u8], pcr_selection: &[u8], pcr_digest: &[u8]) -> Vec<u8> {
         let mut msg = Vec::new();
         // magic: 0xFF544347
@@ -894,32 +917,33 @@ mod tests {
     fn test_tpm_nonce_direct_match() {
         // Azure vTPM puts raw report_data as the TPM nonce (qualifyingData).
         // Verification uses direct byte comparison.
-        let report_data = b"hello world test nonce";
+        let report_data = test_nonce("direct match", 22);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(report_data, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let msg = build_tpms_attest(&report_data, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
         assert!(
-            verify_tpm_nonce(&msg, report_data).is_ok(),
+            verify_tpm_nonce(&msg, &report_data).is_ok(),
             "nonce should match via direct comparison"
         );
     }
 
     #[test]
     fn test_tpm_nonce_mismatch() {
-        let nonce = b"correct data nonce value";
+        let nonce = test_nonce("the quoted nonce", 24);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
         assert!(
-            verify_tpm_nonce(&msg, b"wrong___data nonce value").is_err(),
+            verify_tpm_nonce(&msg, &test_nonce("another nonce", 24)).is_err(),
             "nonce should not match for different data"
         );
     }
 
     #[test]
     fn test_tpm_nonce_length_mismatch() {
-        let nonce = b"short";
+        // The expected value extends the quoted one, so only the length differs.
+        let nonce = test_nonce("length", 5);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
-        let result = verify_tpm_nonce(&msg, b"much longer expected data");
+        let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let result = verify_tpm_nonce(&msg, &test_nonce("length", 25));
         assert!(
             result.is_err(),
             "different length nonce should return error"
@@ -941,7 +965,7 @@ mod tests {
         let expected_digest = crate::utils::sha256(&pcr_concat);
 
         // Build TPMS_ATTEST with sizeofSelect=3, bitmap [0xFF, 0x00, 0x00] (PCRs 0-7)
-        let nonce = [0u8; 32];
+        let nonce = test_nonce("pcr digest", 32);
         let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0x00, 0x00], &expected_digest);
 
         let result = verify_tpm_pcrs(&msg, &pcrs);
@@ -956,7 +980,7 @@ mod tests {
     fn test_tpm_pcrs_wrong_digest() {
         let pcrs: Vec<Vec<u8>> = (0..24).map(|_| vec![0u8; 32]).collect();
         let wrong_digest = [0xAA; 32];
-        let nonce = [0u8; 32];
+        let nonce = test_nonce("pcr digest", 32);
         let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0x00, 0x00], &wrong_digest);
 
         let result = verify_tpm_pcrs(&msg, &pcrs);
@@ -982,7 +1006,7 @@ mod tests {
         let pcrs: Vec<Vec<u8>> = (0..24).map(|i| vec![i as u8; 32]).collect();
         let pcr0_digest = crate::utils::sha256(&pcrs[0]);
 
-        let nonce = [0u8; 32];
+        let nonce = test_nonce("pcr digest", 32);
         let msg = build_tpms_attest(&nonce, &[3, 0x01, 0x00, 0x00], &pcr0_digest);
 
         assert!(verify_tpm_pcrs(&msg, &pcrs).is_ok());
@@ -998,7 +1022,7 @@ mod tests {
         concat.extend_from_slice(&pcrs[4]);
         let digest = crate::utils::sha256(&concat);
 
-        let nonce = [0u8; 32];
+        let nonce = test_nonce("pcr digest", 32);
         let msg = build_tpms_attest(&nonce, &[3, 0x15, 0x00, 0x00], &digest);
 
         assert!(verify_tpm_pcrs(&msg, &pcrs).is_ok());
@@ -1158,7 +1182,11 @@ mod tests {
     fn test_parse_quote_info_valid() {
         let digest = [0xBB; 32];
         // Select PCRs 0, 1, 2 (bitmap byte 0 = 0b00000111 = 0x07)
-        let msg = build_tpms_attest(&[0u8; 32], &[3, 0x07, 0x00, 0x00], &digest);
+        let msg = build_tpms_attest(
+            &test_nonce("pcr selection", 32),
+            &[3, 0x07, 0x00, 0x00],
+            &digest,
+        );
 
         let (selected, extracted_digest) = parse_quote_info(&msg).unwrap();
         assert_eq!(selected, vec![0, 1, 2]);
@@ -1169,7 +1197,11 @@ mod tests {
     fn test_parse_quote_info_high_pcrs() {
         // Select PCRs 16, 17, 18 (byte 2, bits 0,1,2 = 0x07)
         let digest = [0xCC; 32];
-        let msg = build_tpms_attest(&[0u8; 32], &[3, 0x00, 0x00, 0x07], &digest);
+        let msg = build_tpms_attest(
+            &test_nonce("pcr selection", 32),
+            &[3, 0x00, 0x00, 0x07],
+            &digest,
+        );
 
         let (selected, _) = parse_quote_info(&msg).unwrap();
         assert_eq!(selected, vec![16, 17, 18]);
@@ -1178,7 +1210,11 @@ mod tests {
     #[test]
     fn test_parse_quote_info_all_24_pcrs() {
         let digest = [0xDD; 32];
-        let msg = build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0xFF, 0xFF], &digest);
+        let msg = build_tpms_attest(
+            &test_nonce("pcr selection", 32),
+            &[3, 0xFF, 0xFF, 0xFF],
+            &digest,
+        );
 
         let (selected, _) = parse_quote_info(&msg).unwrap();
         assert_eq!(selected.len(), 24);
@@ -1358,11 +1394,11 @@ mod tests {
     fn test_check_report_data_unpadded_nonce_matches_original() {
         // Simulate: attester passes unpadded "hello" as TPM nonce.
         // Verifier checks with the same unpadded "hello" → should match.
-        let nonce = b"hello";
+        let nonce = test_nonce("unpadded", 5);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
 
-        let result = check_report_data(&msg, Some(b"hello"));
+        let result = check_report_data(&msg, Some(&nonce));
         assert!(
             result.is_ok(),
             "unpadded nonce should match: {:?}",
@@ -1376,14 +1412,11 @@ mod tests {
         // Simulate: attester passes unpadded "hello" (5 bytes) as TPM nonce.
         // Verifier checks with zero-padded 64-byte version → should fail
         // because lengths differ.
-        let nonce = b"hello";
+        let nonce = test_nonce("unpadded", 5);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let msg = build_tpms_attest(&nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
 
-        let mut padded_expected = vec![0u8; 64];
-        padded_expected[..5].copy_from_slice(b"hello");
-
-        let result = check_report_data(&msg, Some(&padded_expected));
+        let result = check_report_data(&msg, Some(&zero_padded(&nonce)));
         assert!(
             result.is_err(),
             "padded expected should not match unpadded nonce"
@@ -1396,12 +1429,11 @@ mod tests {
         // 64-byte nonce to TPM. Verifier checks with original unpadded data.
         // This should fail because the nonce in the quote is 64 bytes but
         // the expected is 5 bytes.
-        let mut padded_nonce = vec![0u8; 64];
-        padded_nonce[..5].copy_from_slice(b"hello");
+        let nonce = test_nonce("unpadded", 5);
         let pcr_digest = [0u8; 32];
-        let msg = build_tpms_attest(&padded_nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
+        let msg = build_tpms_attest(&zero_padded(&nonce), &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
 
-        let result = check_report_data(&msg, Some(b"hello"));
+        let result = check_report_data(&msg, Some(&nonce));
         assert!(
             result.is_err(),
             "unpadded expected should not match padded nonce (length mismatch)"
@@ -1410,7 +1442,7 @@ mod tests {
 
     #[test]
     fn test_check_report_data_none_returns_none() {
-        let msg = build_tpms_attest(b"any", &[3, 0xFF, 0xFF, 0xFF], &[0u8; 32]);
+        let msg = build_tpms_attest(&test_nonce("any", 3), &[3, 0xFF, 0xFF, 0xFF], &[0u8; 32]);
         let result = check_report_data(&msg, None).unwrap();
         assert_eq!(result, None, "no expected data should return None");
     }
@@ -1474,8 +1506,12 @@ mod tests {
         use crate::types::{Claims, TcbInfo};
 
         // Simulate a nonce that was zero-padded to 64 bytes (as attest does)
-        let mut padded_nonce = vec![0u8; 64];
-        padded_nonce[..5].copy_from_slice(b"hello");
+        let nonce = test_nonce("padded", 5);
+        assert_ne!(
+            nonce[4], 0,
+            "precondition: the nonce itself ends in a non-zero byte"
+        );
+        let padded_nonce = zero_padded(&nonce);
 
         let pcr_sel = &[0x03, 0x00, 0x00, 0x00];
         let pcr_digest = vec![0u8; 32];
@@ -1510,8 +1546,7 @@ mod tests {
         );
 
         assert_eq!(
-            result.claims.signed_data,
-            b"hello".to_vec(),
+            result.claims.signed_data, nonce,
             "signed_data should have trailing nulls stripped"
         );
         // platform_data nonce should still contain the full padded value
@@ -1528,7 +1563,11 @@ mod tests {
     /// A quote message whose signed PCR selection covers PCRs 0-8.
     fn attest_selecting_pcr8() -> Vec<u8> {
         // sizeofSelect=3, bitmap [0xFF, 0x01, 0x00]: PCRs 0-7 plus PCR 8.
-        build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0x01, 0x00], &[0u8; 32])
+        build_tpms_attest(
+            &test_nonce("init data", 32),
+            &[3, 0xFF, 0x01, 0x00],
+            &[0u8; 32],
+        )
     }
 
     #[test]
@@ -1617,7 +1656,11 @@ mod tests {
             pcr_concat.extend_from_slice(pcr);
         }
         let digest = crate::utils::sha256(&pcr_concat);
-        let msg = build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0x00, 0x00], &digest);
+        let msg = build_tpms_attest(
+            &test_nonce("init data", 32),
+            &[3, 0xFF, 0x00, 0x00],
+            &digest,
+        );
 
         assert!(
             verify_tpm_pcrs(&msg, &pcrs).is_ok(),
