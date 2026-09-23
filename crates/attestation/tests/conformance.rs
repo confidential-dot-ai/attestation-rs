@@ -335,6 +335,8 @@ mod author {
     const LIVE_CCEL: &[u8] = include_bytes!("../test_data/tdx_ccel_live.bin");
     const LIVE_CCEL2: &[u8] = include_bytes!("../test_data/tdx_ccel_live2.dat");
     const TCB_INFO: &[u8] = include_bytes!("../test_data/collateral/tcb_info_50806f000000.json");
+    const TCB_INFO_90C06F: &[u8] =
+        include_bytes!("../test_data/collateral/tcb_info_90c06f000000.json");
     const TD_QE_IDENTITY: &[u8] = include_bytes!("../test_data/collateral/td_qe_identity.json");
     const TCB_SIGNING_CHAIN: &[u8] =
         include_bytes!("../test_data/collateral/tcb_signing_chain.pem");
@@ -548,6 +550,23 @@ mod author {
             "tdx_tcb_info/50806f000000".to_string(),
             CollateralRef::Signed {
                 body: "collateral/tcb_info_50806f000000.forged.json".into(),
+                signing_chain: "collateral/tcb_signing_chain.pem".into(),
+            },
+        );
+        map
+    }
+
+    /// The March TCB Info for FMSPC 90c06f000000 held under the live quote's
+    /// FMSPC b0c06f000000: Intel-signed, inside its window, and with a level
+    /// the live platform meets, for another platform.
+    fn tdx_fixture_collateral_for_another_fmspc() -> BTreeMap<String, CollateralRef> {
+        write("collateral/tcb_info_90c06f000000.json", TCB_INFO_90C06F);
+        let mut map = tdx_fixture_collateral();
+        map.remove("tdx_tcb_info/50806f000000");
+        map.insert(
+            "tdx_tcb_info/b0c06f000000".to_string(),
+            CollateralRef::Signed {
+                body: "collateral/tcb_info_90c06f000000.json".into(),
                 signing_chain: "collateral/tcb_signing_chain.pem".into(),
             },
         );
@@ -943,6 +962,17 @@ mod author {
                 evidence: tdx_envelope(V4_QUOTE).into(),
                 policy: Some(v4_policy().into()),
                 collateral: tdx_fixture_collateral_with_forged_tcb_info(),
+                expect: Some(RefusalCode::CollateralInvalid),
+            },
+            Authored {
+                id: "tdx-tcb-info-for-another-fmspc",
+                section: "9.2.3",
+                statement: "step 5: the TCB Info carries the PCK certificate's FMSPC, whatever supplied it; an Intel-signed TCB Info for another platform is refused",
+                // The live PCK is valid from 2026-03-30; the March fixtures until 2026-04-15.
+                now: "2026-04-01T00:00:00Z",
+                evidence: tdx_envelope(LIVE_QUOTE).into(),
+                policy: Some(v4_policy().into()),
+                collateral: tdx_fixture_collateral_for_another_fmspc(),
                 expect: Some(RefusalCode::CollateralInvalid),
             },
             Authored {

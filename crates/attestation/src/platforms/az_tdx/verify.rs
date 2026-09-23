@@ -69,8 +69,8 @@ pub async fn verify_evidence(
     tdx_verify::verify_quote_signature(&td_quote_bytes, &tdx_quote)?;
     dcap::verify_dcap_chain(&td_quote_bytes, tdx_quote.quote_version, None)?;
 
-    // TDX debug policy enforcement (bit 0 of td_attributes)
-    if tdx_quote.body.td_attributes[0] & 0x01 != 0 && !params.allow_debug {
+    // TDX debug policy enforcement: the TUD and profiling groups
+    if tdx_verify::td_attributes_debug(&tdx_quote.body.td_attributes) && !params.allow_debug {
         return Err(AttestationError::DebugPolicyViolation);
     }
 
@@ -87,14 +87,19 @@ pub async fn verify_evidence(
             .check_pck_revocation(auth.pck_cert_chain_pem)
             .await?;
 
-        // TCB status evaluation
+        // TCB Info and TD QE Identity, bound to this platform and evaluated
         let fmspc = dcap::extract_fmspc_from_pck_der(&pck_der_certs)?;
         let tcb_info = provider.get_tcb_info(&fmspc).await?;
-        let status = dcap::evaluate_tcb_status(
-            &tcb_info.body,
-            &tdx_quote.body.tee_tcb_svn,
+        let qe_identity = provider.get_td_qe_identity().await?;
+        let root_ca_crl = provider.get_root_ca_crl().await?;
+        let status = dcap::evaluate_tdx_collateral_at(
+            &tdx_quote.body,
+            auth.qe_report_body,
             auth.pck_cert_chain_pem,
-            &tcb_info.signing_chain,
+            (&tcb_info.body, &tcb_info.signing_chain),
+            (&qe_identity.body, &qe_identity.signing_chain),
+            &root_ca_crl,
+            provider.now(),
         )?;
 
         // Reject Revoked TCB status
@@ -103,14 +108,6 @@ pub async fn verify_evidence(
                 "TDX TCB status is Revoked".into(),
             ));
         }
-
-        // QE Identity verification (TDX uses TD_QE, not SGX QE)
-        let qe_identity = provider.get_td_qe_identity().await?;
-        dcap::verify_qe_identity(
-            auth.qe_report_body,
-            &qe_identity.body,
-            &qe_identity.signing_chain,
-        )?;
 
         Some(status)
     } else {

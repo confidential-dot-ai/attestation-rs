@@ -20,16 +20,12 @@ use crate::types::TdxTcbStatus;
 use crate::utils::constant_time_eq;
 use std::collections::BTreeMap;
 
-/// TD attribute bits (Intel TDX Module ABI): DEBUG, SEPT_VE_DISABLE,
-/// MIGRATABLE, PKS, KL, PERFMON. Every other bit is reserved and must be zero.
-const ATTR_DEBUG: u64 = 1;
+/// TD attribute bits (TDX Module ABI 348551-007 Table 3.22, standard section
+/// 9.2.5). `RESERVED_P` (22:18) may take any value; the reserved mask covers
+/// bits 3:1, 15:7, 26:23 and 61:32.
 const ATTR_SEPT_VE_DISABLE: u64 = 1 << 28;
 const ATTR_MIGRATABLE: u64 = 1 << 29;
-const ATTR_PKS: u64 = 1 << 30;
-const ATTR_KL: u64 = 1 << 31;
-const ATTR_PERFMON: u64 = 1 << 63;
-const ATTR_DEFINED: u64 =
-    ATTR_DEBUG | ATTR_SEPT_VE_DISABLE | ATTR_MIGRATABLE | ATTR_PKS | ATTR_KL | ATTR_PERFMON;
+const ATTR_RESERVED_MASK: u64 = 0x3FFF_FFFF_0780_FF8E;
 
 fn checked(next_update: Option<String>) -> CollateralOutcome {
     CollateralOutcome {
@@ -60,15 +56,6 @@ fn pcs_next_update(body: &[u8], object: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn pcs_u32(body: &[u8], object: &str, field: &str) -> Option<u32> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()?
-        .get(object)?
-        .get(field)?
-        .as_u64()
-        .and_then(|v| u32::try_from(v).ok())
-}
-
 pub(crate) async fn appraise(
     cpu: &CpuEvidence,
     ctx: &Ctx<'_>,
@@ -95,11 +82,11 @@ pub(crate) async fn appraise(
         }
     }
     let ppid = dcap::extract_ppid_from_pck(pck_pem)?;
-    let (pck_tcb, pcesvn) = dcap::extract_pck_tcb_components(pck_pem)?;
+    let pck = dcap::pck_tcb_from_pem(pck_pem)?;
 
     // 4. Guest policy, matching Intel's quote verification policy.
     let attrs = u64::from_le_bytes(quote.body.td_attributes);
-    let debug = attrs & ATTR_DEBUG != 0;
+    let debug = crate::platforms::tdx::verify::td_attributes_debug(&quote.body.td_attributes);
     // TD attributes are fixed at build, so debug is off since boot or on.
     let dbgstat = if debug {
         DebugStatus::Enabled
@@ -114,7 +101,7 @@ pub(crate) async fn appraise(
     }
     let sept_ve_disable = attrs & ATTR_SEPT_VE_DISABLE != 0;
     let migratable = attrs & ATTR_MIGRATABLE != 0;
-    let reserved_zero = attrs & !ATTR_DEFINED == 0;
+    let reserved_zero = attrs & ATTR_RESERVED_MASK == 0;
     let service_td = quote.body.mr_servicetd.map(|m| m.iter().any(|b| *b != 0));
     let bits = &policy.policy_bits;
     if debug && !bits.allow_debug {
@@ -184,20 +171,37 @@ pub(crate) async fn appraise(
             collateral.check_pck_revocation(pck_pem).await?;
             outcomes.insert(CollateralCheck::TdxPckCrl, checked(None));
             outcomes.insert(CollateralCheck::TdxRootCrl, checked(None));
+            // Every source (fetched, inline, held, custom) passes through the
+            // same binding and shape checks here.
+            let root_crl = collateral.get_root_ca_crl().await?;
             let tcb_info = collateral.get_tcb_info(&fmspc).await?;
-            let evaluated = dcap::evaluate_tcb_status_at(
+            let info = dcap::verify_tdx_tcb_info_at(
                 &tcb_info.body,
-                &quote.body.tee_tcb_svn,
-                pck_pem,
                 &tcb_info.signing_chain,
+                &root_crl,
                 ctx.now,
             )?;
-            if evaluated.collateral_expired {
+            if info.next_update <= ctx.now {
                 return Err(refuse(
                     RefusalCode::CollateralInvalid,
                     "TCB Info nextUpdate has passed",
                 ));
             }
+            let qe = collateral.get_td_qe_identity().await?;
+            let qe_level = dcap::verify_qe_identity_at(
+                auth.qe_report_body,
+                &qe.body,
+                &qe.signing_chain,
+                &root_crl,
+                ctx.now,
+            )?;
+            if qe_level.next_update <= ctx.now {
+                return Err(refuse(
+                    RefusalCode::CollateralInvalid,
+                    "QE Identity nextUpdate has passed",
+                ));
+            }
+            let evaluated = dcap::evaluate_tdx_tcb(&info, &quote.body, &pck, &qe_level)?;
             if evaluated.tcb_status == TdxTcbStatus::Revoked {
                 return Err(AttestationError::TcbMismatch(
                     "TDX TCB status is Revoked".into(),
@@ -214,13 +218,7 @@ pub(crate) async fn appraise(
                 )));
             }
             if let Some(min) = tdx_floor.and_then(|f| f.min_tcb_evaluation_data_number) {
-                let have = pcs_u32(&tcb_info.body, "tcbInfo", "tcbEvaluationDataNumber")
-                    .ok_or_else(|| {
-                        refuse(
-                            RefusalCode::CollateralInvalid,
-                            "TCB Info carries no tcbEvaluationDataNumber",
-                        )
-                    })?;
+                let have = info.tcb_evaluation_data_number;
                 if have < min {
                     return Err(AttestationError::TcbMismatch(format!(
                         "tcbEvaluationDataNumber {have} is below the policy floor {min}"
@@ -231,20 +229,6 @@ pub(crate) async fn appraise(
                 CollateralCheck::TdxTcbInfo,
                 checked(pcs_next_update(&tcb_info.body, "tcbInfo")),
             );
-            let qe = collateral.get_td_qe_identity().await?;
-            dcap::verify_qe_identity_at(auth.qe_report_body, &qe.body, &qe.signing_chain, ctx.now)?;
-            if let Some(next) = pcs_next_update(&qe.body, "enclaveIdentity") {
-                let past = next
-                    .parse::<chrono::DateTime<chrono::FixedOffset>>()
-                    .map(|t| t.with_timezone(&chrono::Utc) < ctx.now)
-                    .unwrap_or(true);
-                if past {
-                    return Err(refuse(
-                        RefusalCode::CollateralInvalid,
-                        "QE Identity nextUpdate has passed",
-                    ));
-                }
-            }
             outcomes.insert(
                 CollateralCheck::TdxQeIdentity,
                 checked(pcs_next_update(&qe.body, "enclaveIdentity")),
@@ -477,8 +461,8 @@ pub(crate) async fn appraise(
         dbgstat,
         cvm_tcb: Tcb::Tdx(Box::new(TdxTcb {
             tee_tcb_svn: FixedBytes(quote.body.tee_tcb_svn),
-            pck_tcb: FixedBytes(pck_tcb),
-            pcesvn,
+            pck_tcb: FixedBytes(pck.cpusvn),
+            pcesvn: pck.pcesvn,
             fmspc,
             status,
             advisories,
@@ -506,4 +490,34 @@ pub(crate) async fn appraise(
         },
         bound,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_mask_is_the_abi_reserved_bits() {
+        // 3:1, 15:7, 26:23 and 61:32 (TDX Module ABI 348551-007 Table 3.22).
+        let reserved = (1..=3).chain(7..=15).chain(23..=26).chain(32..=61);
+        let mut mask = 0u64;
+        for bit in reserved {
+            mask |= 1 << bit;
+        }
+        assert_eq!(ATTR_RESERVED_MASK, mask);
+    }
+
+    #[test]
+    fn permitted_attributes_pass_the_reserved_check() {
+        // DEBUG and profiling (0, 4 to 6), ICSSD, SERVTD_EXT, RESERVED_P, LASS,
+        // SEPT_VE_DISABLE, MIGRATABLE, PKS, KL, TPA, PERFMON.
+        for bit in [
+            0, 4, 5, 6, 16, 17, 18, 19, 20, 21, 22, 27, 28, 29, 30, 31, 62, 63,
+        ] {
+            assert_eq!(ATTR_RESERVED_MASK & (1 << bit), 0, "bit {bit}");
+        }
+        for bit in [1, 2, 3, 7, 15, 23, 26, 32, 61] {
+            assert_ne!(ATTR_RESERVED_MASK & (1 << bit), 0, "bit {bit}");
+        }
+    }
 }

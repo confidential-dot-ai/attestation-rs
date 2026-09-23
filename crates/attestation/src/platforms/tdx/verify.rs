@@ -173,10 +173,26 @@ impl TdxReportBody {
     }
 }
 
-/// Parse a TDX quote from raw bytes. Supports v4 and v5 formats.
 /// Expected TDX TEE type value in the quote header.
 const TDX_TEE_TYPE: u32 = 0x81;
+/// ECDSA-256 with P-256, the only attestation key type Intel's QVL accepts.
+const ATT_KEY_TYPE_ECDSA_P256: u16 = 2;
+/// Intel's QE vendor ID (QVL `INTEL_QE_VENDOR_ID`).
+const INTEL_QE_VENDOR_ID: [u8; 16] = [
+    0x93, 0x9a, 0x72, 0x33, 0xf7, 0x9c, 0x4c, 0xa9, 0x94, 0x0a, 0x0d, 0xb3, 0x95, 0x7f, 0x06, 0x07,
+];
 
+/// The TD attribute groups that put a TD under debug (TDX Module ABI
+/// 348551-007 Table 3.22): TUD, bits 3:0 with bit 0 `DEBUG`, and the
+/// TD-under-profiling group, bits 6:4.
+pub(crate) const TD_ATTR_DEBUG_GROUPS: u64 = 0x7F;
+
+/// Whether the TD attributes put the TD under debug or host profiling.
+pub(crate) fn td_attributes_debug(td_attributes: &[u8; 8]) -> bool {
+    u64::from_le_bytes(*td_attributes) & TD_ATTR_DEBUG_GROUPS != 0
+}
+
+/// Parse a TDX quote from raw bytes. Supports v4 and v5 formats.
 pub fn parse_tdx_quote(data: &[u8]) -> Result<TdxQuote> {
     let header = QuoteHeader::from_bytes(data)?;
 
@@ -185,6 +201,18 @@ pub fn parse_tdx_quote(data: &[u8]) -> Result<TdxQuote> {
         return Err(AttestationError::QuoteParseFailed(format!(
             "invalid TEE type: expected 0x{:02X} (TDX), got 0x{:02X}",
             TDX_TEE_TYPE, header.tee_type
+        )));
+    }
+    if header.att_key_type != ATT_KEY_TYPE_ECDSA_P256 {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "attestation key type {} is not 2 (ECDSA-256 with P-256)",
+            header.att_key_type
+        )));
+    }
+    if header.vendor_id != INTEL_QE_VENDOR_ID {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "QE vendor ID {} is not Intel's",
+            hex::encode(header.vendor_id)
         )));
     }
 
@@ -373,8 +401,8 @@ pub async fn verify_evidence(
     // 3b. Full DCAP chain verification: PCK cert chain → QE report sig → QE binding
     super::dcap::verify_dcap_chain(&quote_bytes, quote.quote_version, None)?;
 
-    // 3c. TDX debug policy enforcement (bit 0 of td_attributes)
-    if quote.body.td_attributes[0] & 0x01 != 0 && !params.allow_debug {
+    // 3c. TDX debug policy enforcement: the TUD and profiling groups
+    if td_attributes_debug(&quote.body.td_attributes) && !params.allow_debug {
         return Err(AttestationError::DebugPolicyViolation);
     }
 
@@ -388,14 +416,19 @@ pub async fn verify_evidence(
             .check_pck_revocation(auth.pck_cert_chain_pem)
             .await?;
 
-        // TCB status evaluation
+        // TCB Info and TD QE Identity, bound to this platform and evaluated
         let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
         let tcb_info = provider.get_tcb_info(&fmspc).await?;
-        let status = super::dcap::evaluate_tcb_status(
-            &tcb_info.body,
-            &quote.body.tee_tcb_svn,
+        let qe_identity = provider.get_td_qe_identity().await?;
+        let root_ca_crl = provider.get_root_ca_crl().await?;
+        let status = super::dcap::evaluate_tdx_collateral_at(
+            &quote.body,
+            auth.qe_report_body,
             auth.pck_cert_chain_pem,
-            &tcb_info.signing_chain,
+            (&tcb_info.body, &tcb_info.signing_chain),
+            (&qe_identity.body, &qe_identity.signing_chain),
+            &root_ca_crl,
+            provider.now(),
         )?;
 
         // Reject Revoked TCB status
@@ -404,14 +437,6 @@ pub async fn verify_evidence(
                 "TDX TCB status is Revoked".into(),
             ));
         }
-
-        // QE Identity verification (TDX uses TD_QE, not SGX QE)
-        let qe_identity = provider.get_td_qe_identity().await?;
-        super::dcap::verify_qe_identity(
-            auth.qe_report_body,
-            &qe_identity.body,
-            &qe_identity.signing_chain,
-        )?;
 
         Some(status)
     } else {
@@ -665,6 +690,57 @@ mod tests {
     }
 
     #[test]
+    fn v5_tdx15_extended_body_stays_refused() {
+        // Type 4 (TDX 1.5 with the extended feature set, 885 bytes) is out of scope in version 1.
+        let mut data = V5_QUOTE[..QUOTE_HEADER_SIZE].to_vec();
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&885u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 885]);
+        data.extend_from_slice(&V5_QUOTE[QUOTE_HEADER_SIZE + 6 + 648..]);
+        assert!(matches!(
+            parse_tdx_quote(&data),
+            Err(AttestationError::QuoteParseFailed(_))
+        ));
+    }
+
+    #[test]
+    fn attestation_key_type_must_be_ecdsa_p256() {
+        for quote in [V4_QUOTE, V5_QUOTE] {
+            let mut data = quote.to_vec();
+            data[2..4].copy_from_slice(&3u16.to_le_bytes());
+            assert!(matches!(
+                parse_tdx_quote(&data),
+                Err(AttestationError::QuoteParseFailed(m)) if m.contains("attestation key type")
+            ));
+        }
+    }
+
+    #[test]
+    fn qe_vendor_id_must_be_intels() {
+        for quote in [V4_QUOTE, V5_QUOTE] {
+            assert_eq!(&quote[12..28], &INTEL_QE_VENDOR_ID);
+            let mut data = quote.to_vec();
+            data[27] ^= 0x01;
+            assert!(matches!(
+                parse_tdx_quote(&data),
+                Err(AttestationError::QuoteParseFailed(m)) if m.contains("vendor ID")
+            ));
+        }
+    }
+
+    #[test]
+    fn td_debug_covers_the_tud_and_profiling_groups() {
+        for bit in 0..7 {
+            let attrs = (1u64 << bit).to_le_bytes();
+            assert!(td_attributes_debug(&attrs), "bit {bit}");
+        }
+        for bit in [7, 16, 17, 18, 27, 28, 29, 30, 31, 62, 63] {
+            let attrs = (1u64 << bit).to_le_bytes();
+            assert!(!td_attributes_debug(&attrs), "bit {bit}");
+        }
+    }
+
+    #[test]
     fn test_debug_policy_enforcement() {
         // v4 fixture has debug bit set, v5 does not
         let v4 = parse_tdx_quote(V4_QUOTE).unwrap();
@@ -796,10 +872,9 @@ mod tests {
     // collateral path (TCB info, QE identity, CRL checks).
     //
     // Collateral files were captured from Intel PCS v4 and stored in
-    // test_data/collateral/. The signing chains and CRLs have long
-    // validity, but TCB Info `nextUpdate` will eventually expire.
-    // `evaluate_tcb_status` surfaces that as `collateral_expired: true`
-    // rather than a hard failure, so the tests remain valid.
+    // test_data/collateral/. The provider's clock stays inside their
+    // window; the legacy path reports a passed `nextUpdate` as
+    // `collateral_expired: true` and does not fail on it.
     // ---------------------------------------------------------------
 
     const TCB_INFO_V4: &[u8] =
@@ -981,8 +1056,7 @@ mod tests {
         // Info levels (CompSVN [1,1,...] < required [3,3,...]), so collateral
         // verification cannot find a matching SGX TCB level. Collateral
         // testing for the v5 code path is covered by the v4 tests above,
-        // which share the same `evaluate_tcb_status` / `verify_qe_identity`
-        // implementation.
+        // which share `evaluate_tdx_collateral_at`.
     }
 
     #[tokio::test]
