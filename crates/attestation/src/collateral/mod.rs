@@ -443,6 +443,9 @@ impl<T: crate::platforms::nvidia_gpu::NrasProvider + ?Sized>
     fn issuer(&self, arch: crate::types::NvidiaGpuArch) -> Result<String> {
         (**self).issuer(arch)
     }
+    fn accepts_certificate_hold(&self) -> bool {
+        (**self).accepts_certificate_hold()
+    }
     async fn attest(
         &self,
         request: &crate::platforms::nvidia_gpu::NrasRequest,

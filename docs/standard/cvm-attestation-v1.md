@@ -4,7 +4,7 @@
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
 | Version | 1, draft of 2026-09-22 |
-| Conformance corpus | 1.5 |
+| Conformance corpus | 1.6 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
 
@@ -1029,6 +1029,8 @@ The verifier groups the device submodules by architecture and sends one request 
   "claims_version": "3.0" }
 ```
 
+The verifier does not ask NRAS to relax its certificate checks: a request that tells NRAS to accept device certificates whose OCSP status is on hold (the `X-NVIDIA-OCSP-ALLOW-CERT-HOLD` header) is not an appraisal under this profile, and a verifier configured to send one refuses with `unsupported`.
+
 #### 9.7.2. Response
 
 NRAS answers with a detached EAT: `[["JWT", <overall token>], {<name>: <device token>, ...}]`. The verifier:
@@ -1375,7 +1377,7 @@ A refusal names the rule family that failed:
 
 | Code | Sections | Meaning |
 | --- | --- | --- |
-| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.4, 6.5, 8.1, 10.1, 11 step 1 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, version or consistency rule, including a hint that contradicts the signed report, a backing or source the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (a vTPM register and its quoted PCR), and a reserved kind or claim |
+| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.4, 6.5, 8.1, 10.1, 11 step 1 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, version or consistency rule, including a hint that contradicts the signed report, a backing or source the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (a vTPM register and its quoted PCR, an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved kind or claim |
 | `policy-invalid` | 13 | the policy fails its own validation |
 | `platform-unsupported` | 9 | the TEE or hosting is one this verifier does not implement |
 | `report-invalid` | 11 step 2 | the hardware report cannot be parsed, or its version is outside the supported range |
@@ -1398,11 +1400,11 @@ A refusal names the rule family that failed:
 | `device-not-allowed` | 13.5 | a device's architecture is outside the allowed set, or the envelope carries more than 32 device submodules |
 | `device-token-invalid` | 9.7.2 | NRAS answered with a token the verifier refuses: signature, issuer, claims version, `submods` digest, key identifier, or a token that maps to no device |
 | `device-policy` | 9.7.2, 9.7.3, 13.5 | NRAS's overall result is false, the device count differs, a device token is of another architecture, or a device gate failed |
-| `unsupported` | 7.1, 7.4, 9.4.4, 9.6.2 | a format or feature this version does not implement: the `aael` log, a log format the submodule does not admit, a TPM bank other than SHA-256, a CCA profile or binding variant outside Section 9.6.2 |
+| `unsupported` | 7.1, 7.4, 9.4.4, 9.6.2, 9.7.1 | a format or feature this version does not implement: the `aael` log, a log format the submodule does not admit, a TPM bank other than SHA-256, a CCA profile or binding variant outside Section 9.6.2, an NRAS request that relaxes NRAS's certificate checks |
 
 ### 14.5. Versioning and change control
 
-The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.5") and pins that version in its continuous integration.
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.6") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in the implementation or in the case, and the corpus is corrected first. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
@@ -1550,16 +1552,13 @@ The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) 
 
 This section records the status of known implementations at the time of writing, in the manner of RFC 7942.
 
-attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.5 (150 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7 and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
+attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.6 (154 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7 and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
 
 Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; `replay_until_event`; appraisal of the standalone `aael` log; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
 
 Requirements of Section 9 that the reference implementation does not yet enforce, each tracked for correction:
 
 - SEV-SNP: a VEK cross-check failure is refused with `tcb-not-allowed`, and on Turin a VCEK without the FMC extension passes when the report's FMC is 0.
-- Azure: the HCL report's variable data is hashed after trailing zero bytes are removed, which agrees with hashing exactly its declared size for every report Azure produces; the SEV-SNP `cpu` report is not compared with the HCL report's hardware area, and the HCL report's hash type is not checked.
-- NVIDIA: a device token's architecture is not compared with its batch.
-- `cvm` records: `ats` records other than the boot and claim records are not refused.
 
 The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` lists the statements without a case.
 

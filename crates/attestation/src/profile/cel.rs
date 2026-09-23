@@ -378,6 +378,13 @@ pub fn replay(
                 }
                 claims.insert(index, parse_claim_body(body)?);
             }
+            // Section 8.2: `ats` holds the boot and claim records and nothing else.
+            Some(e) => {
+                return Err(bad(format!(
+                    "record {pos}: ats operation {:?} is neither boot nor claim",
+                    e.operation
+                )));
+            }
             _ => {
                 if workload_rules && index >= u16::from(FIRST_WORKLOAD_SLOT) && *earlier == 0 {
                     return Err(bad(format!(
@@ -524,6 +531,26 @@ mod tests {
         refused(vec![rec(0, 3, &claim)], "outside a workload slot");
         let seeded = event_content("ats", "boot", &[0; 48], Some(&[0x33; 32]));
         refused(vec![rec(0, 3, &seeded)], "carries no content");
+        // `ats` holds the boot and claim records only, in any log.
+        let reset = event_content("ats", "reset", &[0; 48], None);
+        refused(
+            vec![rec(0, 3, &boot), rec(1, 4, &claim), rec(2, 4, &reset)],
+            "neither boot nor claim",
+        );
+        refused(
+            vec![rec(0, 3, &boot), rec(1, 3, &reset)],
+            "neither boot nor claim",
+        );
+        let e = replay(
+            &log(vec![rec(0, 3, &reset)]),
+            |i| (i < 4).then_some([0u8; 48]),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, AttestationError::EventlogIntegrityFailed(_)),
+            "got {e}"
+        );
         // a register the platform does not have
         refused(
             vec![rec(0, 16, &start)],

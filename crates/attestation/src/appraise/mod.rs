@@ -50,6 +50,8 @@ pub(crate) struct Ctx<'a> {
     /// The HCL `var_data` a verified vtpm submodule established, which the CPU
     /// report must bind in `vtpm-extradata` mode.
     pub vtpm_var_data: Option<Vec<u8>>,
+    /// The HCL report's hardware area from the same vtpm submodule.
+    pub vtpm_tee_report: Option<Vec<u8>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -82,6 +84,7 @@ impl<'a> Ctx<'a> {
             now,
             policy,
             vtpm_var_data: None,
+            vtpm_tee_report: None,
         })
     }
 
@@ -140,6 +143,7 @@ impl Verifier {
         // A CPU bound through a vTPM needs the vtpm submodule appraised first:
         // it yields the var_data the CPU report must carry the digest of.
         let mut var_data: Option<Vec<u8>> = None;
+        let mut tee_report: Option<Vec<u8>> = None;
         if let Some(Submod::Cpu(cpu)) = evidence.submods.get("cpu") {
             if cpu.cvm_binding.mode == BindingMode::VtpmExtradata {
                 let Some(Submod::Vtpm(v)) = evidence.submods.get("vtpm") else {
@@ -159,6 +163,7 @@ impl Verifier {
                 }
                 let out = self.appraise_vtpm(v, cpu, nonce, policy, now)?;
                 var_data = Some(out.var_data);
+                tee_report = Some(out.tee_report);
                 all_bound &= out.outcome.bound;
                 submods.insert("vtpm".to_string(), out.outcome.appraisal);
             }
@@ -170,6 +175,7 @@ impl Verifier {
                 Submod::Cpu(cpu) => {
                     let mut ctx = Ctx::new(nonce, &cpu.cvm_binding, policy, now)?;
                     ctx.vtpm_var_data = var_data.clone();
+                    ctx.vtpm_tee_report = tee_report.clone();
                     let collateral = InlineCollateral::new(
                         cpu.cvm_endorsements.as_ref(),
                         self.cert_provider.as_ref(),
@@ -263,6 +269,7 @@ impl Verifier {
 #[cfg(not(any(feature = "az-snp", feature = "az-tdx")))]
 struct VtpmOutcome {
     var_data: Vec<u8>,
+    tee_report: Vec<u8>,
     outcome: Outcome,
 }
 

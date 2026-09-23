@@ -100,6 +100,13 @@ pub trait NrasProvider: Send + Sync {
         origin_of(self.url_for(arch))
     }
 
+    /// Whether requests ask NRAS to accept device certificates whose OCSP
+    /// status is on hold. The profile appraisal refuses such a provider; a
+    /// provider that wraps another must forward this.
+    fn accepts_certificate_hold(&self) -> bool {
+        false
+    }
+
     /// POST `request` to the appropriate NRAS endpoint and return the raw
     /// response body. NRAS returns a JSON value that is either a single JWT
     /// string or a "detached EAT" 2-tuple `[ ["JWT", "<top>"], { sub: "<jwt>" } ]`.
@@ -340,6 +347,10 @@ impl NrasProvider for DefaultNrasProvider {
             Some(issuer) => Ok(issuer.clone()),
             None => origin_of(self.url_for(arch)),
         }
+    }
+
+    fn accepts_certificate_hold(&self) -> bool {
+        self.allow_hold_cert
     }
 
     async fn attest(&self, request: &NrasRequest) -> Result<serde_json::Value> {

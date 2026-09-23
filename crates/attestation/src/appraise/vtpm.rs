@@ -11,8 +11,8 @@ use super::vector::evaluate_backing;
 use super::{invalid, refuse, Ctx, Outcome};
 use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::tpm_common::{
-    parse_hcl_report, quote_selection, verify_tpm_nonce, verify_tpm_pcrs, verify_tpm_signature,
-    HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
+    extract_ak_pub_from_jwk_json, parse_hcl_report, quote_selection, verify_tpm_nonce,
+    verify_tpm_pcrs, verify_tpm_signature, HCL_REPORT_TYPE_SNP, HCL_REPORT_TYPE_TDX,
 };
 use crate::profile::{
     AttesterClaims, Backing, Binding, Freshness, HashAlg, LogFormat, ReferenceOutcome,
@@ -25,6 +25,9 @@ use std::collections::BTreeMap;
 pub(crate) struct VtpmOutcome {
     /// The HCL `var_data`, which the CPU appraiser binds to its report.
     pub var_data: Vec<u8>,
+    /// The HCL report's 1184-byte hardware area, which an SEV-SNP cpu
+    /// submodule's report must equal (section 9.4.2).
+    pub tee_report: Vec<u8>,
     pub outcome: Outcome,
 }
 
@@ -36,7 +39,9 @@ pub(crate) fn appraise(
 ) -> Result<VtpmOutcome> {
     let policy = ctx.policy;
     let TpmAkMethod::HclReport = v.cvm_tpm_ak.method;
-    let hcl = parse_hcl_report(v.cvm_tpm_ak.data.as_slice())?;
+    // The HCL report is unsigned envelope data: a shape failure is the envelope's.
+    let hcl = parse_hcl_report(v.cvm_tpm_ak.data.as_slice())
+        .map_err(|e| invalid(format!("cvm_tpm_ak: {e}")))?;
     let expected_type = match tee {
         Tee::SevSnp => HCL_REPORT_TYPE_SNP,
         Tee::Tdx => HCL_REPORT_TYPE_TDX,
@@ -48,6 +53,8 @@ pub(crate) fn appraise(
             hcl.report_type
         )));
     }
+    // The variable data is a JSON object carrying the AK (section 9.4.1).
+    extract_ak_pub_from_jwk_json(&hcl.var_data).map_err(|e| invalid(format!("cvm_tpm_ak: {e}")))?;
 
     // The AK inside var_data signs the quote; the quote's digest covers the
     // selected PCRs; extraData is the anchor, exactly (section 4.5).
@@ -212,6 +219,7 @@ pub(crate) fn appraise(
     };
     Ok(VtpmOutcome {
         var_data: hcl.var_data,
+        tee_report: hcl.tee_report,
         outcome: Outcome {
             appraisal: SubmodAppraisal {
                 ear_status: vector.status(),

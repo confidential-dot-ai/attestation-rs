@@ -744,6 +744,10 @@ impl crate::platforms::nvidia_gpu::NrasProvider for CollateralCache {
         self.nras.url_for(arch)
     }
 
+    fn accepts_certificate_hold(&self) -> bool {
+        self.nras.accepts_certificate_hold()
+    }
+
     async fn attest(
         &self,
         request: &crate::platforms::nvidia_gpu::NrasRequest,

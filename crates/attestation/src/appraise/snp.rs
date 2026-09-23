@@ -454,6 +454,12 @@ pub(crate) async fn appraise(
             let var_data = ctx.vtpm_var_data.as_deref().ok_or_else(|| {
                 invalid("vtpm-extradata binding without a verified vtpm submodule")
             })?;
+            // Section 9.4.2: the report is the HCL report's hardware area, byte for byte.
+            if ctx.vtpm_tee_report.as_deref() != Some(report_bytes) {
+                return Err(invalid(
+                    "the cpu submodule's report is not the HCL report's hardware area",
+                ));
+            }
             verify_hcl_var_data_binding(&report.report_data, var_data)?;
             true
         }

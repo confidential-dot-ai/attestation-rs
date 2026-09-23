@@ -218,10 +218,8 @@ pub(crate) async fn attest_arch(
         // The `submods` digests bind this token to the overall result; its own
         // `eat_nonce` binds it to the session.
         check_submodule_nonce(&name, &sub_claims, &nonce_bytes)?;
-        let mut dc = device_claims_from_submodule(&sub_claims);
-        if dc.arch.is_none() {
-            dc.arch = Some(arch);
-        }
+        let dc = device_claims_from_submodule(&sub_claims);
+        check_device_arch(&name, &dc, arch)?;
         apply_device_policy(&name, &dc, device_policy)?;
         device_claims.push((name, dc));
     }
@@ -898,6 +896,24 @@ fn check_submodule_nonce(
     }
 }
 
+/// Standard section 9.7.2 step 6: a device token's `hwmodel` names the batch's
+/// architecture. A token whose `hwmodel` names none this verifier knows is
+/// refused the same way.
+fn check_device_arch(name: &str, dc: &NvidiaGpuDeviceClaims, batch: NvidiaGpuArch) -> Result<()> {
+    if dc.arch == Some(batch) {
+        return Ok(());
+    }
+    Err(AttestationError::NvidiaGpuDevicePolicyFailed {
+        name: name.to_string(),
+        reason: format!(
+            "hwmodel {:?} names {}, the batch is {batch}",
+            dc.hwmodel.as_deref().unwrap_or(""),
+            dc.arch
+                .map_or_else(|| "no known architecture".to_string(), |a| a.to_string())
+        ),
+    })
+}
+
 /// Enforce per-device policy against a submodule's claims, independent of NRAS's
 /// opaque overall boolean. Each gate fails closed by default (see
 /// [`crate::types::NvidiaGpuDevicePolicy`]). A claim that is absent when its gate
@@ -1493,5 +1509,38 @@ mod tests {
         let dc = NvidiaGpuDeviceClaims::default();
         apply_device_policy("GPU-0", &dc, &policy)
             .expect("all-gates-off policy must accept any device");
+    }
+
+    #[test]
+    fn a_device_token_names_the_batchs_architecture() {
+        let claims = |hwmodel: Option<&str>| {
+            let mut body = serde_json::json!({"ueid": "1"});
+            if let Some(h) = hwmodel {
+                body["hwmodel"] = serde_json::json!(h);
+            }
+            device_claims_from_submodule(&body)
+        };
+        // NRAS's own values: GH100 (Hopper), GB100 (Blackwell), LS_10 (NVSwitch).
+        for (hwmodel, arch) in [
+            ("GH100 A01 GSP BROM", NvidiaGpuArch::Hopper),
+            ("GB100", NvidiaGpuArch::Blackwell),
+            ("LS_10 A01 FSP BROM", NvidiaGpuArch::Ls10),
+        ] {
+            check_device_arch("GPU-0", &claims(Some(hwmodel)), arch).unwrap();
+        }
+        let refused = |dc: NvidiaGpuDeviceClaims, batch| {
+            let e = check_device_arch("GPU-0", &dc, batch).unwrap_err();
+            assert!(
+                matches!(e, AttestationError::NvidiaGpuDevicePolicyFailed { .. }),
+                "got {e}"
+            );
+            assert_eq!(e.refusal_code(), crate::error::RefusalCode::DevicePolicy);
+        };
+        refused(claims(Some("GB100")), NvidiaGpuArch::Hopper);
+        refused(claims(Some("GH100 A01 GSP BROM")), NvidiaGpuArch::Blackwell);
+        refused(claims(Some("LS_10 A01 FSP BROM")), NvidiaGpuArch::Hopper);
+        // A token that names no architecture no longer takes the batch's.
+        refused(claims(None), NvidiaGpuArch::Hopper);
+        refused(claims(Some("AD102")), NvidiaGpuArch::Hopper);
     }
 }

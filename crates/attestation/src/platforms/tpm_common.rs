@@ -139,24 +139,30 @@ pub fn verify_hcl_var_data_binding(report_data: &[u8], var_data: &[u8]) -> Resul
     Ok(())
 }
 
+/// IGVM report data hash type SHA-256 (OpenHCL `IgvmAttestHashType::SHA_256`).
+const HCL_HASH_TYPE_SHA256: u32 = 1;
+
 /// Parsed HCL report data.
 pub struct HclReportData {
     /// Raw TEE report bytes (1184 bytes).
     pub tee_report: Vec<u8>,
     /// Report type (2=SNP, 4=TDX).
     pub report_type: u32,
-    /// Null-trimmed var_data content (JSON with JWK keys).
+    /// The variable data (JSON with JWK keys), exactly `variable_data_size`
+    /// bytes: what the hardware report's data binds.
     pub var_data: Vec<u8>,
 }
 
 /// Parse an HCL report blob into its components.
 ///
-/// The HCL report structure:
+/// The HCL report structure (OpenHCL `IgvmAttestRequestData` after the
+/// hardware report area):
 /// - Bytes 0x00..0x1F: Header (starts with "HCLA" magic)
 /// - Bytes 0x20..0x4BF: TEE report (1184 bytes, SNP or TDX)
-/// - Bytes 0x4C0..0x4D3: var_data header (20 bytes, 5 × LE u32)
-///   - total_remaining, count, report_type, version, content_length
-/// - Bytes 0x4D4..end: var_data content (JSON with JWK keys, null-padded)
+/// - Bytes 0x4C0..0x4D3: 5 × LE u32: data_size, version, report_type,
+///   report_data_hash_type (1 is SHA-256, the only one accepted),
+///   variable_data_size
+/// - Bytes 0x4D4..: variable data (JSON with JWK keys), then padding
 pub fn parse_hcl_report(hcl_report: &[u8]) -> Result<HclReportData> {
     let tee_report_end = HCL_TEE_REPORT_OFFSET + HCL_TEE_REPORT_SIZE;
     let content_start = tee_report_end + HCL_VARDATA_HEADER_SIZE;
@@ -185,34 +191,34 @@ pub fn parse_hcl_report(hcl_report: &[u8]) -> Result<HclReportData> {
             .try_into()
             .map_err(|_| AttestationError::QuoteParseFailed("HCL header slice".to_string()))?,
     );
-    let content_length =
-        u32::from_le_bytes(header[16..20].try_into().map_err(|_| {
-            AttestationError::QuoteParseFailed("HCL content_length slice".to_string())
-        })?) as usize;
-
-    // Validate content_length against available data
-    let available = hcl_report.len() - content_start;
-    if content_length > available {
+    let hash_type = u32::from_le_bytes(header[12..16].try_into().map_err(|_| {
+        AttestationError::QuoteParseFailed("HCL report_data_hash_type slice".to_string())
+    })?);
+    if hash_type != HCL_HASH_TYPE_SHA256 {
         return Err(AttestationError::QuoteParseFailed(format!(
-            "HCL content_length ({content_length}) exceeds available data ({available})"
+            "HCL report data hash type {hash_type} is not 1 (SHA-256)"
         )));
     }
-    let bounded_len = content_length;
+    let variable_data_size = u32::from_le_bytes(header[16..20].try_into().map_err(|_| {
+        AttestationError::QuoteParseFailed("HCL variable_data_size slice".to_string())
+    })?) as usize;
 
-    // Extract content and trim trailing nulls
-    let content = &hcl_report[content_start..content_start + bounded_len];
-    let trimmed_len = content.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-
-    if trimmed_len == 0 {
+    let available = hcl_report.len() - content_start;
+    if variable_data_size > available {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "HCL variable_data_size ({variable_data_size}) exceeds available data ({available})"
+        )));
+    }
+    if variable_data_size == 0 {
         return Err(AttestationError::QuoteParseFailed(
-            "HCL var_data is empty after null trimming".to_string(),
+            "HCL variable data is empty".to_string(),
         ));
     }
 
     Ok(HclReportData {
         tee_report,
         report_type,
-        var_data: content[..trimmed_len].to_vec(),
+        var_data: hcl_report[content_start..content_start + variable_data_size].to_vec(),
     })
 }
 
@@ -1229,14 +1235,49 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hcl_report_trims_nulls() {
+    fn test_parse_hcl_report_ignores_padding_after_the_variable_data() {
         let content = b"test data";
         let mut hcl = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, content);
-        // Extend with null padding
         hcl.extend_from_slice(&[0u8; 100]);
 
         let parsed = parse_hcl_report(&hcl).unwrap();
         assert_eq!(parsed.var_data, content);
+    }
+
+    #[test]
+    fn hcl_variable_data_is_exactly_its_declared_size() {
+        // Zero bytes inside the declared size are variable data: they are
+        // hashed, where the parser used to trim them away first.
+        let mut content = b"test data".to_vec();
+        content.extend_from_slice(&[0u8; 4]);
+        let hcl = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, &content);
+        let parsed = parse_hcl_report(&hcl).unwrap();
+        assert_eq!(parsed.var_data, content);
+        let mut report_data = [0u8; 64];
+        report_data[..32].copy_from_slice(&sha256(b"test data"));
+        assert!(verify_hcl_var_data_binding(&report_data, &parsed.var_data).is_err());
+        report_data[..32].copy_from_slice(&sha256(&content));
+        verify_hcl_var_data_binding(&report_data, &parsed.var_data).unwrap();
+
+        let empty = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, b"");
+        assert!(parse_hcl_report(&empty).is_err());
+        let mut over = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, b"{}");
+        over[0x4D0..0x4D4].copy_from_slice(&3u32.to_le_bytes());
+        assert!(parse_hcl_report(&over).is_err());
+    }
+
+    #[test]
+    fn hcl_report_data_hash_type_must_be_sha256() {
+        let mut hcl = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, b"{}");
+        for hash_type in [0u32, 2, 3] {
+            hcl[0x4CC..0x4D0].copy_from_slice(&hash_type.to_le_bytes());
+            let e = parse_hcl_report(&hcl).err().expect("hash type accepted");
+            assert!(e.to_string().contains("hash type"), "{e}");
+        }
+        // The recorded Azure reports carry 1.
+        let recorded = include_bytes!("../../test_data/az_snp/hcl-report.bin");
+        assert_eq!(recorded[0x4CC..0x4D0], 1u32.to_le_bytes());
+        parse_hcl_report(recorded).unwrap();
     }
 
     #[test]

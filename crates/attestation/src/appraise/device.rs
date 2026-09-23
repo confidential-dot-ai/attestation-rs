@@ -39,6 +39,14 @@ pub(crate) async fn appraise_devices(
             MAX_GPU_DEVICES,
         ));
     }
+    // NV_ALLOW_HOLD_CERT relaxes NRAS's revocation check from the process
+    // environment, where neither the policy nor the appraisal shows it.
+    if provider.accepts_certificate_hold() {
+        return Err(refuse(
+            RefusalCode::Unsupported,
+            "the NRAS provider asks NRAS to accept device certificates on OCSP hold (NV_ALLOW_HOLD_CERT); the profile path does not relax revocation outside the policy",
+        ));
+    }
     if let Some(allowed) = &policy.gpu.expected_archs {
         for (_, d) in &devices {
             if !allowed.contains(&d.arch) {
@@ -388,5 +396,44 @@ mod tests {
         let mut c = claims("uA");
         c.ueid = None;
         assert!(outcomes_for_group(&group, result(vec![("GPU-0", c)]), &policy).is_err());
+    }
+
+    /// A provider that asks NRAS to accept certificates on OCSP hold, as
+    /// `NV_ALLOW_HOLD_CERT=true` makes the default one do.
+    struct HoldingProvider;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl NrasProvider for HoldingProvider {
+        fn url_for(&self, _arch: NvidiaGpuArch) -> &str {
+            "https://invalid.test/never-called"
+        }
+        fn accepts_certificate_hold(&self) -> bool {
+            true
+        }
+        async fn attest(
+            &self,
+            _request: &crate::platforms::nvidia_gpu::NrasRequest,
+        ) -> Result<serde_json::Value> {
+            panic!("the profile path reached NRAS with a relaxed revocation check");
+        }
+        async fn jwks(&self, _arch: NvidiaGpuArch) -> Result<crate::platforms::nvidia_gpu::Jwks> {
+            panic!("the profile path reached NRAS with a relaxed revocation check");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_profile_path_refuses_a_provider_that_accepts_held_certificates() {
+        let d = device("GPU-aaaa");
+        let err = appraise_devices(
+            vec![("gpu/GPU-aaaa".to_string(), &d)],
+            &crate::utils::sha256(b"device nonce"),
+            &VerifyPolicy::default(),
+            &HoldingProvider,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.refusal_code(), RefusalCode::Unsupported, "{err}");
     }
 }

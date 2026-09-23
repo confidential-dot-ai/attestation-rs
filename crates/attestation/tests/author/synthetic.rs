@@ -183,6 +183,16 @@ fn tdx_floor(svn: Option<[u8; 16]>, evaluation: Option<u32>) -> TcbFloor {
     }
 }
 
+/// An Azure envelope whose HCL report (the vtpm's `cvm_tpm_ak.data`) has `f` applied.
+fn with_hcl(v: &Value, f: impl FnOnce(&mut Vec<u8>)) -> Value {
+    tweak(v.clone(), |v| {
+        let ak = &mut v["submods"]["vtpm"]["cvm_tpm_ak"]["data"];
+        let mut hcl = Bytes::decode(ak.as_str().unwrap()).unwrap().0;
+        f(&mut hcl);
+        *ak = json!(b64url(&hcl));
+    })
+}
+
 /// The Genoa envelope carrying `report` in place of the recorded one.
 fn snp_with_report(nonce: &[u8], report: &[u8]) -> Value {
     tweak(snp_envelope(nonce), |v| {
@@ -543,6 +553,36 @@ pub(super) fn cases() -> Vec<Authored> {
                 v["eat_nonce"] = json!(b64url(&vec![0x42; len]));
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::BindingMismatch)),
+        case("azure-snp-hcl-hash-type-not-sha256", "9.4.1",
+            "the HCL report's report data hash type (offset 0x4CC) is 1, SHA-256; another value is refused",
+            SNP_NOW, with_hcl(&az_snp, |h| {
+                assert_eq!(h[0x4CC], 1);
+                h[0x4CC] = 2;
+            }).into(),
+            Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
+        case("azure-snp-hcl-report-type-for-tdx", "9.4.1",
+            "the HCL report's type names the TEE of the cpu submodule; an SEV-SNP cpu with report type 4 (TDX) is refused",
+            SNP_NOW, with_hcl(&az_snp, |h| {
+                assert_eq!(h[0x4C8], 2);
+                h[0x4C8] = 4;
+            }).into(),
+            Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
+        case("azure-snp-hcl-variable-data-size-includes-padding", "9.4.1",
+            "the variable data is exactly its declared size; a size that takes in the zero padding after the JSON object is refused",
+            SNP_NOW, with_hcl(&az_snp, |h| {
+                let size = u32::from_le_bytes(h[0x4D0..0x4D4].try_into().unwrap());
+                assert_eq!(h[0x4D4 + size as usize], 0);
+                h[0x4D0..0x4D4].copy_from_slice(&(size + 1).to_le_bytes());
+            }).into(),
+            Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
+        case("azure-snp-cpu-report-not-the-hcl-area", "9.4.2",
+            "the cpu submodule's SNP report is the HCL report's hardware area byte for byte; a genuine report of another machine with its own VCEK is refused",
+            SNP_NOW, tweak(az_snp.clone(), |v| {
+                let cpu = &mut v["submods"]["cpu"];
+                cpu["cvm_report"][1] = json!(b64url(SNP_REPORT));
+                cpu["cvm_endorsements"]["snp.vek"][1] = json!(b64url(SNP_VCEK));
+            }).into(),
+            Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
         case("azure-cpu-without-vtpm", "4.2", "a cpu bound through vtpm-extradata needs its vtpm submodule",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 v["submods"].as_object_mut().unwrap().remove("vtpm");
