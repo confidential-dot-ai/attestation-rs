@@ -75,8 +75,8 @@ jobs:
   # macOS targets compile to verify-only binaries automatically.
   # Build on PRs so the exact release artifacts are validated before merge;
   # only the release job below publishes on pushes to main.
-  conformance:
-    name: Conformance (harnesses and the wasm build)
+  wasm:
+    name: Wasm build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -84,21 +84,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
-        with:
-          tool: wasm-pack@0.15.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: conformance/go.mod
-      # The harnesses prove their own plumbing against the corpus (section 14).
-      - run: cd conformance && node --test
-      - run: cd conformance && test -z "$(gofmt -l .)" && go vet ./... && go test ./...
-      # The wasm build must reproduce every decision of the corpus.
-      - run: cd crates/attestation-wasm && wasm-pack build --target nodejs --release
-      - run: cd crates/attestation-wasm && node conformance.mjs
+      # The wasm entry's corpus run is native (cargo test -p attestation-wasm);
+      # this builds the same code for the target it ships on.
+      - run: cargo build -p attestation-wasm --target wasm32-unknown-unknown --release
 
   release-build:
     name: Release Build ${{ matrix.target }}

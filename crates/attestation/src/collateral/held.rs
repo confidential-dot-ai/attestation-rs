@@ -180,6 +180,67 @@ impl TdxCollateralProvider for HeldCollateral {
     }
 }
 
+/// One recorded NRAS exchange: the nonce the appraisal sends for an
+/// architecture batch, the detached EAT NRAS answered and the JWKS that
+/// verifies it (profile section 14.2).
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone)]
+pub struct NrasExchange {
+    pub arch: crate::types::NvidiaGpuArch,
+    /// Hex, as the request carries it.
+    pub nonce: String,
+    pub response: serde_json::Value,
+    pub jwks: super::Jwks,
+}
+
+/// An NRAS provider over recorded exchanges. A request it holds no exchange
+/// for fails as unavailable collateral, so an appraisal reaches no network.
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone, Default)]
+pub struct HeldNras {
+    exchanges: Vec<NrasExchange>,
+}
+
+#[cfg(feature = "nvidia-gpu")]
+impl HeldNras {
+    pub fn new(exchanges: Vec<NrasExchange>) -> Self {
+        HeldNras { exchanges }
+    }
+}
+
+#[cfg(feature = "nvidia-gpu")]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl super::NrasProvider for HeldNras {
+    fn url_for(&self, arch: crate::types::NvidiaGpuArch) -> &str {
+        match arch {
+            crate::types::NvidiaGpuArch::Ls10 => super::NRAS_SWITCH_URL,
+            _ => super::NRAS_GPU_URL,
+        }
+    }
+
+    async fn attest(&self, request: &super::NrasRequest) -> Result<serde_json::Value> {
+        self.exchanges
+            .iter()
+            .find(|e| e.arch == request.arch && e.nonce == request.nonce)
+            .map(|e| e.response.clone())
+            .ok_or_else(|| {
+                AttestationError::NrasRequestFailed(format!(
+                    "no NRAS exchange is held for {} with nonce {}",
+                    request.arch, request.nonce
+                ))
+            })
+    }
+
+    async fn jwks(&self, arch: crate::types::NvidiaGpuArch) -> Result<super::Jwks> {
+        self.exchanges
+            .iter()
+            .find(|e| e.arch == arch)
+            .map(|e| e.jwks.clone())
+            .ok_or_else(|| AttestationError::JwksFetch(format!("no JWKS is held for {arch}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

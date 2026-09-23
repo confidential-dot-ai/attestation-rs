@@ -17,73 +17,25 @@ evaluation time is an input.
 | `inputs/` | the envelopes, policies, collateral and recorded NRAS exchanges the cases reference |
 | `UNCOVERED.md` | the normative statements that have no case yet |
 
-The Rust library is the reference implementation. Its runner is
-`crates/attestation/tests/conformance.rs`: `cargo test -p attestation --features nvidia-gpu --test conformance`
-checks every case, and `UPDATE_CONFORMANCE=1` rewrites the expected appraisals
-from the reference implementation, which reviewers read as part of the change
-that regenerated them. Other implementations only check.
+The corpus is data. Every implementation runs it with its own runner, in its
+own repository, and pins it by the attestation-rs commit or tag it was taken
+from. A runner reads a case's inputs, hands them to the implementation with
+the evaluation time pinned and the case's collateral and NRAS exchanges as the
+only ones available, and compares the decision: the appraisal as parsed JSON
+with the members of section 14.3 removed, or the refusal's section 14.4 code.
 
-## Harnesses
-
-The corpus ships a harness for Go and one for JavaScript. Each loads the
-cases, checks them against the section 14.2 format, reads a case's inputs,
-applies the comparison rules of section 14.3 and reports one outcome per
-case: `pass`, `fail` (another decision) or `error` (no decision). Neither
-carries an implementation; each proves its own plumbing with `go test` and
-`node --test`, by replaying every case's expectation through itself.
-
-An implementation supplies an appraiser: a function from a case's inputs (the
-evaluation time, the envelope, the policy or none for the section 7 default,
-the held collateral keyed as section 8 keys collateral, the recorded NRAS
-exchanges) to the section 5 appraisal as JSON, or a refusal with its section
-14.4 code. Any other failure is reported as an error, never as a decision.
-
-### Go
-
-```go
-import conformance "github.com/confidential-dot-ai/attestation-rs/conformance"
-
-type appraiser struct{}
-
-func (appraiser) Appraise(ctx context.Context, in *conformance.Inputs) ([]byte, error) {
-    // ... return the appraisal JSON, or &conformance.Refusal{Code: conformance.BindingMismatch, Reason: "..."}
-}
-
-func TestConformance(t *testing.T) {
-    corpus, err := conformance.Load() // the corpus embedded at this module version
-    if err != nil {
-        t.Fatal(err)
-    }
-    conformance.Test(t, corpus, appraiser{})
-}
-```
-
-The corpus is embedded in the module, so a Go implementation pins a corpus
-version by pinning the module at the tag `conformance/v<version>.0`;
-`conformance.LoadDir` reads a checkout instead. attestation-go runs this once
-it has `appraise`.
-
-### JavaScript
-
-```js
-import { format, loadCorpus, run } from "./conformance/index.mjs";
-
-const corpus = await loadCorpus();
-const report = await run(corpus, async (inputs) => {
-  // ... return the appraisal JSON; to refuse, throw an Error whose `code` is the section 14.4 code
-});
-process.stdout.write(format(report));
-process.exitCode = report.passed ? 0 : 1;
-```
-
-The wasm build is the JavaScript implementation. Its adapter is
-`crates/attestation-wasm/conformance.mjs`, which calls the `appraise_with`
-export with the case's inputs and reads the refusal code from the thrown
-`Error`'s `code`:
+The Rust library is the reference implementation:
 
 ```bash
-cd crates/attestation-wasm && wasm-pack build --target nodejs --release && node conformance.mjs
+cargo test -p attestation --features nvidia-gpu --test conformance
 ```
 
-Both harnesses need Node 21 or later and Go 1.22 or later. Neither reaches a
-network.
+checks every case, and `UPDATE_CONFORMANCE=1` rewrites the expected appraisals
+from the reference implementation, which reviewers read as part of the change
+that regenerated them.
+
+The wasm build decides every case through its `appraise_with` entry:
+
+```bash
+cargo test -p attestation-wasm --test conformance
+```

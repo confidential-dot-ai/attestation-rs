@@ -39,6 +39,8 @@ pub use error::{CollateralError, CollateralResult};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fetch::{Endpoints, Fetcher};
 pub use held::{HeldArtifact, HeldCollateral};
+#[cfg(feature = "nvidia-gpu")]
+pub use held::{HeldNras, NrasExchange};
 pub use key::{CollateralKey, CollateralKind, Fmspc, PckCa};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::DiskStore;

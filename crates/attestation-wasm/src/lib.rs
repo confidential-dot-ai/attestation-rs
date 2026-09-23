@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
-use attestation::collateral::{CertProvider, DefaultCertProvider, HeldCollateral};
+use attestation::collateral::{
+    CertProvider, DefaultCertProvider, HeldCollateral, HeldNras, NrasExchange,
+};
 use attestation::error::Result as AttestationResult;
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
 use attestation::platforms::az_snp::verify::{verify_report, VerifiedReport};
@@ -19,6 +21,7 @@ use attestation::platforms::snp::verify::{
 };
 use attestation::platforms::tdx::evidence::TdxEvidence;
 use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
+use attestation::profile::VerifyPolicy;
 use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
 use attestation::{AttestationError, RefusalCode};
@@ -151,36 +154,44 @@ pub async fn verify(
     serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
 }
 
-/// A JS `Error` whose `code` is a refusal code of profile section 14.4, so a
-/// caller acts on the rule family that failed and never on the message.
-fn coded(code: RefusalCode, message: &str) -> JsValue {
-    let err = js_sys::Error::new(message);
-    // Setting a data property on a fresh Error cannot fail.
-    let _ = js_sys::Reflect::set(
-        &err,
-        &JsValue::from_str("code"),
-        &JsValue::from_str(code.as_str()),
-    );
-    err.into()
+/// Why a profile entry returned no appraisal: a refusal with its section 14.4
+/// code, or a usage error, which no rule of the profile decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    Refused { code: RefusalCode, message: String },
+    Usage(String),
 }
 
-/// The implementation's refusal, coded by its section 14.4 mapping.
-fn refusal(e: AttestationError) -> JsValue {
-    coded(e.refusal_code(), &format!("appraise: {e}"))
+impl Failure {
+    fn refused(e: AttestationError) -> Self {
+        Failure::Refused {
+            code: e.refusal_code(),
+            message: format!("appraise: {e}"),
+        }
+    }
+
+    /// A JS `Error`. A refusal carries its code as `code`, so a caller acts
+    /// on the rule family that failed and never on the message.
+    fn into_js(self) -> JsValue {
+        match self {
+            Failure::Refused { code, message } => {
+                let err = js_sys::Error::new(&message);
+                // Setting a data property on a fresh Error cannot fail.
+                let _ = js_sys::Reflect::set(
+                    &err,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str(code.as_str()),
+                );
+                err.into()
+            }
+            Failure::Usage(message) => js_sys::Error::new(&message).into(),
+        }
+    }
 }
 
-/// A caller's usage error: no code, since no rule of the profile decided.
-fn usage(message: String) -> JsValue {
-    js_sys::Error::new(&message).into()
-}
-
-fn parse_policy(policy_json: &str) -> Result<attestation::profile::VerifyPolicy, JsValue> {
-    serde_json::from_str(policy_json).map_err(|e| {
-        coded(
-            RefusalCode::PolicyInvalid,
-            &format!("policy deserialize: {e}"),
-        )
-    })
+/// The policy through the library's own parser, as every entry reads it.
+fn parse_policy(policy_json: &str) -> Result<VerifyPolicy, Failure> {
+    VerifyPolicy::from_json(policy_json.as_bytes()).map_err(Failure::refused)
 }
 
 /// The envelope's `eat_nonce`, or empty when it has none it can decode.
@@ -201,15 +212,21 @@ fn carried_nonce(evidence_json: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn check_issued_nonce(evidence_json: &str, issued: &[u8]) -> Result<(), JsValue> {
+fn check_issued_nonce(evidence_json: &str, issued: &[u8]) -> Result<(), Failure> {
     if constant_time_eq(issued, &carried_nonce(evidence_json)) {
         Ok(())
     } else {
-        Err(coded(
-            RefusalCode::BindingMismatch,
-            "appraise: eat_nonce differs from the nonce this relying party issued",
-        ))
+        Err(Failure::Refused {
+            code: RefusalCode::BindingMismatch,
+            message: "appraise: eat_nonce differs from the nonce this relying party issued"
+                .to_string(),
+        })
     }
+}
+
+fn to_json(appraisal: &attestation::profile::Appraisal) -> Result<String, Failure> {
+    serde_json::to_string_pretty(appraisal)
+        .map_err(|e| Failure::Usage(format!("json serialize: {e}")))
 }
 
 /// Appraise a profile envelope (`tag:confidential.ai,2026:cvm#1`, section 6)
@@ -236,17 +253,22 @@ pub async fn appraise(
     policy_json: String,
     snp_crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
-    let policy = parse_policy(&policy_json)?;
-    check_issued_nonce(&evidence_json, &nonce)?;
-    let appraisal = attestation::Verifier::offline()
-        .with_cert_provider(StaticSnpCollateral {
-            inner: DefaultCertProvider::new(),
-            crl_der: snp_crl_der,
-        })
-        .appraise_json(evidence_json.as_bytes(), &policy)
-        .await
-        .map_err(refusal)?;
-    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
+    async {
+        let policy = parse_policy(&policy_json)?;
+        check_issued_nonce(&evidence_json, &nonce)?;
+        let appraisal = attestation::Verifier::offline()
+            .with_cert_provider(StaticSnpCollateral {
+                inner: DefaultCertProvider::new(),
+                crl_der: snp_crl_der,
+            })
+            .with_nras_provider(HeldNras::default())
+            .appraise_json(evidence_json.as_bytes(), &policy)
+            .await
+            .map_err(Failure::refused)?;
+        to_json(&appraisal)
+    }
+    .await
+    .map_err(Failure::into_js)
 }
 
 /// What an appraisal depends on beyond the envelope and the policy (profile
@@ -259,7 +281,8 @@ pub async fn appraise(
 ///   "collateral": {
 ///     "snp_crl/Genoa": { "body": "<base64>" },
 ///     "tdx_tcb_info/50806f000000": { "body": "<base64>", "signing_chain": "<base64>" }
-///   }
+///   },
+///   "nras": [{ "arch": "HOPPER", "nonce": "<hex>", "response": <JSON>, "jwks": <JSON> }]
 /// }
 /// ```
 #[derive(Deserialize)]
@@ -278,10 +301,10 @@ struct Inputs {
     /// unavailable collateral, and inline endorsements stay inputs.
     #[serde(default)]
     collateral: BTreeMap<String, Artifact>,
-    /// Recorded NRAS exchanges. This build carries no GPU verifier, so any
-    /// entry is refused as `unsupported`.
+    /// Recorded NRAS exchanges; a request with no exchange here is
+    /// unavailable collateral, and nothing reaches a network.
     #[serde(default)]
-    nras: Vec<serde_json::Value>,
+    nras: Vec<NrasInput>,
 }
 
 #[derive(Deserialize)]
@@ -292,10 +315,85 @@ struct Artifact {
     signing_chain: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NrasInput {
+    arch: attestation::profile::GpuArch,
+    nonce: String,
+    response: serde_json::Value,
+    jwks: serde_json::Value,
+}
+
+/// [`appraise_with`] in Rust: the appraisal JSON, or why there is none.
+pub async fn appraise_with_inputs(
+    evidence_json: &str,
+    policy_json: Option<&str>,
+    inputs_json: &str,
+) -> Result<String, Failure> {
+    use base64::Engine;
+    let inputs: Inputs =
+        serde_json::from_str(inputs_json).map_err(|e| Failure::Usage(format!("inputs: {e}")))?;
+    let policy = match policy_json {
+        Some(p) => parse_policy(p)?,
+        None => VerifyPolicy::default(),
+    };
+    if let Some(nonce) = &inputs.nonce {
+        let issued = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(nonce)
+            .map_err(|e| Failure::Usage(format!("inputs.nonce: {e}")))?;
+        check_issued_nonce(evidence_json, &issued)?;
+    }
+    let std64 = base64::engine::general_purpose::STANDARD;
+    let mut held = HeldCollateral::new();
+    for (key, artifact) in inputs.collateral {
+        let body = std64
+            .decode(&artifact.body)
+            .map_err(|e| Failure::Usage(format!("inputs.collateral[{key}].body: {e}")))?;
+        held = match artifact.signing_chain {
+            Some(chain) => {
+                let chain = std64.decode(&chain).map_err(|e| {
+                    Failure::Usage(format!("inputs.collateral[{key}].signing_chain: {e}"))
+                })?;
+                held.with_signed(key, body, chain)
+            }
+            None => held.with_bytes(key, body),
+        };
+    }
+    let mut exchanges = Vec::with_capacity(inputs.nras.len());
+    for (i, x) in inputs.nras.into_iter().enumerate() {
+        exchanges.push(NrasExchange {
+            arch: x.arch.into(),
+            nonce: x.nonce,
+            response: x.response,
+            jwks: serde_json::from_value(x.jwks)
+                .map_err(|e| Failure::Usage(format!("inputs.nras[{i}].jwks: {e}")))?,
+        });
+    }
+    let mut verifier =
+        attestation::Verifier::offline().with_nras_provider(HeldNras::new(exchanges));
+    if let Some(now) = &inputs.now {
+        let now = DateTime::parse_from_rfc3339(now)
+            .map_err(|e| Failure::Usage(format!("inputs.now: {e}")))?
+            .with_timezone(&Utc);
+        held = held.at(now);
+        verifier = verifier.with_clock(Arc::new(move || now));
+    }
+    if held.holds_tdx() {
+        verifier = verifier.with_tdx_provider(held.clone());
+    }
+    let appraisal = verifier
+        .with_cert_provider(held)
+        .appraise_json(evidence_json.as_bytes(), &policy)
+        .await
+        .map_err(Failure::refused)?;
+    to_json(&appraisal)
+}
+
 /// Appraise a profile envelope with every input fixed: the evaluation time,
-/// the issued nonce and the collateral the caller holds (`inputs_json`, see
-/// [`Inputs`]). This is the entry the conformance corpus (section 14) runs,
-/// and the one for a relying party that fetches collateral itself.
+/// the issued nonce, the collateral the caller holds and recorded NRAS
+/// exchanges (`inputs_json`, see [`Inputs`]). This is the entry the
+/// conformance corpus (section 14) runs, and the one for a relying party that
+/// fetches collateral itself.
 ///
 /// - `evidence_json`: the envelope
 /// - `policy_json`: a `VerifyPolicy`, or absent for the section 7 default
@@ -309,58 +407,9 @@ pub async fn appraise_with(
     policy_json: Option<String>,
     inputs_json: String,
 ) -> Result<String, JsValue> {
-    use base64::Engine;
-    let inputs: Inputs =
-        serde_json::from_str(&inputs_json).map_err(|e| usage(format!("inputs: {e}")))?;
-    let policy = match &policy_json {
-        Some(p) => parse_policy(p)?,
-        None => attestation::profile::VerifyPolicy::default(),
-    };
-    if !inputs.nras.is_empty() {
-        return Err(coded(
-            RefusalCode::Unsupported,
-            "nras: this build carries no GPU verifier",
-        ));
-    }
-    if let Some(nonce) = &inputs.nonce {
-        let issued = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(nonce)
-            .map_err(|e| usage(format!("inputs.nonce: {e}")))?;
-        check_issued_nonce(&evidence_json, &issued)?;
-    }
-    let std64 = base64::engine::general_purpose::STANDARD;
-    let mut held = HeldCollateral::new();
-    for (key, artifact) in inputs.collateral {
-        let body = std64
-            .decode(&artifact.body)
-            .map_err(|e| usage(format!("inputs.collateral[{key}].body: {e}")))?;
-        held = match artifact.signing_chain {
-            Some(chain) => {
-                let chain = std64
-                    .decode(&chain)
-                    .map_err(|e| usage(format!("inputs.collateral[{key}].signing_chain: {e}")))?;
-                held.with_signed(key, body, chain)
-            }
-            None => held.with_bytes(key, body),
-        };
-    }
-    let mut verifier = attestation::Verifier::offline();
-    if let Some(now) = &inputs.now {
-        let now = DateTime::parse_from_rfc3339(now)
-            .map_err(|e| usage(format!("inputs.now: {e}")))?
-            .with_timezone(&Utc);
-        held = held.at(now);
-        verifier = verifier.with_clock(Arc::new(move || now));
-    }
-    if held.holds_tdx() {
-        verifier = verifier.with_tdx_provider(held.clone());
-    }
-    let appraisal = verifier
-        .with_cert_provider(held)
-        .appraise_json(evidence_json.as_bytes(), &policy)
+    appraise_with_inputs(&evidence_json, policy_json.as_deref(), &inputs_json)
         .await
-        .map_err(refusal)?;
-    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
+        .map_err(Failure::into_js)
 }
 
 /// Appraise a pre-profile `{ platform, evidence }` envelope through the
@@ -376,25 +425,28 @@ pub async fn appraise_legacy(
     policy_json: String,
     snp_crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
-    let policy = parse_policy(&policy_json)?;
-    let key: Option<attestation::profile::KeyBinding> = key_json
-        .map(|k| serde_json::from_str(&k))
-        .transpose()
-        .map_err(|e| {
-            coded(
-                RefusalCode::EnvelopeInvalid,
-                &format!("key deserialize: {e}"),
-            )
-        })?;
-    let appraisal = attestation::Verifier::offline()
-        .with_cert_provider(StaticSnpCollateral {
-            inner: DefaultCertProvider::new(),
-            crl_der: snp_crl_der,
-        })
-        .appraise_legacy_json(envelope_json.as_bytes(), &nonce, key, &policy)
-        .await
-        .map_err(refusal)?;
-    serde_json::to_string_pretty(&appraisal).map_err(|e| usage(format!("json serialize: {e}")))
+    async {
+        let policy = parse_policy(&policy_json)?;
+        let key: Option<attestation::profile::KeyBinding> = key_json
+            .map(|k| serde_json::from_str(&k))
+            .transpose()
+            .map_err(|e| Failure::Refused {
+                code: RefusalCode::EnvelopeInvalid,
+                message: format!("key deserialize: {e}"),
+            })?;
+        let appraisal = attestation::Verifier::offline()
+            .with_cert_provider(StaticSnpCollateral {
+                inner: DefaultCertProvider::new(),
+                crl_der: snp_crl_der,
+            })
+            .with_nras_provider(HeldNras::default())
+            .appraise_legacy_json(envelope_json.as_bytes(), &nonce, key, &policy)
+            .await
+            .map_err(Failure::refused)?;
+        to_json(&appraisal)
+    }
+    .await
+    .map_err(Failure::into_js)
 }
 
 /// Verify live SNP evidence in WASM.

@@ -10,7 +10,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The pre-profile exports call platform internals until they are removed.
-attestation = { path = "../attestation", features = ["unstable-internals"] }
+# nvidia-gpu is the NRAS token verifier (JWS and JSON, no network); NRAS
+# exchanges reach it only as recorded inputs.
+attestation = { path = "../attestation", features = ["unstable-internals", "nvidia-gpu"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -22,3 +24,4 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+flate2 = "1"
