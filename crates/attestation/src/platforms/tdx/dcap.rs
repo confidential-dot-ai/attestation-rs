@@ -1010,7 +1010,7 @@ fn module_identity(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    levels.sort_by(|a, b| b.isvsvn.cmp(&a.isvsvn));
+    levels.sort_by_key(|l| std::cmp::Reverse(l.isvsvn));
     if levels.windows(2).any(|w| w[0].isvsvn == w[1].isvsvn) {
         return Err(collateral_err(format!(
             "TDX module identity {id} repeats a TCB level"
@@ -1721,7 +1721,7 @@ pub fn evaluate_qe_identity(qe_report_body: &[u8], enclave_identity: &str) -> Re
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    levels.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    levels.sort_by_key(|l| std::cmp::Reverse((l.0, l.1)));
     if levels
         .windows(2)
         .any(|w| (w[0].0, w[0].1) == (w[1].0, w[1].1))
