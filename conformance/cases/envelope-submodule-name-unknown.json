@@ -1,7 +1,7 @@
 {
   "id": "envelope-submodule-name-unknown",
   "rule": {
-    "section": "4.3",
+    "section": "4.2",
     "statement": "a submodule name outside the reserved forms is rejected"
   },
   "now": "2026-09-22T00:00:00Z",

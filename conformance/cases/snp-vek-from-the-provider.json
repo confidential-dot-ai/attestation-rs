@@ -1,7 +1,7 @@
 {
   "id": "snp-vek-from-the-provider",
   "rule": {
-    "section": "4.6",
+    "section": "10.2",
     "statement": "a VEK the verifier's provider holds serves an envelope that carries none"
   },
   "now": "2026-09-22T00:00:00Z",

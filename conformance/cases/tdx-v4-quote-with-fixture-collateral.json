@@ -1,7 +1,7 @@
 {
   "id": "tdx-v4-quote-with-fixture-collateral",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 6: revocation, TCB status and QE identity from signed collateral; the debug attribute is reported in the vector"
   },
   "now": "2026-03-17T00:00:00Z",

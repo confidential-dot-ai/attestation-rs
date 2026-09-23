@@ -1,7 +1,7 @@
 {
   "id": "snp-machine-on-allowlist",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 3: the authenticated identity on the allowlist appraises"
   },
   "now": "2026-09-22T00:00:00Z",

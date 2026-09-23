@@ -1,7 +1,7 @@
 {
   "id": "dstack-json-replays",
   "rule": {
-    "section": "4.8",
+    "section": "9.3",
     "statement": "dstack-json: boot events keep their TCG digests, runtime events recompute, and the log reproduces the signed RTMRs"
   },
   "now": "2026-09-22T00:00:00Z",

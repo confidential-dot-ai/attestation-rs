@@ -428,7 +428,7 @@ mod tests {
 
     fn vectors() -> serde_json::Value {
         serde_json::from_str(include_str!(
-            "../../../../docs/design/vectors/cvm_profile_vectors.json"
+            "../../../../docs/standard/vectors/cvm_profile_vectors.json"
         ))
         .unwrap()
     }

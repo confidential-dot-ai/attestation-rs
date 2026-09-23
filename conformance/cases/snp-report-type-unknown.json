@@ -1,7 +1,7 @@
 {
   "id": "snp-report-type-unknown",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_report: a media type outside the profile's is refused"
   },
   "now": "2026-09-22T00:00:00Z",

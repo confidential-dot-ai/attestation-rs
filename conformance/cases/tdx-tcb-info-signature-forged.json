@@ -1,7 +1,7 @@
 {
   "id": "tdx-tcb-info-signature-forged",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 6: TCB status comes from TCB Info with its signing chain anchored; a body altered under the signature is refused"
   },
   "now": "2026-03-17T00:00:00Z",

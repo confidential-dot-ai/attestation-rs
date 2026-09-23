@@ -1,7 +1,7 @@
 {
   "id": "tdx-register-repeated",
   "rule": {
-    "section": "4.7",
+    "section": "6.1",
     "statement": "each register index appears once"
   },
   "now": "2026-09-22T00:00:00Z",

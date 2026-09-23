@@ -1,7 +1,7 @@
 ; CVM attestation profile v1 (tag:confidential.ai,2026:cvm#1): the wire
-; definition of docs/design/cvm-attestation-profile-v1.md, normative for the
-; evidence envelope (section 4), the appraisal (section 5) and the verifier
-; policy (section 7). Three roots: cvm-evidence, cvm-appraisal, cvm-policy.
+; definition of docs/standard/cvm-attestation-v1.md, normative for the
+; evidence envelope (section 4), the appraisal (section 12) and the verifier
+; policy (section 13). Three roots: cvm-evidence, cvm-appraisal, cvm-policy.
 ;
 ; JSON is the primary encoding. CBOR carries the same values with the claim
 ; keys of Appendix A, through the JC<> generic of RFC 9711 appendix D; names
@@ -14,7 +14,7 @@
 ; draft-ietf-rats-ear-04, draft-ietf-rats-ar4si-10 and RFC 9999 with their
 ; import prefixes, unchanged. A rule is prose when CDDL cannot state it
 ; (uniqueness, equality between two members, duplicate member names in the
-; encoding); section 4.10 and schemas/check list those rules.
+; encoding); section 4.7 states those rules.
 
 ; ===================================================================
 ; Evidence (section 4)
@@ -30,16 +30,16 @@ cvm-evidence = {
 
 cvm-profile-uri = "tag:confidential.ai,2026:cvm#1"
 
-; The relying party's challenge, 16 to 64 bytes (section 4.3).
+; The relying party's challenge, 16 to 64 bytes (section 4.1).
 cvm-nonce = bytes-of<bytes .size (16..64)>
 
-; Unknown claims are ignored, whatever they hold (section 4.10). Every known
+; Unknown claims are ignored, whatever they hold (section 4.7). Every known
 ; claim is written with a cut (^), so a known name with a wrong value fails
 ; and is never taken for an unknown claim.
 unknown-claim = ( JC<text, (int / text)> => any )
 
 ; cpu (exactly one), vtpm (only when the cpu binds through it) and one entry
-; per device; at most 66 submodules in all (sections 4.3, 4.10).
+; per device; at most 66 submodules in all (sections 4.2, 4.7).
 cvm-submods = submod-shapes .within ({ 1*66 text => any })
 
 submod-shapes = {
@@ -62,9 +62,9 @@ gpu-name = text .regexp "gpu/[!-.0-~]{1,128}"
 switch-name = text .regexp "nvswitch/[!-.0-~]{1,128}"
 device-ueid = text .regexp "[!-.0-~]{1,128}"
 
-; --- cpu claims sets (section 4.4), one shape per platform and mode ---
+; --- cpu claims sets (section 4.3), one shape per platform and mode ---
 
-; Azure binds through the vTPM's extraData (section 4.5).
+; Azure binds through the vTPM's extraData (section 5.4).
 cpu-azure = snp-azure / tdx-azure
 
 ; Everywhere else the report binds the anchor directly.
@@ -95,8 +95,8 @@ snp-report-data<H, R> = {
   * unknown-claim
 }
 
-; snp-vmr registers bind only through the commitment (sections 4.7, 4.9).
-; The log is required by appraisal, not by the envelope (log-required).
+; snp-vmr registers bind only through the commitment (sections 6.5, 8).
+; Appraisal requires the log (log-required); the envelope may omit it.
 snp-commitment<H, R> = {
   cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
   cvm-report-label ^ => report-record<R>,
@@ -138,7 +138,7 @@ tdx-report-data<H, R> = {
   * unknown-claim
 }
 
-; A log needs registers to replay into (section 4.7).
+; A log needs registers to replay into (section 6.1).
 tdx-registers-and-log = (
   cvm-registers-label ^ => [1*64 tdx-register],    ; each RTMR at most once
   ? cvm-log-label ^ => cvm-log
@@ -161,7 +161,7 @@ cpu-hints = (
 absent = uint .lt 0
 
 ; generation, when present, names what the verifier derives from the report
-; and must agree with it (section 4.2).
+; and must agree with it (section 3.4).
 platform<V, T, H, G> = {
   "vendor" ^ => V,
   "tee" ^ => T,
@@ -179,7 +179,7 @@ tsm-report-type = "application/vnd.veraison.tsm-report+json"   ; ingest only
 report-record<T> = [ T, bytes-of<field-bytes>, 4 ]
 
 ; The certificate pattern binds exactly an x509-tbs-sha256 key; the challenge
-; pattern binds no key or an spki-sha256 or raw key (section 4.5).
+; pattern binds no key or an spki-sha256 or raw key (section 5.3).
 cpu-binding<M> = {
   "pattern" ^ => "challenge",
   "mode" ^ => M,
@@ -195,7 +195,7 @@ challenge-key = { "kind" ^ => "spki-sha256", "value" ^ => bytes-of<bytes .size 3
 certificate-key = { "kind" ^ => "x509-tbs-sha256", "value" ^ => bytes-of<bytes .size 32> }
 key-binding = challenge-key / certificate-key
 
-; --- registers (section 4.7) ---
+; --- registers (section 6) ---
 
 tdx-register = {
   "index" ^ => 0..3,
@@ -221,7 +221,7 @@ vtpm-register<A, N> = {
   "backing" ^ => "privileged-service",
 }
 
-; --- event log (section 4.8) ---
+; --- event log (section 7) ---
 
 cvm-log = {
   "format" ^ => "tcg-cel-cbor" / "tcg-cel-json" / "tdx-ccel"
@@ -229,7 +229,7 @@ cvm-log = {
   "data" ^ => bytes-of<field-bytes>,
 }
 
-; --- endorsements (section 4.6) ---
+; --- endorsements (section 10) ---
 
 snp-endorsements = endorsement-collection<{
   "__cmwc_t" ^ => endorsements-collection-type,
@@ -252,7 +252,7 @@ endorsements-collection-type = "tag:confidential.ai,2026:cvm-endorsements#1"
 ; At least one entry beside __cmwc_t (RFC 9999 section 3.3).
 endorsement-collection<M> = M .within ({ "__cmwc_t" => any, + text => any })
 
-; {body, issuer_chain} as JSON, each a .b64u byte string (section 4.6).
+; {body, issuer_chain} as JSON, each a .b64u byte string (section 10.1).
 pcs-signed-type = "application/vnd.confidential-ai.pcs-signed+json"
 
 ; Indicator 2 (endorsements) or 1 (reference values shipped inline).
@@ -279,11 +279,11 @@ vtpm<A, N> = {
 
 tpm-ak = { "method" ^ => "hcl-report", "data" ^ => bytes-of<field-bytes> }
 
-; --- Arm CCA (section 4.4): the token as the RMM emits it ---
+; --- Arm CCA (section 4.6): the token as the RMM emits it ---
 
 cca-token = JC<[ "CBOR", text .b64u field-bytes ], field-bytes>
 
-; --- device submodules (section 4.4) ---
+; --- device submodules (section 4.5) ---
 
 ; NVIDIA's device evidence as its SDK exchanges it with NRAS: evidence_b64
 ; and cert_chain_b64 keep NVIDIA's standard base64 text and are passed to
@@ -301,7 +301,7 @@ device<A> = {
 }
 
 ; ===================================================================
-; Appraisal (section 5): an EAR draft-ietf-rats-ear-04 claims set
+; Appraisal (section 12): an EAR draft-ietf-rats-ear-04 claims set
 ; ===================================================================
 
 cvm-appraisal = {
@@ -322,15 +322,15 @@ cvm-appraisal = {
 ; draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines this claim with a text
 ; value and no CBOR key, so its key is text in both encodings. It is "false"
 ; only for a device whose signed nonce match is false under a policy that
-; tolerates it; a binding that fails is otherwise a refusal (section 5.3).
+; tolerates it; a binding that fails is otherwise a refusal (section 12.6).
 all-submods-bound-label = "ear_all_submods_bound"
 
 ; The envelope as appraised and the endorsements used, as a CMW collection
-; in a record of type application/cmw+json (section 5).
+; in a record of type application/cmw+json (section 12.1).
 raw-evidence = [ "application/cmw+json", bytes-of<bytes>, ? cmw-ind ]
 
-; ear_status is the worst tier the vector reaches (section 5.2). The two
-; policy ids are the profile and the policy's ni name (section 5.1).
+; ear_status is the worst tier the vector reaches (section 12.4). The two
+; policy ids are the profile and the policy's ni name (section 12.5).
 appraisal<C> = {
   ear.status-label ^ => ar4si.trustworthiness-tier,
   ear.trustworthiness-vector-label ^ => ar4si.trustworthiness-vector,
@@ -342,9 +342,9 @@ appraisal<C> = {
 ; RFC 6920: the SHA-384 of the JCS serialization of the effective policy.
 policy-ni-uri = text .regexp "ni:///sha-384;[A-Za-z0-9_-]{64}"
 
-; --- attester claims (section 5.1) ---
+; --- attester claims (section 12.2) ---
 
-cpu-claims = snp-claims / tdx-claims
+cpu-claims = snp-claims / tdx-claims / cca-claims
 
 snp-claims = {
   cvm-platform-label ^ => verified-platform<"amd", "sev-snp", snp-generation>,
@@ -414,7 +414,7 @@ verified-platform<V, T, G> = {
   "vendor" ^ => V,
   "tee" ^ => T,
   "generation" ^ => G,
-  "hosting" ^ => "bare" / "azure" / "gcp" / "dstack",   ; as reported (section 4.2)
+  "hosting" ^ => "bare" / "azure" / "gcp" / "dstack",   ; as reported (section 3.4)
 }
 
 freshness = {
@@ -454,7 +454,7 @@ tdx-tcb-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
                / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
                / "OutOfDateConfigurationNeeded" / "Revoked"
 
-; The Confidential Containers Trustee names for an SNP report (section 5.4).
+; The Confidential Containers Trustee names for an SNP report (section 12.7).
 trustee-snp = {
   "policy_abi_major" ^ => uint .le 255,
   "policy_abi_minor" ^ => uint .le 255,
@@ -474,7 +474,7 @@ trustee-snp = {
   "chip_id" ^ => hex64,
 }
 
-; The Intel Trust Authority names for a TD quote (section 5.3).
+; The Intel Trust Authority names for a TD quote (section 12.6).
 tdx-compat-claims = (
   "tdx_mrtd" ^ => hex48,
   "tdx_rtmr0" ^ => hex48,
@@ -497,6 +497,48 @@ hex32 = text .regexp "[0-9a-f]{64}"
 hex48 = text .regexp "[0-9a-f]{96}"
 hex64 = text .regexp "[0-9a-f]{128}"
 
+; Arm CCA (section 9.6): the RIM, the REMs and the RPV from the realm token;
+; the implementation, the instance, the lifecycle and the software components
+; from the platform token. Version 1 does not replay REMs.
+cca-claims = cca-claims-in<"sha256", 32>
+           / cca-claims-in<"sha384", 48>
+           / cca-claims-in<"sha512", 64>
+
+cca-claims-in<A, N> = {
+  cvm-platform-label ^ => verified-platform<"arm", "cca", cca-implementation-id>,
+  cvm-launch-measurement-label ^ => digest<A, N>,
+  cvm-registers-label ^ => [4*4 cca-register<A, N>],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "cca-rpv", "value" ^ => bytes-of<bytes .size 64> },
+  cvm-policy-label ^ => { "debug" ^ => bool, "migratable" ^ => false },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "lifecycle" ^ => uint .le 65535,
+    "sw_components" ^ => [+ cca-sw-component],
+  },
+  cvm-identity-label ^ => { "instance_id" ^ => bytes-of<bytes .size 33> },
+}
+
+cca-implementation-id = text .regexp "[0-9a-f]{64}"
+
+cca-register<A, N> = {
+  "index" ^ => 0..3,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "cca-rem",
+  "backing" ^ => "hardware",
+  "replayed" ^ => false,
+}
+
+; A platform software component (claim 2399), keys as text.
+cca-sw-component = {
+  ? "component_type" ^ => text,
+  "measurement_value" ^ => bytes-of<bytes .size (32..64)>,
+  ? "version" ^ => text,
+  "signer_id" ^ => bytes-of<bytes .size (32..64)>,
+  ? "hash_alg" ^ => text,
+}
+
 vtpm-claims = {
   cvm-registers-label ^ => [+ verified-register],
   cvm-freshness-label ^ => freshness,
@@ -504,10 +546,10 @@ vtpm-claims = {
 }
 
 ; NRAS's signed device claims verbatim, with cvm_identity and cvm_tcb beside
-; them (section 5.3).
+; them (section 9.7.3).
 device-claims = ear.claims-map-type
 
-; --- verifier claims (section 5.1) ---
+; --- verifier claims (section 12.3) ---
 
 verifier-claims = ar4si.non-empty<{
   ? cvm-collateral-label ^ => { + collateral-check => collateral-outcome },
@@ -521,7 +563,7 @@ verifier-claims = ar4si.non-empty<{
 }>
 
 collateral-check = "snp_crl" / "tdx_pck_crl" / "tdx_root_crl"
-                 / "tdx_tcb_info" / "tdx_qe_identity" / "nras_jwks"
+                 / "tdx_tcb_info" / "tdx_qe_identity" / "nras_jwks" / "cca_corim"
 
 collateral-outcome = {
   "status" ^ => "checked" / "skipped" / "not-applicable",
@@ -541,7 +583,7 @@ register-index = JC<text .base10 (0..65535), 0..65535>
 rfc3339 = text .regexp "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
 
 ; ===================================================================
-; Policy (section 7): a verifier input, JSON only. Every member is optional
+; Policy (section 13): a verifier input, JSON only. Every member is optional
 ; and takes the default shown, and every default fails closed.
 ; ===================================================================
 
@@ -608,7 +650,7 @@ tcb-floor = ar4si.non-empty<{
 snp-tcb-value = "reported" / "current" / "committed" / "launch"
 
 machine-entry = {
-  "id" ^ => bytes-of<bytes .size (1..1048576)>,
+  "id" ^ => bytes-of<bytes .size (1..128)>,
   ? "tcb_floor" ^ => text,
 }
 
@@ -629,7 +671,7 @@ gpu-policy = {
 
 backing = "virtualized" / "kernel-service" / "privileged-service" / "hardware"
 
-; Every byte string field is at most 1 MiB (section 4.10).
+; Every byte string field is at most 1 MiB (section 4.7).
 field-bytes = bytes .size (1..1048576)
 
 bytes-of<B> = JC<text .b64u B, B>

@@ -1,7 +1,7 @@
 {
   "id": "gpu-device-arch-under-gpu-name",
   "rule": {
-    "section": "4.4",
+    "section": "4.5",
     "statement": "an NVSwitch (LS10) is named nvswitch/<ueid>"
   },
   "now": "2026-09-22T00:00:00Z",

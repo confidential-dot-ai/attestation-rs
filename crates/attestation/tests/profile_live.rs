@@ -244,27 +244,63 @@ async fn live_tdx_metal_profile() {
     common(PlatformType::Tdx, &verifier, &policy, 32).await;
 }
 
-async fn azure(platform: PlatformType, policy: VerifyPolicy) {
+/// The launch measurement of the envelope's hardware report, as a pin.
+fn launch_pin(evidence: &Evidence) -> Digest {
+    let Some(Submod::Cpu(cpu)) = evidence.submods.get("cpu") else {
+        panic!("cpu submodule")
+    };
+    let raw = cpu.cvm_report.value.as_slice();
+    let value = if cpu.cvm_platform.tee == attestation::profile::Tee::Tdx {
+        attestation::platforms::tdx::verify::parse_tdx_quote(raw)
+            .unwrap()
+            .body
+            .mr_td
+            .to_vec()
+    } else {
+        attestation::platforms::snp::verify::parse_report(raw)
+            .unwrap()
+            .measurement
+            .to_vec()
+    };
+    Digest {
+        alg: HashAlg::Sha384,
+        value: Bytes(value),
+    }
+}
+
+async fn azure(platform: PlatformType, mut policy: VerifyPolicy) {
     let verifier = verifier();
     let nonce = random(32);
     let envelope = attest(platform, &nonce, None).await;
     let evidence = Evidence::from_json(&envelope).expect("the envelope parses");
     assert!(evidence.submods.contains_key("vtpm"));
 
-    // Strict defaults refuse the vTPM's privileged-service registers first.
+    // Section 9.4.4: without the paravisor pinned, vtpm-extradata is refused.
     let err = verifier
         .appraise(&evidence, &VerifyPolicy::default())
         .await
         .unwrap_err();
+    assert_eq!(
+        err.refusal_code(),
+        attestation::RefusalCode::BindingMismatch,
+        "{err}"
+    );
+    // Pinned, strict defaults refuse the vTPM's privileged-service registers.
+    let pin = launch_pin(&evidence);
+    policy.reference.launch_measurement = vec![pin.clone()];
+    let mut strict = VerifyPolicy::default();
+    strict.reference.launch_measurement = vec![pin.clone()];
+    let err = verifier.appraise(&evidence, &strict).await.unwrap_err();
     assert!(
         err.to_string().contains("backed by"),
         "strict defaults on Azure should refuse the vTPM backing: {err}"
     );
     // With only the backing relaxed, report what Intel says of the host.
-    let backing_only = VerifyPolicy {
+    let mut backing_only = VerifyPolicy {
         min_backing: Backing::PrivilegedService,
         ..Default::default()
     };
+    backing_only.reference.launch_measurement = vec![pin];
     match verifier.appraise(&evidence, &backing_only).await {
         Ok(_) => eprintln!("default TCB policy accepts {platform}"),
         Err(e) => eprintln!("default TCB policy refuses {platform}: {e}"),
@@ -305,6 +341,11 @@ async fn azure(platform: PlatformType, policy: VerifyPolicy) {
             value: pcr0,
         }],
     );
+    // PCR pins earn executables only beside the launch measurement pin.
+    pinned.reference.launch_measurement = vec![Digest {
+        alg: c.cvm_launch_measurement.alg,
+        value: c.cvm_launch_measurement.value.clone(),
+    }];
     let a = verifier
         .appraise(&evidence, &pinned)
         .await

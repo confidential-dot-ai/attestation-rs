@@ -1,7 +1,7 @@
 {
   "id": "snp-launch-measurement-not-in-reference",
   "rule": {
-    "section": "7",
+    "section": "13.4",
     "statement": "a pinned launch measurement the report does not match is refused"
   },
   "now": "2026-09-22T00:00:00Z",

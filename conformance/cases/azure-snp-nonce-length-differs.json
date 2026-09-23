@@ -1,7 +1,7 @@
 {
   "id": "azure-snp-nonce-length-differs",
   "rule": {
-    "section": "4.5",
+    "section": "5.4",
     "statement": "vtpm-extradata: extraData == anchor; a nonce of another length is refused"
   },
   "now": "2026-09-22T00:00:00Z",

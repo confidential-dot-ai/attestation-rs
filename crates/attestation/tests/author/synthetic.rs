@@ -1,7 +1,7 @@
 //! Synthetic cases: the recordings of the authored cases, changed in one
 //! place each, so every normative statement a recording can show has a case.
 //! A case changes one thing; where an input breaks several rules, the
-//! verification order of section 6 decides, and the statement says so.
+//! verification order of section 11 decides, and the statement says so.
 
 use super::*;
 use attestation::profile::{FixedBytes, TdxFloor};
@@ -222,6 +222,8 @@ pub(super) fn cases() -> Vec<Authored> {
         alg: HashAlg::Sha384,
         value: Bytes(b.to_vec()),
     };
+    // vtpm-extradata needs the paravisor pinned (section 9.4).
+    az_snp_policy.reference.launch_measurement = vec![sha384(&az_report.measurement)];
     let key32 = |b: u8| json!({"kind": "spki-sha256", "value": b64url(&[b; 32])});
     let keyed = |p: &mut VerifyPolicy| {
         p.freshness.key = Some(serde_json::from_value(key32(0x11)).unwrap());
@@ -274,57 +276,57 @@ pub(super) fn cases() -> Vec<Authored> {
 
     let mut out = vec![
         // Section 4.3 and step 1: the envelope's own claims.
-        snp_case("envelope-nonce-too-short", "4.3", "eat_nonce is 16 to 64 bytes: 15 is refused",
+        snp_case("envelope-nonce-too-short", "4.1", "eat_nonce is 16 to 64 bytes: 15 is refused",
             snp_envelope(&[7u8; 15]), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-nonce-too-long", "4.3", "eat_nonce is 16 to 64 bytes: 65 is refused",
+        snp_case("envelope-nonce-too-long", "4.1", "eat_nonce is 16 to 64 bytes: 65 is refused",
             snp_envelope(&[7u8; 65]), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-profile-unknown", "6", "step 1: an unknown profile version is refused",
+        snp_case("envelope-profile-unknown", "11", "step 1: an unknown profile version is refused",
             tweak(snp.clone(), |v| v["eat_profile"] = json!("tag:confidential.ai,2026:cvm#2")),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-version-unknown", "6", "step 1: cvm_version other than 1 is refused",
+        snp_case("envelope-version-unknown", "11", "step 1: cvm_version other than 1 is refused",
             tweak(snp.clone(), |v| v["cvm_version"] = json!(2)), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-submodule-name-unknown", "4.3", "a submodule name outside the reserved forms is rejected",
+        snp_case("envelope-submodule-name-unknown", "4.2", "a submodule name outside the reserved forms is rejected",
             tweak(snp.clone(), |v| v["submods"]["tpm"] = v["submods"]["cpu"].clone()),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-no-cpu-submodule", "4.3", "the cpu submodule is required",
+        snp_case("envelope-no-cpu-submodule", "4.2", "the cpu submodule is required",
             tweak(snp.clone(), |v| v["submods"] = json!({})), Some(R::EnvelopeInvalid)),
         // Section 4.10: encoding.
-        case("envelope-duplicate-member", "4.10", "an object with a duplicate member name is rejected: the envelope",
+        case("envelope-duplicate-member", "4.7", "an object with a duplicate member name is rejected: the envelope",
             SNP_NOW, with_duplicate(&snp, &[], "eat_nonce", &json!(b64url(&[7u8; 16]))),
             Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
-        case("envelope-duplicate-member-in-cvm-object", "4.10", "an object with a duplicate member name is rejected: a cvm_* object",
+        case("envelope-duplicate-member-in-cvm-object", "4.7", "an object with a duplicate member name is rejected: a cvm_* object",
             SNP_NOW, with_duplicate(&snp, &["submods", "cpu", "cvm_platform"], "tee", &json!("sev-snp")),
             Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
-        case("envelope-duplicate-label-in-cmw-collection", "4.10", "an object with a duplicate member name is rejected: a CMW collection",
+        case("envelope-duplicate-label-in-cmw-collection", "4.7", "an object with a duplicate member name is rejected: a CMW collection",
             SNP_NOW, with_duplicate(&snp, &["submods", "cpu", "cvm_endorsements"], "snp.vek",
                 &json!(["application/pkix-cert", b64url(SNP_VCEK), 2])),
             Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-null-member", "4.10", "null is not a value: an optional member is absent or holds its type",
+        snp_case("envelope-null-member", "4.7", "null is not a value: an optional member is absent or holds its type",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["dbgstat"] = Value::Null), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-floating-point", "4.10", "integers are JSON numbers and no profile claim holds floating point",
+        snp_case("envelope-floating-point", "4.7", "integers are JSON numbers and no profile claim holds floating point",
             tweak(snp.clone(), |v| v["cvm_version"] = json!(1.0)), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-object-as-array", "4.10",
+        snp_case("envelope-object-as-array", "4.7",
             "one encoding per value: a cvm_* object written as the array of its members is refused",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"] = json!(["challenge", "report-data"])),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-enumerated-value-as-object", "4.10",
+        snp_case("envelope-enumerated-value-as-object", "4.7",
             "one encoding per value: an enumerated value is its text, never an object naming it",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["pattern"] = json!({"challenge": null})),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-unknown-claim-ignored", "4.10", "an unknown top-level claim is ignored whatever it holds",
+        snp_case("envelope-unknown-claim-ignored", "4.7", "an unknown top-level claim is ignored whatever it holds",
             tweak(snp.clone(), |v| v["x_vendor"] = json!({"note": "ignored", "weight": 1.5, "empty": null})),
             None),
-        snp_case("envelope-byte-string-padded", "4.10", "byte strings are base64url without padding",
+        snp_case("envelope-byte-string-padded", "4.7", "byte strings are base64url without padding",
             tweak(snp.clone(), |v| v["eat_nonce"] = json!(format!("{}=", b64url(&nonce)))),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-byte-string-standard-alphabet", "4.10", "byte strings are base64url: the standard alphabet is refused",
+        snp_case("envelope-byte-string-standard-alphabet", "4.7", "byte strings are base64url: the standard alphabet is refused",
             tweak(snp.clone(), |v| {
                 let text = b64url(SNP_REPORT);
                 assert!(text.contains('-') || text.contains('_'));
                 v["submods"]["cpu"]["cvm_report"][1] = json!(text.replace('-', "+").replace('_', "/"));
             }),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-byte-string-noncanonical", "4.10", "byte strings are base64url with zero trailing bits (RFC 4648 section 3.5)",
+        snp_case("envelope-byte-string-noncanonical", "4.7", "byte strings are base64url with zero trailing bits (RFC 4648 section 3.5)",
             tweak(snp.clone(), |v| {
                 // The last character of a partial group carries zero bits
                 // below the data; setting the lowest one keeps the length.
@@ -339,23 +341,23 @@ pub(super) fn cases() -> Vec<Authored> {
             }),
             Some(R::EnvelopeInvalid)),
         // Section 4.10: bounds.
-        snp_case("envelope-submodules-at-bound", "4.10",
+        snp_case("envelope-submodules-at-bound", "4.7",
             "an envelope carries at most 66 submodules: 66 parse, and the appraisal refuses more devices than it accepts (device-not-allowed)",
             with_gpus(&nonce, 65), Some(R::DeviceNotAllowed)),
-        snp_case("envelope-submodules-over-bound", "4.10", "an envelope carries at most 66 submodules: 67 are refused",
+        snp_case("envelope-submodules-over-bound", "4.7", "an envelope carries at most 66 submodules: 67 are refused",
             with_gpus(&nonce, 66), Some(R::EnvelopeInvalid)),
-        case("envelope-field-at-bound", "4.10",
+        case("envelope-field-at-bound", "4.7",
             "every byte string field is at most 1 MiB: a 1 MiB log parses, and a log that is not CEL is refused (log-invalid)",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", &vec![0u8; 1 << 20]).into(), Some(live_policy.clone().into()), none(),
             Some(R::LogInvalid)),
-        case("envelope-field-over-bound", "4.10", "every byte string field is at most 1 MiB: one byte more is refused",
+        case("envelope-field-over-bound", "4.7", "every byte string field is at most 1 MiB: one byte more is refused",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", &vec![0u8; (1 << 20) + 1]).into(), Some(live_policy.clone().into()), none(),
             Some(R::EnvelopeInvalid)),
-        case("envelope-at-size-bound", "4.10", "the whole envelope is at most 10 MiB: exactly 10 MiB appraises",
+        case("envelope-at-size-bound", "4.7", "the whole envelope is at most 10 MiB: exactly 10 MiB appraises",
             SNP_NOW, padded_to(&snp, 10 << 20), Some(lenient().into()), none(), None),
-        case("envelope-over-size-bound", "4.10", "the whole envelope is at most 10 MiB: one byte more is refused",
+        case("envelope-over-size-bound", "4.7", "the whole envelope is at most 10 MiB: one byte more is refused",
             SNP_NOW, padded_to(&snp, (10 << 20) + 1), Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
-        snp_case("envelope-cmw-collection-over-bound", "4.10", "a CMW collection carries at most 32 entries",
+        snp_case("envelope-cmw-collection-over-bound", "4.7", "a CMW collection carries at most 32 entries",
             tweak(snp.clone(), |v| {
                 for i in 0..32 {
                     v["submods"]["cpu"]["cvm_endorsements"][format!("x{i}")] =
@@ -363,82 +365,82 @@ pub(super) fn cases() -> Vec<Authored> {
                 }
             }),
             Some(R::EnvelopeInvalid)),
-        snp_case("envelope-cmw-collection-nested", "4.6", "cvm_endorsements accepts no nested collection",
+        snp_case("envelope-cmw-collection-nested", "10.1", "cvm_endorsements accepts no nested collection",
             tweak(snp.clone(), |v| {
                 v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"] =
                     json!({"snp.vek": ["application/pkix-cert", b64url(SNP_VCEK), 2]});
             }),
             Some(R::EnvelopeInvalid)),
         // Section 4.4 and 4.2: the cpu claims set.
-        snp_case("snp-platform-vendor-disagrees-with-tee", "4.4", "cvm_platform: the vendor is the TEE's vendor",
+        snp_case("snp-platform-vendor-disagrees-with-tee", "4.3", "cvm_platform: the vendor is the TEE's vendor",
             cpu(|v| v["submods"]["cpu"]["cvm_platform"]["vendor"] = json!("intel")), Some(R::EnvelopeInvalid)),
-        snp_case("snp-generation-hint-contradicts-report", "4.2",
+        snp_case("snp-generation-hint-contradicts-report", "3.4",
             "a hint that contradicts the signed data is an error: generation Milan on a Genoa report",
             cpu(|v| v["submods"]["cpu"]["cvm_platform"]["generation"] = json!("Milan")), Some(R::EnvelopeInvalid)),
-        snp_case("snp-generation-hint-agrees", "4.4", "cvm_platform.generation names the generation the report carries",
+        snp_case("snp-generation-hint-agrees", "4.3", "cvm_platform.generation names the generation the report carries",
             cpu(|v| v["submods"]["cpu"]["cvm_platform"]["generation"] = json!("Genoa")), None),
-        snp_case("snp-generation-hint-unknown", "4.4", "cvm_platform.generation is Milan, Genoa or Turin on SEV-SNP",
+        snp_case("snp-generation-hint-unknown", "4.3", "cvm_platform.generation is Milan, Genoa or Turin on SEV-SNP",
             cpu(|v| v["submods"]["cpu"]["cvm_platform"]["generation"] = json!("genoa")), Some(R::EnvelopeInvalid)),
-        snp_case("snp-report-indicator-not-evidence", "4.4", "cvm_report: the indicator is required and exactly 4",
+        snp_case("snp-report-indicator-not-evidence", "4.3", "cvm_report: the indicator is required and exactly 4",
             cpu(|v| v["submods"]["cpu"]["cvm_report"][2] = json!(2)), Some(R::EnvelopeInvalid)),
-        snp_case("snp-report-type-unknown", "4.4", "cvm_report: a media type outside the profile's is refused",
+        snp_case("snp-report-type-unknown", "4.3", "cvm_report: a media type outside the profile's is refused",
             cpu(|v| v["submods"]["cpu"]["cvm_report"][0] = json!("application/octet-stream")), Some(R::EnvelopeInvalid)),
-        snp_case("snp-report-type-for-other-tee", "4.4", "cvm_report: a TD quote under an SEV-SNP platform is refused",
+        snp_case("snp-report-type-for-other-tee", "4.3", "cvm_report: a TD quote under an SEV-SNP platform is refused",
             cpu(|v| v["submods"]["cpu"]["cvm_report"][0] = json!("application/vnd.confidential-ai.tdx-quote")),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-provenance-ignored", "4.4", "cvm_provenance is reserved and a v1 verifier ignores it",
+        snp_case("snp-provenance-ignored", "4.3", "cvm_provenance is reserved and a v1 verifier ignores it",
             cpu(|v| v["submods"]["cpu"]["cvm_provenance"] = json!({"ppid": "AAEC", "registry": "https://example.com"})),
             None),
-        snp_case("snp-dbgstat-hint-agrees", "4.4",
+        snp_case("snp-dbgstat-hint-agrees", "4.3",
             "dbgstat is compared on whether debug is enabled; the disabled qualifier is the attester's",
             cpu(|v| v["submods"]["cpu"]["dbgstat"] = json!("disabled-permanently")), None),
-        snp_case("snp-registers-without-commitment", "4.7", "snp-vmr registers appear only with the commitment binding",
+        snp_case("snp-registers-without-commitment", "6.5", "snp-vmr registers appear only with the commitment binding",
             cpu(|v| v["submods"]["cpu"]["cvm_registers"] = json!([{"index": 4, "alg": "sha384",
                 "value": b64url(&[0u8; 48]), "source": "snp-vmr", "backing": "virtualized"}])),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-chain-claims-without-commitment", "4.9", "cvm_chain and bootseed belong to the commitment binding",
+        snp_case("snp-chain-claims-without-commitment", "4.3", "cvm_chain and bootseed belong to the commitment binding",
             cpu(|v| {
                 v["submods"]["cpu"]["cvm_chain"] = json!({"chain_len": 1});
                 v["submods"]["cpu"]["bootseed"] = json!(b64url(&[0u8; 32]));
             }),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-commitment-without-chain", "4.9", "commitment requires cvm_chain, bootseed and all 16 registers",
+        snp_case("snp-commitment-without-chain", "8.1", "commitment requires cvm_chain, bootseed and all 16 registers",
             cpu(|v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("commitment")), Some(R::EnvelopeInvalid)),
-        snp_case("snp-binding-mode-for-other-platform", "4.5", "vtpm-extradata binds Azure evidence; a bare SEV-SNP report binds its report data",
+        snp_case("snp-binding-mode-for-other-platform", "5.4", "vtpm-extradata binds Azure evidence; a bare SEV-SNP report binds its report data",
             cpu(|v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("vtpm-extradata")), Some(R::EnvelopeInvalid)),
-        case("tdx-binding-commitment", "4.5", "the commitment binding is SEV-SNP's; a TD quote binds its report data",
+        case("tdx-binding-commitment", "5.4", "the commitment binding is SEV-SNP's; a TD quote binds its report data",
             SNP_NOW, tweak(tdx_regs.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("commitment")).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
         // Section 4.5: keys and the anchor.
-        snp_case("snp-key-kind-reserved", "4.5", "tls-exporter is reserved for v2; a v1 verifier rejects it as an unknown kind",
+        snp_case("snp-key-kind-reserved", "5.3", "tls-exporter is reserved for v2; a v1 verifier rejects it as an unknown kind",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] =
                 json!({"kind": "tls-exporter", "value": b64url(&[0x11; 32])})),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-key-value-wrong-size", "4.5", "spki-sha256 is 32 bytes",
+        snp_case("snp-key-value-wrong-size", "5.3", "spki-sha256 is 32 bytes",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] =
                 json!({"kind": "spki-sha256", "value": b64url(&[0x11; 31])})),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-raw-key-too-long", "4.5", "a raw key value is at most 65535 bytes",
+        snp_case("snp-raw-key-too-long", "5.3", "a raw key value is at most 65535 bytes",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] =
                 json!({"kind": "raw", "value": b64url(&vec![0x11; 65536])})),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-certificate-pattern-needs-tbs-key", "4.5", "the certificate pattern binds an x509-tbs-sha256 key",
+        snp_case("snp-certificate-pattern-needs-tbs-key", "5.3", "the certificate pattern binds an x509-tbs-sha256 key",
             tweak(snp.clone(), |v| {
                 v["submods"]["cpu"]["cvm_binding"]["pattern"] = json!("certificate");
                 v["submods"]["cpu"]["cvm_binding"]["key"] = key32(0x11);
             }),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-tbs-key-needs-certificate-pattern", "4.5", "an x509-tbs-sha256 key belongs to the certificate pattern",
+        snp_case("snp-tbs-key-needs-certificate-pattern", "5.3", "an x509-tbs-sha256 key belongs to the certificate pattern",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] =
                 json!({"kind": "x509-tbs-sha256", "value": b64url(&[0x22; 32])})),
             Some(R::EnvelopeInvalid)),
-        case("snp-keyed-anchor-not-bound", "4.5",
+        case("snp-keyed-anchor-not-bound", "5.2",
             "with a key the anchor is SHA-384(\"ats-anchor-v1\" || ...); a report bound to the bare nonce is refused",
             SNP_NOW, tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] = key32(0x11)).into(),
             Some(with_policy(lenient(), keyed).into()), none(), Some(R::BindingMismatch)),
-        case("snp-policy-key-not-bound", "4.5", "a key the policy requires and the envelope does not bind is refused",
+        case("snp-policy-key-not-bound", "5.2", "a key the policy requires and the envelope does not bind is refused",
             SNP_NOW, snp.clone().into(), Some(with_policy(lenient(), keyed).into()), none(), Some(R::BindingMismatch)),
-        snp_case("snp-certificate-pattern-without-presented-certificate", "4.5.1",
+        snp_case("snp-certificate-pattern-without-presented-certificate", "5.5",
             "the verifier compares the certificate it was presented with; without it the certificate pattern is refused",
             tweak(snp.clone(), |v| {
                 v["submods"]["cpu"]["cvm_binding"]["pattern"] = json!("certificate");
@@ -447,39 +449,39 @@ pub(super) fn cases() -> Vec<Authored> {
             }),
             Some(R::BindingMismatch)),
         // Section 4.7: registers.
-        case("tdx-log-without-registers", "4.7", "cvm_registers is required whenever cvm_log is present",
+        case("tdx-log-without-registers", "6.1", "cvm_registers is required whenever cvm_log is present",
             SNP_NOW, tweak(tdx_live.clone(), |v| {
                 v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_registers");
             }).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("tdx-register-index-out-of-range", "4.7", "for tdx-rtmr the index is the RTMR ordinal 0 to 3",
+        case("tdx-register-index-out-of-range", "6.2", "for tdx-rtmr the index is the RTMR ordinal 0 to 3",
             SNP_NOW, tweak(tdx_regs.clone(), |v| v["submods"]["cpu"]["cvm_registers"][3]["index"] = json!(4)).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("tdx-register-alg-not-sha384", "4.7", "alg is pinned per source: sha384 for tdx-rtmr",
+        case("tdx-register-alg-not-sha384", "6.1", "alg is pinned per source: sha384 for tdx-rtmr",
             SNP_NOW, tweak(tdx_regs.clone(), |v| {
                 v["submods"]["cpu"]["cvm_registers"][0]["alg"] = json!("sha256");
                 v["submods"]["cpu"]["cvm_registers"][0]["value"] = json!(b64url(&[0u8; 32]));
             }).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("tdx-register-backing-not-hardware", "4.7", "backing is constrained by source: hardware for tdx-rtmr",
+        case("tdx-register-backing-not-hardware", "6.4", "backing is constrained by source: hardware for tdx-rtmr",
             SNP_NOW, tweak(tdx_regs.clone(), |v| v["submods"]["cpu"]["cvm_registers"][0]["backing"] = json!("virtualized")).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("tdx-register-value-wrong-length", "4.7", "value is exactly the digest length of alg",
+        case("tdx-register-value-wrong-length", "6.1", "value is exactly the digest length of alg",
             SNP_NOW, tweak(tdx_regs.clone(), |v| v["submods"]["cpu"]["cvm_registers"][0]["value"] = json!(b64url(&[0u8; 47]))).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("tdx-register-repeated", "4.7", "each register index appears once",
+        case("tdx-register-repeated", "6.1", "each register index appears once",
             SNP_NOW, tweak(tdx_regs.clone(), |v| {
                 let first = v["submods"]["cpu"]["cvm_registers"][0].clone();
                 v["submods"]["cpu"]["cvm_registers"].as_array_mut().unwrap().push(first);
             }).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("azure-snp-register-backing-hardware", "4.7", "backing is constrained by source: privileged-service for vtpm-pcr",
+        case("azure-snp-register-backing-hardware", "6.4", "backing is constrained by source: privileged-service for vtpm-pcr",
             SNP_NOW, tweak(az_snp.clone(), |v| v["submods"]["vtpm"]["cvm_registers"][0]["backing"] = json!("hardware")).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("azure-snp-register-differs-from-quoted-pcr", "4.7", "a vtpm register equals the quoted PCR of its index",
+        case("azure-snp-register-differs-from-quoted-pcr", "4.4", "a vtpm register equals the quoted PCR of its index",
             SNP_NOW, tweak(az_snp.clone(), |v| v["submods"]["vtpm"]["cvm_registers"][0]["value"] = json!(b64url(&[9u8; 32]))).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("azure-snp-quoted-pcrs-altered", "4.7",
+        case("azure-snp-quoted-pcrs-altered", "6.5",
             "for vtpm-pcr the quoted PCR digest must reproduce from the registers: a PCR changed with its register is refused",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 let index = v["submods"]["vtpm"]["cvm_registers"][0]["index"].as_u64().unwrap() as usize;
@@ -492,76 +494,86 @@ pub(super) fn cases() -> Vec<Authored> {
                 v["submods"]["vtpm"]["cvm_tpm_quote"]["pcrs"].as_array_mut().unwrap().pop();
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        case("azure-snp-register-outside-bank", "4.7", "a vtpm register's alg is the quoted bank",
+        case("azure-snp-register-outside-bank", "6.1", "a vtpm register's alg is the quoted bank",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 v["submods"]["vtpm"]["cvm_registers"][0]["alg"] = json!("sha384");
                 v["submods"]["vtpm"]["cvm_registers"][0]["value"] = json!(b64url(&[0u8; 48]));
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
         // Sections 4.4 and 4.5: the vTPM binding.
-        case("azure-snp-nonce-not-bound", "4.5", "vtpm-extradata: extraData == anchor; another nonce of the same length is refused",
+        case("azure-snp-nonce-not-bound", "5.4", "vtpm-extradata: extraData == anchor; another nonce of the same length is refused",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 let mut other = az_nonce.clone();
                 other[0] ^= 1;
                 v["eat_nonce"] = json!(b64url(&other));
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::BindingMismatch)),
-        case("azure-snp-nonce-length-differs", "4.5", "vtpm-extradata: extraData == anchor; a nonce of another length is refused",
+        case("azure-snp-nonce-length-differs", "5.4", "vtpm-extradata: extraData == anchor; a nonce of another length is refused",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 let len = if az_nonce.len() == 16 { 20 } else { 16 };
                 v["eat_nonce"] = json!(b64url(&vec![0x42; len]));
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::BindingMismatch)),
-        case("azure-cpu-without-vtpm", "4.4", "a cpu bound through vtpm-extradata needs its vtpm submodule",
+        case("azure-cpu-without-vtpm", "4.2", "a cpu bound through vtpm-extradata needs its vtpm submodule",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 v["submods"].as_object_mut().unwrap().remove("vtpm");
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        snp_case("snp-vtpm-without-vtpm-binding", "4.4", "a vtpm submodule belongs to a cpu bound through vtpm-extradata",
+        snp_case("snp-vtpm-without-vtpm-binding", "4.2", "a vtpm submodule belongs to a cpu bound through vtpm-extradata",
             tweak(snp.clone(), |v| v["submods"]["vtpm"] = az_snp["submods"]["vtpm"].clone()),
             Some(R::EnvelopeInvalid)),
-        case("azure-snp-vtpm-log-not-tpm2", "4.8", "the vtpm submodule's log is a TPM2 event log in this release",
+        case("azure-snp-vtpm-log-not-tpm2", "9.4", "the vtpm submodule's log is a TPM2 event log in this release",
             SNP_NOW, tweak(az_snp.clone(), |v| v["submods"]["vtpm"]["cvm_log"] =
                 json!({"format": "tcg-cel-json", "data": b64url(b"[]")})).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::Unsupported)),
-        case("azure-snp-backing-below-minimum", "7", "min_backing: a privileged-service register under the default hardware floor is refused",
-            SNP_NOW, az_snp.clone().into(), Some(lenient().into()), none(), Some(R::BackingBelowMinimum)),
-        case("azure-snp-pcr8-pinned", "5.2", "vtpm: executables is 2 when every pinned PCR matches",
+        case("azure-snp-backing-below-minimum", "13.1", "min_backing: a privileged-service register under the default hardware floor is refused",
+            SNP_NOW, az_snp.clone().into(),
+            Some(with_policy(az_snp_policy.clone(), |p| p.min_backing = Backing::Hardware).into()),
+            none(), Some(R::BackingBelowMinimum)),
+        case("azure-snp-pcr8-pinned", "12.4", "vtpm: executables is 2 when the launch measurement is pinned and every pinned PCR matches",
             SNP_NOW, az_snp.clone().into(),
             Some(with_policy(az_snp_policy.clone(), |p| {
                 p.reference.pcrs.insert(8, vec![Digest { alg: HashAlg::Sha256, value: Bytes(az_pcr(8)) }]);
             }).into()),
             none(), None),
-        case("azure-snp-owner-key-accepted", "7", "owner.id_key_digests: a report whose ID key is listed appraises",
+        case("azure-snp-pcr8-pinned-without-launch-measurement", "9.4",
+            "vtpm-extradata: without a pinned launch measurement nothing establishes the paravisor that binds the nonce, so the evidence is refused",
+            SNP_NOW, az_snp.clone().into(),
+            Some(with_policy(az_snp_policy.clone(), |p| {
+                p.reference.launch_measurement.clear();
+                p.reference.pcrs.insert(8, vec![Digest { alg: HashAlg::Sha256, value: Bytes(az_pcr(8)) }]);
+            }).into()),
+            none(), Some(R::BindingMismatch)),
+        case("azure-snp-owner-key-accepted", "13.4", "owner.id_key_digests: a report whose ID key is listed appraises",
             SNP_NOW, az_snp.clone().into(),
             Some(with_policy(az_snp_policy.clone(), |p| {
                 p.owner = Some(OwnerPolicy { id_key_digests: vec![FixedBytes(az_report.id_key_digest)] });
             }).into()),
             none(), None),
         // Section 4.6: endorsements.
-        snp_case("snp-endorsement-label-unknown", "4.6", "cvm_endorsements labels are exactly the ones section 4.6 lists",
+        snp_case("snp-endorsement-label-unknown", "10.1", "cvm_endorsements labels are exactly the ones section 10.1 lists",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["snp.ask"] = json!(["application/pkix-cert", b64url(SNP_VCEK), 2])),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-endorsement-for-other-tee", "4.6", "an endorsement for another TEE is refused",
+        snp_case("snp-endorsement-for-other-tee", "10.1", "an endorsement for another TEE is refused",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["tdx.root_crl"] = json!(["application/pkix-crl", b64url(ROOT_CRL), 2])),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-endorsement-type-wrong", "4.6", "snp.vek is application/pkix-cert",
+        snp_case("snp-endorsement-type-wrong", "10.1", "snp.vek is application/pkix-cert",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][0] = json!("application/pkix-crl")),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-endorsement-indicator-evidence", "4.6", "an endorsement's indicator is exactly 2, or 1 for reference values",
+        snp_case("snp-endorsement-indicator-evidence", "10.1", "an endorsement's indicator is exactly 2, or 1 for reference values",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][2] = json!(4)),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-endorsements-type-tag-wrong", "4.6", "cvm_endorsements' __cmwc_t is tag:confidential.ai,2026:cvm-endorsements#1",
+        snp_case("snp-endorsements-type-tag-wrong", "10.1", "cvm_endorsements' __cmwc_t is tag:confidential.ai,2026:cvm-endorsements#1",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["__cmwc_t"] = json!("tag:example.com,2026:endorsements")),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-endorsements-without-type-tag", "4.6", "cvm_endorsements carries its __cmwc_t",
+        snp_case("snp-endorsements-without-type-tag", "10.1", "cvm_endorsements carries its __cmwc_t",
             cpu(|v| { v["submods"]["cpu"]["cvm_endorsements"].as_object_mut().unwrap().remove("__cmwc_t"); }),
             Some(R::EnvelopeInvalid)),
-        snp_case("snp-inline-vek-of-another-chip", "4.6",
+        snp_case("snp-inline-vek-of-another-chip", "10.2",
             "inline endorsements are inputs: a VEK that is not the report's is not used, and with no other source the VEK is unavailable",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][1] = json!(b64url(TEST_VCEK))),
             Some(R::CollateralUnavailable)),
-        case("snp-vek-from-the-provider", "4.6", "a VEK the verifier's provider holds serves an envelope that carries none",
+        case("snp-vek-from-the-provider", "10.2", "a VEK the verifier's provider holds serves an envelope that carries none",
             SNP_NOW, tweak(snp.clone(), |v| {
                 v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_endorsements");
             }).into(),
@@ -585,35 +597,38 @@ pub(super) fn cases() -> Vec<Authored> {
             )]),
             None),
         // Section 4.8: logs.
-        case("tdx-cel-cbor-replays", "4.8",
+        case("tdx-cel-cbor-replays", "7.4",
             "tcg-cel-cbor: the log replays from zero into the RTMRs it extends, each reproducing the signed value",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", &cel_log(LIVE_CCEL2, false)).into(), Some(live_policy.clone().into()), none(), None),
-        case("tdx-cel-json-replays", "4.8", "tcg-cel-json: the same records in CEL-JSON replay the same way",
+        case("tdx-cel-json-replays", "7.4", "tcg-cel-json: the same records in CEL-JSON replay the same way",
             SNP_NOW, tdx_with_log("tcg-cel-json", &cel_log(LIVE_CCEL2, true)).into(), Some(live_policy.clone().into()), none(), None),
-        case("tdx-cel-log-from-another-boot", "4.8", "a CEL log that does not reproduce the signed RTMRs is refused",
+        case("tdx-cel-log-from-another-boot", "7.4", "a CEL log that does not reproduce the signed RTMRs is refused",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", &cel_log(LIVE_CCEL, false)).into(), Some(live_policy.clone().into()), none(),
             Some(R::ReplayMismatch)),
-        case("tdx-cel-log-unparseable", "4.8", "a log that cannot be parsed whole under its format is refused",
+        case("tdx-cel-log-unparseable", "7.1", "a log that cannot be parsed whole under its format is refused",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", b"not a CEL log").into(), Some(live_policy.clone().into()), none(),
             Some(R::LogInvalid)),
-        case("tdx-aael-log-unsupported", "4.8", "the standalone attestation-agent log is parsed but this release's appraisal refuses it",
+        case("tdx-aael-log-unsupported", "7.1", "the standalone attestation-agent log is parsed but this release's appraisal refuses it",
             SNP_NOW, tdx_with_log("aael", b"AAEL").into(), Some(live_policy.clone().into()), none(), Some(R::Unsupported)),
-        case("dstack-json-replays", "4.8",
+        case("dstack-json-replays", "9.3",
             "dstack-json: boot events keep their TCG digests, runtime events recompute, and the log reproduces the signed RTMRs",
             SNP_NOW, dstack_envelope(serde_json::from_str::<Value>(DSTACK).unwrap()["event_log"].as_str().unwrap()).into(),
             Some(live_policy.clone().into()), none(), None),
-        case("dstack-json-runtime-event-altered", "4.8", "dstack-json: a runtime event whose digest does not recompute is refused",
+        case("dstack-json-runtime-event-altered", "9.3", "dstack-json: a runtime event whose digest does not recompute is refused",
             SNP_NOW, dstack_envelope(&dstack_log_with_altered_runtime_event()).into(),
             Some(live_policy.clone().into()), none(), Some(R::ReplayMismatch)),
         // Sections 5.2 and 7: reference values.
-        snp_case("snp-launch-measurement-pinned", "5.2",
+        snp_case("snp-launch-measurement-pinned", "12.4",
             "executables is 3 when only the launch measurement matched", snp.clone(), None),
-        snp_case("snp-host-data-pinned", "7", "reference.host_data: the value cvm_host_data must carry appraises", snp.clone(), None),
-        snp_case("snp-host-data-zero-padded", "7", "reference.host_data is zero-padded to the platform's length", snp.clone(), None),
-        snp_case("snp-host-data-differs", "7", "reference.host_data: another value is refused", snp.clone(), Some(R::ReferenceMismatch)),
-        snp_case("snp-owner-key-not-accepted", "7", "owner.id_key_digests: an ID key outside the list is refused",
+        snp_case("snp-host-data-pinned", "13.4", "reference.host_data: the value cvm_host_data must carry appraises", snp.clone(), None),
+        snp_case("snp-host-data-zero-padded", "13.4", "reference.host_data is zero-padded to the platform's length", snp.clone(), None),
+        snp_case("snp-host-data-differs", "13.4", "reference.host_data: another value is refused", snp.clone(), Some(R::ReferenceMismatch)),
+        snp_case("snp-host-data-longer-than-the-field", "13.4",
+            "reference.host_data longer than the platform's field is a pin no report meets",
             snp.clone(), Some(R::ReferenceMismatch)),
-        case("tdx-registers-pinned", "5.2", "executables is 2 when the launch measurement and every pinned register match",
+        snp_case("snp-owner-key-not-accepted", "13.4", "owner.id_key_digests: an ID key outside the list is refused",
+            snp.clone(), Some(R::ReferenceMismatch)),
+        case("tdx-registers-pinned", "12.4", "executables is 2 when the launch measurement and every pinned register match",
             SNP_NOW, tdx_live.clone().into(),
             Some(with_policy(live_policy.clone(), |p| {
                 p.reference.launch_measurement = vec![sha384(&live.body.mr_td)];
@@ -622,42 +637,49 @@ pub(super) fn cases() -> Vec<Authored> {
                 }
             }).into()),
             none(), None),
-        case("tdx-registers-pinned-without-launch-measurement", "5.2",
+        case("tdx-registers-pinned-without-launch-measurement", "12.4",
             "with the launch measurement unpinned nothing vouches for the firmware, so executables makes no claim",
             SNP_NOW, tdx_regs.clone().into(),
             Some(with_policy(live_policy.clone(), |p| {
                 p.reference.registers.insert(0, vec![sha384(&live.body.rtmr_0)]);
             }).into()),
             none(), None),
-        case("tdx-register-not-in-reference", "7", "reference.registers: a register outside its reference values is refused",
+        case("tdx-register-not-in-reference", "13.4", "reference.registers: a register outside its reference values is refused",
             SNP_NOW, tdx_regs.clone().into(),
             Some(with_policy(live_policy.clone(), |p| {
                 p.reference.registers.insert(1, vec![sha384(&[0u8; 48])]);
             }).into()),
             none(), Some(R::ReferenceMismatch)),
+        case("tdx-owner-pin-unsatisfiable", "13.1",
+            "a pin nothing in the evidence can satisfy is refused: owner.id_key_digests on a TD quote",
+            SNP_NOW, tdx_regs.clone().into(),
+            Some(with_policy(live_policy.clone(), |p| {
+                p.owner = Some(OwnerPolicy { id_key_digests: vec![FixedBytes([0x11; 48])] });
+            }).into()),
+            none(), Some(R::ReferenceMismatch)),
         // Section 7: floors.
-        snp_case("snp-machine-floor-overrides-default", "7", "a machine that names a tcb_floor is held to it, not to default_floor",
+        snp_case("snp-machine-floor-overrides-default", "13.3", "a machine that names a tcb_floor is held to it, not to default_floor",
             snp.clone(), None),
-        snp_case("snp-machine-floor-applies", "7", "a machine's own tcb_floor applies", snp.clone(), Some(R::TcbNotAllowed)),
-        snp_case("snp-default-floor-for-machine-without-floor", "7", "every other machine is held to default_floor",
+        snp_case("snp-machine-floor-applies", "13.3", "a machine's own tcb_floor applies", snp.clone(), Some(R::TcbNotAllowed)),
+        snp_case("snp-default-floor-for-machine-without-floor", "13.3", "every other machine is held to default_floor",
             snp.clone(), Some(R::TcbNotAllowed)),
-        snp_case("snp-floor-names-fmc-before-turin", "7", "a floor that names the FMC SPL fails a report without one",
+        snp_case("snp-floor-names-fmc-before-turin", "13.2", "a floor that names the FMC SPL fails a report without one",
             snp.clone(), Some(R::TcbNotAllowed)),
-        case("tdx-floor-tee-tcb-svn", "7", "a TDX floor adds tee_tcb_svn componentwise", TDX_FIXTURE_NOW,
+        case("tdx-floor-tee-tcb-svn", "13.2", "a TDX floor adds tee_tcb_svn componentwise", TDX_FIXTURE_NOW,
             tdx_envelope(V4_QUOTE).into(),
             Some(with_policy(v4_policy(), |p| {
                 p.tcb.floors.insert("f".into(), tdx_floor(Some([0xff; 16]), None));
                 p.tcb.default_floor = Some("f".into());
             }).into()),
             tdx.clone(), Some(R::TcbNotAllowed)),
-        case("tdx-floor-evaluation-data-number", "7", "a TDX floor adds tcbEvaluationDataNumber", TDX_FIXTURE_NOW,
+        case("tdx-floor-evaluation-data-number", "13.2", "a TDX floor adds tcbEvaluationDataNumber", TDX_FIXTURE_NOW,
             tdx_envelope(V4_QUOTE).into(),
             Some(with_policy(v4_policy(), |p| {
                 p.tcb.floors.insert("f".into(), tdx_floor(None, Some(u32::MAX)));
                 p.tcb.default_floor = Some("f".into());
             }).into()),
             tdx.clone(), Some(R::TcbNotAllowed)),
-        case("tdx-floor-met", "7", "a TDX floor the quote and its TCB Info meet appraises", TDX_FIXTURE_NOW,
+        case("tdx-floor-met", "13.2", "a TDX floor the quote and its TCB Info meet appraises", TDX_FIXTURE_NOW,
             tdx_envelope(V4_QUOTE).into(),
             Some(with_policy(v4_policy(), |p| {
                 p.tcb.floors.insert("f".into(), tdx_floor(Some([0; 16]), Some(1)));
@@ -665,55 +687,55 @@ pub(super) fn cases() -> Vec<Authored> {
             }).into()),
             tdx.clone(), None),
         // Section 7: devices.
-        snp_case("snp-gpu-required-without-device", "7", "gpu.required with no device submodule is refused",
+        snp_case("snp-gpu-required-without-device", "13.5", "gpu.required with no device submodule is refused",
             snp.clone(), Some(R::DeviceRequired)),
-        snp_case("snp-gpu-arch-not-allowed", "7", "gpu.expected_archs: a device of another architecture is refused",
+        snp_case("snp-gpu-arch-not-allowed", "13.5", "gpu.expected_archs: a device of another architecture is refused",
             tweak(snp.clone(), |v| v["submods"]["gpu/GPU-0000"] = gpu_device("GPU-0000", "BLACKWELL")),
             Some(R::DeviceNotAllowed)),
-        snp_case("gpu-device-uuid-differs-from-name", "4.4", "a device's uuid is the <ueid> of its submodule name",
+        snp_case("gpu-device-uuid-differs-from-name", "4.5", "a device's uuid is the <ueid> of its submodule name",
             tweak(snp.clone(), |v| v["submods"]["gpu/GPU-0000"] = gpu_device("GPU-0001", "HOPPER")),
             Some(R::EnvelopeInvalid)),
-        snp_case("gpu-device-arch-under-gpu-name", "4.4", "an NVSwitch (LS10) is named nvswitch/<ueid>",
+        snp_case("gpu-device-arch-under-gpu-name", "4.5", "an NVSwitch (LS10) is named nvswitch/<ueid>",
             tweak(snp.clone(), |v| v["submods"]["gpu/GPU-0000"] = gpu_device("GPU-0000", "LS10")),
             Some(R::EnvelopeInvalid)),
-        snp_case("gpu-device-binding-not-nras-nonce", "4.4", "a device submodule binds in nras-nonce mode",
+        snp_case("gpu-device-binding-not-nras-nonce", "4.5", "a device submodule binds in nras-nonce mode",
             tweak(snp.clone(), |v| {
                 v["submods"]["gpu/GPU-0000"] = gpu_device("GPU-0000", "HOPPER");
                 v["submods"]["gpu/GPU-0000"]["cvm_binding"]["mode"] = json!("report-data");
             }),
             Some(R::EnvelopeInvalid)),
-        snp_case("gpu-device-unknown-claim-ignored", "4.10",
+        snp_case("gpu-device-unknown-claim-ignored", "4.7",
             "an unknown claim in a device submodule is ignored; the appraisal goes on to NRAS, which this case records no exchange for",
             tweak(snp.clone(), |v| {
                 v["submods"]["gpu/GPU-0000"] = gpu_device("GPU-0000", "HOPPER");
                 v["submods"]["gpu/GPU-0000"]["x_sdk_version"] = json!("1.2.3");
             }),
             Some(R::CollateralUnavailable)),
-        snp_case("cca-nested-token-not-implemented", "2", "Arm CCA is a platform this release does not appraise",
+        snp_case("cca-nested-token-not-implemented", "9", "Arm CCA is a platform this release does not appraise",
             tweak(snp.clone(), |v| v["submods"]["cpu"] = json!(["CBOR", b64url(b"\xd9\x03\x8b\xa0")])),
             Some(R::PlatformUnsupported)),
         // Section 7: the policy's own validation.
-        snp_case("policy-unknown-member", "7", "a policy with an unknown member fails its validation", snp.clone(),
+        snp_case("policy-unknown-member", "13.1", "a policy with an unknown member fails its validation", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-null-member", "7", "null is not a value in a policy either", snp.clone(), Some(R::PolicyInvalid)),
-        snp_case("policy-member-not-an-object", "7", "a policy member that is an object is written as one; an array is refused",
+        snp_case("policy-null-member", "13.1", "null is not a value in a policy either", snp.clone(), Some(R::PolicyInvalid)),
+        snp_case("policy-member-not-an-object", "13.1", "a policy member that is an object is written as one; an array is refused",
             snp.clone(), Some(R::PolicyInvalid)),
-        snp_case("policy-default-floor-not-defined", "7", "default_floor names one of tcb.floors", snp.clone(),
+        snp_case("policy-default-floor-not-defined", "13.2", "default_floor names one of tcb.floors", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-machine-floor-not-defined", "7", "a machine's tcb_floor names one of tcb.floors", snp.clone(),
+        snp_case("policy-machine-floor-not-defined", "13.3", "a machine's tcb_floor names one of tcb.floors", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-revoked-status-allowed", "7", "Revoked can never be an allowed TDX status", snp.clone(),
+        snp_case("policy-revoked-status-allowed", "13.2", "Revoked can never be an allowed TDX status", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-empty-machine-allowlist", "7", "an empty allowlist admits nothing and is refused", snp.clone(),
+        snp_case("policy-empty-machine-allowlist", "13.3", "an empty allowlist admits nothing and is refused", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-floor-constrains-nothing", "7", "a named floor constrains something", snp.clone(),
+        snp_case("policy-floor-constrains-nothing", "13.2", "a named floor constrains something", snp.clone(),
             Some(R::PolicyInvalid)),
-        snp_case("policy-commitment-header-not-pinned", "7", "commitment.header16 is the value section 4.9 pins", snp.clone(),
+        snp_case("policy-commitment-header-not-pinned", "13.1", "commitment.header16 is the value section 8.1 pins", snp.clone(),
             Some(R::PolicyInvalid)),
         // Section 5.1: the policy's identifier names the effective policy.
-        case("snp-crl-checked-under-the-default-policy", "7", "a case without a policy runs under the section 7 defaults",
+        case("snp-crl-checked-under-the-default-policy", "13.1", "a case without a policy runs under the section 13.1 defaults",
             SNP_NOW, snp.clone().into(), None, genoa_crl.clone(), None),
-        case("snp-crl-checked-with-defaults-spelled-out", "5.1",
+        case("snp-crl-checked-with-defaults-spelled-out", "12.5",
             "the policy id is the SHA-384 of the effective policy: the defaults written out name the same policy as no policy",
             SNP_NOW, snp.clone().into(), Some(VerifyPolicy::default().into()), genoa_crl.clone(), None),
     ];
@@ -745,6 +767,13 @@ pub(super) fn cases() -> Vec<Authored> {
             "snp-host-data-differs",
             with_policy(lenient(), |p| {
                 p.reference.host_data = Some(Bytes(vec![1; 32]))
+            })
+            .into(),
+        ),
+        (
+            "snp-host-data-longer-than-the-field",
+            with_policy(lenient(), |p| {
+                p.reference.host_data = Some(Bytes(vec![0; 48]))
             })
             .into(),
         ),

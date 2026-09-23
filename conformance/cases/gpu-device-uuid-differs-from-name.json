@@ -1,7 +1,7 @@
 {
   "id": "gpu-device-uuid-differs-from-name",
   "rule": {
-    "section": "4.4",
+    "section": "4.5",
     "statement": "a device's uuid is the <ueid> of its submodule name"
   },
   "now": "2026-09-22T00:00:00Z",

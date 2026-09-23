@@ -113,7 +113,7 @@
       "ear_trustworthiness_vector": {
         "configuration": 96,
         "hardware": 32,
-        "runtime-opaque": 2
+        "runtime-opaque": 96
       },
       "ear_verifier_claims": {
         "cvm_backing_min": {

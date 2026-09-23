@@ -1,7 +1,7 @@
 {
   "id": "snp-report-type-for-other-tee",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_report: a TD quote under an SEV-SNP platform is refused"
   },
   "now": "2026-09-22T00:00:00Z",

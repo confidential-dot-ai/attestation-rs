@@ -1,7 +1,7 @@
 {
   "id": "tdx-floor-evaluation-data-number",
   "rule": {
-    "section": "7",
+    "section": "13.2",
     "statement": "a TDX floor adds tcbEvaluationDataNumber"
   },
   "now": "2026-03-17T00:00:00Z",

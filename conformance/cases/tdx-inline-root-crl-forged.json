@@ -1,7 +1,7 @@
 {
   "id": "tdx-inline-root-crl-forged",
   "rule": {
-    "section": "4.6",
+    "section": "10.2",
     "statement": "inline endorsements are inputs, never authority: a root CRL whose signature does not verify is refused"
   },
   "now": "2026-03-17T00:00:00Z",

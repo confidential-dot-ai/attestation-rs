@@ -1,5 +1,5 @@
 #![cfg(all(feature = "snp", feature = "tdx", feature = "nvidia-gpu"))]
-//! The conformance corpus (design doc section 14), run against this
+//! The conformance corpus (section 14 of the standard), run against this
 //! implementation: every case under `conformance/cases` must reproduce its
 //! decision. With `UPDATE_CONFORMANCE=1` the authored cases and their expected
 //! appraisals are rewritten from this implementation, which is the reference.
@@ -196,10 +196,10 @@ async fn decide(case: &Case) -> Result<Value, AttestationError> {
     Ok(v)
 }
 
-/// The section numbers the design doc has headings for.
+/// The section numbers the standard has headings for.
 fn doc_sections() -> Vec<String> {
-    let doc = std::fs::read_to_string(root().join("../docs/design/cvm-attestation-profile-v1.md"))
-        .unwrap();
+    let doc =
+        std::fs::read_to_string(root().join("../docs/standard/cvm-attestation-v1.md")).unwrap();
     doc.lines()
         .filter_map(|l| l.strip_prefix("#"))
         .map(|l| l.trim_start_matches('#').trim())
@@ -245,7 +245,7 @@ async fn the_corpus_holds_against_this_implementation() {
         let section = case.rule.section.split_whitespace().next().unwrap_or("");
         if !sections.iter().any(|s| s == section) {
             failures.push(format!(
-                "{}: cites section {:?}, which the design doc does not have",
+                "{}: cites section {:?}, which the standard does not have",
                 case.id, case.rule.section
             ));
             continue;
@@ -644,12 +644,36 @@ mod author {
         let (az_tdx, _) = azure_envelope(AZ_TDX, "az-tdx");
         let (az_snp, _) = azure_envelope(AZ_SNP, "az-snp");
         let snp_report = attestation::platforms::snp::verify::parse_report(SNP_REPORT).unwrap();
+        // vtpm-extradata needs the paravisor pinned (section 9.4).
+        let launch = |envelope: &Value| -> Vec<u8> {
+            let b64 = envelope["submods"]["cpu"]["cvm_report"][1]
+                .as_str()
+                .unwrap();
+            let raw = Bytes::decode(b64).unwrap().0;
+            match envelope["submods"]["cpu"]["cvm_platform"]["tee"].as_str() {
+                Some("tdx") => attestation::platforms::tdx::verify::parse_tdx_quote(&raw)
+                    .unwrap()
+                    .body
+                    .mr_td
+                    .to_vec(),
+                _ => attestation::platforms::snp::verify::parse_report(&raw)
+                    .unwrap()
+                    .measurement
+                    .to_vec(),
+            }
+        };
+        let pin = |envelope: &Value| Digest {
+            alg: HashAlg::Sha384,
+            value: Bytes(launch(envelope)),
+        };
         let mut azure_policy = v4_policy();
         azure_policy.tcb.require_revocation = false;
         azure_policy.tcb.require_signed_collateral = false;
         azure_policy.min_backing = Backing::PrivilegedService;
+        azure_policy.reference.launch_measurement = vec![pin(&az_tdx)];
         let mut az_snp_policy = lenient();
         az_snp_policy.min_backing = Backing::PrivilegedService;
+        az_snp_policy.reference.launch_measurement = vec![pin(&az_snp)];
         let mut az_snp_pcr8 = az_snp_policy.clone();
         az_snp_pcr8.reference.pcrs.insert(
             8,
@@ -720,11 +744,30 @@ mod author {
         live_lenient.tcb.require_signed_collateral = false;
         let mut revocation_checked = lenient();
         revocation_checked.tcb.require_revocation = true;
+        // The recorded Genoa report's reported TCB, as a floor on all four values.
+        let mut floor_and_crl = revocation_checked.clone();
+        floor_and_crl.tcb.floors.insert(
+            "genoa".into(),
+            TcbFloor {
+                snp: Some(SnpFloor {
+                    min: SnpTcb {
+                        bootloader: 10,
+                        tee: 0,
+                        snp: 27,
+                        microcode: 27,
+                        fmc: None,
+                    },
+                    values: SnpTcbValue::all(),
+                }),
+                tdx: None,
+            },
+        );
+        floor_and_crl.tcb.default_floor = Some("genoa".into());
 
         vec![
             Authored {
                 id: "snp-genoa-report-data",
-                section: "4.5",
+                section: "5.4",
                 statement: "report-data: report_data == pad64(anchor); a Genoa report with its VEK inline appraises",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -734,7 +777,7 @@ mod author {
             },
             Authored {
                 id: "snp-nonce-not-bound",
-                section: "4.5",
+                section: "5.4",
                 statement: "report-data: report_data == pad64(anchor); another nonce is refused",
                 now: SNP_NOW,
                 evidence: snp_envelope(&wrong_nonce).into(),
@@ -744,7 +787,7 @@ mod author {
             },
             Authored {
                 id: "snp-dbgstat-hint-contradicts-report",
-                section: "5.1",
+                section: "4.3",
                 statement: "an attester dbgstat hint that contradicts the signed report is refused",
                 now: SNP_NOW,
                 evidence: hinted.into(),
@@ -754,7 +797,7 @@ mod author {
             },
             Authored {
                 id: "snp-unknown-submodule-claim-ignored",
-                section: "4.10",
+                section: "4.7",
                 statement: "unknown claims at the top level or in a submodule claims set are ignored, as EAT extensibility requires",
                 now: SNP_NOW,
                 evidence: stray_claim.into(),
@@ -764,7 +807,7 @@ mod author {
             },
             Authored {
                 id: "snp-unknown-cvm-field-refused",
-                section: "4.10",
+                section: "4.7",
                 statement: "an unknown field inside any cvm_* object is rejected",
                 now: SNP_NOW,
                 evidence: stray_field.into(),
@@ -774,7 +817,7 @@ mod author {
             },
             Authored {
                 id: "snp-tcb-below-floor",
-                section: "7",
+                section: "13.2",
                 statement: "a TCB floor bounds each value it names; reported below the floor is refused",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -784,7 +827,7 @@ mod author {
             },
             Authored {
                 id: "snp-launch-measurement-not-in-reference",
-                section: "7",
+                section: "13.4",
                 statement: "a pinned launch measurement the report does not match is refused",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -794,7 +837,7 @@ mod author {
             },
             Authored {
                 id: "snp-machine-not-on-allowlist",
-                section: "6",
+                section: "11",
                 statement: "step 3: when policy carries a machine allowlist, the authenticated identity must be on it",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -804,7 +847,7 @@ mod author {
             },
             Authored {
                 id: "snp-machine-on-allowlist",
-                section: "6",
+                section: "11",
                 statement: "step 3: the authenticated identity on the allowlist appraises",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -814,7 +857,7 @@ mod author {
             },
             Authored {
                 id: "snp-pcr-pin-without-vtpm",
-                section: "7",
+                section: "13.1",
                 statement: "a vTPM PCR pin cannot be honored by evidence without a vtpm submodule",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -824,7 +867,7 @@ mod author {
             },
             Authored {
                 id: "snp-revocation-required-without-crl",
-                section: "6",
+                section: "11",
                 statement: "step 6: policy requires revocation and no CRL can be obtained",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -834,7 +877,7 @@ mod author {
             },
             Authored {
                 id: "tdx-v4-quote-with-fixture-collateral",
-                section: "6",
+                section: "11",
                 statement: "step 6: revocation, TCB status and QE identity from signed collateral; the debug attribute is reported in the vector",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -844,7 +887,7 @@ mod author {
             },
             Authored {
                 id: "tdx-debug-attribute-refused",
-                section: "6",
+                section: "11",
                 statement: "step 4: TD debug bit clear unless policy allows",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -854,7 +897,7 @@ mod author {
             },
             Authored {
                 id: "tdx-tcb-status-not-allowed",
-                section: "7",
+                section: "13.2",
                 statement: "tcb.tdx_allowed_status: a status outside the set is refused",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -864,7 +907,7 @@ mod author {
             },
             Authored {
                 id: "tdx-collateral-required-but-unavailable",
-                section: "6",
+                section: "11",
                 statement: "step 6: policy requires signed collateral and none can be obtained",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -874,7 +917,7 @@ mod author {
             },
             Authored {
                 id: "tdx-inline-root-crl-forged",
-                section: "4.6",
+                section: "10.2",
                 statement: "inline endorsements are inputs, never authority: a root CRL whose signature does not verify is refused",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope_with_forged_inline_root_crl().into(),
@@ -884,7 +927,7 @@ mod author {
             },
             Authored {
                 id: "tdx-collateral-past-its-window",
-                section: "4.6",
+                section: "10.2",
                 statement: "every validity window and nextUpdate is checked before use: the March fixtures evaluated in May are refused",
                 now: "2026-05-01T00:00:00Z",
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -894,7 +937,7 @@ mod author {
             },
             Authored {
                 id: "tdx-tcb-info-signature-forged",
-                section: "6",
+                section: "11",
                 statement: "step 6: TCB status comes from TCB Info with its signing chain anchored; a body altered under the signature is refused",
                 now: TDX_FIXTURE_NOW,
                 evidence: tdx_envelope(V4_QUOTE).into(),
@@ -904,7 +947,7 @@ mod author {
             },
             Authored {
                 id: "snp-crl-checked",
-                section: "6",
+                section: "11",
                 statement: "step 6: revocation checked against AMD's CRL for the generation, signed by the ARK and inside its window",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -913,8 +956,18 @@ mod author {
                 expect: None,
             },
             Authored {
+                id: "snp-hardware-affirmed",
+                section: "9.1.5",
+                statement: "hardware is 2 when revocation was checked and a TCB floor applied; the cases without either carry no hardware claim",
+                now: SNP_NOW,
+                evidence: snp_envelope(&nonce).into(),
+                policy: Some(floor_and_crl.into()),
+                collateral: snp_crl_collateral(false),
+                expect: None,
+            },
+            Authored {
                 id: "snp-crl-past-its-window",
-                section: "4.6",
+                section: "10.2",
                 statement: "every validity window and nextUpdate is checked before use: AMD's CRL after its nextUpdate is refused",
                 now: "2026-12-01T00:00:00Z",
                 evidence: snp_envelope(&nonce).into(),
@@ -924,7 +977,7 @@ mod author {
             },
             Authored {
                 id: "snp-crl-forged",
-                section: "6",
+                section: "11",
                 statement: "step 6: a CRL whose signature does not verify against the ARK is refused",
                 now: SNP_NOW,
                 evidence: snp_envelope(&nonce).into(),
@@ -934,7 +987,7 @@ mod author {
             },
             Authored {
                 id: "tdx-ccel-replays-every-rtmr",
-                section: "4.8",
+                section: "7.4",
                 statement: "tdx-ccel: the log replays into RTMR 0 to 3, each reproducing the signed value",
                 now: SNP_NOW,
                 evidence: tdx_envelope_with_ccel(LIVE_QUOTE, LIVE_CCEL2).into(),
@@ -944,7 +997,7 @@ mod author {
             },
             Authored {
                 id: "tdx-ccel-from-another-boot",
-                section: "4.8",
+                section: "7.4",
                 statement: "tdx-ccel: a log that does not replay to the signed RTMR 0 to 2 is refused",
                 now: SNP_NOW,
                 evidence: tdx_envelope_with_ccel(LIVE_QUOTE, LIVE_CCEL).into(),
@@ -954,7 +1007,7 @@ mod author {
             },
             Authored {
                 id: "tdx-register-differs-from-quote",
-                section: "4.7",
+                section: "6.5",
                 statement: "for tdx-rtmr the envelope values must equal the signed report",
                 now: SNP_NOW,
                 evidence: altered_rtmr.into(),
@@ -964,7 +1017,7 @@ mod author {
             },
             Authored {
                 id: "azure-tdx-through-vtpm",
-                section: "4.4",
+                section: "9.4",
                 statement: "vtpm: the TD quote binds through vtpm-extradata and the quoted PCRs become privileged-service registers",
                 now: SNP_NOW,
                 evidence: az_tdx.into(),
@@ -974,7 +1027,7 @@ mod author {
             },
             Authored {
                 id: "azure-snp-through-vtpm",
-                section: "4.4",
+                section: "9.4",
                 statement: "vtpm: the SNP report binds through vtpm-extradata and the quoted PCRs become privileged-service registers",
                 now: SNP_NOW,
                 evidence: az_snp.clone().into(),
@@ -984,7 +1037,7 @@ mod author {
             },
             Authored {
                 id: "azure-snp-pcr8-not-in-reference",
-                section: "7",
+                section: "13.4",
                 statement: "reference.pcrs: a quoted PCR outside its reference values is refused",
                 now: SNP_NOW,
                 evidence: az_snp.into(),
@@ -1194,37 +1247,37 @@ async fn the_cddl_module_agrees_with_the_schemas_and_the_parsers() {
     );
 }
 
-/// The rules of sections 4 and 7 that CDDL cannot state, by the parser's
+/// The rules of sections 4, 6 and 13 that CDDL cannot state, by the parser's
 /// refusal: uniqueness, equality between two members, and names that must
 /// resolve inside the same document.
 const PROSE: &[(&str, &str)] = &[
     (
         "duplicate register",
-        "4.7: each register index appears once",
+        "6.1: each register index appears once",
     ),
     (
         "differs from the quoted PCR",
-        "4.7: a vtpm register equals the quoted PCR of its index",
+        "4.4: a vtpm register equals the quoted PCR of its index",
     ),
     (
         "carries all 16 snp-vmr registers",
-        "4.9: the commitment carries each of the 16 slots once",
+        "4.3: the commitment carries each of the 16 slots once",
     ),
     (
         "differs from the submodule name",
-        "4.4: a device's uuid is the <ueid> of its name",
+        "4.5: a device's uuid is the <ueid> of its name",
     ),
     (
         "is not in tcb.floors",
-        "7: a floor name names one of tcb.floors",
+        "13.2: a floor name names one of tcb.floors",
     ),
     (
         "empty or repeated",
-        "7: an SNP floor names each TCB value at most once",
+        "13.2: an SNP floor names each TCB value at most once",
     ),
     (
         "evidence too large",
-        "4.10: the whole envelope is at most 10 MiB",
+        "4.7: the whole envelope is at most 10 MiB",
     ),
 ];
 

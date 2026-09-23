@@ -1,7 +1,7 @@
 {
   "id": "envelope-cmw-collection-nested",
   "rule": {
-    "section": "4.6",
+    "section": "10.1",
     "statement": "cvm_endorsements accepts no nested collection"
   },
   "now": "2026-09-22T00:00:00Z",

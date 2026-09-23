@@ -1,7 +1,7 @@
 {
   "id": "tdx-binding-commitment",
   "rule": {
-    "section": "4.5",
+    "section": "5.4",
     "statement": "the commitment binding is SEV-SNP's; a TD quote binds its report data"
   },
   "now": "2026-09-22T00:00:00Z",

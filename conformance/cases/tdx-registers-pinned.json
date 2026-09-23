@@ -1,7 +1,7 @@
 {
   "id": "tdx-registers-pinned",
   "rule": {
-    "section": "5.2",
+    "section": "12.4",
     "statement": "executables is 2 when the launch measurement and every pinned register match"
   },
   "now": "2026-09-22T00:00:00Z",

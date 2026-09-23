@@ -1,7 +1,7 @@
 {
   "id": "snp-generation-hint-agrees",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_platform.generation names the generation the report carries"
   },
   "now": "2026-09-22T00:00:00Z",

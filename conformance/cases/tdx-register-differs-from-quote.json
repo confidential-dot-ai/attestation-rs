@@ -1,7 +1,7 @@
 {
   "id": "tdx-register-differs-from-quote",
   "rule": {
-    "section": "4.7",
+    "section": "6.5",
     "statement": "for tdx-rtmr the envelope values must equal the signed report"
   },
   "now": "2026-09-22T00:00:00Z",

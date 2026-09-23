@@ -1,7 +1,7 @@
 {
   "id": "envelope-byte-string-padded",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "byte strings are base64url without padding"
   },
   "now": "2026-09-22T00:00:00Z",

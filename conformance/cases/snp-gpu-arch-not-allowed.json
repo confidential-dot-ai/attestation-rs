@@ -1,7 +1,7 @@
 {
   "id": "snp-gpu-arch-not-allowed",
   "rule": {
-    "section": "7",
+    "section": "13.5",
     "statement": "gpu.expected_archs: a device of another architecture is refused"
   },
   "now": "2026-09-22T00:00:00Z",

@@ -1,7 +1,7 @@
 {
   "id": "snp-crl-forged",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 6: a CRL whose signature does not verify against the ARK is refused"
   },
   "now": "2026-09-22T00:00:00Z",

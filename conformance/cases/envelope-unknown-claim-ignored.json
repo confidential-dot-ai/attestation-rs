@@ -1,7 +1,7 @@
 {
   "id": "envelope-unknown-claim-ignored",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "an unknown top-level claim is ignored whatever it holds"
   },
   "now": "2026-09-22T00:00:00Z",

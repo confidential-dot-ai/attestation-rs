@@ -1,7 +1,7 @@
 {
   "id": "snp-host-data-zero-padded",
   "rule": {
-    "section": "7",
+    "section": "13.4",
     "statement": "reference.host_data is zero-padded to the platform's length"
   },
   "now": "2026-09-22T00:00:00Z",

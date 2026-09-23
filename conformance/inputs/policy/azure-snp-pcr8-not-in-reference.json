@@ -1,6 +1,11 @@
 {
   "reference": {
-    "launch_measurement": [],
+    "launch_measurement": [
+      {
+        "alg": "sha384",
+        "value": "agY76d159jcchC5ID43DtccllhNE5XEw6Ixa30no9_bHm3Wl63f8dplZ9K6y-UAe"
+      }
+    ],
     "registers": {},
     "pcrs": {
       "8": [

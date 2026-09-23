@@ -1,7 +1,7 @@
 {
   "id": "policy-null-member",
   "rule": {
-    "section": "7",
+    "section": "13.1",
     "statement": "null is not a value in a policy either"
   },
   "now": "2026-09-22T00:00:00Z",

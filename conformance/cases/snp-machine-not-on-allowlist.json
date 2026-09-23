@@ -1,7 +1,7 @@
 {
   "id": "snp-machine-not-on-allowlist",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 3: when policy carries a machine allowlist, the authenticated identity must be on it"
   },
   "now": "2026-09-22T00:00:00Z",

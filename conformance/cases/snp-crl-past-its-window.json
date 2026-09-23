@@ -1,7 +1,7 @@
 {
   "id": "snp-crl-past-its-window",
   "rule": {
-    "section": "4.6",
+    "section": "10.2",
     "statement": "every validity window and nextUpdate is checked before use: AMD's CRL after its nextUpdate is refused"
   },
   "now": "2026-12-01T00:00:00Z",

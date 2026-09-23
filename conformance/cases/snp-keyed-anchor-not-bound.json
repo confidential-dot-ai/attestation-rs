@@ -1,7 +1,7 @@
 {
   "id": "snp-keyed-anchor-not-bound",
   "rule": {
-    "section": "4.5",
+    "section": "5.2",
     "statement": "with a key the anchor is SHA-384(\"ats-anchor-v1\" || ...); a report bound to the bare nonce is refused"
   },
   "now": "2026-09-22T00:00:00Z",

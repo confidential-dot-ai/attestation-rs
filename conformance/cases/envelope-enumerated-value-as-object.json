@@ -1,7 +1,7 @@
 {
   "id": "envelope-enumerated-value-as-object",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "one encoding per value: an enumerated value is its text, never an object naming it"
   },
   "now": "2026-09-22T00:00:00Z",

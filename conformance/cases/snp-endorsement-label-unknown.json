@@ -1,8 +1,8 @@
 {
   "id": "snp-endorsement-label-unknown",
   "rule": {
-    "section": "4.6",
-    "statement": "cvm_endorsements labels are exactly the ones section 4.6 lists"
+    "section": "10.1",
+    "statement": "cvm_endorsements labels are exactly the ones section 10.1 lists"
   },
   "now": "2026-09-22T00:00:00Z",
   "evidence": "evidence/snp-endorsement-label-unknown.json",

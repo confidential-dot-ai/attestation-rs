@@ -93,7 +93,6 @@
       "ear_trustworthiness_vector": {
         "configuration": 2,
         "executables": 3,
-        "hardware": 2,
         "runtime-opaque": 2
       },
       "ear_verifier_claims": {

@@ -1,7 +1,7 @@
 {
   "id": "snp-default-floor-for-machine-without-floor",
   "rule": {
-    "section": "7",
+    "section": "13.3",
     "statement": "every other machine is held to default_floor"
   },
   "now": "2026-09-22T00:00:00Z",

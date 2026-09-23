@@ -1,7 +1,7 @@
 {
   "id": "azure-cpu-without-vtpm",
   "rule": {
-    "section": "4.4",
+    "section": "4.2",
     "statement": "a cpu bound through vtpm-extradata needs its vtpm submodule"
   },
   "now": "2026-09-22T00:00:00Z",

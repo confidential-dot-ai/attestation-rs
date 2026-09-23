@@ -1,7 +1,7 @@
 {
   "id": "snp-dbgstat-hint-agrees",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "dbgstat is compared on whether debug is enabled; the disabled qualifier is the attester's"
   },
   "now": "2026-09-22T00:00:00Z",

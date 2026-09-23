@@ -130,6 +130,26 @@ fn launch_measurement_hex(appraisal: &serde_json::Value) -> String {
     )
 }
 
+/// The launch measurement of an envelope's hardware report, read at its
+/// offset: SNP `MEASUREMENT` (0x90), or the TD quote's `MRTD` (body offset 136).
+fn envelope_launch_hex(envelope: &serde_json::Value) -> String {
+    let cpu = &envelope["submods"]["cpu"];
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cpu["cvm_report"][1].as_str().expect("cvm_report"))
+        .expect("base64url");
+    let at = if cpu["cvm_platform"]["tee"] == "tdx" {
+        let body = if u16::from_le_bytes([raw[0], raw[1]]) == 5 {
+            54
+        } else {
+            48
+        };
+        body + 136
+    } else {
+        0x90
+    };
+    hex::encode(&raw[at..at + 48])
+}
+
 /// attest then verify with the flags the runner gate uses, under a policy
 /// that accepts the runner; then the negative cases and the old envelope.
 fn round_trip(platform: &str, device: &str, nonce_len: usize) {
@@ -143,7 +163,16 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
         serde_json::from_slice(&std::fs::read(&envelope).unwrap()).unwrap();
     assert_eq!(body["eat_profile"], PROFILE_URI, "attest emits the profile");
 
-    let out = cli(&[
+    let pin = if platform.ends_with("tdx") {
+        "--expected-mrtd"
+    } else {
+        "--expected-launch-digest"
+    };
+    // vtpm-extradata is refused unless the paravisor's launch measurement is
+    // pinned (standard section 9.4.4), so Azure verifies with the pin.
+    let azure = platform.starts_with("az-");
+    let azure_pin = envelope_launch_hex(&body);
+    let mut args = vec![
         "verify",
         "--evidence",
         &envelope,
@@ -151,7 +180,13 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
         &nonce,
         "--policy",
         &policy,
-    ]);
+    ];
+    if azure {
+        let unpinned = cli(&args);
+        assert!(!unpinned.status.success(), "Azure without a launch pin");
+        args.extend([pin, azure_pin.as_str()]);
+    }
+    let out = cli(&args);
     assert!(out.status.success(), "verify under the runner policy");
     let appraisal: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("verify prints the appraisal");
@@ -159,12 +194,11 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
     assert_eq!(appraisal["ear_all_submods_bound"], "true");
 
     // A measurement pin narrows the policy: the true value passes, another fails.
-    let pin = if platform.ends_with("tdx") {
-        "--expected-mrtd"
-    } else {
-        "--expected-launch-digest"
-    };
     let measurement = launch_measurement_hex(&appraisal);
+    assert_eq!(
+        measurement, azure_pin,
+        "the report's own launch measurement"
+    );
     let verify_pinned = |value: &str| {
         cli(&[
             "verify",
@@ -182,15 +216,20 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
     assert!(!verify_pinned(&"00".repeat(48)).status.success());
 
     // Another nonce is refused before any appraisal.
-    let other = cli(&[
+    let other_nonce = random_hex(nonce_len);
+    let mut other_args = vec![
         "verify",
         "--evidence",
         &envelope,
         "--expected-report-data",
-        &random_hex(nonce_len),
+        &other_nonce,
         "--policy",
         &policy,
-    ]);
+    ];
+    if azure {
+        other_args.extend([pin, azure_pin.as_str()]);
+    }
+    let other = cli(&other_args);
     assert!(!other.status.success());
     assert!(String::from_utf8_lossy(&other.stderr).contains("eat_nonce differs"));
 

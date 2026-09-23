@@ -1,7 +1,7 @@
 {
   "id": "policy-revoked-status-allowed",
   "rule": {
-    "section": "7",
+    "section": "13.2",
     "statement": "Revoked can never be an allowed TDX status"
   },
   "now": "2026-09-22T00:00:00Z",

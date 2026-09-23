@@ -1,7 +1,7 @@
 {
   "id": "snp-host-data-differs",
   "rule": {
-    "section": "7",
+    "section": "13.4",
     "statement": "reference.host_data: another value is refused"
   },
   "now": "2026-09-22T00:00:00Z",

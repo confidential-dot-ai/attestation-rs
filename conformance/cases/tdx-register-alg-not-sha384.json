@@ -1,7 +1,7 @@
 {
   "id": "tdx-register-alg-not-sha384",
   "rule": {
-    "section": "4.7",
+    "section": "6.1",
     "statement": "alg is pinned per source: sha384 for tdx-rtmr"
   },
   "now": "2026-09-22T00:00:00Z",

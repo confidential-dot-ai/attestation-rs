@@ -1,7 +1,7 @@
 {
   "id": "snp-vtpm-without-vtpm-binding",
   "rule": {
-    "section": "4.4",
+    "section": "4.2",
     "statement": "a vtpm submodule belongs to a cpu bound through vtpm-extradata"
   },
   "now": "2026-09-22T00:00:00Z",

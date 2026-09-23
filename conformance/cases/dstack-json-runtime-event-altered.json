@@ -1,7 +1,7 @@
 {
   "id": "dstack-json-runtime-event-altered",
   "rule": {
-    "section": "4.8",
+    "section": "9.3",
     "statement": "dstack-json: a runtime event whose digest does not recompute is refused"
   },
   "now": "2026-09-22T00:00:00Z",

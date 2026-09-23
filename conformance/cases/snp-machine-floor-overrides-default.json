@@ -1,7 +1,7 @@
 {
   "id": "snp-machine-floor-overrides-default",
   "rule": {
-    "section": "7",
+    "section": "13.3",
     "statement": "a machine that names a tcb_floor is held to it, not to default_floor"
   },
   "now": "2026-09-22T00:00:00Z",

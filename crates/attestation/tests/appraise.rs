@@ -151,7 +151,8 @@ async fn snp_report_with_inline_vek_appraises() {
         .unwrap();
     let cpu = &appraisal.submods["cpu"];
     assert_eq!(cpu.ear_status, Tier::Affirming);
-    assert_eq!(cpu.ear_trustworthiness_vector.hardware, Some(2));
+    // No TCB floor and no CRL: nothing assessed the TCB, so no hardware claim.
+    assert_eq!(cpu.ear_trustworthiness_vector.hardware, None);
     assert_eq!(cpu.ear_trustworthiness_vector.runtime_opaque, Some(2));
     assert!(appraisal.ear_all_submods_bound.is_true());
     let AttesterClaims::Cpu(claims) = &cpu.ear_attester_claims else {
@@ -636,6 +637,32 @@ fn recorded_nonce(evidence: &serde_json::Value) -> (Vec<u8>, Vec<u8>) {
     (nonce, wrong)
 }
 
+/// The launch measurement of a recorded Azure attestation, as the pin that
+/// `vtpm-extradata` requires (section 9.4.4).
+fn launch_pin(legacy: &[u8], nonce: &[u8]) -> Digest {
+    let evidence = attestation::profile::Evidence::from_legacy(legacy, nonce, None).unwrap();
+    let Some(attestation::profile::Submod::Cpu(cpu)) = evidence.submods.get("cpu") else {
+        panic!("cpu submodule")
+    };
+    let raw = cpu.cvm_report.value.as_slice();
+    let value = if cpu.cvm_platform.tee == attestation::profile::Tee::Tdx {
+        attestation::platforms::tdx::verify::parse_tdx_quote(raw)
+            .unwrap()
+            .body
+            .mr_td
+            .to_vec()
+    } else {
+        attestation::platforms::snp::verify::parse_report(raw)
+            .unwrap()
+            .measurement
+            .to_vec()
+    };
+    Digest {
+        alg: HashAlg::Sha384,
+        value: Bytes(value),
+    }
+}
+
 #[tokio::test]
 async fn azure_tdx_evidence_appraises_through_the_vtpm() {
     // Recorded on an Azure TDX VM; the nonce is the one the recording bound.
@@ -652,7 +679,20 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
     policy.tcb.require_revocation = false;
     policy.tcb.require_signed_collateral = false;
     policy.min_backing = Backing::PrivilegedService;
+    let mut unpinned = policy.clone();
+    policy.reference.launch_measurement = vec![launch_pin(legacy, nonce)];
     let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    // Without the paravisor pinned, vtpm-extradata establishes no freshness.
+    unpinned.reference.launch_measurement.clear();
+    let err = verifier
+        .appraise_legacy_json(legacy, nonce, None, &unpinned)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.refusal_code(),
+        attestation::RefusalCode::BindingMismatch,
+        "{err}"
+    );
     let a = verifier
         .appraise_legacy_json(legacy, nonce, None, &policy)
         .await
@@ -713,6 +753,12 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
             value: pcr0,
         }],
     );
+    // PCR pins earn executables only beside the launch measurement pin that
+    // vouches for the paravisor which measured them.
+    pinned.reference.launch_measurement = vec![Digest {
+        alg: HashAlg::Sha384,
+        value: cpu.cvm_launch_measurement.value.clone(),
+    }];
     let a = verifier
         .appraise_legacy_json(legacy, nonce, None, &pinned)
         .await
@@ -751,6 +797,7 @@ async fn azure_snp_evidence_appraises_through_the_vtpm() {
     let nonce = nonce.as_slice();
     let mut policy = lenient_policy();
     policy.min_backing = Backing::PrivilegedService;
+    policy.reference.launch_measurement = vec![launch_pin(legacy, nonce)];
     let verifier = Verifier::offline().with_cert_provider(NoCollateral);
     let a = verifier
         .appraise_legacy_json(legacy, nonce, None, &policy)

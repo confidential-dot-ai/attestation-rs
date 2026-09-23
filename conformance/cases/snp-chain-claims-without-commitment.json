@@ -1,7 +1,7 @@
 {
   "id": "snp-chain-claims-without-commitment",
   "rule": {
-    "section": "4.9",
+    "section": "4.3",
     "statement": "cvm_chain and bootseed belong to the commitment binding"
   },
   "now": "2026-09-22T00:00:00Z",

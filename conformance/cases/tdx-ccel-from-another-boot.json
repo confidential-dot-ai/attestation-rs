@@ -1,7 +1,7 @@
 {
   "id": "tdx-ccel-from-another-boot",
   "rule": {
-    "section": "4.8",
+    "section": "7.4",
     "statement": "tdx-ccel: a log that does not replay to the signed RTMR 0 to 2 is refused"
   },
   "now": "2026-09-22T00:00:00Z",

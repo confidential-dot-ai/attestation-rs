@@ -1,7 +1,7 @@
 {
   "id": "snp-host-data-pinned",
   "rule": {
-    "section": "7",
+    "section": "13.4",
     "statement": "reference.host_data: the value cvm_host_data must carry appraises"
   },
   "now": "2026-09-22T00:00:00Z",

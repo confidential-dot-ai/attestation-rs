@@ -6,7 +6,7 @@
     "cpu": {
       "ear_appraisal_policy_ids": [
         "tag:confidential.ai,2026:cvm#1",
-        "ni:///sha-384;yY430iM8-n4tLVGlUUyWv69q4yRliDtiuNurx62ApS4y5bUTS5hZnajFHuejpX_x"
+        "ni:///sha-384;nSiqMFSg0SA6JzNw1yr78yVYBOv0bkIkdwwRt7zyP7dfyyjPhBREYftePKEQA_Q4"
       ],
       "ear_attester_claims": {
         "cvm_freshness": {
@@ -92,7 +92,7 @@
       "ear_status": "affirming",
       "ear_trustworthiness_vector": {
         "configuration": 2,
-        "hardware": 2,
+        "executables": 3,
         "runtime-opaque": 2
       },
       "ear_verifier_claims": {
@@ -100,13 +100,16 @@
           "snp_crl": {
             "status": "skipped"
           }
+        },
+        "cvm_reference": {
+          "launch_measurement": true
         }
       }
     },
     "vtpm": {
       "ear_appraisal_policy_ids": [
         "tag:confidential.ai,2026:cvm#1",
-        "ni:///sha-384;yY430iM8-n4tLVGlUUyWv69q4yRliDtiuNurx62ApS4y5bUTS5hZnajFHuejpX_x"
+        "ni:///sha-384;nSiqMFSg0SA6JzNw1yr78yVYBOv0bkIkdwwRt7zyP7dfyyjPhBREYftePKEQA_Q4"
       ],
       "ear_attester_claims": {
         "cvm_freshness": {

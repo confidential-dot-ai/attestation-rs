@@ -1,7 +1,7 @@
 {
   "id": "snp-endorsement-indicator-evidence",
   "rule": {
-    "section": "4.6",
+    "section": "10.1",
     "statement": "an endorsement's indicator is exactly 2, or 1 for reference values"
   },
   "now": "2026-09-22T00:00:00Z",

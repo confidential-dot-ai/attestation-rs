@@ -145,6 +145,14 @@ pub(crate) async fn appraise(
         ));
     }
 
+    // A pin nothing in a TD quote can meet: the ID key is SEV-SNP's.
+    if policy.owner.is_some() {
+        return Err(refuse(
+            RefusalCode::ReferenceMismatch,
+            "owner.id_key_digests pins an SEV-SNP ID key, which a TD quote does not carry",
+        ));
+    }
+
     if let Some(expected) = &policy.reference.host_data {
         let padded = crate::utils::pad_report_data(expected.as_slice(), 48)?;
         if !constant_time_eq(&quote.body.mr_config_id, &padded) {
@@ -408,6 +416,7 @@ pub(crate) async fn appraise(
         executables,
         assessment.hardware,
         configuration,
+        debug,
     );
 
     let mut compat = BTreeMap::new();

@@ -1,7 +1,7 @@
 {
   "id": "tdx-register-value-wrong-length",
   "rule": {
-    "section": "4.7",
+    "section": "6.1",
     "statement": "value is exactly the digest length of alg"
   },
   "now": "2026-09-22T00:00:00Z",

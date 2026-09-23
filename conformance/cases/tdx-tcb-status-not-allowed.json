@@ -1,7 +1,7 @@
 {
   "id": "tdx-tcb-status-not-allowed",
   "rule": {
-    "section": "7",
+    "section": "13.2",
     "statement": "tcb.tdx_allowed_status: a status outside the set is refused"
   },
   "now": "2026-03-17T00:00:00Z",

@@ -1,7 +1,7 @@
 {
   "id": "tdx-cel-json-replays",
   "rule": {
-    "section": "4.8",
+    "section": "7.4",
     "statement": "tcg-cel-json: the same records in CEL-JSON replay the same way"
   },
   "now": "2026-09-22T00:00:00Z",

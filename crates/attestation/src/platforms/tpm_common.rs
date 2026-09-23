@@ -133,9 +133,8 @@ pub fn verify_hcl_var_data_binding(report_data: &[u8], var_data: &[u8]) -> Resul
         AttestationError::QuoteParseFailed("report_data shorter than 32 bytes".to_string())
     })?;
     if !constant_time_eq(report_data_prefix, &hash) {
-        return Err(AttestationError::SignatureVerificationFailed(
-            "HCL var_data binding failed: report_data[..32] != SHA-256(var_data)".to_string(),
-        ));
+        // The HCL report is unsigned, so a mismatch is a failed binding.
+        return Err(AttestationError::ReportDataMismatch);
     }
     Ok(())
 }

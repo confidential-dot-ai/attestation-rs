@@ -1,7 +1,7 @@
 {
   "id": "envelope-field-at-bound",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "every byte string field is at most 1 MiB: a 1 MiB log parses, and a log that is not CEL is refused (log-invalid)"
   },
   "now": "2026-09-22T00:00:00Z",

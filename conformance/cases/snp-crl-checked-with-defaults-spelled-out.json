@@ -1,7 +1,7 @@
 {
   "id": "snp-crl-checked-with-defaults-spelled-out",
   "rule": {
-    "section": "5.1",
+    "section": "12.5",
     "statement": "the policy id is the SHA-384 of the effective policy: the defaults written out name the same policy as no policy"
   },
   "now": "2026-09-22T00:00:00Z",

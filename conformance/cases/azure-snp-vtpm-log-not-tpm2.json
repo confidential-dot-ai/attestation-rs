@@ -1,7 +1,7 @@
 {
   "id": "azure-snp-vtpm-log-not-tpm2",
   "rule": {
-    "section": "4.8",
+    "section": "9.4",
     "statement": "the vtpm submodule's log is a TPM2 event log in this release"
   },
   "now": "2026-09-22T00:00:00Z",

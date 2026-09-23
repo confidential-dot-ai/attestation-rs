@@ -1,7 +1,7 @@
 {
   "id": "snp-endorsement-for-other-tee",
   "rule": {
-    "section": "4.6",
+    "section": "10.1",
     "statement": "an endorsement for another TEE is refused"
   },
   "now": "2026-09-22T00:00:00Z",

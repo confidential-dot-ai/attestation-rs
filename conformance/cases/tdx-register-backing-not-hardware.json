@@ -1,7 +1,7 @@
 {
   "id": "tdx-register-backing-not-hardware",
   "rule": {
-    "section": "4.7",
+    "section": "6.4",
     "statement": "backing is constrained by source: hardware for tdx-rtmr"
   },
   "now": "2026-09-22T00:00:00Z",

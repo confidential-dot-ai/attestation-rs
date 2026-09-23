@@ -1,7 +1,7 @@
 {
   "id": "tdx-cel-log-from-another-boot",
   "rule": {
-    "section": "4.8",
+    "section": "7.4",
     "statement": "a CEL log that does not reproduce the signed RTMRs is refused"
   },
   "now": "2026-09-22T00:00:00Z",

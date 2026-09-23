@@ -1,7 +1,7 @@
 {
   "id": "snp-certificate-pattern-without-presented-certificate",
   "rule": {
-    "section": "4.5.1",
+    "section": "5.5",
     "statement": "the verifier compares the certificate it was presented with; without it the certificate pattern is refused"
   },
   "now": "2026-09-22T00:00:00Z",

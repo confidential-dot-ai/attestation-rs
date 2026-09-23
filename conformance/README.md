@@ -1,7 +1,8 @@
 # Conformance corpus
 
-The executable form of the CVM attestation profile (design doc section 14): one
-case per normative statement, each holding a profile envelope, a policy, the
+The executable form of the CVM attestation standard
+(`docs/standard/cvm-attestation-v1.md`, section 14): one case per normative
+statement, each citing the section it exercises and holding an envelope, a policy, the
 collateral the appraisal may use, the evaluation time, and the decision the
 profile requires, as an appraisal or a refusal code.
 

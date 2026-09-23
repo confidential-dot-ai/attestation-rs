@@ -1,7 +1,7 @@
 {
   "id": "snp-endorsements-without-type-tag",
   "rule": {
-    "section": "4.6",
+    "section": "10.1",
     "statement": "cvm_endorsements carries its __cmwc_t"
   },
   "now": "2026-09-22T00:00:00Z",

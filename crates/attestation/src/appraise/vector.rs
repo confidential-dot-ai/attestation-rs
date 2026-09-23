@@ -119,13 +119,15 @@ pub(crate) fn evaluate_backing(
     }))
 }
 
-/// Section 5.2 for a CPU submodule whose checks all passed. `configuration`
-/// is 96 when debug is enabled or VMPL is not 0, which policy may have allowed.
+/// Section 12.4 for a CPU submodule whose checks all passed. `configuration`
+/// is 96 when debug is enabled or VMPL is not 0, which policy may have allowed;
+/// with debug enabled the host can read guest memory, so runtime-opaque is 96.
 pub(crate) fn cpu_vector(
     instance_identity: Option<i8>,
     executables: Option<i8>,
     hardware: Option<i8>,
     configuration: i8,
+    debug: bool,
 ) -> TrustVector {
     TrustVector {
         instance_identity,
@@ -133,7 +135,7 @@ pub(crate) fn cpu_vector(
         executables,
         file_system: None,
         hardware,
-        runtime_opaque: Some(2),
+        runtime_opaque: Some(if debug { 96 } else { 2 }),
         storage_opaque: None,
         sourced_data: None,
     }

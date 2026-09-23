@@ -1,7 +1,7 @@
 {
   "id": "snp-launch-measurement-pinned",
   "rule": {
-    "section": "5.2",
+    "section": "12.4",
     "statement": "executables is 3 when only the launch measurement matched"
   },
   "now": "2026-09-22T00:00:00Z",

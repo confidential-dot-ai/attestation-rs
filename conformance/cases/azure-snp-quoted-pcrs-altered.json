@@ -1,7 +1,7 @@
 {
   "id": "azure-snp-quoted-pcrs-altered",
   "rule": {
-    "section": "4.7",
+    "section": "6.5",
     "statement": "for vtpm-pcr the quoted PCR digest must reproduce from the registers: a PCR changed with its register is refused"
   },
   "now": "2026-09-22T00:00:00Z",

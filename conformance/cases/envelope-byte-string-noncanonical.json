@@ -1,7 +1,7 @@
 {
   "id": "envelope-byte-string-noncanonical",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "byte strings are base64url with zero trailing bits (RFC 4648 section 3.5)"
   },
   "now": "2026-09-22T00:00:00Z",

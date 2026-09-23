@@ -1,7 +1,7 @@
 {
   "id": "snp-nonce-not-bound",
   "rule": {
-    "section": "4.5",
+    "section": "5.4",
     "statement": "report-data: report_data == pad64(anchor); another nonce is refused"
   },
   "now": "2026-09-22T00:00:00Z",

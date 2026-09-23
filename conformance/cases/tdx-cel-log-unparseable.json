@@ -1,7 +1,7 @@
 {
   "id": "tdx-cel-log-unparseable",
   "rule": {
-    "section": "4.8",
+    "section": "7.1",
     "statement": "a log that cannot be parsed whole under its format is refused"
   },
   "now": "2026-09-22T00:00:00Z",

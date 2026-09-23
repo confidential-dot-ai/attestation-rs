@@ -147,6 +147,16 @@ impl Verifier {
                         "cpu binds through vtpm-extradata but there is no vtpm submodule",
                     ));
                 };
+                // Section 9.4: the nonce reaches the hardware report only through
+                // the paravisor that holds the vTPM key, and only a pinned launch
+                // measurement establishes that paravisor. Without the pin, a guest
+                // on other hardware could bind its own key once and sign any nonce.
+                if policy.reference.launch_measurement.is_empty() {
+                    return Err(refuse(
+                        RefusalCode::BindingMismatch,
+                        "vtpm-extradata needs a pinned launch measurement to establish the paravisor",
+                    ));
+                }
                 let out = self.appraise_vtpm(v, cpu, nonce, policy, now)?;
                 var_data = Some(out.var_data);
                 all_bound &= out.outcome.bound;

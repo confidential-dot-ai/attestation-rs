@@ -1,7 +1,7 @@
 {
   "id": "snp-generation-hint-unknown",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_platform.generation is Milan, Genoa or Turin on SEV-SNP"
   },
   "now": "2026-09-22T00:00:00Z",

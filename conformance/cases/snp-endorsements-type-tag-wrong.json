@@ -1,7 +1,7 @@
 {
   "id": "snp-endorsements-type-tag-wrong",
   "rule": {
-    "section": "4.6",
+    "section": "10.1",
     "statement": "cvm_endorsements' __cmwc_t is tag:confidential.ai,2026:cvm-endorsements#1"
   },
   "now": "2026-09-22T00:00:00Z",

@@ -241,9 +241,11 @@ pub(crate) async fn appraise(
     verify_cert_chain(ark_der, intermediate, &vek_der)?;
     verify_vek_validity_period_at(&vek_der, ctx.now)?;
     let mut collateral_outcomes = BTreeMap::new();
+    let mut revocation_checked = false;
     match collateral.get_snp_crl(generation).await? {
         Some(crl) => {
             check_vcek_not_revoked_at(&vek_der, &crl, ark_der, ctx.now)?;
+            revocation_checked = true;
             collateral_outcomes.insert(
                 CollateralCheck::SnpCrl,
                 CollateralOutcome {
@@ -280,7 +282,17 @@ pub(crate) async fn appraise(
         .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
     verify_vcek_tcb(&report, &vek_der, generation)?;
 
-    // 4. Guest policy.
+    // 4. Guest policy. A guest runs at VMPL 0 to 3; any other value is a
+    // report the host requested, whose report data the host chose.
+    if report.vmpl > 3 {
+        return Err(refuse(
+            RefusalCode::GuestPolicy,
+            format!(
+                "VMPL {:#x}: the report was not requested by the guest",
+                report.vmpl
+            ),
+        ));
+    }
     if policy.policy_bits.require_vmpl0 && report.vmpl != 0 {
         return Err(AttestationError::VmplCheckFailed(report.vmpl));
     }
@@ -321,7 +333,9 @@ pub(crate) async fn appraise(
     }
 
     if let Some(expected) = &policy.reference.host_data {
-        let padded = crate::utils::pad_report_data(expected.as_slice(), 32)?;
+        // A pin longer than HOST_DATA is one no report can meet.
+        let padded = crate::utils::pad_report_data(expected.as_slice(), 32)
+            .map_err(|_| AttestationError::InitDataMismatch)?;
         if !constant_time_eq(&report.host_data, &padded) {
             return Err(AttestationError::InitDataMismatch);
         }
@@ -329,7 +343,8 @@ pub(crate) async fn appraise(
 
     // Identity, floor.
     let (floor, instance_identity) = resolve_floor(policy, &report.chip_id)?;
-    if let Some(f) = floor.and_then(|f| f.snp.as_ref()) {
+    let snp_floor = floor.and_then(|f| f.snp.as_ref());
+    if let Some(f) = snp_floor {
         for value in &f.values {
             let have = tcb(match value {
                 SnpTcbValue::Reported => &report.reported_tcb,
@@ -468,7 +483,9 @@ pub(crate) async fn appraise(
         launch_alg: HashAlg::Sha384,
         launch: &report.measurement,
         registers: &registers,
-        hardware: Some(2),
+        // AMD runs no TCB status service, so a floor is the only TCB
+        // assessment; without one, or without revocation, no claim.
+        hardware: (snp_floor.is_some() && revocation_checked).then_some(2),
     };
     let (reference, executables) = evaluate_reference(policy, &assessment)?;
     let backing_min = evaluate_backing(policy, &registers)?;
@@ -478,6 +495,7 @@ pub(crate) async fn appraise(
         executables,
         assessment.hardware,
         configuration,
+        debug,
     );
 
     let tcb_set = SnpTcbSet {
@@ -582,7 +600,7 @@ mod tests {
 
     fn vectors() -> serde_json::Value {
         serde_json::from_str(include_str!(
-            "../../../../docs/design/vectors/cvm_profile_vectors.json"
+            "../../../../docs/standard/vectors/cvm_profile_vectors.json"
         ))
         .unwrap()
     }

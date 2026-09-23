@@ -1,7 +1,7 @@
 {
   "id": "snp-pcr-pin-without-vtpm",
   "rule": {
-    "section": "7",
+    "section": "13.1",
     "statement": "a vTPM PCR pin cannot be honored by evidence without a vtpm submodule"
   },
   "now": "2026-09-22T00:00:00Z",

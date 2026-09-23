@@ -1,7 +1,7 @@
 {
   "id": "snp-registers-without-commitment",
   "rule": {
-    "section": "4.7",
+    "section": "6.5",
     "statement": "snp-vmr registers appear only with the commitment binding"
   },
   "now": "2026-09-22T00:00:00Z",

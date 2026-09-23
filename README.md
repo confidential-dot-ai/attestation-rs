@@ -4,6 +4,8 @@
 
 Rust workspace for TEE attestation libraries, tools, and services.
 
+The attestation contract these crates implement is the [CVM Attestation v1 standard](docs/standard/cvm-attestation-v1.md): evidence, runtime measurement registers, event logs, the SEV-SNP register construction, per-platform bindings, results, policy and conformance. Its CDDL module is `schemas/cvm-profile-v1.cddl`, its test vectors are in `docs/standard/vectors/`, and its conformance corpus is `conformance/`.
+
 ## Workspace Members
 
 | Package | Path | Description |
@@ -61,13 +63,13 @@ wasm-pack build --target web --release
 
 This writes an ES module and the `.wasm` binary to `pkg/`:
 
-- `pkg/attestation_wasm.js` — JS bindings and the `init` loader
-- `pkg/attestation_wasm_bg.wasm` — the WASM blob
+- `pkg/attestation_wasm.js`: JS bindings and the `init` loader
+- `pkg/attestation_wasm_bg.wasm`: the WASM blob
 
 The build's profile entry points are `appraise`, `appraise_with` (evaluation
 time, held collateral and recorded NRAS exchanges as inputs) and
 `appraise_legacy`; a refusal is a thrown `Error` whose `code` is a refusal code
-of the design doc's section 14.4. The conformance corpus runs through
+of the standard's section 14.4. The conformance corpus runs through
 `appraise_with` in `cargo test -p attestation-wasm` (see `conformance/README.md`).
 
 Serve `pkg/` over HTTP (browsers won't load WASM from `file://`) and use it from a

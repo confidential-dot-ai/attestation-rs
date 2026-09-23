@@ -1,7 +1,7 @@
 {
   "id": "snp-commitment-without-chain",
   "rule": {
-    "section": "4.9",
+    "section": "8.1",
     "statement": "commitment requires cvm_chain, bootseed and all 16 registers"
   },
   "now": "2026-09-22T00:00:00Z",

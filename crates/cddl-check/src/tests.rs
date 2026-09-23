@@ -355,12 +355,12 @@ fn loading_refuses_what_it_cannot_check() {
 }
 
 #[test]
-fn the_design_doc_carries_the_module() {
-    let doc = include_str!("../../../docs/design/cvm-attestation-profile-v1.md");
+fn the_standard_carries_the_module() {
+    let doc = include_str!("../../../docs/standard/cvm-attestation-v1.md");
     let appendix = doc
         .split("## Appendix C. CDDL module")
         .nth(1)
-        .expect("the design doc has appendix C");
+        .expect("the standard has appendix C");
     let block = appendix
         .split("```cddl\n")
         .nth(1)

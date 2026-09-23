@@ -181,7 +181,7 @@ jobs:
           elif [ -n "$MRTD" ]; then
             ARGS+=(--expected-mrtd "$MRTD")
           else
-            echo "::warning title=no measurement pinned::Checked that the report is genuine and fresh, but not that it came from the image we expect. Pass expected_launch_digest or expected_mrtd to close that."
+            echo "::warning title=no measurement pinned::Checked that the report is genuine and fresh, but not that it came from the image we expect. Pass expected_launch_digest or expected_mrtd to close that; Azure evidence is refused without one."
           fi
 
           attestation-cli "${ARGS[@]}"

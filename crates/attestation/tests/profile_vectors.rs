@@ -1,4 +1,4 @@
-//! Appendix B vectors, from `docs/design/vectors/cvm_profile_vectors.json`.
+//! Appendix B vectors, from `docs/standard/vectors/cvm_profile_vectors.json`.
 //! Every key in the fixture must be consumed, so a vector added to the script
 //! without a check here fails the test.
 
@@ -9,7 +9,7 @@ use attestation::profile::registers::{
 };
 use std::collections::BTreeMap;
 
-const FIXTURE: &str = include_str!("../../../docs/design/vectors/cvm_profile_vectors.json");
+const FIXTURE: &str = include_str!("../../../docs/standard/vectors/cvm_profile_vectors.json");
 
 struct Vectors(BTreeMap<String, String>, std::cell::RefCell<Vec<String>>);
 
@@ -109,7 +109,28 @@ fn appendix_b_vectors() {
     let json = tcg_cel::encode_json(&log).unwrap();
     v.check_text("cel_log_json", &json);
 
-    // Section 5.1: the default policy's identifier.
+    // Section 9.3: dstack runtime event digests, through tcg-cel.
+    {
+        use sha2::Digest as _;
+        let name = String::from_utf8(v.get("dstack_name")).unwrap();
+        let payload = v.get("dstack_payload");
+        let event = |version| tcg_cel::dstack::RuntimeEvent {
+            version,
+            name: name.clone(),
+            payload: payload.clone(),
+        };
+        v.check(
+            "dstack_v1_digest",
+            &sha2::Sha384::digest(event(1).preimage()),
+        );
+        v.check("dstack_v2_preimage", &event(2).preimage());
+        v.check(
+            "dstack_v2_digest",
+            &sha2::Sha384::digest(event(2).preimage()),
+        );
+    }
+
+    // Section 12.5: the default policy's identifier.
     let policy = attestation::profile::VerifyPolicy::default();
     let canonical = policy.canonical_json();
     v.check("policy_jcs_default", canonical.as_bytes());

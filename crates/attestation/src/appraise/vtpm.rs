@@ -173,10 +173,13 @@ pub(crate) fn appraise(
         pinned.insert(*pcr, true);
     }
     let backing_min = evaluate_backing(policy, &registers)?;
-    // Section 5.2: `executables` is what pinned PCRs earn, and 0 (no
+    // Section 12.4: `executables` is what pinned PCRs earn, and 0 (no
     // assertion) with nothing pinned, since AR4SI forbids an empty vector.
+    // The paravisor that measures the PCRs is vouched for only by the cpu
+    // submodule's launch measurement, so PCR pins earn 2 only beside that pin.
     // The hardware, configuration and runtime claims belong to the cpu
     // submodule that binds this AK.
+    let launch_pinned = !policy.reference.launch_measurement.is_empty();
     let reference = (!pinned.is_empty()).then(|| ReferenceOutcome {
         launch_measurement: None,
         registers: pinned.clone(),
@@ -184,7 +187,11 @@ pub(crate) fn appraise(
     let vector = TrustVector {
         instance_identity: None,
         configuration: None,
-        executables: Some(if pinned.is_empty() { 0 } else { 2 }),
+        executables: Some(if pinned.is_empty() || !launch_pinned {
+            0
+        } else {
+            2
+        }),
         file_system: None,
         hardware: None,
         runtime_opaque: None,

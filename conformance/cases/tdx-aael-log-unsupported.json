@@ -1,7 +1,7 @@
 {
   "id": "tdx-aael-log-unsupported",
   "rule": {
-    "section": "4.8",
+    "section": "7.1",
     "statement": "the standalone attestation-agent log is parsed but this release's appraisal refuses it"
   },
   "now": "2026-09-22T00:00:00Z",

@@ -1,7 +1,7 @@
 {
   "id": "snp-machine-floor-applies",
   "rule": {
-    "section": "7",
+    "section": "13.3",
     "statement": "a machine's own tcb_floor applies"
   },
   "now": "2026-09-22T00:00:00Z",

@@ -1,7 +1,7 @@
 {
   "id": "envelope-duplicate-member",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "an object with a duplicate member name is rejected: the envelope"
   },
   "now": "2026-09-22T00:00:00Z",

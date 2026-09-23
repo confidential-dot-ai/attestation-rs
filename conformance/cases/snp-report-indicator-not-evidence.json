@@ -1,7 +1,7 @@
 {
   "id": "snp-report-indicator-not-evidence",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_report: the indicator is required and exactly 4"
   },
   "now": "2026-09-22T00:00:00Z",

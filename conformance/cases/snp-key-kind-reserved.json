@@ -1,7 +1,7 @@
 {
   "id": "snp-key-kind-reserved",
   "rule": {
-    "section": "4.5",
+    "section": "5.3",
     "statement": "tls-exporter is reserved for v2; a v1 verifier rejects it as an unknown kind"
   },
   "now": "2026-09-22T00:00:00Z",

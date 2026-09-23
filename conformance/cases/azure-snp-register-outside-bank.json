@@ -1,7 +1,7 @@
 {
   "id": "azure-snp-register-outside-bank",
   "rule": {
-    "section": "4.7",
+    "section": "6.1",
     "statement": "a vtpm register's alg is the quoted bank"
   },
   "now": "2026-09-22T00:00:00Z",

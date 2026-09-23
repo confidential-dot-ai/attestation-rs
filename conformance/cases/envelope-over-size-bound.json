@@ -1,7 +1,7 @@
 {
   "id": "envelope-over-size-bound",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "the whole envelope is at most 10 MiB: one byte more is refused"
   },
   "now": "2026-09-22T00:00:00Z",

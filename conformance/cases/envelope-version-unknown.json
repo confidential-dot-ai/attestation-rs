@@ -1,7 +1,7 @@
 {
   "id": "envelope-version-unknown",
   "rule": {
-    "section": "6",
+    "section": "11",
     "statement": "step 1: cvm_version other than 1 is refused"
   },
   "now": "2026-09-22T00:00:00Z",

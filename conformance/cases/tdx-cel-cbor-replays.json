@@ -1,7 +1,7 @@
 {
   "id": "tdx-cel-cbor-replays",
   "rule": {
-    "section": "4.8",
+    "section": "7.4",
     "statement": "tcg-cel-cbor: the log replays from zero into the RTMRs it extends, each reproducing the signed value"
   },
   "now": "2026-09-22T00:00:00Z",

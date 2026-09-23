@@ -1,7 +1,7 @@
 {
   "id": "snp-gpu-required-without-device",
   "rule": {
-    "section": "7",
+    "section": "13.5",
     "statement": "gpu.required with no device submodule is refused"
   },
   "now": "2026-09-22T00:00:00Z",

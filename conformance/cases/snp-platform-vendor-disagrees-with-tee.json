@@ -1,7 +1,7 @@
 {
   "id": "snp-platform-vendor-disagrees-with-tee",
   "rule": {
-    "section": "4.4",
+    "section": "4.3",
     "statement": "cvm_platform: the vendor is the TEE's vendor"
   },
   "now": "2026-09-22T00:00:00Z",

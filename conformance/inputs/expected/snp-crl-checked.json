@@ -92,7 +92,6 @@
       "ear_status": "affirming",
       "ear_trustworthiness_vector": {
         "configuration": 2,
-        "hardware": 2,
         "runtime-opaque": 2
       },
       "ear_verifier_claims": {

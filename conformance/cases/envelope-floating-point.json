@@ -1,7 +1,7 @@
 {
   "id": "envelope-floating-point",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "integers are JSON numbers and no profile claim holds floating point"
   },
   "now": "2026-09-22T00:00:00Z",

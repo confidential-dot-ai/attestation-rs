@@ -1,7 +1,7 @@
 {
   "id": "envelope-object-as-array",
   "rule": {
-    "section": "4.10",
+    "section": "4.7",
     "statement": "one encoding per value: a cvm_* object written as the array of its members is refused"
   },
   "now": "2026-09-22T00:00:00Z",
