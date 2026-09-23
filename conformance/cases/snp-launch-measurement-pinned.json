@@ -1,0 +1,13 @@
+{
+  "id": "snp-launch-measurement-pinned",
+  "rule": {
+    "section": "5.2",
+    "statement": "executables is 3 when only the launch measurement matched"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-launch-measurement-pinned.json",
+  "policy": "policy/snp-launch-measurement-pinned.json",
+  "expect": {
+    "appraisal": "expected/snp-launch-measurement-pinned.json"
+  }
+}

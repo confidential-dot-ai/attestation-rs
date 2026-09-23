@@ -64,8 +64,9 @@ pub(crate) fn appraise(
     // bank is not what the quoted values cover.
     let selected = quote_selection(quote.message.as_slice(), tcg_cel::HashAlg::SHA256.0)?;
 
-    // 8. A TCG2 log replays into the quoted PCRs in the quoted bank; a PCR
-    // the log names must reproduce, and only those are marked replayed.
+    // 8. A TCG2 log replays into the quoted PCRs in the quoted bank: a PCR
+    // the log extends must reproduce, and one it never extends is accounted
+    // for exactly when it holds its PC Client starting value (section 4.8).
     let mut replayed: BTreeMap<u16, bool> = BTreeMap::new();
     if let Some(log) = &v.cvm_log {
         if log.format != LogFormat::Tpm2EventLog {
@@ -96,22 +97,25 @@ pub(crate) fn appraise(
             },
         )
         .map_err(integrity)?;
-        // A PCR the log only mentions in EV_NO_ACTION events is not replayed.
-        for (index, reg) in out.registers.into_iter().filter(|(_, r)| r.extended > 0) {
-            let tcg_cel::Index::Pcr(pcr) = index else {
-                unreachable!("TCG2 records name PCRs")
+        for (index, quoted) in pcrs.iter().enumerate() {
+            let pcr = u16::try_from(index).expect("a quote carries 24 PCRs");
+            let reg = out.registers.get(&tcg_cel::Index::Pcr(u32::from(pcr)));
+            let ok = match reg.filter(|r| r.extended > 0) {
+                Some(r) if constant_time_eq(&r.value, quoted) => true,
+                Some(_) => {
+                    return Err(AttestationError::EventlogIntegrityFailed(format!(
+                        "PCR {pcr} does not replay to the quoted value"
+                    )))
+                }
+                // Unextended: the starting value, which a StartupLocality
+                // event sets for PCR 0 and the replay carries.
+                None => match reg {
+                    Some(r) => constant_time_eq(&r.value, quoted),
+                    None => tcg_cel::pc_client_initial(tcg_cel::Index::Pcr(u32::from(pcr)), bank)
+                        .is_some_and(|initial| constant_time_eq(&initial, quoted)),
+                },
             };
-            let pcr = u16::try_from(pcr).expect("PC Client PCRs are below 24");
-            let quoted = pcrs
-                .get(usize::from(pcr))
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            if !constant_time_eq(&reg.value, quoted) {
-                return Err(AttestationError::EventlogIntegrityFailed(format!(
-                    "PCR {pcr} does not replay to the quoted value"
-                )));
-            }
-            replayed.insert(pcr, true);
+            replayed.insert(pcr, ok);
         }
     }
 
@@ -169,9 +173,10 @@ pub(crate) fn appraise(
         pinned.insert(*pcr, true);
     }
     let backing_min = evaluate_backing(policy, &registers)?;
-    // Section 5.2: `executables` is what pinned PCRs earn; the hardware,
-    // configuration and runtime claims belong to the cpu submodule that
-    // binds this AK, so a vtpm with nothing pinned makes no claim.
+    // Section 5.2: `executables` is what pinned PCRs earn, and 0 (no
+    // assertion) with nothing pinned, since AR4SI forbids an empty vector.
+    // The hardware, configuration and runtime claims belong to the cpu
+    // submodule that binds this AK.
     let reference = (!pinned.is_empty()).then(|| ReferenceOutcome {
         launch_measurement: None,
         registers: pinned.clone(),
@@ -179,7 +184,7 @@ pub(crate) fn appraise(
     let vector = TrustVector {
         instance_identity: None,
         configuration: None,
-        executables: (!pinned.is_empty()).then_some(2),
+        executables: Some(if pinned.is_empty() { 0 } else { 2 }),
         file_system: None,
         hardware: None,
         runtime_opaque: None,

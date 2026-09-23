@@ -160,7 +160,7 @@ async fn live_snp_metal_profile() {
         .await
         .expect("strict defaults accept the SNP metal runner");
     show("snp metal, strict defaults", &a);
-    assert!(a.ear_all_submods_bound);
+    assert!(a.ear_all_submods_bound.is_true());
     assert_ne!(a.submods["cpu"].ear_status, Tier::Contraindicated);
     let c = cpu(&a);
     assert_eq!(c.cvm_freshness.mode, BindingMode::ReportData);
@@ -210,7 +210,7 @@ async fn live_tdx_metal_profile() {
         .await
         .expect("any non-revoked status accepts the TDX metal runner");
     show("tdx metal, any non-revoked status", &a);
-    assert!(a.ear_all_submods_bound);
+    assert!(a.ear_all_submods_bound.is_true());
     let c = cpu(&a);
     assert_eq!(c.cvm_freshness.mode, BindingMode::ReportData);
     assert!(matches!(c.cvm_identity, Identity::Tdx { .. }));
@@ -275,7 +275,7 @@ async fn azure(platform: PlatformType, policy: VerifyPolicy) {
         .await
         .expect("the Azure runner policy accepts");
     show(&format!("{platform}"), &a);
-    assert!(a.ear_all_submods_bound);
+    assert!(a.ear_all_submods_bound.is_true());
     let c = cpu(&a);
     assert_eq!(c.cvm_freshness.mode, BindingMode::VtpmExtradata);
     assert_eq!(c.cvm_platform.hosting, Hosting::Azure);

@@ -1,0 +1,13 @@
+{
+  "id": "gpu-device-uuid-differs-from-name",
+  "rule": {
+    "section": "4.4",
+    "statement": "a device's uuid is the <ueid> of its submodule name"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/gpu-device-uuid-differs-from-name.json",
+  "policy": "policy/gpu-device-uuid-differs-from-name.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

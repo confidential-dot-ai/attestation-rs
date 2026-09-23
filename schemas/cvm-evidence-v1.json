@@ -13,7 +13,7 @@
     "Base64Url": {
       "contentEncoding": "base64url",
       "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
-      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-][AQgw])?$",
       "type": "string"
     },
     "Base64UrlBytes32": {
@@ -27,14 +27,7 @@
       "description": "`cvm_binding` (section 4.5).",
       "properties": {
         "key": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/KeyBinding"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/KeyBinding"
         },
         "mode": {
           "$ref": "#/$defs/BindingMode"
@@ -112,8 +105,8 @@
           "$ref": "#/$defs/Base64Url"
         },
         {
-          "maximum": 15,
-          "minimum": 0,
+          "maximum": 31,
+          "minimum": 1,
           "type": "integer"
         }
       ],
@@ -123,48 +116,20 @@
       "description": "`cpu` submodule claims set (section 4.4). Unknown claims are ignored;\nunknown fields inside any `cvm_*` object are rejected by the field types.",
       "properties": {
         "bootseed": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Base64UrlBytes32"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/Base64UrlBytes32",
           "description": "EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 4.9)."
         },
         "cvm_binding": {
           "$ref": "#/$defs/Binding"
         },
         "cvm_chain": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ChainInfo"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/ChainInfo"
         },
         "cvm_endorsements": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CmwCollection"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/CmwCollection"
         },
         "cvm_log": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EventLog"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/EventLog"
         },
         "cvm_platform": {
           "$ref": "#/$defs/PlatformHint"
@@ -176,23 +141,13 @@
           "items": {
             "$ref": "#/$defs/Register"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "cvm_report": {
           "$ref": "#/$defs/CmwRecord"
         },
         "dbgstat": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DebugStatus"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/DebugStatus",
           "description": "EAT `dbgstat` (key 263), a hint; the verifier derives the real value\nand refuses a hint that contradicts the signed report."
         }
       },
@@ -248,8 +203,7 @@
       "type": "string"
     },
     "GpuDeviceEvidence": {
-      "additionalProperties": false,
-      "description": "`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence\nplus the nonce binding (section 4.4).",
+      "description": "`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence\nplus the nonce binding (section 4.4). A claims set like the others, so an\nunknown claim is ignored (section 4.10).",
       "properties": {
         "arch": {
           "$ref": "#/$defs/GpuArch"
@@ -350,10 +304,7 @@
       "additionalProperties": false,
       "properties": {
         "generation": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "hosting": {
           "$ref": "#/$defs/Hosting"
@@ -485,14 +436,7 @@
       "description": "`vtpm` submodule (section 4.4).",
       "properties": {
         "cvm_log": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EventLog"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/EventLog"
         },
         "cvm_registers": {
           "items": {

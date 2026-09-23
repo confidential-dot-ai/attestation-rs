@@ -1,5 +1,5 @@
 {
-  "ear_all_submods_bound": true,
+  "ear_all_submods_bound": "true",
   "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
   "eat_profile": "tag:ietf.org,2026:rats/ear#04",
   "submods": {

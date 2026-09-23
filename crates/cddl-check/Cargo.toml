@@ -1,0 +1,12 @@
+[package]
+name = "cddl-check"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Validates JSON against a CDDL module: the subset of RFC 8610, RFC 9165 and RFC 9741 the CVM attestation profile's module uses"
+
+[dependencies]
+base64 = "0.22"
+regex = "1"
+serde_json = "1"

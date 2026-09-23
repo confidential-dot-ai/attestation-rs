@@ -1,0 +1,13 @@
+{
+  "id": "policy-member-not-an-object",
+  "rule": {
+    "section": "7",
+    "statement": "a policy member that is an object is written as one; an array is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-member-not-an-object.json",
+  "policy": "policy/policy-member-not-an-object.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

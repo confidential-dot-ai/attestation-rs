@@ -1,0 +1,13 @@
+{
+  "id": "envelope-byte-string-standard-alphabet",
+  "rule": {
+    "section": "4.10",
+    "statement": "byte strings are base64url: the standard alphabet is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-byte-string-standard-alphabet.json",
+  "policy": "policy/envelope-byte-string-standard-alphabet.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

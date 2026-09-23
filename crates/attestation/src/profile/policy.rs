@@ -24,9 +24,17 @@ pub struct VerifyPolicy {
     pub commitment: CommitmentPolicy,
     pub tcb: TcbPolicy,
     pub policy_bits: PolicyBitsPolicy,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub identity: Option<IdentityPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub owner: Option<OwnerPolicy>,
     pub gpu: GpuPolicy,
 }
@@ -63,7 +71,11 @@ pub struct ReferenceValues {
     pub slot_owners: BTreeMap<u16, String>,
     /// The value `cvm_host_data` must carry, zero-padded to the platform's
     /// length (32 bytes on SNP, 48 on TDX): the Kata initdata gate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub host_data: Option<Bytes>,
 }
 
@@ -71,7 +83,11 @@ pub struct ReferenceValues {
 #[serde(deny_unknown_fields, default)]
 pub struct FreshnessPolicy {
     /// When set, the evidence must bind exactly this key.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub key: Option<KeyBinding>,
 }
 
@@ -97,7 +113,11 @@ impl Default for CommitmentPolicy {
 pub struct TcbPolicy {
     /// Named floors; a machine entry or `default_floor` selects one.
     pub floors: BTreeMap<String, TcbFloor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default_floor: Option<String>,
     pub tdx_allowed_status: Vec<TdxTcbStatus>,
     pub require_revocation: bool,
@@ -119,9 +139,17 @@ impl Default for TcbPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct TcbFloor {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub snp: Option<SnpFloor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tdx: Option<TdxFloor>,
 }
 
@@ -255,9 +283,17 @@ fn jcs_string(s: &str, out: &mut String) {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct TdxFloor {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_tee_tcb_svn: Option<FixedBytes<16>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_tcb_evaluation_data_number: Option<u32>,
 }
 
@@ -285,6 +321,10 @@ impl Default for PolicyBitsPolicy {
     }
 }
 
+/// The longest machine identity: a GPU ueid, which the name form bounds at
+/// 128 characters; chip ids are 64 bytes, PPIDs 16.
+pub const MAX_MACHINE_ID: usize = 128;
+
 /// Machine allowlist (section 7). An identity absent from `machines` fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -298,7 +338,11 @@ pub struct MachineEntry {
     /// The `cvm_identity` value: SNP `chip_id`, TDX `ppid`, CCA `instance_id`,
     /// or a GPU `ueid` as UTF-8.
     pub id: Bytes,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tcb_floor: Option<String>,
 }
 
@@ -318,7 +362,11 @@ pub struct GpuPolicy {
     /// Reject envelopes without a device submodule.
     pub required: bool,
     /// Accepted architectures, as NRAS names them (`HOPPER`, `BLACKWELL`, `LS10`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub expected_archs: Option<Vec<GpuArch>>,
     pub device_policy: GpuDevicePolicy,
 }
@@ -359,7 +407,7 @@ impl From<&GpuDevicePolicy> for crate::types::NvidiaGpuDevicePolicy {
 impl VerifyPolicy {
     pub fn from_json(json: &[u8]) -> Result<Self> {
         let p: VerifyPolicy =
-            serde_json::from_slice(json).map_err(|e| policy_err(e.to_string()))?;
+            super::strict::from_slice(json).map_err(|e| policy_err(e.to_string()))?;
         p.validate()?;
         Ok(p)
     }
@@ -461,8 +509,10 @@ impl VerifyPolicy {
                 ));
             }
             for m in &id.machines {
-                if m.id.is_empty() {
-                    return Err(policy_err("identity.machines: empty id"));
+                if m.id.is_empty() || m.id.len() > MAX_MACHINE_ID {
+                    return Err(policy_err(format!(
+                        "identity.machines: an id is 1 to {MAX_MACHINE_ID} bytes"
+                    )));
                 }
                 if let Some(f) = &m.tcb_floor {
                     if !floor_exists(f) {

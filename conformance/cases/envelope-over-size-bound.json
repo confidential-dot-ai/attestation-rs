@@ -1,0 +1,13 @@
+{
+  "id": "envelope-over-size-bound",
+  "rule": {
+    "section": "4.10",
+    "statement": "the whole envelope is at most 10 MiB: one byte more is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-over-size-bound.json.gz",
+  "policy": "policy/envelope-over-size-bound.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

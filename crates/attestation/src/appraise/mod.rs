@@ -173,14 +173,8 @@ impl Verifier {
                         "Arm CCA appraisal".to_string(),
                     ))
                 }
-                Submod::Vtpm(_) => {
-                    if submods.contains_key("vtpm") {
-                        continue;
-                    }
-                    return Err(invalid(
-                        "a vtpm submodule needs a cpu bound through vtpm-extradata",
-                    ));
-                }
+                // Appraised with its cpu above; validate() pairs the two.
+                Submod::Vtpm(_) => continue,
                 Submod::Device(d) => {
                     devices.push((name.clone(), d));
                     continue;
@@ -219,7 +213,7 @@ impl Verifier {
             },
             eat_nonce: evidence.eat_nonce.clone(),
             ear_raw_evidence: None,
-            ear_all_submods_bound: all_bound,
+            ear_all_submods_bound: all_bound.into(),
             submods,
         };
         appraisal.validate()?;

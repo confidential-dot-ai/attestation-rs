@@ -1,0 +1,13 @@
+{
+  "id": "snp-owner-key-not-accepted",
+  "rule": {
+    "section": "7",
+    "statement": "owner.id_key_digests: an ID key outside the list is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-owner-key-not-accepted.json",
+  "policy": "policy/snp-owner-key-not-accepted.json",
+  "expect": {
+    "refusal": "reference-mismatch"
+  }
+}

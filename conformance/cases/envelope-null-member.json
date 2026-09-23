@@ -1,0 +1,13 @@
+{
+  "id": "envelope-null-member",
+  "rule": {
+    "section": "4.10",
+    "statement": "null is not a value: an optional member is absent or holds its type"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-null-member.json",
+  "policy": "policy/envelope-null-member.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

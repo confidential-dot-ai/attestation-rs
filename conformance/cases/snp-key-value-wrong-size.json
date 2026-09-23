@@ -1,0 +1,13 @@
+{
+  "id": "snp-key-value-wrong-size",
+  "rule": {
+    "section": "4.5",
+    "statement": "spki-sha256 is 32 bytes"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-key-value-wrong-size.json",
+  "policy": "policy/snp-key-value-wrong-size.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

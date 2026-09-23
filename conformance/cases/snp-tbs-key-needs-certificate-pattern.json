@@ -1,0 +1,13 @@
+{
+  "id": "snp-tbs-key-needs-certificate-pattern",
+  "rule": {
+    "section": "4.5",
+    "statement": "an x509-tbs-sha256 key belongs to the certificate pattern"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-tbs-key-needs-certificate-pattern.json",
+  "policy": "policy/snp-tbs-key-needs-certificate-pattern.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

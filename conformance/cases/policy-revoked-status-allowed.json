@@ -1,0 +1,13 @@
+{
+  "id": "policy-revoked-status-allowed",
+  "rule": {
+    "section": "7",
+    "statement": "Revoked can never be an allowed TDX status"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-revoked-status-allowed.json",
+  "policy": "policy/policy-revoked-status-allowed.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

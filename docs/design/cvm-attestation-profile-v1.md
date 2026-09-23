@@ -47,13 +47,14 @@ Goals, restated from the standard-format document with one correction each:
 | RFC 9711 (EAT) | claims set shape, `eat_profile`, `eat_nonce`, `submods`, `dbgstat`, `bootseed`, `measres`, nested tokens; the profile checklist in section 6.3 |
 | RFC 9781 (UCCS) | unprotected claims set, CBOR tag 601, JSON form UJCS, nesting rules in Appendix C |
 | RFC 9782 (EAT media types) | `application/eat-ucs+json` and `application/eat-ucs+cbor` with the `eat_profile` parameter, which is how the envelope is labeled on the wire |
-| RFC 9999 (CMW) | typed evidence records `[type, value, indicator]`, collections, indicator bits (0 reference values, 1 endorsements, 2 evidence, 3 results, 4 policy), and the `id-pe-cmw` X.509 extension (1.3.6.1.5.5.7.1.35) for certificate-carried evidence |
+| RFC 9999 (CMW) | typed evidence records `[type, value, indicator]`, collections, indicator bits (0 reference values, 1 endorsements, 2 evidence, 3 results, 4 policy; an indicator is 1 to 31), and the `id-pe-cmw` X.509 extension (1.3.6.1.5.5.7.1.35) for certificate-carried evidence |
 | RFC 8392 section 9.1 (CWT) | claim key ranges; our CBOR keys are in the private-use range (Appendix A) |
 | RFC 8949 section 4.2.1 | deterministic CBOR encoding |
 | RFC 4648 section 5 | base64url for byte strings in JSON |
+| RFC 8610 (CDDL), RFC 9165 (`.feature`, `.within`, `.and`), RFC 9741 (`.b64u`, `.base10`) | the wire definition of Appendix C, written in RFC 9711's `JC<>` style |
 | draft-ietf-rats-ear-04 | results: `ear_verifier_id`, `submods`, `ear_status`, `ear_trustworthiness_vector`, `ear_attester_claims`, `ear_verifier_claims`, `ear_raw_evidence` |
 | draft-ietf-rats-ar4si-10 | trustworthiness tiers and per-category values |
-| draft-kykdxy-rats-tdx-cgpu-ear-profile-02 | the Microsoft, Intel and NVIDIA EAR profile for TDX with confidential GPUs; this profile composes with it (section 5.3) |
+| draft-kykdxy-rats-tdx-cgpu-ear-profile-02 | the Microsoft, Intel and NVIDIA EAR profile for TDX with confidential GPUs; this profile composes with it (section 5.3) and takes `ear_all_submods_bound` (a text value) and `ear_nvidia_evidence` from it |
 | draft-sun-rats-composite-eat-00 | detached-digest binding of multiple attesters under one nonce; adopted for v2 (section 12) |
 | draft-ffm-rats-cca-token-04 | the CCA token as a CMW collection under tag 907, keys 0xACCA and 0xACD1, profiles `tag:arm.com,2026:cca_platform#2.0.0` and `tag:arm.com,2026:realm#2.0.0` |
 | TCG Canonical Event Log Format v1.1 r11 | record layout (`recnum` per index, register index, `digests`, `content_type` and `content`), the CBOR and JSON encodings of the section 5.2 CDDL, the `$TPMS_CEL_EVENT-extension` socket, replay |
@@ -93,7 +94,7 @@ The envelope is unprotected, so the verifier classifies every field as one of:
 - bound: fields the verifier checks against signed bytes before use (registers against the report or the commitment, the log against the registers, the nonce against its binding, endorsements against embedded roots);
 - hint: everything else, used only to select a parser and never to make a decision.
 
-`cvm_platform.hosting` is a hint. The vendor and TEE type are re-derived from the signed report. A hint that contradicts the signed data is an error, never a fallback.
+`cvm_platform.hosting` is a hint. The vendor, the TEE type and the generation are re-derived from the signed data: the SNP generation from the report's CPUID fields (or the VEK's issuer for a v2 report), the TDX FMSPC from the PCK certificate. A hint that contradicts the signed data is an error, never a fallback.
 
 ### 4.3 Top-level claims
 
@@ -112,7 +113,7 @@ Submodule names are chosen by the attester within these reserved forms: `cpu` (e
 
 | Claim | Req | Class | Meaning |
 | --- | --- | --- | --- |
-| `cvm_platform` | must | hint | `{vendor, tee, generation?, hosting}`; vendor in `amd`, `intel`, `arm`; tee in `sev-snp`, `tdx`, `cca`; hosting in `bare`, `azure`, `gcp`, `dstack` |
+| `cvm_platform` | must | hint | `{vendor, tee, generation?, hosting}`; vendor in `amd`, `intel`, `arm`; tee in `sev-snp`, `tdx`, `cca`; generation `Milan`, `Genoa` or `Turin` on SEV-SNP and the FMSPC in twelve lowercase hex digits on TDX; hosting in `bare`, `azure`, `gcp`, `dstack` |
 | `cvm_report` | must | signed | a CMW record (RFC 9999) `[type, value, 4]`: `type` is the media type of the raw report, `value` the raw bytes, and the indicator is required and exactly 4 (bit 2, evidence). Types: `application/vnd.confidential-ai.sev-snp-report`, `application/vnd.confidential-ai.tdx-quote`; `application/vnd.veraison.tsm-report+json` is accepted on ingest. On Azure this is the SNP report the HCL report wraps, or the TD quote; the HCL report itself rides in the `vtpm` submodule |
 | `cvm_binding` | must | bound | freshness pattern, binding mode (section 4.5) and their parameters |
 | `cvm_endorsements` | may | bound | inline collateral as a CMW collection, indicator bit 1 (section 4.6) |
@@ -134,7 +135,7 @@ For Arm CCA the `cpu` submodule is instead a nested token (RFC 9711 section 4.2.
 | `cvm_registers` | must | bound | the PCRs projected as registers, source `vtpm-pcr`, backing `privileged-service` |
 | `cvm_log` | may | bound | TPM2 event log or CEL |
 
-`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the existing NVIDIA device evidence (`arch`, `evidence_b64`, `cert_chain_b64`) plus `cvm_binding` with mode `nras-nonce`. The verifier sends it to NRAS API v4 (`/v4/attest/gpu`, `/v4/attest/switch`) with claims version 3.0, the request body NVIDIA's own SDK sends, and reads the detached EAT it answers with: an overall token and one token per device, all ES384 under the pinned NVIDIA anchor, each carrying the endpoint's origin as `iss`. The overall token's `submods` holds `["DIGEST", ["SHA-256", hex]]` over each device token's compact form, which the verifier checks, together with the device count, before it reads a device token; each device token's `eat_nonce` then binds it to the session.
+`gpu/<ueid>` and `nvswitch/<ueid>` submodules: NVIDIA's device evidence as its SDK exchanges it with NRAS, `{arch, uuid, evidence_b64, cert_chain_b64}`, plus `cvm_binding` with the challenge pattern and mode `nras-nonce`. `arch` is `HOPPER` or `BLACKWELL` under `gpu/` and `LS10` under `nvswitch/`, `uuid` is the name's `<ueid>`, and `evidence_b64` and `cert_chain_b64` keep NVIDIA's standard base64 text, at most 1 MiB each, which the verifier passes to NRAS verbatim. The verifier sends it to NRAS API v4 (`/v4/attest/gpu`, `/v4/attest/switch`) with claims version 3.0, the request body NVIDIA's own SDK sends, and reads the detached EAT it answers with: an overall token and one token per device, all ES384 under the pinned NVIDIA anchor, each carrying the endpoint's origin as `iss`. The overall token's `submods` holds `["DIGEST", ["SHA-256", hex]]` over each device token's compact form, which the verifier checks, together with the device count, before it reads a device token; each device token's `eat_nonce` then binds it to the session.
 
 ### 4.5 Freshness and binding modes
 
@@ -228,7 +229,7 @@ Slot semantics are fixed across platforms so policy is portable: slots 0 to 3 ca
 
 Every format becomes CEL records before replay (the `tcg-cel` crate, section 13): a TCG2 event is a `pcclient_std` record with all its digests, the Spec ID header included as an unmeasured record, and a dstack runtime event is a `pcclient_std` record whose `event_data` is its digest's hash input, so it verifies on its own. A record's event type and tagged-event ID lie outside its digest, so a relabeled attestation-agent entry or dstack runtime event still replays; a verifier therefore lists a register's entries or runtime events only when every measured record in that register is one whose digest reproduces.
 
-A c8s runtime event is one CEL record: `recnum` its number within its slot, `pcr` the slot index, `digests` a single entry (`hashAlg` 12, TPM_ALG_SHA384, and `digest` d), `content_type` `cvm` (value 200, 0xC8), and `content` the map `{0: seq (uint), 1: event (bstr)}`. `seq` is the record's place among the log's `cvm` records, from 0. `event` is the deterministic CBOR encoding of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, optional)}`, with `domain` and `operation` each at most 255 bytes of UTF-8. `d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)`, and `d` is the value that was extended. Replay requires `seq` to count the log's `cvm` records without a gap, recomputes `d` from `seq`, the register index and the stored event bytes, requires it to equal the recorded digest, and extends it; the verifier never re-encodes content. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result; policy decides which slots must replay (today: RTMR 0 to 2 must, RTMR 3 reports, and counts as replayed when the log accounts for every extend into it). A `tcg-cel-*` or `dstack-json` log on a TDX submodule replays from zero into the RTMRs it extends, each of which must reproduce the signed value; on an SNP submodule in `commitment` mode the log is required, `chain_len` must equal its record count, and section 4.9 governs the replay from genesis. Policy may name a `replay_until_event` (dstack's `system-ready` is the model), in which case the verified register value is the replay up to and including that record and later records are reported, not enforced; this release does not implement it yet.
+A c8s runtime event is one CEL record: `recnum` its number within its slot, `pcr` the slot index, `digests` a single entry (`hashAlg` 12, TPM_ALG_SHA384, and `digest` d), `content_type` `cvm` (value 200, 0xC8), and `content` the map `{0: seq (uint), 1: event (bstr)}`. `seq` is the record's place among the log's `cvm` records, from 0. `event` is the deterministic CBOR encoding of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, optional)}`, with `domain` and `operation` each at most 255 bytes of UTF-8. `d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)`, and `d` is the value that was extended. Replay requires `seq` to count the log's `cvm` records without a gap, recomputes `d` from `seq`, the register index and the stored event bytes, requires it to equal the recorded digest, and extends it; the verifier never re-encodes content. The verifier replays every register the log covers and marks each register `replayed: true` or `false` in the result. A register the log extends counts as replayed when its records, replayed from the register's starting value, reproduce the signed value; one the log never extends counts as replayed exactly when it still holds its starting value (zero for an RTMR, the PC Client starting value for a PCR), since the log then accounts for every extend into it. Policy decides which slots must replay (today: RTMR 0 to 2 must and RTMR 3 reports). A `tcg-cel-*` or `dstack-json` log on a TDX submodule replays from zero into the RTMRs it extends, each of which must reproduce the signed value; on an SNP submodule in `commitment` mode the log is required, `chain_len` must equal its record count, and section 4.9 governs the replay from genesis. Policy may name a `replay_until_event` (dstack's `system-ready` is the model), in which case the verified register value is the replay up to and including that record and later records are reported, not enforced; this release does not implement it yet.
 
 For SNP `commitment` logs, every record must use `cvm` content; other CEL content is rejected because its digest would not authenticate the sequence. The driver assigns `seq` from its global extension counter and `recnum` from the slot's counter, and computes `d` while holding the same lock used for extension and log append; callers cannot supply either number or substitute a precomputed digest. Swapping records across registers and renumbering them therefore either fails digest validation or changes the register bank and commitment. Imported CCEL, TPM and dstack logs retain their native ordering guarantees.
 
@@ -269,9 +270,9 @@ The verifier runs the order of section 6: chain and signature, then launch measu
 
 ### 4.10 Encoding rules
 
-JSON: claim names are strings; profile claims carry the `cvm_` prefix; byte strings are base64url without padding (RFC 4648 section 5); integers are JSON numbers; no floating point anywhere. Unknown claims at the top level or in a submodule claims set are ignored, as EAT extensibility requires; an unknown field inside any `cvm_*` object is rejected. Both JSON encodings in use today (standard base64 in the SNP and TDX payloads, base64url in the Azure payloads, hex in TPM quotes) are replaced by this rule; section 9 covers the transition.
+JSON: claim names are strings; profile claims carry the `cvm_` prefix; byte strings are base64url without padding and with zero trailing bits (RFC 4648 sections 5 and 3.5, the strict `.b64u` of RFC 9741); integers are JSON numbers; no profile claim holds floating point. Unknown claims at the top level or in a submodule claims set, device submodules included, are ignored whatever they hold, as EAT extensibility requires; an unknown field inside any `cvm_*` object is rejected. Both JSON encodings in use today (standard base64 in the SNP and TDX payloads, base64url in the Azure payloads, hex in TPM quotes) are replaced by this rule; section 9 covers the transition.
 
-An object with a duplicate member name is rejected, in the envelope, in every `cvm_*` object and in every CMW collection, so no two implementations can disagree about which value was meant; implementations whose JSON library keeps the last duplicate must check for duplicates themselves. Untrusted input is parsed without buffering and within fixed bounds: an envelope carries at most 66 submodules, a CMW collection at most 32 entries and one level of nesting, and every byte string field at most 1 MiB, with the whole envelope at most 10 MiB.
+Each value has one JSON encoding, so no two implementations can disagree about what a document holds. An object with a duplicate member name is rejected, in the envelope, in every `cvm_*` object and in every CMW collection. `null` is not a value: an optional member is absent or holds its type. An object is written as an object, never as the array of its members, and an enumerated value is its text, never an object naming it. Implementations whose JSON library admits any of these (keeping the last duplicate, reading `null` as absent, reading a struct from an array) must refuse them themselves. A CMW record's indicator, where the profile does not fix it, is 1 to 31 (RFC 9999 section 3.1). Untrusted input is parsed without buffering and within fixed bounds: an envelope carries at most 66 submodules, a CMW collection at most 32 entries and one level of nesting, and every byte string field at most 1 MiB, with the whole envelope at most 10 MiB.
 
 CBOR: claim keys from Appendix A; text strings for names, byte strings for bytes; deterministic encoding; definite lengths.
 
@@ -334,6 +335,8 @@ Filled from AR4SI-10 values. The library returns the vector; it never returns a 
 | storage-opaque | 0 in v1 |
 | sourced-data | 2 for a GPU submodule NRAS affirmed with an acceptable device policy |
 
+The `vtpm` submodule's vector carries `executables` alone: 2 when every PCR the policy pins matches, and 0 (no assertion) when the policy pins none, because AR4SI requires a vector to carry at least one claim. Its hardware, configuration and runtime claims belong to the `cpu` submodule that binds its AK.
+
 An `isSafe` boolean is not part of the profile. A relying party that wants one derives it from `ear_status` under its own policy.
 
 ### 5.3 Composition with the TDX and confidential-GPU EAR profile
@@ -342,7 +345,7 @@ draft-kykdxy-rats-tdx-cgpu-ear-profile (Microsoft, Intel, NVIDIA) defines EAR su
 
 This profile composes with it: for a TDX submodule the verifier emits the `tdx_*` claims above verbatim inside `ear_attester_claims` beside the vendor-neutral `cvm_*` claims, GPU submodules carry the NRAS claim names unchanged in `ear_attester_claims` (with `cvm_identity` and `cvm_tcb` beside them) and the draft's `ear_nvidia_evidence` (`signature_verified`, `parsed`, `nonce_match`, taken from NRAS's signed `x-nvidia-gpu-attestation-report-*` claims, or `x-nvidia-switch-attestation-report-*` for an NVSwitch) in `ear_verifier_claims`, and `ear_all_submods_bound` is set from the binding checks of section 4.5. A relying party written against that draft reads our tokens without a mapping; a relying party written against this profile gains SNP, Arm, registers and logs.
 
-Multi-attester binding in v1 is `ear_all_submods_bound`, set from the per-submodule nonce checks of section 4.5. The detached-digest bundle of draft-sun-rats-composite-eat (SHA-384 digests, tag 602, one nonce for every sub-attester) is v2, so the GPU submodule ships now.
+Multi-attester binding in v1 is `ear_all_submods_bound`, set from the per-submodule nonce checks of section 4.5. The composing draft (revision 02) defines its value as text, and the verifier emits `"true"` or `"false"`, never its `"unknown"`, since every binding is checked. A binding that fails is a refusal, so the claim is `"false"` only when a device's signed nonce match is false and policy (`gpu.device_policy.require_nonce_match`) tolerates it. The detached-digest bundle of draft-sun-rats-composite-eat (SHA-384 digests, tag 602, one nonce for every sub-attester) is v2, so the GPU submodule ships now.
 
 ### 5.4 Composition with Confidential Containers Trustee
 
@@ -366,7 +369,7 @@ For `vtpm`, steps 3 and 5 are the TPM signature by the AK and the AK binding to 
 
 ## 7. Policy and reference values
 
-Policy is a verifier input, never evidence:
+Policy is a verifier input, never evidence, and follows the JSON rules of section 4.10 (a `null` member, or an object written as an array, fails its validation):
 
 ```
 VerifyPolicy {
@@ -390,7 +393,7 @@ TcbFloor { snp: { min: { bootloader, tee, snp, microcode, fmc? },
            tdx: { min_tee_tcb_svn: bytes16?, min_tcb_evaluation_data_number: int? }? }
 ```
 
-Machine allowlists are first-class: `identity.machines[].id` is the submodule's `cvm_identity` value (SNP `chip_id`, TDX `ppid`, CCA `instance_id`, GPU `ueid`), authenticated by the hardware chain before it is compared. When `identity` is set, an identity absent from the list fails the appraisal (section 5.2); a machine that names a `tcb_floor` is held to that floor and every other machine to `default_floor`. Floors are named so a fleet carries one floor per generation and moves a machine between them without editing every policy.
+Machine allowlists are first-class: `identity.machines[].id` is the submodule's `cvm_identity` value (SNP `chip_id`, TDX `ppid`, CCA `instance_id`, GPU `ueid`), 1 to 128 bytes, authenticated by the hardware chain before it is compared. When `identity` is set, an identity absent from the list fails the appraisal (section 5.2); a machine that names a `tcb_floor` is held to that floor and every other machine to `default_floor`. Floors are named so a fleet carries one floor per generation and moves a machine between them without editing every policy.
 
 An SNP floor bounds each TCB value it names, all four by default: `reported`, the TCB the VCEK that signed the report was derived for; `current`, the firmware running when the report was signed; `committed`, the anti-rollback floor SNP_COMMIT sets, below which the firmware cannot be loaded again; and `launch`, the current TCB when the guest was launched or imported. A floor on `reported` alone leaves a host free to roll the firmware back to its committed version between attestations, and a guest launched on vulnerable firmware keeps that exposure after a live update; the default closes both, and a policy narrows `values` only by naming the values it checks. A floor that names the FMC SPL fails a report without one, which is every generation before Turin. For TDX the Intel status and the floor are independent requirements: the status must be in `tdx_allowed_status` for every quote, and a named floor adds `tee_tcb_svn` componentwise and `tcbEvaluationDataNumber`. The evaluation number is what stops an older TCB Info, still inside its own validity window and validly signed, from reporting a status that a later TCB recovery changed.
 
@@ -418,7 +421,7 @@ pub struct CpuEvidence {
 
 pub struct Appraisal {                       // an EAR claims set (section 5)
     pub eat_profile: String, pub iat: i64, pub ear_verifier_id: VerifierId, pub eat_nonce: Bytes,
-    pub ear_all_submods_bound: bool, pub submods: BTreeMap<String, SubmodAppraisal>,
+    pub ear_all_submods_bound: AllBound, pub submods: BTreeMap<String, SubmodAppraisal>,   // "true" or "false"
 }
 pub struct SubmodAppraisal {
     pub ear_status: Tier, pub ear_trustworthiness_vector: TrustVector, pub ear_appraisal_policy_ids: Vec<String>,
@@ -441,7 +444,7 @@ The public surface is the verifier, the attester functions and the vocabulary; t
 
 Collateral is one type with three transports (inline, cached, fetched), keyed by `CollateralKey`, with `valid_until` taken from each artifact, exactly as the sweep plan describes. The service is a router over the library cache.
 
-Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schemas/cvm-policy-v1.json` are generated from the Rust types (`attestation::profile::schema`) and committed; a library test fails on drift, and attestation-go and c8s-verify-js load them in CI and fail on drift. The test vectors of Appendix B are checked in as `docs/design/vectors/cvm_profile_vectors.json`, emitted by the same script, and every implementation consumes that file; the Rust test fails when a vector has no check. The WASM build exports `appraise(evidence_json, nonce, policy_json, snp_crl_der)`, `appraise_legacy`, and `appraise_with(evidence_json, policy_json, inputs_json)`, which takes the evaluation time, the issued nonce, the collateral the caller holds and recorded NRAS exchanges as inputs (section 14.2) and is the entry the conformance corpus runs through (`crates/attestation-wasm/tests/conformance.rs`); a refusal is a thrown `Error` whose `code` is the section 14.4 code. Its four per-platform exports stay for the transition and are removed with the pre-profile envelope.
+The wire definition is the CDDL module `schemas/cvm-profile-v1.cddl` (Appendix C), with the roots `cvm-evidence`, `cvm-appraisal` and `cvm-policy`. Schemas: `schemas/cvm-evidence-v1.json`, `schemas/cvm-claims-v1.json` and `schemas/cvm-policy-v1.json` are generated from the Rust types (`attestation::profile::schema`) and committed; a library test fails on drift, and attestation-go and c8s-verify-js load them in CI and fail on drift. A test (`crates/attestation/tests/conformance.rs`) holds the module, the JSON Schemas and the reference parsers to each other on every input of the conformance corpus and on single-point changes of the inputs that cover every member path: what the CDDL accepts, the JSON Schema accepts; what the parser accepts, the CDDL accepts; and what the CDDL accepts, the parser accepts, except where the parser enforces a rule CDDL cannot state (each register index appears once, a vtpm register equals the quoted PCR of its index, the commitment carries each slot once, a device's `uuid` is its name's `<ueid>`, floor names resolve, an SNP floor names each value once, the envelope is at most 10 MiB). The CDDL verdicts come from `crates/cddl-check`, which implements the subset of RFC 8610, RFC 9165 and RFC 9741 the module uses and refuses to load anything outside it. The test vectors of Appendix B are checked in as `docs/design/vectors/cvm_profile_vectors.json`, emitted by the same script, and every implementation consumes that file; the Rust test fails when a vector has no check. The WASM build exports `appraise(evidence_json, nonce, policy_json, snp_crl_der)`, `appraise_legacy`, and `appraise_with(evidence_json, policy_json, inputs_json)`, which takes the evaluation time, the issued nonce, the collateral the caller holds and recorded NRAS exchanges as inputs (section 14.2) and is the entry the conformance corpus runs through (`crates/attestation-wasm/tests/conformance.rs`); a refusal is a thrown `Error` whose `code` is the section 14.4 code. Its four per-platform exports stay for the transition and are removed with the pre-profile envelope.
 
 ## 9. Compatibility and migration
 
@@ -562,10 +565,10 @@ case = {
 }
 path = text                           ; relative to conformance/inputs, forward slashes
 collateral-key = text                 ; the text form of the collateral key (section 8)
-nras-exchange = { "arch": text, "nonce": text, "response": path, "jwks": path }
+nras-exchange = { "arch": "HOPPER" / "BLACKWELL" / "LS10", "nonce": text, "response": path, "jwks": path }
 ```
 
-`rule.section` names the section the case exercises and `rule.statement` quotes it, so a case is traceable to the text and the text to its cases. Every input is a file under `inputs/`, so a case is self-contained and identical for every implementation.
+`rule.section` names the section the case exercises and `rule.statement` quotes it, so a case is traceable to the text and the text to its cases. Every input is a file under `inputs/`, so a case is self-contained and identical for every implementation. An input whose path ends in `.gz` is stored gzip-compressed (RFC 1952) and is its decompressed content; the corpus compresses only inputs over 1 MiB, which only the size bounds of section 4.10 need.
 
 A case fixes everything a decision depends on:
 
@@ -657,7 +660,7 @@ Profile claims use integer keys in the CWT private-use range (RFC 8392 section 9
 
 Result tokens use the EAR labels of draft-ietf-rats-ear-04: `ear_status` 1000, `ear_trustworthiness_vector` 1001, `ear_raw_evidence` 1002, `ear_appraisal_policy_ids` 1003, `ear_verifier_id` 1004 (`developer` 0, `build` 1), `ear_attester_claims` 1005, `ear_verifier_claims` 1006, `ear_device_topology` 1007.
 
-Compatibility objects (the `tdx_*` claims of section 5.3 and the `snp` object of section 5.4) keep text keys in both encodings, because the vocabularies they mirror define none. The reserved keys carry no v1 semantics: a v1 verifier ignores `cvm_provenance` as EAT extensibility requires for a whole claim, and never emits `cvm_workload_id`.
+Compatibility objects (the `tdx_*` claims of section 5.3 and the `snp` object of section 5.4) keep text keys in both encodings, because the vocabularies they mirror define none. So do `ear_all_submods_bound` and `ear_nvidia_evidence`, which draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines with JSON names and no CBOR keys. The reserved keys carry no v1 semantics: a v1 verifier ignores `cvm_provenance` as EAT extensibility requires for a whole claim, and never emits `cvm_workload_id`.
 
 ## Appendix B. Test vectors
 
@@ -755,3 +758,733 @@ id           ni:///sha-384;pni3PFUdGgCFfZBnFXificD4loMIb-iiih37U3qScVIMEho9pcoIO
 These vectors revise the unreleased v1 draft twice: content-only event digests are no longer accepted as `cvm` records, and the records follow CEL v1.1, with `recnum` counted per slot, the content under `content_type` 9 and `content` 10, the global sequence in the `cvm` content and the log as one CBOR array. The record digests are unchanged by the second revision. The pending driver and producers must adopt both together with the verifier.
 
 The vectors were produced with SHA-384 and SHA-256 from a standard library over the exact byte strings written above; the generating script is committed beside the schemas so any implementation can regenerate them.
+
+## Appendix C. CDDL module
+
+The wire definition of sections 4, 5 and 7, as committed in `schemas/cvm-profile-v1.cddl`; a test fails when this copy and the file differ.
+
+```cddl
+; CVM attestation profile v1 (tag:confidential.ai,2026:cvm#1): the wire
+; definition of docs/design/cvm-attestation-profile-v1.md, normative for the
+; evidence envelope (section 4), the appraisal (section 5) and the verifier
+; policy (section 7). Three roots: cvm-evidence, cvm-appraisal, cvm-policy.
+;
+; JSON is the primary encoding. CBOR carries the same values with the claim
+; keys of Appendix A, through the JC<> generic of RFC 9711 appendix D; names
+; inside profile objects stay text in both encodings. Byte strings are
+; RFC 9741 .b64u text in JSON (strict: URL-safe alphabet, no padding, zero
+; trailing bits) and byte strings in CBOR. The policy is a verifier input and
+; JSON only.
+;
+; Rules prefixed eat., ear., ar4si. and cmw. are copied from RFC 9711,
+; draft-ietf-rats-ear-04, draft-ietf-rats-ar4si-10 and RFC 9999 with their
+; import prefixes, unchanged. A rule is prose when CDDL cannot state it
+; (uniqueness, equality between two members, duplicate member names in the
+; encoding); section 4.10 and schemas/check list those rules.
+
+; ===================================================================
+; Evidence (section 4)
+; ===================================================================
+
+cvm-evidence = {
+  eat.profile-label ^ => cvm-profile-uri,
+  eat.nonce-label ^ => cvm-nonce,
+  cvm-version-label ^ => 1,
+  eat.submods-label ^ => cvm-submods,
+  * unknown-claim
+}
+
+cvm-profile-uri = "tag:confidential.ai,2026:cvm#1"
+
+; The relying party's challenge, 16 to 64 bytes (section 4.3).
+cvm-nonce = bytes-of<bytes .size (16..64)>
+
+; Unknown claims are ignored, whatever they hold (section 4.10). Every known
+; claim is written with a cut (^), so a known name with a wrong value fails
+; and is never taken for an unknown claim.
+unknown-claim = ( JC<text, (int / text)> => any )
+
+; cpu (exactly one), vtpm (only when the cpu binds through it) and one entry
+; per device; at most 66 submodules in all (sections 4.3, 4.10).
+cvm-submods = submod-shapes .within ({ 1*66 text => any })
+
+submod-shapes = {
+                  "cpu" ^ => cpu-azure,
+                  "vtpm" ^ => cvm-vtpm,
+                  device-entries,
+                }
+              / {
+                  "cpu" ^ => cpu-direct / cca-token,
+                  device-entries,
+                }
+
+device-entries = (
+  * gpu-name ^ => gpu-device,
+  * switch-name ^ => switch-device,
+)
+
+; <ueid> is printable ASCII without "/", 1 to 128 characters.
+gpu-name = text .regexp "gpu/[!-.0-~]{1,128}"
+switch-name = text .regexp "nvswitch/[!-.0-~]{1,128}"
+device-ueid = text .regexp "[!-.0-~]{1,128}"
+
+; --- cpu claims sets (section 4.4), one shape per platform and mode ---
+
+; Azure binds through the vTPM's extraData (section 4.5).
+cpu-azure = snp-azure / tdx-azure
+
+; Everywhere else the report binds the anchor directly.
+cpu-direct = snp-report-data<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-report-data<"dstack", snp-report-type>
+           / snp-commitment<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-commitment<"dstack", snp-report-type>
+           / tdx-report-data<("bare" / "gcp"), (tdx-quote-type / tsm-report-type)>
+           / tdx-report-data<"dstack", tdx-quote-type>
+
+snp-azure = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", "azure", snp-generation>,
+  cvm-report-label ^ => report-record<snp-report-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+snp-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+; snp-vmr registers bind only through the commitment (sections 4.7, 4.9).
+; The log is required by appraisal, not by the envelope (log-required).
+snp-commitment<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"commitment">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  cvm-registers-label ^ => [16*16 snp-register],   ; slots 0 to 15, each once
+  ? cvm-log-label ^ => cvm-log,
+  cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  cpu-hints,
+  * unknown-claim
+}
+
+no-snp-registers = (
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+  no-commitment-claims,
+)
+
+tdx-azure = {
+  cvm-platform-label ^ => platform<"intel", "tdx", "azure", fmspc>,
+  cvm-report-label ^ => report-record<tdx-quote-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+tdx-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"intel", "tdx", H, fmspc>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+; A log needs registers to replay into (section 4.7).
+tdx-registers-and-log = (
+  cvm-registers-label ^ => [1*64 tdx-register],    ; each RTMR at most once
+  ? cvm-log-label ^ => cvm-log
+  //
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+)
+
+no-commitment-claims = (
+  ? cvm-chain-label ^ => absent,
+  ? eat.boot-seed-label ^ => absent,
+)
+
+cpu-hints = (
+  ? eat.debug-status-label ^ => eat.debug-status-type,
+  ? cvm-provenance-label ^ => any,                 ; reserved, ignored in v1
+)
+
+; Matches nothing: the member it types must be absent.
+absent = uint .lt 0
+
+; generation, when present, names what the verifier derives from the report
+; and must agree with it (section 4.2).
+platform<V, T, H, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  ? "generation" ^ => G,
+  "hosting" ^ => H,
+}
+
+snp-generation = "Milan" / "Genoa" / "Turin"
+
+snp-report-type = "application/vnd.confidential-ai.sev-snp-report"
+tdx-quote-type = "application/vnd.confidential-ai.tdx-quote"
+tsm-report-type = "application/vnd.veraison.tsm-report+json"   ; ingest only
+
+; A CMW record whose indicator is exactly 4, evidence (RFC 9999 section 3.1).
+report-record<T> = [ T, bytes-of<field-bytes>, 4 ]
+
+; The certificate pattern binds exactly an x509-tbs-sha256 key; the challenge
+; pattern binds no key or an spki-sha256 or raw key (section 4.5).
+cpu-binding<M> = {
+  "pattern" ^ => "challenge",
+  "mode" ^ => M,
+  ? "key" ^ => challenge-key
+  //
+  "pattern" ^ => "certificate",
+  "mode" ^ => M,
+  "key" ^ => certificate-key,
+}
+
+challenge-key = { "kind" ^ => "spki-sha256", "value" ^ => bytes-of<bytes .size 32> }
+              / { "kind" ^ => "raw", "value" ^ => bytes-of<bytes .size (0..65535)> }
+certificate-key = { "kind" ^ => "x509-tbs-sha256", "value" ^ => bytes-of<bytes .size 32> }
+key-binding = challenge-key / certificate-key
+
+; --- registers (section 4.7) ---
+
+tdx-register = {
+  "index" ^ => 0..3,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "tdx-rtmr",
+  "backing" ^ => "hardware",
+}
+
+snp-register = {
+  "index" ^ => 0..15,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "snp-vmr",
+  "backing" ^ => "virtualized" / "kernel-service" / "privileged-service",
+}
+
+vtpm-register<A, N> = {
+  "index" ^ => 0..23,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "vtpm-pcr",
+  "backing" ^ => "privileged-service",
+}
+
+; --- event log (section 4.8) ---
+
+cvm-log = {
+  "format" ^ => "tcg-cel-cbor" / "tcg-cel-json" / "tdx-ccel"
+              / "tpm2-event-log" / "dstack-json" / "aael",
+  "data" ^ => bytes-of<field-bytes>,
+}
+
+; --- endorsements (section 4.6) ---
+
+snp-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "snp.vek" ^ => endorsement<"application/pkix-cert">,
+  ? "snp.crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+tdx-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "tdx.tcb_info" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.qe_identity" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.pck_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "tdx.root_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+endorsements-collection-type = "tag:confidential.ai,2026:cvm-endorsements#1"
+
+; At least one entry beside __cmwc_t (RFC 9999 section 3.3).
+endorsement-collection<M> = M .within ({ "__cmwc_t" => any, + text => any })
+
+; {body, issuer_chain} as JSON, each a .b64u byte string (section 4.6).
+pcs-signed-type = "application/vnd.confidential-ai.pcs-signed+json"
+
+; Indicator 2 (endorsements) or 1 (reference values shipped inline).
+endorsement<T> = [ T, bytes-of<field-bytes>, 1 / 2 ]
+
+; --- vtpm submodule (section 4.4) ---
+
+; Registers are in the quoted bank, each equal to the quoted PCR of its
+; index and inside the quote's signed selection.
+cvm-vtpm = vtpm<"sha256", 32> / vtpm<"sha384", 48> / vtpm<"sha512", 64>
+
+vtpm<A, N> = {
+  cvm-tpm-quote-label ^ => {
+    "message" ^ => bytes-of<field-bytes>,
+    "signature" ^ => bytes-of<field-bytes>,
+    "pcrs" ^ => [24*24 bytes-of<bytes .size N>],
+    "bank" ^ => A,
+  },
+  cvm-tpm-ak-label ^ => tpm-ak,
+  cvm-registers-label ^ => [1*24 vtpm-register<A, N>],
+  ? cvm-log-label ^ => cvm-log,
+  * unknown-claim
+}
+
+tpm-ak = { "method" ^ => "hcl-report", "data" ^ => bytes-of<field-bytes> }
+
+; --- Arm CCA (section 4.4): the token as the RMM emits it ---
+
+cca-token = JC<[ "CBOR", text .b64u field-bytes ], field-bytes>
+
+; --- device submodules (section 4.4) ---
+
+; NVIDIA's device evidence as its SDK exchanges it with NRAS: evidence_b64
+; and cert_chain_b64 keep NVIDIA's standard base64 text and are passed to
+; NRAS verbatim. uuid equals the <ueid> of the submodule name.
+gpu-device = device<("HOPPER" / "BLACKWELL")>
+switch-device = device<"LS10">
+
+device<A> = {
+  "arch" ^ => A,
+  "uuid" ^ => device-ueid,
+  "evidence_b64" ^ => text .size (1..1048576),
+  "cert_chain_b64" ^ => text .size (1..1048576),
+  cvm-binding-label ^ => { "pattern" ^ => "challenge", "mode" ^ => "nras-nonce" },
+  * unknown-claim
+}
+
+; ===================================================================
+; Appraisal (section 5): an EAR draft-ietf-rats-ear-04 claims set
+; ===================================================================
+
+cvm-appraisal = {
+  eat.profile-label ^ => "tag:ietf.org,2026:rats/ear#04",
+  eat.iat-claim-label ^ => ~eat.time-int,
+  ear.verifier-id-label ^ => ar4si.verifier-id,
+  eat.nonce-label ^ => cvm-nonce,
+  ? ear.raw-evidence-label ^ => raw-evidence,
+  all-submods-bound-label ^ => "true" / "false",
+  eat.submods-label ^ => {
+    "cpu" ^ => appraisal<cpu-claims>,
+    ? "vtpm" ^ => appraisal<vtpm-claims>,
+    * gpu-name ^ => appraisal<device-claims>,
+    * switch-name ^ => appraisal<device-claims>,
+  },
+}
+
+; draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines this claim with a text
+; value and no CBOR key, so its key is text in both encodings. It is "false"
+; only for a device whose signed nonce match is false under a policy that
+; tolerates it; a binding that fails is otherwise a refusal (section 5.3).
+all-submods-bound-label = "ear_all_submods_bound"
+
+; The envelope as appraised and the endorsements used, as a CMW collection
+; in a record of type application/cmw+json (section 5).
+raw-evidence = [ "application/cmw+json", bytes-of<bytes>, ? cmw-ind ]
+
+; ear_status is the worst tier the vector reaches (section 5.2). The two
+; policy ids are the profile and the policy's ni name (section 5.1).
+appraisal<C> = {
+  ear.status-label ^ => ar4si.trustworthiness-tier,
+  ear.trustworthiness-vector-label ^ => ar4si.trustworthiness-vector,
+  ear.appraisal-policy-ids-label ^ => [ cvm-profile-uri, policy-ni-uri ],
+  ear.attester-claims-label ^ => C,
+  ear.verifier-claims-label ^ => verifier-claims,
+}
+
+; RFC 6920: the SHA-384 of the JCS serialization of the effective policy.
+policy-ni-uri = text .regexp "ni:///sha-384;[A-Za-z0-9_-]{64}"
+
+; --- attester claims (section 5.1) ---
+
+cpu-claims = snp-claims / tdx-claims
+
+snp-claims = {
+  cvm-platform-label ^ => verified-platform<"amd", "sev-snp", snp-generation>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  ? cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "snp-host-data", "value" ^ => bytes-of<bytes .size 32> },
+  cvm-owner-label ^ => {
+    "family_id" ^ => bytes-of<bytes .size 16>,
+    "image_id" ^ => bytes-of<bytes .size 16>,
+    "id_key_digest" ^ => bytes-of<bytes .size 48>,
+    "author_key_digest" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "smt" ^ => bool,
+    "single_socket" ^ => bool,
+    "vmpl" ^ => uint .le 255,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "reported" ^ => snp-tcb,
+    "committed" ^ => snp-tcb,
+    "current" ^ => snp-tcb,
+    "launch" ^ => snp-tcb,
+  },
+  cvm-identity-label ^ => { "chip_id" ^ => bytes-of<bytes .size 64> },
+  ? cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  ? eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  "snp" ^ => trustee-snp,
+}
+
+tdx-claims = {
+  cvm-platform-label ^ => verified-platform<"intel", "tdx", fmspc>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "tdx-mrconfigid", "value" ^ => bytes-of<bytes .size 48> },
+  cvm-owner-label ^ => {
+    "mr_owner" ^ => bytes-of<bytes .size 48>,
+    "mr_owner_config" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "sept_ve_disable" ^ => bool,
+    ? "service_td" ^ => bool,
+    "reserved_bits_zero" ^ => bool,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    "pck_tcb" ^ => bytes-of<bytes .size 16>,
+    "pcesvn" ^ => uint .le 65535,
+    "fmspc" ^ => fmspc,
+    ? "status" ^ => tdx-tcb-status,
+    ? "advisories" ^ => [+ text],
+  },
+  cvm-identity-label ^ => { "ppid" ^ => bytes-of<bytes .size 16> },
+  tdx-compat-claims,
+}
+
+fmspc = text .regexp "[0-9a-f]{12}"
+
+verified-platform<V, T, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  "generation" ^ => G,
+  "hosting" ^ => "bare" / "azure" / "gcp" / "dstack",   ; as reported (section 4.2)
+}
+
+freshness = {
+  "pattern" ^ => "challenge" / "certificate",
+  "mode" ^ => "report-data" / "commitment" / "vtpm-extradata" / "cca-challenge" / "nras-nonce",
+  ? "key" ^ => key-binding,
+  ? "not_before" ^ => rfc3339,
+  ? "not_after" ^ => rfc3339,
+}
+
+verified-register = verified-register-in<"sha256", 32>
+                  / verified-register-in<"sha384", 48>
+                  / verified-register-in<"sha512", 64>
+
+verified-register-in<A, N> = {
+  "index" ^ => uint .le 65535,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "tdx-rtmr" / "snp-vmr" / "vtpm-pcr" / "cca-rem",
+  "backing" ^ => backing,
+  "replayed" ^ => bool,
+  ? "owner" ^ => text .size (1..255),
+  ? "purpose" ^ => text .size (1..255),
+}
+
+digest<A, N> = { "alg" ^ => A, "value" ^ => bytes-of<bytes .size N> }
+
+snp-tcb = {
+  "bootloader" ^ => uint .le 255,
+  "tee" ^ => uint .le 255,
+  "snp" ^ => uint .le 255,
+  "microcode" ^ => uint .le 255,
+  ? "fmc" ^ => uint .le 255,
+}
+
+tdx-tcb-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+               / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+               / "OutOfDateConfigurationNeeded" / "Revoked"
+
+; The Confidential Containers Trustee names for an SNP report (section 5.4).
+trustee-snp = {
+  "policy_abi_major" ^ => uint .le 255,
+  "policy_abi_minor" ^ => uint .le 255,
+  "policy_smt_allowed" ^ => bool,
+  "policy_migrate_ma" ^ => bool,
+  "policy_debug_allowed" ^ => bool,
+  "policy_single_socket" ^ => bool,
+  "reported_tcb_bootloader" ^ => uint .le 255,
+  "reported_tcb_tee" ^ => uint .le 255,
+  "reported_tcb_snp" ^ => uint .le 255,
+  "reported_tcb_microcode" ^ => uint .le 255,
+  "platform_tsme_enabled" ^ => bool,
+  "platform_smt_enabled" ^ => bool,
+  "measurement" ^ => hex48,
+  "report_data" ^ => hex64,
+  "init_data" ^ => hex32,
+  "chip_id" ^ => hex64,
+}
+
+; The Intel Trust Authority names for a TD quote (section 5.3).
+tdx-compat-claims = (
+  "tdx_mrtd" ^ => hex48,
+  "tdx_rtmr0" ^ => hex48,
+  "tdx_rtmr1" ^ => hex48,
+  "tdx_rtmr2" ^ => hex48,
+  "tdx_rtmr3" ^ => hex48,
+  "tdx_mrconfigid" ^ => hex48,
+  "tdx_mrowner" ^ => hex48,
+  "tdx_mrownerconfig" ^ => hex48,
+  "tdx_td_attributes" ^ => hex8,
+  "tdx_tee_tcb_svn" ^ => hex16,
+  "tdx_xfam" ^ => hex8,
+  "tdx_mrseam" ^ => hex48,
+  "tdx_mrsignerseam" ^ => hex48,
+)
+
+hex8 = text .regexp "[0-9a-f]{16}"
+hex16 = text .regexp "[0-9a-f]{32}"
+hex32 = text .regexp "[0-9a-f]{64}"
+hex48 = text .regexp "[0-9a-f]{96}"
+hex64 = text .regexp "[0-9a-f]{128}"
+
+vtpm-claims = {
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-tpm-ak-label ^ => tpm-ak,
+}
+
+; NRAS's signed device claims verbatim, with cvm_identity and cvm_tcb beside
+; them (section 5.3).
+device-claims = ear.claims-map-type
+
+; --- verifier claims (section 5.1) ---
+
+verifier-claims = ar4si.non-empty<{
+  ? cvm-collateral-label ^ => { + collateral-check => collateral-outcome },
+  ? cvm-reference-label ^ => reference-outcome,
+  ? cvm-backing-min-label ^ => { "required" ^ => backing, "weakest_seen" ^ => backing },
+  ? "ear_nvidia_evidence" ^ => {
+    ? "signature_verified" ^ => bool,
+    ? "parsed" ^ => bool,
+    ? "nonce_match" ^ => bool,
+  },
+}>
+
+collateral-check = "snp_crl" / "tdx_pck_crl" / "tdx_root_crl"
+                 / "tdx_tcb_info" / "tdx_qe_identity" / "nras_jwks"
+
+collateral-outcome = {
+  "status" ^ => "checked" / "skipped" / "not-applicable",
+  ? "reason" ^ => text,
+  ? "this_update" ^ => rfc3339,
+  ? "next_update" ^ => rfc3339,
+  ? "signed" ^ => bool,
+}
+
+reference-outcome = ar4si.non-empty<{
+  ? "launch_measurement" ^ => bool,
+  ? "registers" ^ => { + register-index => bool },
+}>
+
+register-index = JC<text .base10 (0..65535), 0..65535>
+
+rfc3339 = text .regexp "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
+
+; ===================================================================
+; Policy (section 7): a verifier input, JSON only. Every member is optional
+; and takes the default shown, and every default fails closed.
+; ===================================================================
+
+cvm-policy = {
+  ? "reference" ^ => reference-values,
+  ? "min_backing" ^ => backing .default "hardware",
+  ? "freshness" ^ => { ? "key" ^ => key-binding },
+  ? "commitment" ^ => {
+    ? "header16" ^ => "QVRTLU1SLTEBARAAAAAAAA",
+    ? "seed" ^ => "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn",
+  },
+  ? "tcb" ^ => tcb-policy,
+  ? "policy_bits" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "allow_migration" ^ => bool .default false,
+    ? "require_vmpl0" ^ => bool .default true,
+    ? "require_sept_ve_disable" ^ => bool .default true,
+    ? "require_zero_reserved_attributes" ^ => bool .default true,
+    ? "allow_service_td" ^ => bool .default false,
+  },
+  ? "identity" ^ => { "machines" ^ => [+ machine-entry] },
+  ? "owner" ^ => { "id_key_digests" ^ => [+ bytes-of<bytes .size 48>] },
+  ? "gpu" ^ => gpu-policy,
+}
+
+reference-values = {
+  ? "launch_measurement" ^ => [* policy-digest],
+  ? "registers" ^ => { * register-index => [+ policy-digest] },
+  ? "pcrs" ^ => { * pcr-index => [+ policy-digest] },
+  ? "slot_owners" ^ => { * register-index => text .size (1..255) },
+  ? "host_data" ^ => bytes-of<bytes .size (1..48)>,
+}
+
+pcr-index = text .base10 (0..23)
+
+policy-digest = digest<"sha256", 32> / digest<"sha384", 48> / digest<"sha512", 64>
+
+; A named floor must constrain something; default_floor and every machine's
+; tcb_floor name one of the floors.
+tcb-policy = {
+  ? "floors" ^ => { * text => tcb-floor },
+  ? "default_floor" ^ => text,
+  ? "tdx_allowed_status" ^ => [+ allowed-tdx-status],   ; default ["UpToDate"]
+  ? "require_revocation" ^ => bool .default true,
+  ? "require_signed_collateral" ^ => bool .default true,
+}
+
+; Revoked can never be allowed.
+allowed-tdx-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+                   / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+                   / "OutOfDateConfigurationNeeded"
+
+tcb-floor = ar4si.non-empty<{
+  ? "snp" ^ => {
+    "min" ^ => snp-tcb,
+    ? "values" ^ => [1*4 snp-tcb-value],           ; each at most once
+  },
+  ? "tdx" ^ => {
+    ? "min_tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    ? "min_tcb_evaluation_data_number" ^ => uint .le 4294967295,
+  },
+}>
+
+snp-tcb-value = "reported" / "current" / "committed" / "launch"
+
+machine-entry = {
+  "id" ^ => bytes-of<bytes .size (1..1048576)>,
+  ? "tcb_floor" ^ => text,
+}
+
+gpu-policy = {
+  ? "required" ^ => bool .default false,
+  ? "expected_archs" ^ => [+ ("HOPPER" / "BLACKWELL" / "LS10")],
+  ? "device_policy" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "require_secboot" ^ => bool .default true,
+    ? "require_nonce_match" ^ => bool .default true,
+    ? "require_measres_success" ^ => bool .default true,
+  },
+}
+
+; ===================================================================
+; Shared
+; ===================================================================
+
+backing = "virtualized" / "kernel-service" / "privileged-service" / "hardware"
+
+; Every byte string field is at most 1 MiB (section 4.10).
+field-bytes = bytes .size (1..1048576)
+
+bytes-of<B> = JC<text .b64u B, B>
+
+; RFC 9999: non-zero, and only the five registered bits.
+cmw-ind = 1..31
+
+; Appendix A.
+cvm-version-label = JC<"cvm_version", -70000>
+cvm-platform-label = JC<"cvm_platform", -70001>
+cvm-report-label = JC<"cvm_report", -70002>
+cvm-binding-label = JC<"cvm_binding", -70003>
+cvm-endorsements-label = JC<"cvm_endorsements", -70004>
+cvm-registers-label = JC<"cvm_registers", -70005>
+cvm-log-label = JC<"cvm_log", -70006>
+cvm-chain-label = JC<"cvm_chain", -70007>
+cvm-provenance-label = JC<"cvm_provenance", -70008>
+cvm-tpm-quote-label = JC<"cvm_tpm_quote", -70010>
+cvm-tpm-ak-label = JC<"cvm_tpm_ak", -70011>
+cvm-launch-measurement-label = JC<"cvm_launch_measurement", -70020>
+cvm-freshness-label = JC<"cvm_freshness", -70021>
+cvm-host-data-label = JC<"cvm_host_data", -70022>
+cvm-owner-label = JC<"cvm_owner", -70023>
+cvm-policy-label = JC<"cvm_policy", -70024>
+cvm-tcb-label = JC<"cvm_tcb", -70025>
+cvm-identity-label = JC<"cvm_identity", -70026>
+cvm-collateral-label = JC<"cvm_collateral", -70030>
+cvm-reference-label = JC<"cvm_reference", -70031>
+cvm-backing-min-label = JC<"cvm_backing_min", -70032>
+
+; From RFC 9711 section 7.3 and appendix D.
+eat.JC<J, C> = eat.JSON-ONLY<J> / eat.CBOR-ONLY<C>
+eat.JSON-ONLY<J> = J .feature "json"
+eat.CBOR-ONLY<C> = C .feature "cbor"
+JC<J, C> = eat.JC<J, C>
+eat.time-int = #6.1(int)
+eat.nonce-label = eat.JC<"eat_nonce", 10>
+eat.debug-status-label = eat.JC<"dbgstat", 263>
+eat.profile-label = eat.JC<"eat_profile", 265>
+eat.submods-label = eat.JC<"submods", 266>
+eat.boot-seed-label = eat.JC<"bootseed", 268>
+eat.iat-claim-label = eat.JC<"iat", 6>
+eat.debug-status-type = eat.ds-enabled / eat.disabled / eat.disabled-since-boot
+                      / eat.disabled-permanently / eat.disabled-fully-and-permanently
+eat.ds-enabled = eat.JC<"enabled", 0>
+eat.disabled = eat.JC<"disabled", 1>
+eat.disabled-since-boot = eat.JC<"disabled-since-boot", 2>
+eat.disabled-permanently = eat.JC<"disabled-permanently", 3>
+eat.disabled-fully-and-permanently = eat.JC<"disabled-fully-and-permanently", 4>
+
+; From draft-ietf-rats-ear-04 appendix A.
+ear.verifier-id-label = eat.JC<"ear_verifier_id", 1004>
+ear.raw-evidence-label = eat.JC<"ear_raw_evidence", 1002>
+ear.status-label = eat.JC<"ear_status", 1000>
+ear.trustworthiness-vector-label = eat.JC<"ear_trustworthiness_vector", 1001>
+ear.appraisal-policy-ids-label = eat.JC<"ear_appraisal_policy_ids", 1003>
+ear.attester-claims-label = eat.JC<"ear_attester_claims", 1005>
+ear.verifier-claims-label = eat.JC<"ear_verifier_claims", 1006>
+ear.claims-map-type = eat.JC<ear.claims-map-type-json, ear.claims-map-type-cbor>
+ear.claims-map-type-json = {+ text => any}
+ear.claims-map-type-cbor = {+ (text / int) => any}
+
+; From draft-ietf-rats-ar4si-10 section 3.
+ar4si.trustworthiness-vector = ar4si.non-empty<{
+  ? ar4si.instance-identity-label => ar4si.trustworthiness-claim,
+  ? ar4si.configuration-label => ar4si.trustworthiness-claim,
+  ? ar4si.executables-label => ar4si.trustworthiness-claim,
+  ? ar4si.file-system-label => ar4si.trustworthiness-claim,
+  ? ar4si.hardware-label => ar4si.trustworthiness-claim,
+  ? ar4si.runtime-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.storage-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.sourced-data-label => ar4si.trustworthiness-claim,
+}>
+ar4si.non-empty<M> = M .within ({+ any => any})
+ar4si.trustworthiness-claim = -128..127
+ar4si.instance-identity-label = eat.JC<"instance-identity", 0>
+ar4si.configuration-label = eat.JC<"configuration", 1>
+ar4si.executables-label = eat.JC<"executables", 2>
+ar4si.file-system-label = eat.JC<"file-system", 3>
+ar4si.hardware-label = eat.JC<"hardware", 4>
+ar4si.runtime-opaque-label = eat.JC<"runtime-opaque", 5>
+ar4si.storage-opaque-label = eat.JC<"storage-opaque", 6>
+ar4si.sourced-data-label = eat.JC<"sourced-data", 7>
+ar4si.trustworthiness-tier = eat.JC<"none", 0> / eat.JC<"affirming", 2>
+                           / eat.JC<"warning", 32> / eat.JC<"contraindicated", 96>
+ar4si.verifier-id = {
+  ar4si.developer-label => text,
+  ar4si.build-label => text,
+}
+ar4si.developer-label = eat.JC<"developer", 0>
+ar4si.build-label = eat.JC<"build", 1>
+```

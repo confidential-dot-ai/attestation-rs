@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-register-backing-hardware",
+  "rule": {
+    "section": "4.7",
+    "statement": "backing is constrained by source: privileged-service for vtpm-pcr"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-register-backing-hardware.json",
+  "policy": "policy/azure-snp-register-backing-hardware.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

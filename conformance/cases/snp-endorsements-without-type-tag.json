@@ -1,0 +1,13 @@
+{
+  "id": "snp-endorsements-without-type-tag",
+  "rule": {
+    "section": "4.6",
+    "statement": "cvm_endorsements carries its __cmwc_t"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-endorsements-without-type-tag.json",
+  "policy": "policy/snp-endorsements-without-type-tag.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

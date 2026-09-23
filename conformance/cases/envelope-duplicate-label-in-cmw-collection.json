@@ -1,0 +1,13 @@
+{
+  "id": "envelope-duplicate-label-in-cmw-collection",
+  "rule": {
+    "section": "4.10",
+    "statement": "an object with a duplicate member name is rejected: a CMW collection"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-duplicate-label-in-cmw-collection.json",
+  "policy": "policy/envelope-duplicate-label-in-cmw-collection.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

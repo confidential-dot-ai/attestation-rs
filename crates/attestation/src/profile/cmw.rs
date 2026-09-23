@@ -18,8 +18,9 @@ use std::fmt;
 pub const MAX_CMW_DEPTH: u8 = 2;
 /// Entries per collection; the profile defines seven labels.
 pub const MAX_CMW_ENTRIES: usize = 32;
-/// RFC 9999 defines indicator bits 0 to 3.
-pub const MAX_CMW_IND: u32 = 0b1111;
+/// RFC 9999 section 3.1 registers five indicator bits, so an indicator is 1
+/// to 31; zero is not a value.
+pub const MAX_CMW_IND: u32 = 0b1_1111;
 
 /// `json-record = [type: media-type, value: base64url-string, ? ind: uint]`
 /// (RFC 9999 section 3.1).
@@ -79,8 +80,10 @@ impl<'de> Deserialize<'de> for CmwRecord {
                 if media_type.is_empty() || !media_type.contains('/') {
                     return Err(de::Error::custom("CMW record: type is not a media type"));
                 }
-                if ind.is_some_and(|i| i > MAX_CMW_IND) {
-                    return Err(de::Error::custom("CMW record: indicator above 15"));
+                if ind.is_some_and(|i| i == 0 || i > MAX_CMW_IND) {
+                    return Err(de::Error::custom(
+                        "CMW record: an indicator is 1 to 31 (RFC 9999 section 3.1)",
+                    ));
                 }
                 Ok(CmwRecord {
                     media_type,
@@ -105,7 +108,7 @@ impl JsonSchema for CmwRecord {
             "prefixItems": [
                 { "type": "string", "pattern": "^[^/]+/.+$" },
                 bytes,
-                { "type": "integer", "minimum": 0, "maximum": MAX_CMW_IND }
+                { "type": "integer", "minimum": 1, "maximum": MAX_CMW_IND }
             ],
             "minItems": 2,
             "maxItems": 3
@@ -266,8 +269,11 @@ mod tests {
         assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",2,9]"#).is_err());
         assert!(serde_json::from_str::<CmwRecord>(r#"["notatype","AQID"]"#).is_err());
         assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID=="]"#).is_err());
-        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",16]"#).is_err());
-        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",15]"#).is_ok());
+        // RFC 9999 section 3.1: non-zero, five registered bits.
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",0]"#).is_err());
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",32]"#).is_err());
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",16]"#).is_ok());
+        assert!(serde_json::from_str::<CmwRecord>(r#"["a/b","AQID",31]"#).is_ok());
     }
 
     #[test]

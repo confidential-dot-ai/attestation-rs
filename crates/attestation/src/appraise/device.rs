@@ -203,7 +203,9 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
                 }),
             },
         },
-        bound: true,
+        // A device NRAS reports unmatched is not bound to this session, even
+        // when policy tolerates the mismatch (section 5.3).
+        bound: claims.nonce_match == Some(true),
     })
 }
 

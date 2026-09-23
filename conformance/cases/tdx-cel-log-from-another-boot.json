@@ -1,0 +1,13 @@
+{
+  "id": "tdx-cel-log-from-another-boot",
+  "rule": {
+    "section": "4.8",
+    "statement": "a CEL log that does not reproduce the signed RTMRs is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-cel-log-from-another-boot.json",
+  "policy": "policy/tdx-cel-log-from-another-boot.json",
+  "expect": {
+    "refusal": "replay-mismatch"
+  }
+}

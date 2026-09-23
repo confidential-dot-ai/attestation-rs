@@ -1,0 +1,13 @@
+{
+  "id": "snp-platform-vendor-disagrees-with-tee",
+  "rule": {
+    "section": "4.4",
+    "statement": "cvm_platform: the vendor is the TEE's vendor"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-platform-vendor-disagrees-with-tee.json",
+  "policy": "policy/snp-platform-vendor-disagrees-with-tee.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

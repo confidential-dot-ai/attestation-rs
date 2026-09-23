@@ -1,5 +1,5 @@
 {
-  "ear_all_submods_bound": true,
+  "ear_all_submods_bound": "true",
   "eat_nonce": "YXR0ZXN0YXRpb24tdGVzdC1maXh0dXJl",
   "eat_profile": "tag:ietf.org,2026:rats/ear#04",
   "submods": {
@@ -331,7 +331,9 @@
         }
       },
       "ear_status": "none",
-      "ear_trustworthiness_vector": {},
+      "ear_trustworthiness_vector": {
+        "executables": 0
+      },
       "ear_verifier_claims": {
         "cvm_backing_min": {
           "required": "privileged-service",

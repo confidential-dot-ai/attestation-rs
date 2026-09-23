@@ -1,0 +1,13 @@
+{
+  "id": "snp-binding-mode-for-other-platform",
+  "rule": {
+    "section": "4.5",
+    "statement": "vtpm-extradata binds Azure evidence; a bare SEV-SNP report binds its report data"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-binding-mode-for-other-platform.json",
+  "policy": "policy/snp-binding-mode-for-other-platform.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

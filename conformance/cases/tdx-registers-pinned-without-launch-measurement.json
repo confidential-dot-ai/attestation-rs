@@ -1,0 +1,13 @@
+{
+  "id": "tdx-registers-pinned-without-launch-measurement",
+  "rule": {
+    "section": "5.2",
+    "statement": "with the launch measurement unpinned nothing vouches for the firmware, so executables makes no claim"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-registers-pinned-without-launch-measurement.json",
+  "policy": "policy/tdx-registers-pinned-without-launch-measurement.json",
+  "expect": {
+    "appraisal": "expected/tdx-registers-pinned-without-launch-measurement.json"
+  }
+}

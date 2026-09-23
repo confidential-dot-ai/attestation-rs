@@ -1,0 +1,13 @@
+{
+  "id": "snp-generation-hint-unknown",
+  "rule": {
+    "section": "4.4",
+    "statement": "cvm_platform.generation is Milan, Genoa or Turin on SEV-SNP"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-generation-hint-unknown.json",
+  "policy": "policy/snp-generation-hint-unknown.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

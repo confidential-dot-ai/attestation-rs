@@ -153,7 +153,7 @@ async fn snp_report_with_inline_vek_appraises() {
     assert_eq!(cpu.ear_status, Tier::Affirming);
     assert_eq!(cpu.ear_trustworthiness_vector.hardware, Some(2));
     assert_eq!(cpu.ear_trustworthiness_vector.runtime_opaque, Some(2));
-    assert!(appraisal.ear_all_submods_bound);
+    assert!(appraisal.ear_all_submods_bound.is_true());
     let AttesterClaims::Cpu(claims) = &cpu.ear_attester_claims else {
         panic!("cpu claims")
     };
@@ -657,7 +657,7 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
         .appraise_legacy_json(legacy, nonce, None, &policy)
         .await
         .unwrap();
-    assert!(a.ear_all_submods_bound);
+    assert!(a.ear_all_submods_bound.is_true());
     let AttesterClaims::Vtpm(vtpm) = &a.submods["vtpm"].ear_attester_claims else {
         panic!("vtpm claims")
     };
@@ -756,7 +756,7 @@ async fn azure_snp_evidence_appraises_through_the_vtpm() {
         .appraise_legacy_json(legacy, nonce, None, &policy)
         .await
         .unwrap();
-    assert!(a.ear_all_submods_bound);
+    assert!(a.ear_all_submods_bound.is_true());
     assert_eq!(a.submods.len(), 2);
     let AttesterClaims::Cpu(cpu) = &a.submods["cpu"].ear_attester_claims else {
         panic!("cpu claims")

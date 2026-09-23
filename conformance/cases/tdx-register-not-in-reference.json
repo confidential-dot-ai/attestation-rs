@@ -1,0 +1,13 @@
+{
+  "id": "tdx-register-not-in-reference",
+  "rule": {
+    "section": "7",
+    "statement": "reference.registers: a register outside its reference values is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-register-not-in-reference.json",
+  "policy": "policy/tdx-register-not-in-reference.json",
+  "expect": {
+    "refusal": "reference-mismatch"
+  }
+}

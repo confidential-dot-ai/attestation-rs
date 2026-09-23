@@ -1,0 +1,13 @@
+{
+  "id": "dstack-json-runtime-event-altered",
+  "rule": {
+    "section": "4.8",
+    "statement": "dstack-json: a runtime event whose digest does not recompute is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/dstack-json-runtime-event-altered.json",
+  "policy": "policy/dstack-json-runtime-event-altered.json",
+  "expect": {
+    "refusal": "replay-mismatch"
+  }
+}

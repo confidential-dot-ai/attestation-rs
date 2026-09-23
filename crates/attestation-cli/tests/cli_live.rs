@@ -156,7 +156,7 @@ fn round_trip(platform: &str, device: &str, nonce_len: usize) {
     let appraisal: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("verify prints the appraisal");
     eprintln!("{}", serde_json::to_string_pretty(&appraisal).unwrap());
-    assert_eq!(appraisal["ear_all_submods_bound"], true);
+    assert_eq!(appraisal["ear_all_submods_bound"], "true");
 
     // A measurement pin narrows the policy: the true value passes, another fails.
     let pin = if platform.ends_with("tdx") {

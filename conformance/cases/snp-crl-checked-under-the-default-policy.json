@@ -1,0 +1,15 @@
+{
+  "id": "snp-crl-checked-under-the-default-policy",
+  "rule": {
+    "section": "7",
+    "statement": "a case without a policy runs under the section 7 defaults"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-crl-checked-under-the-default-policy.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.der"
+  },
+  "expect": {
+    "appraisal": "expected/snp-crl-checked-under-the-default-policy.json"
+  }
+}

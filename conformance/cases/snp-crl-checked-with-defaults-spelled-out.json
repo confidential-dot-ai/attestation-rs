@@ -1,0 +1,16 @@
+{
+  "id": "snp-crl-checked-with-defaults-spelled-out",
+  "rule": {
+    "section": "5.1",
+    "statement": "the policy id is the SHA-384 of the effective policy: the defaults written out name the same policy as no policy"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-crl-checked-with-defaults-spelled-out.json",
+  "policy": "policy/snp-crl-checked-with-defaults-spelled-out.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.der"
+  },
+  "expect": {
+    "appraisal": "expected/snp-crl-checked-with-defaults-spelled-out.json"
+  }
+}

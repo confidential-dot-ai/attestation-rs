@@ -24,6 +24,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+/// The SNP generations `cvm_platform.generation` may name.
+pub const SNP_GENERATIONS: [&str; 3] = ["Milan", "Genoa", "Turin"];
+
 /// Upper bound on submodules in one envelope: one CPU, one vTPM, and devices.
 pub const MAX_SUBMODS: usize = 66;
 /// A device `<ueid>` is printable ASCII without `/`, at most this long.
@@ -413,20 +416,44 @@ pub struct CpuEvidence {
     pub cvm_platform: PlatformHint,
     pub cvm_report: CmwRecord,
     pub cvm_binding: Binding,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cvm_endorsements: Option<CmwCollection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cvm_registers: Option<Vec<Register>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cvm_log: Option<EventLog>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cvm_chain: Option<ChainInfo>,
     /// EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 4.9).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bootseed: Option<FixedBytes<32>>,
     /// EAT `dbgstat` (key 263), a hint; the verifier derives the real value
     /// and refuses a hint that contradicts the signed report.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dbgstat: Option<DebugStatus>,
     /// Reserved (section 4.4): carried through, never interpreted in v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,7 +465,11 @@ pub struct CpuEvidence {
 pub struct PlatformHint {
     pub vendor: Vendor,
     pub tee: Tee,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub generation: Option<String>,
     pub hosting: Hosting,
 }
@@ -484,7 +515,11 @@ pub enum Hosting {
 pub struct Binding {
     pub pattern: FreshnessPattern,
     pub mode: BindingMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub key: Option<KeyBinding>,
 }
 
@@ -775,7 +810,11 @@ pub struct VtpmEvidence {
     pub cvm_tpm_quote: TpmQuote,
     pub cvm_tpm_ak: TpmAkBinding,
     pub cvm_registers: Vec<Register>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "super::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cvm_log: Option<EventLog>,
 }
 
@@ -791,8 +830,10 @@ pub struct TpmQuote {
 
 impl TpmQuote {
     pub fn validate(&self) -> Result<()> {
-        if self.message.is_empty() || self.signature.is_empty() {
-            return Err(invalid("cvm_tpm_quote: empty message or signature"));
+        for (what, field) in [("message", &self.message), ("signature", &self.signature)] {
+            if field.is_empty() || field.len() > MAX_EVIDENCE_FIELD_SIZE {
+                return Err(invalid(format!("cvm_tpm_quote: {what} empty or too large")));
+            }
         }
         if self.pcrs.len() != 24 {
             return Err(invalid(format!(
@@ -863,9 +904,9 @@ impl From<GpuArch> for crate::types::NvidiaGpuArch {
 }
 
 /// `gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence
-/// plus the nonce binding (section 4.4).
+/// plus the nonce binding (section 4.4). A claims set like the others, so an
+/// unknown claim is ignored (section 4.10).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct GpuDeviceEvidence {
     pub arch: GpuArch,
     pub uuid: String,
@@ -930,9 +971,22 @@ impl CpuEvidence {
         if p.tee.vendor() != p.vendor {
             return Err(invalid("cvm_platform: vendor and tee disagree"));
         }
+        // The hint names what the verifier derives from the report (section
+        // 4.4): an SNP generation, or a TDX FMSPC in lowercase hex.
         if let Some(g) = &p.generation {
-            if g.is_empty() || g.len() > 64 {
-                return Err(invalid("cvm_platform.generation: empty or too long"));
+            let ok = match p.tee {
+                Tee::SevSnp => SNP_GENERATIONS.contains(&g.as_str()),
+                Tee::Tdx => {
+                    g.len() == 12
+                        && g.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }
+                Tee::Cca => false,
+            };
+            if !ok {
+                return Err(invalid(format!(
+                    "cvm_platform.generation {g:?} is not a generation this profile names"
+                )));
             }
         }
 
@@ -1218,7 +1272,7 @@ impl Evidence {
             });
         }
         let e: Evidence =
-            serde_json::from_slice(json).map_err(|e| invalid(format!("envelope: {e}")))?;
+            super::strict::from_slice(json).map_err(|e| invalid(format!("envelope: {e}")))?;
         e.validate()?;
         Ok(e)
     }
@@ -1283,10 +1337,12 @@ impl Evidence {
         let Some(mode) = cpu_mode else {
             return Err(invalid("submods: no cpu submodule"));
         };
-        if mode == BindingMode::VtpmExtradata && !have_vtpm {
-            return Err(invalid(
-                "cpu binds through vtpm-extradata but there is no vtpm submodule",
-            ));
+        if (mode == BindingMode::VtpmExtradata) != have_vtpm {
+            return Err(invalid(if have_vtpm {
+                "a vtpm submodule needs a cpu bound through vtpm-extradata"
+            } else {
+                "cpu binds through vtpm-extradata but there is no vtpm submodule"
+            }));
         }
         Ok(())
     }
@@ -1519,9 +1575,11 @@ mod tests {
             .unwrap()
             .pop();
         assert!(err(&v).contains("exactly 4"));
-        let mut v = snp_envelope();
-        v["submods"]["cpu"]["cvm_report"][2] = json!(4294967295u32);
-        assert!(err(&v).contains("indicator above 15"));
+        for ind in [0u32, 32, 4294967295] {
+            let mut v = snp_envelope();
+            v["submods"]["cpu"]["cvm_report"][2] = json!(ind);
+            assert!(err(&v).contains("1 to 31"), "{ind}");
+        }
         let mut v = snp_envelope();
         v["submods"]["cpu"]["cvm_platform"]["vendor"] = json!("intel");
         assert!(err(&v).contains("disagree"));

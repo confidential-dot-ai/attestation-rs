@@ -469,10 +469,10 @@ pub fn extract_tpm_nonce(message: &[u8]) -> Result<Vec<u8>> {
 /// Verify TPM nonce matches expected report_data.
 pub fn verify_tpm_nonce(message: &[u8], expected: &[u8]) -> Result<()> {
     let nonce = extract_tpm_nonce(message)?;
+    // extraData must equal the anchor exactly; another length is a binding
+    // that does not hold, not a quote that cannot be parsed.
     if nonce.len() != expected.len() {
-        return Err(AttestationError::QuoteParseFailed(
-            "TPM nonce length mismatch".to_string(),
-        ));
+        return Err(AttestationError::ReportDataMismatch);
     }
     if !constant_time_eq(&nonce, expected) {
         return Err(AttestationError::ReportDataMismatch);
@@ -531,9 +531,11 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
 
     let computed_digest = sha256(&pcr_concat);
 
+    // The quote parsed; the PCR values it carries are not the ones it signed.
     if !constant_time_eq(&computed_digest, &expected_digest) {
-        return Err(AttestationError::QuoteParseFailed(
-            "PCR digest in TPM quote does not match hash of PCR values".to_string(),
+        return Err(AttestationError::refused(
+            crate::error::RefusalCode::RegisterMismatch,
+            "PCR digest in TPM quote does not match hash of PCR values",
         ));
     }
 

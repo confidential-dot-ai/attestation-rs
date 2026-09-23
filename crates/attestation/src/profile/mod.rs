@@ -16,6 +16,7 @@ pub mod keys;
 pub mod policy;
 pub mod registers;
 pub mod schema;
+pub mod strict;
 
 pub use appraisal::*;
 pub use bytes::{Bytes, FixedBytes};

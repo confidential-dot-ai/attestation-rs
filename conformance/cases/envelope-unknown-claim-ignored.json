@@ -1,0 +1,13 @@
+{
+  "id": "envelope-unknown-claim-ignored",
+  "rule": {
+    "section": "4.10",
+    "statement": "an unknown top-level claim is ignored whatever it holds"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-unknown-claim-ignored.json",
+  "policy": "policy/envelope-unknown-claim-ignored.json",
+  "expect": {
+    "appraisal": "expected/envelope-unknown-claim-ignored.json"
+  }
+}

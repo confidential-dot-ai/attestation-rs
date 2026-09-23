@@ -14,7 +14,7 @@ evaluation time is an input.
 | --- | --- |
 | `VERSION` | `<profile version>.<revision>`; any change to a case raises the revision |
 | `cases/<id>.json` | one case, in the section 14.2 format |
-| `inputs/` | the envelopes, policies, collateral and recorded NRAS exchanges the cases reference |
+| `inputs/` | the envelopes, policies, collateral and recorded NRAS exchanges the cases reference; an input whose path ends in `.gz` is gzip-compressed and is its decompressed content |
 | `UNCOVERED.md` | the normative statements that have no case yet |
 
 The corpus is data. Every implementation runs it with its own runner, in its
@@ -30,9 +30,11 @@ The Rust library is the reference implementation:
 cargo test -p attestation --features nvidia-gpu --test conformance
 ```
 
-checks every case, and `UPDATE_CONFORMANCE=1` rewrites the expected appraisals
-from the reference implementation, which reviewers read as part of the change
-that regenerated them.
+checks every case, and `UPDATE_CONFORMANCE=1` rewrites the cases and their
+expected appraisals from the reference implementation, which reviewers read as
+part of the change that regenerated them; `CONFORMANCE_EXPLAIN=1` prints each
+decision with the implementation's reason. The same test file holds the CDDL
+module (`schemas/cvm-profile-v1.cddl`) to the JSON Schemas and the parsers.
 
 The wasm build decides every case through its `appraise_with` entry:
 

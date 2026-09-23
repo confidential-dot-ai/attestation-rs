@@ -35,11 +35,43 @@ pub struct Appraisal {
     /// snapshot the verifier used (bit 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ear_raw_evidence: Option<CmwRecord>,
-    /// Every submodule's freshness binding held (section 5.3, from the TDX
-    /// and confidential-GPU EAR profile).
-    pub ear_all_submods_bound: bool,
+    /// Every submodule's freshness binding held (section 5.3). The TDX and
+    /// confidential-GPU EAR profile defines the claim with a text value.
+    pub ear_all_submods_bound: AllBound,
     /// One appraisal per evidence submodule, same names.
     pub submods: BTreeMap<String, SubmodAppraisal>,
+}
+
+/// `ear_all_submods_bound` as draft-kykdxy-rats-tdx-cgpu-ear-profile-02
+/// defines it: text, `"true"` or `"false"`. Its `"unknown"` never applies
+/// here, since every binding is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AllBound {
+    True,
+    False,
+}
+
+impl From<bool> for AllBound {
+    fn from(bound: bool) -> Self {
+        if bound {
+            AllBound::True
+        } else {
+            AllBound::False
+        }
+    }
+}
+
+impl AllBound {
+    pub fn is_true(self) -> bool {
+        self == AllBound::True
+    }
+}
+
+impl std::fmt::Display for AllBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_true() { "true" } else { "false" })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -70,14 +102,14 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The tier a trustworthiness claim value falls in (AR4SI section 2.3.3).
-    /// Anything outside the defined ranges is treated as contraindicated.
+    /// The tier a trustworthiness claim value falls in (AR4SI section 2.3.2):
+    /// the standard values 0 to 127 and the non-standard negative ones.
     pub fn of(value: i8) -> Tier {
         match value {
-            0 | 1 => Tier::None,
-            2..=31 => Tier::Affirming,
-            32..=95 => Tier::Warning,
-            _ => Tier::Contraindicated,
+            -1..=1 => Tier::None,
+            2..=31 | -32..=-2 => Tier::Affirming,
+            32..=95 | -96..=-33 => Tier::Warning,
+            96..=127 | -128..=-97 => Tier::Contraindicated,
         }
     }
     pub fn value(self) -> u8 {
@@ -569,7 +601,14 @@ mod tests {
         assert_eq!(Tier::of(96), Tier::Contraindicated);
         assert_eq!(Tier::of(97), Tier::Contraindicated);
         assert_eq!(Tier::of(99), Tier::Contraindicated);
-        assert_eq!(Tier::of(-1), Tier::Contraindicated);
+        assert_eq!(Tier::of(127), Tier::Contraindicated);
+        assert_eq!(Tier::of(-1), Tier::None);
+        assert_eq!(Tier::of(-2), Tier::Affirming);
+        assert_eq!(Tier::of(-32), Tier::Affirming);
+        assert_eq!(Tier::of(-33), Tier::Warning);
+        assert_eq!(Tier::of(-96), Tier::Warning);
+        assert_eq!(Tier::of(-97), Tier::Contraindicated);
+        assert_eq!(Tier::of(-128), Tier::Contraindicated);
         let v = TrustVector {
             hardware: Some(2),
             executables: Some(33),

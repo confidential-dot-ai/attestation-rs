@@ -6,6 +6,7 @@ members = [
     "crates/attestation-api",
     "crates/attestation-wasm",
     "crates/tcg-cel",
+    "crates/cddl-check",
 ]
 default-members = [
     "crates/attestation",
@@ -13,6 +14,7 @@ default-members = [
     "crates/attestation-api",
     "crates/attestation-wasm",
     "crates/tcg-cel",
+    "crates/cddl-check",
 ]
 
 [workspace.dependencies]
@@ -64,3 +66,12 @@ zerocopy = "0.8"
 # Parsers processing untrusted attestation reports and certificate fields are
 # the primary risk sites.
 overflow-checks = true
+
+# The CDDL drift check (crates/attestation/tests/conformance.rs) validates
+# about 25,000 instances; its two test-only validators run optimized so the
+# debug test build stays fast.
+[profile.dev.package.cddl-check]
+opt-level = 3
+
+[profile.dev.package.jsonschema]
+opt-level = 3

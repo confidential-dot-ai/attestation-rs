@@ -1,0 +1,13 @@
+{
+  "id": "envelope-cmw-collection-nested",
+  "rule": {
+    "section": "4.6",
+    "statement": "cvm_endorsements accepts no nested collection"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-cmw-collection-nested.json",
+  "policy": "policy/envelope-cmw-collection-nested.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

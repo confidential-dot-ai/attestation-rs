@@ -1,0 +1,723 @@
+; CVM attestation profile v1 (tag:confidential.ai,2026:cvm#1): the wire
+; definition of docs/design/cvm-attestation-profile-v1.md, normative for the
+; evidence envelope (section 4), the appraisal (section 5) and the verifier
+; policy (section 7). Three roots: cvm-evidence, cvm-appraisal, cvm-policy.
+;
+; JSON is the primary encoding. CBOR carries the same values with the claim
+; keys of Appendix A, through the JC<> generic of RFC 9711 appendix D; names
+; inside profile objects stay text in both encodings. Byte strings are
+; RFC 9741 .b64u text in JSON (strict: URL-safe alphabet, no padding, zero
+; trailing bits) and byte strings in CBOR. The policy is a verifier input and
+; JSON only.
+;
+; Rules prefixed eat., ear., ar4si. and cmw. are copied from RFC 9711,
+; draft-ietf-rats-ear-04, draft-ietf-rats-ar4si-10 and RFC 9999 with their
+; import prefixes, unchanged. A rule is prose when CDDL cannot state it
+; (uniqueness, equality between two members, duplicate member names in the
+; encoding); section 4.10 and schemas/check list those rules.
+
+; ===================================================================
+; Evidence (section 4)
+; ===================================================================
+
+cvm-evidence = {
+  eat.profile-label ^ => cvm-profile-uri,
+  eat.nonce-label ^ => cvm-nonce,
+  cvm-version-label ^ => 1,
+  eat.submods-label ^ => cvm-submods,
+  * unknown-claim
+}
+
+cvm-profile-uri = "tag:confidential.ai,2026:cvm#1"
+
+; The relying party's challenge, 16 to 64 bytes (section 4.3).
+cvm-nonce = bytes-of<bytes .size (16..64)>
+
+; Unknown claims are ignored, whatever they hold (section 4.10). Every known
+; claim is written with a cut (^), so a known name with a wrong value fails
+; and is never taken for an unknown claim.
+unknown-claim = ( JC<text, (int / text)> => any )
+
+; cpu (exactly one), vtpm (only when the cpu binds through it) and one entry
+; per device; at most 66 submodules in all (sections 4.3, 4.10).
+cvm-submods = submod-shapes .within ({ 1*66 text => any })
+
+submod-shapes = {
+                  "cpu" ^ => cpu-azure,
+                  "vtpm" ^ => cvm-vtpm,
+                  device-entries,
+                }
+              / {
+                  "cpu" ^ => cpu-direct / cca-token,
+                  device-entries,
+                }
+
+device-entries = (
+  * gpu-name ^ => gpu-device,
+  * switch-name ^ => switch-device,
+)
+
+; <ueid> is printable ASCII without "/", 1 to 128 characters.
+gpu-name = text .regexp "gpu/[!-.0-~]{1,128}"
+switch-name = text .regexp "nvswitch/[!-.0-~]{1,128}"
+device-ueid = text .regexp "[!-.0-~]{1,128}"
+
+; --- cpu claims sets (section 4.4), one shape per platform and mode ---
+
+; Azure binds through the vTPM's extraData (section 4.5).
+cpu-azure = snp-azure / tdx-azure
+
+; Everywhere else the report binds the anchor directly.
+cpu-direct = snp-report-data<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-report-data<"dstack", snp-report-type>
+           / snp-commitment<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-commitment<"dstack", snp-report-type>
+           / tdx-report-data<("bare" / "gcp"), (tdx-quote-type / tsm-report-type)>
+           / tdx-report-data<"dstack", tdx-quote-type>
+
+snp-azure = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", "azure", snp-generation>,
+  cvm-report-label ^ => report-record<snp-report-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+snp-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+; snp-vmr registers bind only through the commitment (sections 4.7, 4.9).
+; The log is required by appraisal, not by the envelope (log-required).
+snp-commitment<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"commitment">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  cvm-registers-label ^ => [16*16 snp-register],   ; slots 0 to 15, each once
+  ? cvm-log-label ^ => cvm-log,
+  cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  cpu-hints,
+  * unknown-claim
+}
+
+no-snp-registers = (
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+  no-commitment-claims,
+)
+
+tdx-azure = {
+  cvm-platform-label ^ => platform<"intel", "tdx", "azure", fmspc>,
+  cvm-report-label ^ => report-record<tdx-quote-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+tdx-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"intel", "tdx", H, fmspc>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+; A log needs registers to replay into (section 4.7).
+tdx-registers-and-log = (
+  cvm-registers-label ^ => [1*64 tdx-register],    ; each RTMR at most once
+  ? cvm-log-label ^ => cvm-log
+  //
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+)
+
+no-commitment-claims = (
+  ? cvm-chain-label ^ => absent,
+  ? eat.boot-seed-label ^ => absent,
+)
+
+cpu-hints = (
+  ? eat.debug-status-label ^ => eat.debug-status-type,
+  ? cvm-provenance-label ^ => any,                 ; reserved, ignored in v1
+)
+
+; Matches nothing: the member it types must be absent.
+absent = uint .lt 0
+
+; generation, when present, names what the verifier derives from the report
+; and must agree with it (section 4.2).
+platform<V, T, H, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  ? "generation" ^ => G,
+  "hosting" ^ => H,
+}
+
+snp-generation = "Milan" / "Genoa" / "Turin"
+
+snp-report-type = "application/vnd.confidential-ai.sev-snp-report"
+tdx-quote-type = "application/vnd.confidential-ai.tdx-quote"
+tsm-report-type = "application/vnd.veraison.tsm-report+json"   ; ingest only
+
+; A CMW record whose indicator is exactly 4, evidence (RFC 9999 section 3.1).
+report-record<T> = [ T, bytes-of<field-bytes>, 4 ]
+
+; The certificate pattern binds exactly an x509-tbs-sha256 key; the challenge
+; pattern binds no key or an spki-sha256 or raw key (section 4.5).
+cpu-binding<M> = {
+  "pattern" ^ => "challenge",
+  "mode" ^ => M,
+  ? "key" ^ => challenge-key
+  //
+  "pattern" ^ => "certificate",
+  "mode" ^ => M,
+  "key" ^ => certificate-key,
+}
+
+challenge-key = { "kind" ^ => "spki-sha256", "value" ^ => bytes-of<bytes .size 32> }
+              / { "kind" ^ => "raw", "value" ^ => bytes-of<bytes .size (0..65535)> }
+certificate-key = { "kind" ^ => "x509-tbs-sha256", "value" ^ => bytes-of<bytes .size 32> }
+key-binding = challenge-key / certificate-key
+
+; --- registers (section 4.7) ---
+
+tdx-register = {
+  "index" ^ => 0..3,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "tdx-rtmr",
+  "backing" ^ => "hardware",
+}
+
+snp-register = {
+  "index" ^ => 0..15,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "snp-vmr",
+  "backing" ^ => "virtualized" / "kernel-service" / "privileged-service",
+}
+
+vtpm-register<A, N> = {
+  "index" ^ => 0..23,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "vtpm-pcr",
+  "backing" ^ => "privileged-service",
+}
+
+; --- event log (section 4.8) ---
+
+cvm-log = {
+  "format" ^ => "tcg-cel-cbor" / "tcg-cel-json" / "tdx-ccel"
+              / "tpm2-event-log" / "dstack-json" / "aael",
+  "data" ^ => bytes-of<field-bytes>,
+}
+
+; --- endorsements (section 4.6) ---
+
+snp-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "snp.vek" ^ => endorsement<"application/pkix-cert">,
+  ? "snp.crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+tdx-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "tdx.tcb_info" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.qe_identity" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.pck_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "tdx.root_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+endorsements-collection-type = "tag:confidential.ai,2026:cvm-endorsements#1"
+
+; At least one entry beside __cmwc_t (RFC 9999 section 3.3).
+endorsement-collection<M> = M .within ({ "__cmwc_t" => any, + text => any })
+
+; {body, issuer_chain} as JSON, each a .b64u byte string (section 4.6).
+pcs-signed-type = "application/vnd.confidential-ai.pcs-signed+json"
+
+; Indicator 2 (endorsements) or 1 (reference values shipped inline).
+endorsement<T> = [ T, bytes-of<field-bytes>, 1 / 2 ]
+
+; --- vtpm submodule (section 4.4) ---
+
+; Registers are in the quoted bank, each equal to the quoted PCR of its
+; index and inside the quote's signed selection.
+cvm-vtpm = vtpm<"sha256", 32> / vtpm<"sha384", 48> / vtpm<"sha512", 64>
+
+vtpm<A, N> = {
+  cvm-tpm-quote-label ^ => {
+    "message" ^ => bytes-of<field-bytes>,
+    "signature" ^ => bytes-of<field-bytes>,
+    "pcrs" ^ => [24*24 bytes-of<bytes .size N>],
+    "bank" ^ => A,
+  },
+  cvm-tpm-ak-label ^ => tpm-ak,
+  cvm-registers-label ^ => [1*24 vtpm-register<A, N>],
+  ? cvm-log-label ^ => cvm-log,
+  * unknown-claim
+}
+
+tpm-ak = { "method" ^ => "hcl-report", "data" ^ => bytes-of<field-bytes> }
+
+; --- Arm CCA (section 4.4): the token as the RMM emits it ---
+
+cca-token = JC<[ "CBOR", text .b64u field-bytes ], field-bytes>
+
+; --- device submodules (section 4.4) ---
+
+; NVIDIA's device evidence as its SDK exchanges it with NRAS: evidence_b64
+; and cert_chain_b64 keep NVIDIA's standard base64 text and are passed to
+; NRAS verbatim. uuid equals the <ueid> of the submodule name.
+gpu-device = device<("HOPPER" / "BLACKWELL")>
+switch-device = device<"LS10">
+
+device<A> = {
+  "arch" ^ => A,
+  "uuid" ^ => device-ueid,
+  "evidence_b64" ^ => text .size (1..1048576),
+  "cert_chain_b64" ^ => text .size (1..1048576),
+  cvm-binding-label ^ => { "pattern" ^ => "challenge", "mode" ^ => "nras-nonce" },
+  * unknown-claim
+}
+
+; ===================================================================
+; Appraisal (section 5): an EAR draft-ietf-rats-ear-04 claims set
+; ===================================================================
+
+cvm-appraisal = {
+  eat.profile-label ^ => "tag:ietf.org,2026:rats/ear#04",
+  eat.iat-claim-label ^ => ~eat.time-int,
+  ear.verifier-id-label ^ => ar4si.verifier-id,
+  eat.nonce-label ^ => cvm-nonce,
+  ? ear.raw-evidence-label ^ => raw-evidence,
+  all-submods-bound-label ^ => "true" / "false",
+  eat.submods-label ^ => {
+    "cpu" ^ => appraisal<cpu-claims>,
+    ? "vtpm" ^ => appraisal<vtpm-claims>,
+    * gpu-name ^ => appraisal<device-claims>,
+    * switch-name ^ => appraisal<device-claims>,
+  },
+}
+
+; draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines this claim with a text
+; value and no CBOR key, so its key is text in both encodings. It is "false"
+; only for a device whose signed nonce match is false under a policy that
+; tolerates it; a binding that fails is otherwise a refusal (section 5.3).
+all-submods-bound-label = "ear_all_submods_bound"
+
+; The envelope as appraised and the endorsements used, as a CMW collection
+; in a record of type application/cmw+json (section 5).
+raw-evidence = [ "application/cmw+json", bytes-of<bytes>, ? cmw-ind ]
+
+; ear_status is the worst tier the vector reaches (section 5.2). The two
+; policy ids are the profile and the policy's ni name (section 5.1).
+appraisal<C> = {
+  ear.status-label ^ => ar4si.trustworthiness-tier,
+  ear.trustworthiness-vector-label ^ => ar4si.trustworthiness-vector,
+  ear.appraisal-policy-ids-label ^ => [ cvm-profile-uri, policy-ni-uri ],
+  ear.attester-claims-label ^ => C,
+  ear.verifier-claims-label ^ => verifier-claims,
+}
+
+; RFC 6920: the SHA-384 of the JCS serialization of the effective policy.
+policy-ni-uri = text .regexp "ni:///sha-384;[A-Za-z0-9_-]{64}"
+
+; --- attester claims (section 5.1) ---
+
+cpu-claims = snp-claims / tdx-claims
+
+snp-claims = {
+  cvm-platform-label ^ => verified-platform<"amd", "sev-snp", snp-generation>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  ? cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "snp-host-data", "value" ^ => bytes-of<bytes .size 32> },
+  cvm-owner-label ^ => {
+    "family_id" ^ => bytes-of<bytes .size 16>,
+    "image_id" ^ => bytes-of<bytes .size 16>,
+    "id_key_digest" ^ => bytes-of<bytes .size 48>,
+    "author_key_digest" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "smt" ^ => bool,
+    "single_socket" ^ => bool,
+    "vmpl" ^ => uint .le 255,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "reported" ^ => snp-tcb,
+    "committed" ^ => snp-tcb,
+    "current" ^ => snp-tcb,
+    "launch" ^ => snp-tcb,
+  },
+  cvm-identity-label ^ => { "chip_id" ^ => bytes-of<bytes .size 64> },
+  ? cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  ? eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  "snp" ^ => trustee-snp,
+}
+
+tdx-claims = {
+  cvm-platform-label ^ => verified-platform<"intel", "tdx", fmspc>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "tdx-mrconfigid", "value" ^ => bytes-of<bytes .size 48> },
+  cvm-owner-label ^ => {
+    "mr_owner" ^ => bytes-of<bytes .size 48>,
+    "mr_owner_config" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "sept_ve_disable" ^ => bool,
+    ? "service_td" ^ => bool,
+    "reserved_bits_zero" ^ => bool,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    "pck_tcb" ^ => bytes-of<bytes .size 16>,
+    "pcesvn" ^ => uint .le 65535,
+    "fmspc" ^ => fmspc,
+    ? "status" ^ => tdx-tcb-status,
+    ? "advisories" ^ => [+ text],
+  },
+  cvm-identity-label ^ => { "ppid" ^ => bytes-of<bytes .size 16> },
+  tdx-compat-claims,
+}
+
+fmspc = text .regexp "[0-9a-f]{12}"
+
+verified-platform<V, T, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  "generation" ^ => G,
+  "hosting" ^ => "bare" / "azure" / "gcp" / "dstack",   ; as reported (section 4.2)
+}
+
+freshness = {
+  "pattern" ^ => "challenge" / "certificate",
+  "mode" ^ => "report-data" / "commitment" / "vtpm-extradata" / "cca-challenge" / "nras-nonce",
+  ? "key" ^ => key-binding,
+  ? "not_before" ^ => rfc3339,
+  ? "not_after" ^ => rfc3339,
+}
+
+verified-register = verified-register-in<"sha256", 32>
+                  / verified-register-in<"sha384", 48>
+                  / verified-register-in<"sha512", 64>
+
+verified-register-in<A, N> = {
+  "index" ^ => uint .le 65535,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "tdx-rtmr" / "snp-vmr" / "vtpm-pcr" / "cca-rem",
+  "backing" ^ => backing,
+  "replayed" ^ => bool,
+  ? "owner" ^ => text .size (1..255),
+  ? "purpose" ^ => text .size (1..255),
+}
+
+digest<A, N> = { "alg" ^ => A, "value" ^ => bytes-of<bytes .size N> }
+
+snp-tcb = {
+  "bootloader" ^ => uint .le 255,
+  "tee" ^ => uint .le 255,
+  "snp" ^ => uint .le 255,
+  "microcode" ^ => uint .le 255,
+  ? "fmc" ^ => uint .le 255,
+}
+
+tdx-tcb-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+               / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+               / "OutOfDateConfigurationNeeded" / "Revoked"
+
+; The Confidential Containers Trustee names for an SNP report (section 5.4).
+trustee-snp = {
+  "policy_abi_major" ^ => uint .le 255,
+  "policy_abi_minor" ^ => uint .le 255,
+  "policy_smt_allowed" ^ => bool,
+  "policy_migrate_ma" ^ => bool,
+  "policy_debug_allowed" ^ => bool,
+  "policy_single_socket" ^ => bool,
+  "reported_tcb_bootloader" ^ => uint .le 255,
+  "reported_tcb_tee" ^ => uint .le 255,
+  "reported_tcb_snp" ^ => uint .le 255,
+  "reported_tcb_microcode" ^ => uint .le 255,
+  "platform_tsme_enabled" ^ => bool,
+  "platform_smt_enabled" ^ => bool,
+  "measurement" ^ => hex48,
+  "report_data" ^ => hex64,
+  "init_data" ^ => hex32,
+  "chip_id" ^ => hex64,
+}
+
+; The Intel Trust Authority names for a TD quote (section 5.3).
+tdx-compat-claims = (
+  "tdx_mrtd" ^ => hex48,
+  "tdx_rtmr0" ^ => hex48,
+  "tdx_rtmr1" ^ => hex48,
+  "tdx_rtmr2" ^ => hex48,
+  "tdx_rtmr3" ^ => hex48,
+  "tdx_mrconfigid" ^ => hex48,
+  "tdx_mrowner" ^ => hex48,
+  "tdx_mrownerconfig" ^ => hex48,
+  "tdx_td_attributes" ^ => hex8,
+  "tdx_tee_tcb_svn" ^ => hex16,
+  "tdx_xfam" ^ => hex8,
+  "tdx_mrseam" ^ => hex48,
+  "tdx_mrsignerseam" ^ => hex48,
+)
+
+hex8 = text .regexp "[0-9a-f]{16}"
+hex16 = text .regexp "[0-9a-f]{32}"
+hex32 = text .regexp "[0-9a-f]{64}"
+hex48 = text .regexp "[0-9a-f]{96}"
+hex64 = text .regexp "[0-9a-f]{128}"
+
+vtpm-claims = {
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-tpm-ak-label ^ => tpm-ak,
+}
+
+; NRAS's signed device claims verbatim, with cvm_identity and cvm_tcb beside
+; them (section 5.3).
+device-claims = ear.claims-map-type
+
+; --- verifier claims (section 5.1) ---
+
+verifier-claims = ar4si.non-empty<{
+  ? cvm-collateral-label ^ => { + collateral-check => collateral-outcome },
+  ? cvm-reference-label ^ => reference-outcome,
+  ? cvm-backing-min-label ^ => { "required" ^ => backing, "weakest_seen" ^ => backing },
+  ? "ear_nvidia_evidence" ^ => {
+    ? "signature_verified" ^ => bool,
+    ? "parsed" ^ => bool,
+    ? "nonce_match" ^ => bool,
+  },
+}>
+
+collateral-check = "snp_crl" / "tdx_pck_crl" / "tdx_root_crl"
+                 / "tdx_tcb_info" / "tdx_qe_identity" / "nras_jwks"
+
+collateral-outcome = {
+  "status" ^ => "checked" / "skipped" / "not-applicable",
+  ? "reason" ^ => text,
+  ? "this_update" ^ => rfc3339,
+  ? "next_update" ^ => rfc3339,
+  ? "signed" ^ => bool,
+}
+
+reference-outcome = ar4si.non-empty<{
+  ? "launch_measurement" ^ => bool,
+  ? "registers" ^ => { + register-index => bool },
+}>
+
+register-index = JC<text .base10 (0..65535), 0..65535>
+
+rfc3339 = text .regexp "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
+
+; ===================================================================
+; Policy (section 7): a verifier input, JSON only. Every member is optional
+; and takes the default shown, and every default fails closed.
+; ===================================================================
+
+cvm-policy = {
+  ? "reference" ^ => reference-values,
+  ? "min_backing" ^ => backing .default "hardware",
+  ? "freshness" ^ => { ? "key" ^ => key-binding },
+  ? "commitment" ^ => {
+    ? "header16" ^ => "QVRTLU1SLTEBARAAAAAAAA",
+    ? "seed" ^ => "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn",
+  },
+  ? "tcb" ^ => tcb-policy,
+  ? "policy_bits" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "allow_migration" ^ => bool .default false,
+    ? "require_vmpl0" ^ => bool .default true,
+    ? "require_sept_ve_disable" ^ => bool .default true,
+    ? "require_zero_reserved_attributes" ^ => bool .default true,
+    ? "allow_service_td" ^ => bool .default false,
+  },
+  ? "identity" ^ => { "machines" ^ => [+ machine-entry] },
+  ? "owner" ^ => { "id_key_digests" ^ => [+ bytes-of<bytes .size 48>] },
+  ? "gpu" ^ => gpu-policy,
+}
+
+reference-values = {
+  ? "launch_measurement" ^ => [* policy-digest],
+  ? "registers" ^ => { * register-index => [+ policy-digest] },
+  ? "pcrs" ^ => { * pcr-index => [+ policy-digest] },
+  ? "slot_owners" ^ => { * register-index => text .size (1..255) },
+  ? "host_data" ^ => bytes-of<bytes .size (1..48)>,
+}
+
+pcr-index = text .base10 (0..23)
+
+policy-digest = digest<"sha256", 32> / digest<"sha384", 48> / digest<"sha512", 64>
+
+; A named floor must constrain something; default_floor and every machine's
+; tcb_floor name one of the floors.
+tcb-policy = {
+  ? "floors" ^ => { * text => tcb-floor },
+  ? "default_floor" ^ => text,
+  ? "tdx_allowed_status" ^ => [+ allowed-tdx-status],   ; default ["UpToDate"]
+  ? "require_revocation" ^ => bool .default true,
+  ? "require_signed_collateral" ^ => bool .default true,
+}
+
+; Revoked can never be allowed.
+allowed-tdx-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+                   / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+                   / "OutOfDateConfigurationNeeded"
+
+tcb-floor = ar4si.non-empty<{
+  ? "snp" ^ => {
+    "min" ^ => snp-tcb,
+    ? "values" ^ => [1*4 snp-tcb-value],           ; each at most once
+  },
+  ? "tdx" ^ => {
+    ? "min_tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    ? "min_tcb_evaluation_data_number" ^ => uint .le 4294967295,
+  },
+}>
+
+snp-tcb-value = "reported" / "current" / "committed" / "launch"
+
+machine-entry = {
+  "id" ^ => bytes-of<bytes .size (1..1048576)>,
+  ? "tcb_floor" ^ => text,
+}
+
+gpu-policy = {
+  ? "required" ^ => bool .default false,
+  ? "expected_archs" ^ => [+ ("HOPPER" / "BLACKWELL" / "LS10")],
+  ? "device_policy" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "require_secboot" ^ => bool .default true,
+    ? "require_nonce_match" ^ => bool .default true,
+    ? "require_measres_success" ^ => bool .default true,
+  },
+}
+
+; ===================================================================
+; Shared
+; ===================================================================
+
+backing = "virtualized" / "kernel-service" / "privileged-service" / "hardware"
+
+; Every byte string field is at most 1 MiB (section 4.10).
+field-bytes = bytes .size (1..1048576)
+
+bytes-of<B> = JC<text .b64u B, B>
+
+; RFC 9999: non-zero, and only the five registered bits.
+cmw-ind = 1..31
+
+; Appendix A.
+cvm-version-label = JC<"cvm_version", -70000>
+cvm-platform-label = JC<"cvm_platform", -70001>
+cvm-report-label = JC<"cvm_report", -70002>
+cvm-binding-label = JC<"cvm_binding", -70003>
+cvm-endorsements-label = JC<"cvm_endorsements", -70004>
+cvm-registers-label = JC<"cvm_registers", -70005>
+cvm-log-label = JC<"cvm_log", -70006>
+cvm-chain-label = JC<"cvm_chain", -70007>
+cvm-provenance-label = JC<"cvm_provenance", -70008>
+cvm-tpm-quote-label = JC<"cvm_tpm_quote", -70010>
+cvm-tpm-ak-label = JC<"cvm_tpm_ak", -70011>
+cvm-launch-measurement-label = JC<"cvm_launch_measurement", -70020>
+cvm-freshness-label = JC<"cvm_freshness", -70021>
+cvm-host-data-label = JC<"cvm_host_data", -70022>
+cvm-owner-label = JC<"cvm_owner", -70023>
+cvm-policy-label = JC<"cvm_policy", -70024>
+cvm-tcb-label = JC<"cvm_tcb", -70025>
+cvm-identity-label = JC<"cvm_identity", -70026>
+cvm-collateral-label = JC<"cvm_collateral", -70030>
+cvm-reference-label = JC<"cvm_reference", -70031>
+cvm-backing-min-label = JC<"cvm_backing_min", -70032>
+
+; From RFC 9711 section 7.3 and appendix D.
+eat.JC<J, C> = eat.JSON-ONLY<J> / eat.CBOR-ONLY<C>
+eat.JSON-ONLY<J> = J .feature "json"
+eat.CBOR-ONLY<C> = C .feature "cbor"
+JC<J, C> = eat.JC<J, C>
+eat.time-int = #6.1(int)
+eat.nonce-label = eat.JC<"eat_nonce", 10>
+eat.debug-status-label = eat.JC<"dbgstat", 263>
+eat.profile-label = eat.JC<"eat_profile", 265>
+eat.submods-label = eat.JC<"submods", 266>
+eat.boot-seed-label = eat.JC<"bootseed", 268>
+eat.iat-claim-label = eat.JC<"iat", 6>
+eat.debug-status-type = eat.ds-enabled / eat.disabled / eat.disabled-since-boot
+                      / eat.disabled-permanently / eat.disabled-fully-and-permanently
+eat.ds-enabled = eat.JC<"enabled", 0>
+eat.disabled = eat.JC<"disabled", 1>
+eat.disabled-since-boot = eat.JC<"disabled-since-boot", 2>
+eat.disabled-permanently = eat.JC<"disabled-permanently", 3>
+eat.disabled-fully-and-permanently = eat.JC<"disabled-fully-and-permanently", 4>
+
+; From draft-ietf-rats-ear-04 appendix A.
+ear.verifier-id-label = eat.JC<"ear_verifier_id", 1004>
+ear.raw-evidence-label = eat.JC<"ear_raw_evidence", 1002>
+ear.status-label = eat.JC<"ear_status", 1000>
+ear.trustworthiness-vector-label = eat.JC<"ear_trustworthiness_vector", 1001>
+ear.appraisal-policy-ids-label = eat.JC<"ear_appraisal_policy_ids", 1003>
+ear.attester-claims-label = eat.JC<"ear_attester_claims", 1005>
+ear.verifier-claims-label = eat.JC<"ear_verifier_claims", 1006>
+ear.claims-map-type = eat.JC<ear.claims-map-type-json, ear.claims-map-type-cbor>
+ear.claims-map-type-json = {+ text => any}
+ear.claims-map-type-cbor = {+ (text / int) => any}
+
+; From draft-ietf-rats-ar4si-10 section 3.
+ar4si.trustworthiness-vector = ar4si.non-empty<{
+  ? ar4si.instance-identity-label => ar4si.trustworthiness-claim,
+  ? ar4si.configuration-label => ar4si.trustworthiness-claim,
+  ? ar4si.executables-label => ar4si.trustworthiness-claim,
+  ? ar4si.file-system-label => ar4si.trustworthiness-claim,
+  ? ar4si.hardware-label => ar4si.trustworthiness-claim,
+  ? ar4si.runtime-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.storage-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.sourced-data-label => ar4si.trustworthiness-claim,
+}>
+ar4si.non-empty<M> = M .within ({+ any => any})
+ar4si.trustworthiness-claim = -128..127
+ar4si.instance-identity-label = eat.JC<"instance-identity", 0>
+ar4si.configuration-label = eat.JC<"configuration", 1>
+ar4si.executables-label = eat.JC<"executables", 2>
+ar4si.file-system-label = eat.JC<"file-system", 3>
+ar4si.hardware-label = eat.JC<"hardware", 4>
+ar4si.runtime-opaque-label = eat.JC<"runtime-opaque", 5>
+ar4si.storage-opaque-label = eat.JC<"storage-opaque", 6>
+ar4si.sourced-data-label = eat.JC<"sourced-data", 7>
+ar4si.trustworthiness-tier = eat.JC<"none", 0> / eat.JC<"affirming", 2>
+                           / eat.JC<"warning", 32> / eat.JC<"contraindicated", 96>
+ar4si.verifier-id = {
+  ar4si.developer-label => text,
+  ar4si.build-label => text,
+}
+ar4si.developer-label = eat.JC<"developer", 0>
+ar4si.build-label = eat.JC<"build", 1>

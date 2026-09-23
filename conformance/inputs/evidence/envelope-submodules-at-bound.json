@@ -1,0 +1,681 @@
+{
+  "cvm_version": 1,
+  "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+  "eat_profile": "tag:confidential.ai,2026:cvm#1",
+  "submods": {
+    "cpu": {
+      "cvm_binding": {
+        "mode": "report-data",
+        "pattern": "challenge"
+      },
+      "cvm_endorsements": {
+        "__cmwc_t": "tag:confidential.ai,2026:cvm-endorsements#1",
+        "snp.vek": [
+          "application/pkix-cert",
+          "MIIFPzCCAvOgAwIBAgIBADBBBgkqhkiG9w0BAQowNKAPMA0GCWCGSAFlAwQCAgUAoRwwGgYJKoZIhvcNAQEIMA0GCWCGSAFlAwQCAgUAogMCATAwezEUMBIGA1UECwwLRW5naW5lZXJpbmcxCzAJBgNVBAYTAlVTMRQwEgYDVQQHDAtTYW50YSBDbGFyYTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERldmljZXMxEjAQBgNVBAMMCVNFVi1HZW5vYTAeFw0yNjAyMTcyMzAxMzZaFw0zMzAyMTcyMzAxMzZaMHoxFDASBgNVBAsMC0VuZ2luZWVyaW5nMQswCQYDVQQGEwJVUzEUMBIGA1UEBwwLU2FudGEgQ2xhcmExCzAJBgNVBAgMAkNBMR8wHQYDVQQKDBZBZHZhbmNlZCBNaWNybyBEZXZpY2VzMREwDwYDVQQDDAhTRVYtVkNFSzB2MBAGByqGSM49AgEGBSuBBAAiA2IABIp0WFs7kFJC9d51WvUv7dHvBxJI1CwDn_RXkET7BHtI1rMLTbp0eszXqFhyrBWuCPruXhfTm7iUyxQg-gExv927UmpF2BAmCQKNGhXq7jswYlEyG_XSEJtMIu-frG3dq6OCARMwggEPMBAGCSsGAQQBnHgBAQQDAgEAMBQGCSsGAQQBnHgBAgQHFgVHZW5vYTARBgorBgEEAZx4AQMBBAMCAQowEQYKKwYBBAGceAEDAgQDAgEAMBEGCisGAQQBnHgBAwQEAwIBADARBgorBgEEAZx4AQMFBAMCAQAwEQYKKwYBBAGceAEDBgQDAgEAMBEGCisGAQQBnHgBAwcEAwIBADARBgorBgEEAZx4AQMDBAMCARswEQYKKwYBBAGceAEDCAQDAgEbME0GCSsGAQQBnHgBBARAtfmkyCgOY8l9KI22ZIV33CuEiISqaC16InukDlDesrDRErWZ2HqszaeNBvQlSx6BxNlT7zxpnbOdTgYBPp-kzjBBBgkqhkiG9w0BAQowNKAPMA0GCWCGSAFlAwQCAgUAoRwwGgYJKoZIhvcNAQEIMA0GCWCGSAFlAwQCAgUAogMCATADggIBACIL3uNBEPhG8Ptw7qdLWFMWXC2Pu_kcWbcQYH9ELBkHxp_dYxRJxM4qztvHhJErYtl-95BqTEBK6orL2ET4CVgTVRJWzYb4ascRx5wrTrPCwEPQsI35QI29okDl-HmmoDKtyGb6mMFNjESweB-HlpL_e-AyWm_JSSgH5YvJQtjlixRx40i-4F7sz7X12Y0xEi9HIGiOqnFeCXzB1--fjjnEjo7U3bngEmV4c2yYt5F9vtYpJPCNzhHQgAxlaGlvD0HFPmDXQSnOVPkpoGgquZ96A49temI1oVFNVrG4iacqbOuDJf7Z9EOEdz2fIsO6n7K4LuacZiajJaRRpds_t8xecAV2FfxIa7WJKhZglXmn8wdVXtrD80jf4VJbSPf3HI6i5EbQXwIFvMCnVlu7iqq38phRjqncLMFxLMcnl3G5WwVX6g3VV-ZmahAdW0IruFOcj9auxdtieKj4sq_P36GnlOOsc1sKyNh7xVjhwNxF0CTx63ivoR_HpnXGlYXW614SWsIKZzwFH36H5sqEOjLkuOKnvAASnzEMM0QuPWAQFsxBLhwgajuD06q3DTA4W320LRhHpg40KJGKaePO7WOhr_YOavXkMQ0v58g_SPZ_XlicR6zTu14OlpI-64ON62ui_Fm8iExYdPUvTBIAExx6jXK3F0X3rXXYOknqkDzR",
+          2
+        ]
+      },
+      "cvm_platform": {
+        "hosting": "bare",
+        "tee": "sev-snp",
+        "vendor": "amd"
+      },
+      "cvm_report": [
+        "application/vnd.confidential-ai.sev-snp-report",
+        "BQAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAKAAAAAAAbGyUAAAAAAAAAAAAAAAAAAABoZWxsby1hdHRlc3RhdGlvbgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2ZEro5bOQJwpR4Qdk6UHa2g5uJjCK0quBe2zsrBYqZkn-M-aT4YX7mld6xR5VJbIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABzYarZXPdxaOAIp784LfqM9OIskU5jZm6J3-eU50CH9f__________________________________________CgAAAAAAGxsZoAIAAAAAAAAAAAAAAAAAAAAAAAAAAAC1-aTIKA5jyX0ojbZkhXfcK4SIhKpoLXoie6QOUN6ysNEStZnYeqzNp40G9CVLHoHE2VPvPGmds51OBgE-n6TOCgAAAAAAGxsxNwEAMTcBAAoAAAAAABsbCwAAAAAAAAALAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABC0bRrPQgIW95WAvjx-xuGhrTo1JoRvVBCoZCpRhFHJ2j3n7oq0bUKR28M4u1FuqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6jj4xMttpSFo4CjgQZOmeE0xTj0HnOL4dMus9XWy6fNjUtCOcdR303Lu2aqP_JDlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        4
+      ]
+    },
+    "gpu/GPU-0000": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0000"
+    },
+    "gpu/GPU-0001": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0001"
+    },
+    "gpu/GPU-0002": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0002"
+    },
+    "gpu/GPU-0003": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0003"
+    },
+    "gpu/GPU-0004": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0004"
+    },
+    "gpu/GPU-0005": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0005"
+    },
+    "gpu/GPU-0006": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0006"
+    },
+    "gpu/GPU-0007": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0007"
+    },
+    "gpu/GPU-0008": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0008"
+    },
+    "gpu/GPU-0009": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0009"
+    },
+    "gpu/GPU-0010": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0010"
+    },
+    "gpu/GPU-0011": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0011"
+    },
+    "gpu/GPU-0012": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0012"
+    },
+    "gpu/GPU-0013": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0013"
+    },
+    "gpu/GPU-0014": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0014"
+    },
+    "gpu/GPU-0015": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0015"
+    },
+    "gpu/GPU-0016": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0016"
+    },
+    "gpu/GPU-0017": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0017"
+    },
+    "gpu/GPU-0018": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0018"
+    },
+    "gpu/GPU-0019": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0019"
+    },
+    "gpu/GPU-0020": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0020"
+    },
+    "gpu/GPU-0021": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0021"
+    },
+    "gpu/GPU-0022": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0022"
+    },
+    "gpu/GPU-0023": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0023"
+    },
+    "gpu/GPU-0024": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0024"
+    },
+    "gpu/GPU-0025": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0025"
+    },
+    "gpu/GPU-0026": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0026"
+    },
+    "gpu/GPU-0027": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0027"
+    },
+    "gpu/GPU-0028": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0028"
+    },
+    "gpu/GPU-0029": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0029"
+    },
+    "gpu/GPU-0030": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0030"
+    },
+    "gpu/GPU-0031": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0031"
+    },
+    "gpu/GPU-0032": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0032"
+    },
+    "gpu/GPU-0033": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0033"
+    },
+    "gpu/GPU-0034": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0034"
+    },
+    "gpu/GPU-0035": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0035"
+    },
+    "gpu/GPU-0036": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0036"
+    },
+    "gpu/GPU-0037": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0037"
+    },
+    "gpu/GPU-0038": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0038"
+    },
+    "gpu/GPU-0039": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0039"
+    },
+    "gpu/GPU-0040": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0040"
+    },
+    "gpu/GPU-0041": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0041"
+    },
+    "gpu/GPU-0042": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0042"
+    },
+    "gpu/GPU-0043": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0043"
+    },
+    "gpu/GPU-0044": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0044"
+    },
+    "gpu/GPU-0045": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0045"
+    },
+    "gpu/GPU-0046": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0046"
+    },
+    "gpu/GPU-0047": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0047"
+    },
+    "gpu/GPU-0048": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0048"
+    },
+    "gpu/GPU-0049": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0049"
+    },
+    "gpu/GPU-0050": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0050"
+    },
+    "gpu/GPU-0051": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0051"
+    },
+    "gpu/GPU-0052": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0052"
+    },
+    "gpu/GPU-0053": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0053"
+    },
+    "gpu/GPU-0054": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0054"
+    },
+    "gpu/GPU-0055": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0055"
+    },
+    "gpu/GPU-0056": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0056"
+    },
+    "gpu/GPU-0057": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0057"
+    },
+    "gpu/GPU-0058": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0058"
+    },
+    "gpu/GPU-0059": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0059"
+    },
+    "gpu/GPU-0060": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0060"
+    },
+    "gpu/GPU-0061": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0061"
+    },
+    "gpu/GPU-0062": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0062"
+    },
+    "gpu/GPU-0063": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0063"
+    },
+    "gpu/GPU-0064": {
+      "arch": "HOPPER",
+      "cert_chain_b64": "AA==",
+      "cvm_binding": {
+        "mode": "nras-nonce",
+        "pattern": "challenge"
+      },
+      "evidence_b64": "AA==",
+      "uuid": "GPU-0064"
+    }
+  }
+}

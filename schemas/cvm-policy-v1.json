@@ -13,7 +13,7 @@
     "Base64Url": {
       "contentEncoding": "base64url",
       "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
-      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-][AQgw])?$",
       "type": "string"
     },
     "Base64UrlBytes16": {
@@ -64,14 +64,7 @@
       "additionalProperties": false,
       "properties": {
         "key": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/KeyBinding"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/KeyBinding",
           "description": "When set, the evidence must bind exactly this key."
         }
       },
@@ -127,10 +120,7 @@
           "items": {
             "$ref": "#/$defs/GpuArch"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "required": {
           "default": false,
@@ -198,10 +188,7 @@
           "description": "The `cvm_identity` value: SNP `chip_id`, TDX `ppid`, CCA `instance_id`,\nor a GPU `ueid` as UTF-8."
         },
         "tcb_floor": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
@@ -260,14 +247,7 @@
       "description": "Reference values, from confos manifests (flat JSON or CoRIM).",
       "properties": {
         "host_data": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Base64Url"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/Base64Url",
           "description": "The value `cvm_host_data` must carry, zero-padded to the platform's\nlength (32 bytes on SNP, 48 on TDX): the Kata initdata gate."
         },
         "launch_measurement": {
@@ -347,6 +327,7 @@
       "type": "object"
     },
     "SnpTcb": {
+      "additionalProperties": false,
       "description": "SNP TCB version components (used for KDS URL construction and TCB checks).",
       "properties": {
         "bootloader": {
@@ -356,14 +337,11 @@
           "type": "integer"
         },
         "fmc": {
-          "description": "FMC (Firmware Microcontroller) SPL — present only on Turin processors.",
+          "description": "FMC (Firmware Microcontroller) SPL, present only on Turin processors.",
           "format": "uint8",
           "maximum": 255,
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "microcode": {
           "format": "uint8",
@@ -421,24 +399,10 @@
       "additionalProperties": false,
       "properties": {
         "snp": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SnpFloor"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/SnpFloor"
         },
         "tdx": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TdxFloor"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/TdxFloor"
         }
       },
       "type": "object"
@@ -447,10 +411,7 @@
       "additionalProperties": false,
       "properties": {
         "default_floor": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "floors": {
           "additionalProperties": {
@@ -486,20 +447,10 @@
         "min_tcb_evaluation_data_number": {
           "format": "uint32",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "min_tee_tcb_svn": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Base64UrlBytes16"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/Base64UrlBytes16"
         }
       },
       "type": "object"
@@ -546,14 +497,7 @@
       }
     },
     "identity": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/IdentityPolicy"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/IdentityPolicy"
     },
     "min_backing": {
       "$ref": "#/$defs/Backing",
@@ -561,14 +505,7 @@
       "description": "The weakest backing any verified register may have."
     },
     "owner": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/OwnerPolicy"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "$ref": "#/$defs/OwnerPolicy"
     },
     "policy_bits": {
       "$ref": "#/$defs/PolicyBitsPolicy",

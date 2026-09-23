@@ -210,6 +210,15 @@ pub(crate) async fn appraise(
         });
     }
     let generation = generation(&report, collateral.raw("snp.vek"))?;
+    // Section 4.2: a hint that contradicts the signed data is an error.
+    if let Some(hint) = &cpu.cvm_platform.generation {
+        if hint != generation.product_name() {
+            return Err(invalid(format!(
+                "cvm_platform.generation {hint:?} contradicts the report's {}",
+                generation.product_name()
+            )));
+        }
+    }
 
     // 3. Hardware chain and signature.
     let reported = tcb(&report.reported_tcb);

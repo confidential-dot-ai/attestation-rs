@@ -75,7 +75,9 @@ impl JsonSchema for Bytes {
         json_schema!({
             "type": "string",
             "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
-            "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-]{3}[AQgw])?$",
+            // A tail of 2 bytes is 3 characters, the last with 2 zero bits;
+            // a tail of 1 byte is 2 characters, the last with 4 zero bits.
+            "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-][AQgw])?$",
             "contentEncoding": "base64url"
         })
     }
@@ -172,6 +174,28 @@ impl<const N: usize> JsonSchema for FixedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64url_pattern_admits_exactly_the_canonical_encodings() {
+        let schema = serde_json::to_value(schemars::schema_for!(Bytes)).unwrap();
+        let re = regex::Regex::new(schema["pattern"].as_str().unwrap()).unwrap();
+        for len in 0..=12usize {
+            let bytes: Vec<u8> = (0..len as u8).map(|b| b.wrapping_mul(37) ^ 0xa5).collect();
+            let text = Bytes(bytes).encode();
+            assert!(re.is_match(&text), "{len} bytes: {text}");
+            if let Some(last) = text.chars().last().filter(|_| len % 3 != 0) {
+                // The same text with a non-zero bit below the data.
+                let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                let i = alphabet.find(last).unwrap();
+                let bumped = alphabet.chars().nth(i | 1).unwrap();
+                let bad = format!("{}{bumped}", &text[..text.len() - 1]);
+                assert!(!re.is_match(&bad), "{len} bytes: {bad}");
+                assert!(Bytes::decode(&bad).is_err(), "the decoder agrees: {bad}");
+            }
+            assert!(!re.is_match(&format!("{text}=")), "no padding");
+        }
+        assert!(!re.is_match("A"), "a single character encodes no byte");
+    }
 
     #[test]
     fn strict_base64url() {

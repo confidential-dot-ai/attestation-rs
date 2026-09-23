@@ -1,0 +1,13 @@
+{
+  "id": "envelope-duplicate-member",
+  "rule": {
+    "section": "4.10",
+    "statement": "an object with a duplicate member name is rejected: the envelope"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-duplicate-member.json",
+  "policy": "policy/envelope-duplicate-member.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

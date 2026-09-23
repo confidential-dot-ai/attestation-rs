@@ -1,0 +1,13 @@
+{
+  "id": "snp-inline-vek-of-another-chip",
+  "rule": {
+    "section": "4.6",
+    "statement": "inline endorsements are inputs: a VEK that is not the report's is not used, and with no other source the VEK is unavailable"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-inline-vek-of-another-chip.json",
+  "policy": "policy/snp-inline-vek-of-another-chip.json",
+  "expect": {
+    "refusal": "collateral-unavailable"
+  }
+}

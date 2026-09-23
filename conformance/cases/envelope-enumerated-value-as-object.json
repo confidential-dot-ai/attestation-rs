@@ -1,0 +1,13 @@
+{
+  "id": "envelope-enumerated-value-as-object",
+  "rule": {
+    "section": "4.10",
+    "statement": "one encoding per value: an enumerated value is its text, never an object naming it"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-enumerated-value-as-object.json",
+  "policy": "policy/envelope-enumerated-value-as-object.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "tdx-registers-pinned",
+  "rule": {
+    "section": "5.2",
+    "statement": "executables is 2 when the launch measurement and every pinned register match"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-registers-pinned.json",
+  "policy": "policy/tdx-registers-pinned.json",
+  "expect": {
+    "appraisal": "expected/tdx-registers-pinned.json"
+  }
+}

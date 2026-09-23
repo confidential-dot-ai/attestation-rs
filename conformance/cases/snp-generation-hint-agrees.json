@@ -1,0 +1,13 @@
+{
+  "id": "snp-generation-hint-agrees",
+  "rule": {
+    "section": "4.4",
+    "statement": "cvm_platform.generation names the generation the report carries"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-generation-hint-agrees.json",
+  "policy": "policy/snp-generation-hint-agrees.json",
+  "expect": {
+    "appraisal": "expected/snp-generation-hint-agrees.json"
+  }
+}

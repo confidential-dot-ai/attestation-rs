@@ -86,6 +86,14 @@ pub(crate) async fn appraise(
     let auth = dcap::parse_auth_data(quote_bytes, body_end)?;
     let pck_pem = auth.pck_cert_chain_pem;
     let fmspc = dcap::extract_fmspc_from_pck(pck_pem)?.to_ascii_lowercase();
+    // Section 4.2: a hint that contradicts the signed data is an error.
+    if let Some(hint) = &cpu.cvm_platform.generation {
+        if *hint != fmspc {
+            return Err(invalid(format!(
+                "cvm_platform.generation {hint:?} contradicts the PCK certificate's FMSPC {fmspc}"
+            )));
+        }
+    }
     let ppid = dcap::extract_ppid_from_pck(pck_pem)?;
     let (pck_tcb, pcesvn) = dcap::extract_pck_tcb_components(pck_pem)?;
 
@@ -340,14 +348,20 @@ pub(crate) async fn appraise(
                     _ => cel::parse_dstack_json(log.data.as_slice())?,
                 };
                 let out = cel::replay(&records, |i| (i < 4).then_some([0u8; 48]), false)?;
-                // An RTMR the log names only in unmeasured records is not replayed.
-                for (index, slot) in out.slots.into_iter().filter(|(_, s)| s.extended > 0) {
-                    if !constant_time_eq(&slot.value, &rtmrs[usize::from(index)]) {
-                        return Err(AttestationError::EventlogIntegrityFailed(format!(
-                            "RTMR[{index}] does not replay to the signed value"
-                        )));
-                    }
-                    replayed[usize::from(index)] = true;
+                // Every RTMR the log extends must reproduce. One it never
+                // extends is accounted for exactly when it is still zero, as
+                // the CCEL counts RTMR 3 (section 4.8).
+                for (index, rtmr) in rtmrs.iter().enumerate() {
+                    let slot = out.slots.get(&(index as u16)).filter(|s| s.extended > 0);
+                    replayed[index] = match slot {
+                        Some(s) if constant_time_eq(&s.value, rtmr) => true,
+                        Some(_) => {
+                            return Err(AttestationError::EventlogIntegrityFailed(format!(
+                                "RTMR[{index}] does not replay to the signed value"
+                            )))
+                        }
+                        None => rtmr.iter().all(|&b| b == 0),
+                    };
                 }
             }
             other => {

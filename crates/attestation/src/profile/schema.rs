@@ -11,8 +11,40 @@ pub const EVIDENCE_SCHEMA_FILE: &str = "cvm-evidence-v1.json";
 pub const CLAIMS_SCHEMA_FILE: &str = "cvm-claims-v1.json";
 pub const POLICY_SCHEMA_FILE: &str = "cvm-policy-v1.json";
 
+/// Section 4.10: null is not a value, so no schema admits it where the
+/// profile types have an optional member (schemars writes `Option<T>` as
+/// `T` or null).
+fn drop_null(schema: &mut schemars::Schema) {
+    if let Some(obj) = schema.as_object_mut() {
+        if let Some(Value::Array(types)) = obj.get_mut("type") {
+            types.retain(|t| t != "null");
+            if types.len() == 1 {
+                let only = types.remove(0);
+                obj.insert("type".into(), only);
+            }
+        }
+        if let Some(Value::Array(any)) = obj.get_mut("anyOf") {
+            any.retain(|s| s != &serde_json::json!({"type": "null"}));
+            if any.len() == 1 {
+                let only = any.remove(0);
+                obj.remove("anyOf");
+                if let Value::Object(members) = only {
+                    for (k, v) in members {
+                        obj.entry(k).or_insert(v);
+                    }
+                }
+            }
+        }
+    }
+    schemars::transform::transform_subschemas(&mut drop_null, schema);
+}
+
 fn generate<T: schemars::JsonSchema>(id: &str, title: &str) -> Value {
-    let mut v = serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes");
+    let generator = schemars::generate::SchemaSettings::draft2020_12()
+        .with_transform(drop_null)
+        .into_generator();
+    let mut v =
+        serde_json::to_value(generator.into_root_schema_for::<T>()).expect("schema serializes");
     if let Value::Object(m) = &mut v {
         m.insert(
             "$id".into(),

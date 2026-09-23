@@ -252,7 +252,7 @@ pub enum TcbInfo {
         tee: u8,
         snp: u8,
         microcode: u8,
-        /// FMC (Firmware Microcontroller) SPL — present only on Turin processors.
+        /// FMC (Firmware Microcontroller) SPL, present only on Turin processors.
         #[serde(skip_serializing_if = "Option::is_none")]
         fmc: Option<u8>,
     },
@@ -350,13 +350,18 @@ impl ProcessorGeneration {
     Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct SnpTcb {
     pub bootloader: u8,
     pub tee: u8,
     pub snp: u8,
     pub microcode: u8,
-    /// FMC (Firmware Microcontroller) SPL — present only on Turin processors.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// FMC (Firmware Microcontroller) SPL, present only on Turin processors.
+    #[serde(
+        default,
+        deserialize_with = "crate::profile::strict::present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fmc: Option<u8>,
 }
 
