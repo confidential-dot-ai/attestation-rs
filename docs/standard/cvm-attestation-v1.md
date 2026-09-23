@@ -4,7 +4,7 @@
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
 | Version | 1, draft of 2026-09-22 |
-| Conformance corpus | 1.3 |
+| Conformance corpus | 1.4 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
 
@@ -1402,7 +1402,7 @@ A refusal names the rule family that failed:
 
 ### 14.5. Versioning and change control
 
-The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.3") and pins that version in its continuous integration.
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.4") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in the implementation or in the case, and the corpus is corrected first. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
