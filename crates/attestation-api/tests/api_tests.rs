@@ -758,7 +758,7 @@ async fn live_metal_api_profile_round_trip() {
     assert_eq!(status, StatusCode::OK, "{json}");
     eprintln!("{}", serde_json::to_string_pretty(&json).unwrap());
     assert!(json.get("result").is_none());
-    assert_eq!(json["appraisal"]["ear_all_submods_bound"], true);
+    assert_eq!(json["appraisal"]["ear_all_submods_bound"], "true");
     assert_ne!(
         json["appraisal"]["submods"]["cpu"]["ear_status"],
         "contraindicated"
