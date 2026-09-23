@@ -1636,7 +1636,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(&err, AttestationError::CertChainError(m) if m.contains("names a VLEK and the endorsement certificate is a VCEK")),
-            "got: {err}"
+            "a VCEK under SIGNING_KEY 1 must be refused as a chain error"
         );
         let vlek = include_bytes!("../../../test_data/snp/test-vlek.der");
         let err = verify_vek_chain_at(
@@ -1648,7 +1648,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(&err, AttestationError::CertChainError(m) if m.contains("names a VCEK and the endorsement certificate is a VLEK")),
-            "got: {err}"
+            "a VLEK under SIGNING_KEY 0 must be refused as a chain error"
         );
         let intermediate = verify_vek_chain_at(
             ProcessorGeneration::Genoa,
@@ -1686,7 +1686,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string().contains("ARK certificate has expired"),
-            "got: {err}"
+            "the expired Genoa ARK must be refused"
         );
         // The Turin ASK is valid from 2023-05-15.
         let turin_ask = super::super::certs::get_ask(ProcessorGeneration::Turin);

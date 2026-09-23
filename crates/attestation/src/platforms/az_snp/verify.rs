@@ -173,8 +173,9 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
                 matched = Some((*gen, intermediate));
                 break;
             }
+            // The error is returned when no generation matches; it is not logged.
             Err(e) => {
-                log::debug!("VEK chain check failed for {gen:?}: {e}");
+                log::debug!("VEK chain check failed for {gen:?}");
                 last_err = Some(e);
             }
         }
