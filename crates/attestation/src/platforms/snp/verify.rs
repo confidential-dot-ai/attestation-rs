@@ -793,11 +793,16 @@ pub fn verify_vek_chain_at(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<&'static [u8]> {
     let cert_is_vlek = is_vlek_cert(vek_der)?;
+    // Fixed text: the key kind is never formatted into an error that callers log.
     if cert_is_vlek != (signing_key == SigningKey::Vlek) {
-        return Err(AttestationError::CertChainError(format!(
-            "the report's SIGNING_KEY names a {signing_key:?} and the endorsement certificate is a {}",
-            if cert_is_vlek { "VLEK" } else { "VCEK" }
-        )));
+        return Err(AttestationError::CertChainError(
+            if cert_is_vlek {
+                "the report's SIGNING_KEY names a VCEK and the endorsement certificate is a VLEK"
+            } else {
+                "the report's SIGNING_KEY names a VLEK and the endorsement certificate is a VCEK"
+            }
+            .into(),
+        ));
     }
     let ark_der = super::certs::get_ark(generation);
     let intermediate_der = match signing_key {
@@ -1630,7 +1635,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, AttestationError::CertChainError(_)),
+            matches!(&err, AttestationError::CertChainError(m) if m.contains("names a VLEK and the endorsement certificate is a VCEK")),
             "got: {err}"
         );
         let vlek = include_bytes!("../../../test_data/snp/test-vlek.der");
@@ -1642,7 +1647,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, AttestationError::CertChainError(_)),
+            matches!(&err, AttestationError::CertChainError(m) if m.contains("names a VCEK and the endorsement certificate is a VLEK")),
             "got: {err}"
         );
         let intermediate = verify_vek_chain_at(
