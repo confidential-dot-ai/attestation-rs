@@ -23,8 +23,10 @@ pub struct VerifiedReport {
     pub result: VerificationResult,
     /// AMD processor generation the VCEK chain validated against.
     pub matched_gen: ProcessorGeneration,
-    /// VCEK certificate (DER) — needed for the CRL revocation check.
+    /// VCEK certificate (DER).
     pub vcek_der: Vec<u8>,
+    /// The ASK or ASVK the chain used, whose serial the CRL is checked against.
+    pub intermediate_der: &'static [u8],
     /// SNP attestation report version parsed from the HCL TEE report.
     pub report_version: u32,
 }
@@ -42,15 +44,18 @@ pub async fn verify_evidence(
     let VerifiedReport {
         mut result,
         matched_gen,
-        vcek_der,
+        intermediate_der,
         ..
     } = verify_report(evidence, params)?;
 
-    // CRL revocation check (if provider supplies CRL data)
-    // AMD CRLs are signed by the ARK (root), not the ASK/ASVK intermediate.
+    // CRL revocation check of the chain's ASK/ASVK (if provider supplies CRL data)
     let ark_der = crate::platforms::snp::certs::get_ark(matched_gen);
     if let Some(crl_der) = cert_provider.get_snp_crl(matched_gen).await? {
-        crate::platforms::snp::verify::check_vcek_not_revoked(&vcek_der, &crl_der, ark_der)?;
+        crate::platforms::snp::verify::check_chain_not_revoked(
+            intermediate_der,
+            &crl_der,
+            ark_der,
+        )?;
         result.collateral_verified = true;
     } else {
         log::warn!(
@@ -100,6 +105,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         .map_err(|e| AttestationError::EvidenceDeserialize(format!("VCEK base64: {e}")))?;
     let (tpm_sig, tpm_msg, tpm_pcrs) = tpm_common::decode_tpm_quote(&evidence.tpm_quote)?;
     let snp_report = crate::platforms::snp::verify::parse_report(&hcl.tee_report)?;
+    let signing_key = crate::platforms::snp::verify::report_signing_key(&hcl.tee_report)?;
 
     // Version range check: Azure HCL may use v2 (no CPUID), up to MAX_REPORT_VERSION
     const AZ_MIN_REPORT_VERSION: u32 = 2;
@@ -137,7 +143,6 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     tpm_common::verify_hcl_var_data_binding(snp_report.report_data.as_ref(), &hcl.var_data)?;
 
     // VCEK/VLEK validation against bundled AMD CA chain
-    let is_vlek = crate::platforms::snp::verify::is_vlek_cert(&vcek_der)?;
     let cpuid_fam_id = snp_report.cpuid_fam_id.unwrap_or(0);
     let cpuid_mod_id = snp_report.cpuid_mod_id.unwrap_or(0);
     let processor_gen = ProcessorGeneration::from_cpuid(cpuid_fam_id, cpuid_mod_id);
@@ -156,22 +161,16 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         }
     };
     let mut last_err = None;
-    let mut matched_gen = None;
+    let mut matched = None;
+    let now = chrono::Utc::now();
     for gen in &gens {
-        let ark_der = crate::platforms::snp::certs::get_ark(*gen);
-        // VLEK chain: ARK → ASVK → VLEK; VCEK chain: ARK → ASK → VCEK
-        let intermediate_der = if is_vlek {
-            crate::platforms::snp::certs::get_asvk(*gen)
-        } else {
-            crate::platforms::snp::certs::get_ask(*gen)
-        };
-        match crate::platforms::snp::verify::verify_cert_chain(ark_der, intermediate_der, &vcek_der)
+        match crate::platforms::snp::verify::verify_vek_chain_at(*gen, signing_key, &vcek_der, now)
         {
-            Ok(()) => {
+            Ok(intermediate) => {
                 if gens.len() > 1 {
                     log::warn!("az-snp: processor generation fallback matched {gen:?}");
                 }
-                matched_gen = Some(*gen);
+                matched = Some((*gen, intermediate));
                 break;
             }
             Err(e) => {
@@ -180,14 +179,11 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
             }
         }
     }
-    let matched_gen = matched_gen.ok_or_else(|| {
+    let (matched_gen, intermediate_der) = matched.ok_or_else(|| {
         last_err.unwrap_or_else(|| {
             AttestationError::CertChainError("no matching AMD root cert found".to_string())
         })
     })?;
-
-    // VCEK/VLEK validity period — same check as the bare-metal SNP path (6b).
-    crate::platforms::snp::verify::verify_vek_validity_period(&vcek_der)?;
 
     // SNP report signature against VCEK
     crate::platforms::snp::verify::verify_report_signature(&hcl.tee_report, &vcek_der)?;
@@ -241,6 +237,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         result,
         matched_gen,
         vcek_der,
+        intermediate_der,
         report_version: snp_report.version,
     })
 }

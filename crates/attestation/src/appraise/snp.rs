@@ -7,8 +7,8 @@ use super::{invalid, refuse, Ctx, Outcome};
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, RefusalCode, Result};
 use crate::platforms::snp::verify::{
-    check_vcek_not_revoked_at, is_vlek_cert, parse_report, verify_cert_chain, verify_vcek_tcb,
-    verify_vek_validity_period_at, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
+    check_chain_not_revoked_at, parse_report, report_signing_key, verify_report_signature,
+    verify_vcek_tcb, verify_vek_chain_at, SigningKey, MAX_REPORT_VERSION, MIN_REPORT_VERSION,
 };
 #[cfg(feature = "az-snp")]
 use crate::platforms::tpm_common::verify_hcl_var_data_binding;
@@ -25,7 +25,6 @@ use crate::profile::{
 use crate::profile::{DebugStatus, SnpTcbValue};
 use crate::types::{ProcessorGeneration, SnpTcb};
 use crate::utils::constant_time_eq;
-use sev::certs::snp::{Certificate, Verifiable};
 use sev::firmware::guest::AttestationReport;
 use sev::firmware::host::TcbVersion;
 use std::collections::BTreeMap;
@@ -209,6 +208,7 @@ pub(crate) async fn appraise(
             max: MAX_REPORT_VERSION,
         });
     }
+    let signing_key = report_signing_key(report_bytes)?;
     let generation = generation(&report, collateral.raw("snp.vek"))?;
     // Section 4.2: a hint that contradicts the signed data is an error.
     if let Some(hint) = &cpu.cvm_platform.generation {
@@ -231,20 +231,13 @@ pub(crate) async fn appraise(
             "chip_id is masked (all zero) and the envelope carries no VEK".to_string(),
         ));
     };
-    let is_vlek = is_vlek_cert(&vek_der)?;
+    let intermediate = verify_vek_chain_at(generation, signing_key, &vek_der, ctx.now)?;
     let ark_der = crate::platforms::snp::certs::get_ark(generation);
-    let intermediate = if is_vlek {
-        crate::platforms::snp::certs::get_asvk(generation)
-    } else {
-        crate::platforms::snp::certs::get_ask(generation)
-    };
-    verify_cert_chain(ark_der, intermediate, &vek_der)?;
-    verify_vek_validity_period_at(&vek_der, ctx.now)?;
     let mut collateral_outcomes = BTreeMap::new();
     let mut revocation_checked = false;
     match collateral.get_snp_crl(generation).await? {
         Some(crl) => {
-            check_vcek_not_revoked_at(&vek_der, &crl, ark_der, ctx.now)?;
+            check_chain_not_revoked_at(intermediate, &crl, ark_der, ctx.now)?;
             revocation_checked = true;
             collateral_outcomes.insert(
                 CollateralCheck::SnpCrl,
@@ -275,11 +268,7 @@ pub(crate) async fn appraise(
             );
         }
     }
-    let vek = Certificate::from_der(&vek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("VEK to sev Certificate: {e}")))?;
-    (&vek, &report)
-        .verify()
-        .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
+    verify_report_signature(report_bytes, &vek_der)?;
     verify_vcek_tcb(&report, &vek_der, generation)?;
 
     // 4. Guest policy. A guest runs at VMPL 0 to 3; any other value is a
@@ -341,8 +330,11 @@ pub(crate) async fn appraise(
         }
     }
 
-    // Identity, floor.
-    let (floor, instance_identity) = resolve_floor(policy, &report.chip_id)?;
+    // Identity, floor. A VLEK or a masked (all zero) CHIP_ID identifies no
+    // machine (section 13.3).
+    let machine = (signing_key == SigningKey::Vcek && report.chip_id.iter().any(|&b| b != 0))
+        .then_some(&report.chip_id[..]);
+    let (floor, instance_identity) = resolve_floor(policy, machine)?;
     let snp_floor = floor.and_then(|f| f.snp.as_ref());
     if let Some(f) = snp_floor {
         for value in &f.values {

@@ -148,7 +148,7 @@ pub(crate) async fn appraise(
     }
 
     // Identity, floor.
-    let (floor, instance_identity) = resolve_floor(policy, &ppid)?;
+    let (floor, instance_identity) = resolve_floor(policy, Some(&ppid))?;
     let tdx_floor = floor.and_then(|f| f.tdx.as_ref());
     if let Some(min) = tdx_floor.and_then(|f| f.min_tee_tcb_svn.as_ref()) {
         if quote

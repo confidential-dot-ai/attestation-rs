@@ -1,0 +1,13 @@
+{
+  "id": "snp-vlek-chain-appraises",
+  "rule": {
+    "section": "9.1.4",
+    "statement": "step 2: SIGNING_KEY 1 names a VLEK, which the ASVK signs; the chain, the signature and the TCB cross-check hold with no chip identifier (the recording was taken at VMPL 1, which the vector reports as configuration 96)"
+  },
+  "now": "2025-06-01T00:00:00Z",
+  "evidence": "evidence/snp-vlek-chain-appraises.json",
+  "policy": "policy/snp-vlek-chain-appraises.json",
+  "expect": {
+    "appraisal": "expected/snp-vlek-chain-appraises.json"
+  }
+}

@@ -16,7 +16,7 @@ use attestation::platforms::az_tdx::verify::verify_evidence as verify_az_tdx_evi
 use attestation::platforms::snp::certs::get_ark;
 use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
-    check_vcek_not_revoked, enforce_min_tcb, parse_report, verify_report_signature,
+    check_chain_not_revoked, enforce_min_tcb, parse_report, verify_report_signature,
     verify_vek_endorsement, MAX_REPORT_VERSION,
 };
 use attestation::platforms::tdx::evidence::TdxEvidence;
@@ -550,14 +550,14 @@ fn verify_snp_impl(
     // period, and VEK chip-id/TCB OID cross-validation against the report —
     // the checks whose absence let an expired or wrong-platform VEK vouch for
     // a report here while the native verifier rejected it.
-    verify_vek_endorsement(&report, &vek_der, gen).map_err(|e| format!("VEK endorsement: {e}"))?;
+    let intermediate = verify_vek_endorsement(&report_bytes, &report, &vek_der, gen)
+        .map_err(|e| format!("VEK endorsement: {e}"))?;
 
-    // CRL revocation check — caller-supplied collateral, ARK-signature- and
-    // freshness-verified before it is trusted (AMD CRLs are signed by the
-    // ARK, not the ASK/ASVK intermediate).
+    // CRL revocation check of the chain's ASK/ASVK: caller-supplied
+    // collateral, ARK-signature- and freshness-verified before it is trusted.
     let collateral_verified = match crl_der {
         Some(crl) => {
-            check_vcek_not_revoked(&vek_der, &crl, get_ark(gen))
+            check_chain_not_revoked(intermediate, &crl, get_ark(gen))
                 .map_err(|e| format!("CRL check: {e}"))?;
             true
         }
@@ -692,8 +692,9 @@ fn verify_az_snp_impl(
     let VerifiedReport {
         mut result,
         matched_gen,
-        vcek_der,
+        intermediate_der,
         report_version,
+        ..
     } = verify_report(&evidence, &params).map_err(|e| format!("az-snp verify: {e}"))?;
 
     // CRL revocation check — caller-supplied collateral, exactly the check the
@@ -702,7 +703,7 @@ fn verify_az_snp_impl(
     // intermediate, and the CRL's signature and freshness are verified before
     // it is trusted.
     if let Some(crl) = crl_der {
-        check_vcek_not_revoked(&vcek_der, &crl, get_ark(matched_gen))
+        check_chain_not_revoked(intermediate_der, &crl, get_ark(matched_gen))
             .map_err(|e| format!("CRL check: {e}"))?;
         result.collateral_verified = true;
     }

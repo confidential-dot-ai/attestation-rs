@@ -301,9 +301,12 @@ impl Verifier {
     not(any(feature = "snp", feature = "tdx", feature = "nvidia-gpu")),
     allow(dead_code)
 )]
+/// The TCB floor for an authenticated machine identity, and the AR4SI
+/// instance-identity claim. `None` is evidence that identifies no machine,
+/// which never matches an allowlist entry.
 pub(crate) fn resolve_floor<'p>(
     policy: &'p VerifyPolicy,
-    identity: &[u8],
+    identity: Option<&[u8]>,
 ) -> Result<(Option<&'p TcbFloor>, Option<i8>)> {
     let Some(allow) = &policy.identity else {
         return Ok((
@@ -313,6 +316,12 @@ pub(crate) fn resolve_floor<'p>(
                 .as_deref()
                 .and_then(|f| policy.tcb.floors.get(f)),
             None,
+        ));
+    };
+    let Some(identity) = identity else {
+        return Err(refuse(
+            RefusalCode::MachineNotAllowed,
+            "the evidence identifies no machine (a VLEK or a masked chip identifier) and policy carries a machine allowlist",
         ));
     };
     let Some(entry) = allow

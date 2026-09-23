@@ -139,7 +139,7 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
     // The identity policy compares the signed `ueid`, never the envelope's
     // label; an allowlist with no ueid to check fails closed.
     let (_floor, instance_identity) = match claims.ueid.as_deref() {
-        Some(ueid) => resolve_floor(policy, ueid.as_bytes())?,
+        Some(ueid) => resolve_floor(policy, Some(ueid.as_bytes()))?,
         None if policy.identity.is_some() => {
             return Err(refuse(
                 RefusalCode::MachineNotAllowed,

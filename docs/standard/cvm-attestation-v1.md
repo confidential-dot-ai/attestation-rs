@@ -4,7 +4,7 @@
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
 | Version | 1, draft of 2026-09-22 |
-| Conformance corpus | 1.4 |
+| Conformance corpus | 1.5 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
 
@@ -1402,7 +1402,7 @@ A refusal names the rule family that failed:
 
 ### 14.5. Versioning and change control
 
-The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.4") and pins that version in its continuous integration.
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.5") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in the implementation or in the case, and the corpus is corrected first. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
@@ -1550,13 +1550,13 @@ The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) 
 
 This section records the status of known implementations at the time of writing, in the manner of RFC 7942.
 
-attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.4 (146 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7 and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
+attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.5 (150 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7 and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
 
 Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; `replay_until_event`; appraisal of the standalone `aael` log; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
 
 Requirements of Section 9 that the reference implementation does not yet enforce, each tracked for correction:
 
-- SEV-SNP: report version 6 and Turin models above 0x11 are refused; the report signature is verified over a re-encoding of the parsed report, so the reserved bytes of the TCB fields are not covered; `SIGNATURE_ALGO` and the key-selection bits are not checked, and a VLEK is recognized by its certificate name; the CRL is searched for the VEK's serial number but not the ASK's or ASVK's; the ARK, ASK and ASVK validity windows are not checked; a VEK cross-check failure is refused with `tcb-not-allowed`, and on Turin a VCEK without the FMC extension passes when the report's FMC is 0; an all-zero chip identifier is not excluded from allowlist matching.
+- SEV-SNP: a VEK cross-check failure is refused with `tcb-not-allowed`, and on Turin a VCEK without the FMC extension passes when the report's FMC is 0.
 - Azure: the HCL report's variable data is hashed after trailing zero bytes are removed, which agrees with hashing exactly its declared size for every report Azure produces; the SEV-SNP `cpu` report is not compared with the HCL report's hardware area, and the HCL report's hash type is not checked.
 - NVIDIA: a device token's architecture is not compared with its batch.
 - `cvm` records: `ats` records other than the boot and claim records are not refused.

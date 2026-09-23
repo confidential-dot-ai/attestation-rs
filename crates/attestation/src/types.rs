@@ -321,7 +321,7 @@ impl ProcessorGeneration {
         match (family_id, model_id) {
             (0x19, 0x00..=0x0F) => Some(ProcessorGeneration::Milan),
             (0x19, 0x10..=0x1F) | (0x19, 0xA0..=0xAF) => Some(ProcessorGeneration::Genoa),
-            (0x1A, 0x00..=0x11) => Some(ProcessorGeneration::Turin),
+            (0x1A, 0x00..=0x1F) => Some(ProcessorGeneration::Turin),
             _ => None,
         }
     }
@@ -399,13 +399,17 @@ mod tests {
             Some(ProcessorGeneration::Genoa)
         );
 
-        // Turin range: family 0x1A, model 0x00..0x11
+        // Turin: family 0x1A, extended model 0 or 1 (AMD 57230 section 1.5)
         assert_eq!(
             ProcessorGeneration::from_cpuid(0x1A, 0x00),
             Some(ProcessorGeneration::Turin)
         );
         assert_eq!(
-            ProcessorGeneration::from_cpuid(0x1A, 0x11),
+            ProcessorGeneration::from_cpuid(0x1A, 0x12),
+            Some(ProcessorGeneration::Turin)
+        );
+        assert_eq!(
+            ProcessorGeneration::from_cpuid(0x1A, 0x1F),
             Some(ProcessorGeneration::Turin)
         );
 
@@ -414,7 +418,8 @@ mod tests {
         assert_eq!(ProcessorGeneration::from_cpuid(0xFF, 0xFF), None);
         assert_eq!(ProcessorGeneration::from_cpuid(0x18, 0x01), None);
         assert_eq!(ProcessorGeneration::from_cpuid(0x19, 0x20), None); // Gap between Milan/Genoa
-        assert_eq!(ProcessorGeneration::from_cpuid(0x1A, 0x12), None); // Just past Turin range
+        assert_eq!(ProcessorGeneration::from_cpuid(0x1A, 0x20), None); // Just past Turin range
+        assert_eq!(ProcessorGeneration::from_cpuid(0x1A, 0x50), None); // Venice
     }
 }
 

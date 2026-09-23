@@ -7,6 +7,8 @@ use super::*;
 use attestation::profile::{FixedBytes, TdxFloor};
 
 const TEST_VCEK: &[u8] = include_bytes!("../../test_data/snp/test-vcek.der");
+const VLEK_REPORT: &[u8] = include_bytes!("../../test_data/snp/test-vlek-report.bin");
+const VLEK: &[u8] = include_bytes!("../../test_data/snp/test-vlek.der");
 const DSTACK: &str = include_str!("../../../tcg-cel/tests/data/dstack_tdx_getquote.json");
 
 /// A value with `f` applied.
@@ -179,6 +181,33 @@ fn tdx_floor(svn: Option<[u8; 16]>, evaluation: Option<u32>) -> TcbFloor {
             min_tcb_evaluation_data_number: evaluation,
         }),
     }
+}
+
+/// The Genoa envelope carrying `report` in place of the recorded one.
+fn snp_with_report(nonce: &[u8], report: &[u8]) -> Value {
+    tweak(snp_envelope(nonce), |v| {
+        v["submods"]["cpu"]["cvm_report"][1] = json!(b64url(report));
+    })
+}
+
+/// The recorded Genoa report with one byte changed after signing.
+fn snp_report_with(offset: usize, value: u8) -> Vec<u8> {
+    let mut r = SNP_REPORT.to_vec();
+    assert_ne!(r[offset], value);
+    r[offset] = value;
+    r
+}
+
+/// A Milan report signed by a VLEK, whose CHIP_ID is all zero, with the VLEK inline.
+fn vlek_envelope() -> Value {
+    let report = attestation::platforms::snp::verify::parse_report(VLEK_REPORT).unwrap();
+    assert!(report.chip_id.iter().all(|b| *b == 0));
+    let nonce = attestation::utils::strip_trailing_nulls(&report.report_data).to_vec();
+    tweak(snp_envelope(&nonce), |v| {
+        let cpu = &mut v["submods"]["cpu"];
+        cpu["cvm_report"][1] = json!(b64url(VLEK_REPORT));
+        cpu["cvm_endorsements"]["snp.vek"][1] = json!(b64url(VLEK));
+    })
 }
 
 fn with_policy(base: VerifyPolicy, f: impl FnOnce(&mut VerifyPolicy)) -> VerifyPolicy {
@@ -628,6 +657,28 @@ pub(super) fn cases() -> Vec<Authored> {
             snp.clone(), Some(R::ReferenceMismatch)),
         snp_case("snp-owner-key-not-accepted", "13.4", "owner.id_key_digests: an ID key outside the list is refused",
             snp.clone(), Some(R::ReferenceMismatch)),
+        // Section 9.1.4: what the report signature covers.
+        snp_case("snp-tcb-reserved-byte-altered", "9.1.4",
+            "step 3: the signature covers bytes 0x000 to 0x29F as received, so a reserved byte of REPORTED_TCB changed after signing is refused",
+            snp_with_report(&nonce, &snp_report_with(0x182, 1)), Some(R::SignatureInvalid)),
+        snp_case("snp-signature-upper-bytes-nonzero", "9.1.4",
+            "step 3: the upper 24 bytes of R and S are zero; a report whose R carries a non-zero byte there is refused",
+            snp_with_report(&nonce, &snp_report_with(0x2A0 + 48, 1)), Some(R::SignatureInvalid)),
+        case("snp-vlek-chain-appraises", "9.1.4",
+            "step 2: SIGNING_KEY 1 names a VLEK, which the ASVK signs; the chain, the signature and the TCB cross-check hold with no chip identifier (the recording was taken at VMPL 1, which the vector reports as configuration 96)",
+            "2025-06-01T00:00:00Z", vlek_envelope().into(),
+            Some(with_policy(lenient(), |p| p.policy_bits.require_vmpl0 = false).into()),
+            none(), None),
+        case("snp-vlek-masked-chip-identifies-no-machine", "13.3",
+            "a VLEK-endorsed report whose CHIP_ID is all zero identifies no machine, so an allowlist entry of 64 zero bytes does not match it",
+            "2025-06-01T00:00:00Z", vlek_envelope().into(),
+            Some(with_policy(lenient(), |p| {
+                p.policy_bits.require_vmpl0 = false;
+                p.identity = Some(IdentityPolicy {
+                    machines: vec![MachineEntry { id: Bytes(vec![0u8; 64]), tcb_floor: None }],
+                });
+            }).into()),
+            none(), Some(R::MachineNotAllowed)),
         case("tdx-registers-pinned", "12.4", "executables is 2 when the launch measurement and every pinned register match",
             SNP_NOW, tdx_live.clone().into(),
             Some(with_policy(live_policy.clone(), |p| {
