@@ -2130,8 +2130,10 @@ mod tests {
         let bogus_crl = vec![0x30, 0x00];
         let result = check_intermediate_ca_revocation(single_cert_pem.as_bytes(), &bogus_crl);
         assert!(result.is_err());
-        let err = format!("{:?}", result.unwrap_err());
-        assert!(err.contains("at least 2 certs"), "error: {err}");
+        assert!(matches!(
+            result,
+            Err(AttestationError::CertChainError(m)) if m.contains("at least 2 certs")
+        ));
     }
 
     #[test]
@@ -2722,7 +2724,8 @@ mod tests {
                     "{m}"
                 )
             }
-            other => panic!("accepted a PCK CA as the TCB signer: {other:?}"),
+            Err(e) => panic!("refused for another reason: {e}"),
+            Ok(_) => panic!("accepted a PCK CA as the TCB signer"),
         }
         assert!(
             verify_signing_cert_chain_at(TCB_SIGNING_CHAIN, ROOT_CA_CRL_DER, fixture_now()).is_ok()
@@ -2744,7 +2747,7 @@ mod tests {
     fn the_signing_chain_needs_a_root_ca_crl_the_root_signed() {
         // The PCK Platform CA's CRL is signed by that CA, not the root.
         let r = verify_signing_cert_chain_at(TCB_SIGNING_CHAIN, PCK_CRL_DER, fixture_now());
-        assert!(is_collateral_invalid(&r), "{r:?}");
+        assert!(is_collateral_invalid(&r));
         let mut forged = ROOT_CA_CRL_DER.to_vec();
         let n = forged.len();
         forged[n - 1] ^= 0xff;
