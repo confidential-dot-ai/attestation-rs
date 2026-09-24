@@ -388,22 +388,19 @@ fn get_oid_int(ext_value: &[u8]) -> Option<u8> {
     <u8 as Decode>::from_der(ext_value).ok()
 }
 
-/// Extract the chip_id bytes from the VCEK HW_ID extension value.
-///
-/// Some VCEK certificates encode the chip_id as a DER OCTET STRING,
-/// while others (notably Azure VCEK certs from THIM/IMDS) encode it
-/// as raw bytes without an inner DER wrapper. This matches the approach
-/// used by the Trustee reference implementation.
-fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
-    // Try proper DER OCTET STRING decode first.
-    if let Ok(octet_string) = der::asn1::OctetStringRef::from_der(ext_value) {
-        return Some(octet_string.as_bytes());
-    }
-    // Raw bytes (no inner DER wrapper) — return as-is if non-empty.
-    if !ext_value.is_empty() {
+/// The hardware ID a VCEK's HW_ID extension carries: the extension value is
+/// exactly the `len`-byte ID (the form Azure's VCEKs carry), or a DER OCTET
+/// STRING whose content is exactly `len` bytes (AMD 57230). The two forms
+/// differ in length, so the length decides; an ID whose first bytes happen to
+/// read as an OCTET STRING header is still taken whole.
+fn hardware_id(ext_value: &[u8], len: usize) -> Option<&[u8]> {
+    if ext_value.len() == len {
         return Some(ext_value);
     }
-    None
+    match der::asn1::OctetStringRef::from_der(ext_value) {
+        Ok(octets) if octets.as_bytes().len() == len => Some(octets.as_bytes()),
+        _ => None,
+    }
 }
 
 /// Verify VCEK certificate TCB extensions match the SNP attestation report.
@@ -411,9 +408,9 @@ fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
 /// - For "VCEK" certificates: validates chip_id and TCB SPL exact equality.
 /// - For "VLEK" certificates: skips chip_id check, only validates TCB SPLs.
 ///
-/// `processor_gen` gates the chip_id comparison: only Turin uses a short
-/// (8-byte + zero-pad) HW_ID, so the short-prefix path is taken there alone.
-/// Milan/Genoa must match the full 64-byte chip_id exactly.
+/// `processor_gen` sets the hardware ID's length: 8 bytes on Turin, which
+/// must equal the first 8 bytes of a chip_id whose rest is zero, and the full
+/// 64-byte chip_id on Milan and Genoa.
 pub fn verify_vcek_tcb(
     report: &AttestationReport,
     vcek_der: &[u8],
@@ -448,28 +445,20 @@ pub fn verify_vcek_tcb(
                     "VCEK missing required HW_ID OID extension".to_string(),
                 )
             })?;
-        let chip_id_bytes = get_oid_octets(ext.value).ok_or_else(|| {
-            AttestationError::TcbMismatch("VCEK HW_ID OID has unparseable value".to_string())
-        })?;
-        // report.chip_id is always a fixed [u8; 64].
-        let report_chip_id = &report.chip_id[..];
-        let prefix_len = chip_id_bytes.len();
-
-        let ok = if processor_gen == ProcessorGeneration::Turin {
-            // Turin's VCEK HW_ID is shorter than the report's 64-byte chip_id
-            // field (8 meaningful bytes + 56 zero pad). Compare the meaningful
-            // prefix in constant time and confirm the remainder is zero.
-            // Minimum 8 bytes: the smallest known AMD HW_ID (Turin).
-            const MIN_CHIP_ID_LEN: usize = 8;
-            prefix_len >= MIN_CHIP_ID_LEN
-                && prefix_len <= report_chip_id.len()
-                && crate::utils::constant_time_eq(chip_id_bytes, &report_chip_id[..prefix_len])
-                && report_chip_id[prefix_len..].iter().all(|b| *b == 0)
+        // Turin's hardware ID is the first 8 bytes of CHIP_ID, whose other 56
+        // bytes are zero; Milan and Genoa carry all 64.
+        let hwid_len = if processor_gen == ProcessorGeneration::Turin {
+            8
         } else {
-            // Milan/Genoa: require full 64-byte chip_id equality. No short path.
-            prefix_len == report_chip_id.len()
-                && crate::utils::constant_time_eq(chip_id_bytes, report_chip_id)
+            report.chip_id.len()
         };
+        let hwid = hardware_id(ext.value, hwid_len).ok_or_else(|| {
+            AttestationError::TcbMismatch(format!(
+                "VCEK HW_ID is neither {hwid_len} bytes nor an OCTET STRING of {hwid_len} bytes"
+            ))
+        })?;
+        let ok = crate::utils::constant_time_eq(hwid, &report.chip_id[..hwid_len])
+            && report.chip_id[hwid_len..].iter().all(|b| *b == 0);
         if !ok {
             return Err(AttestationError::TcbMismatch(
                 "VCEK chip_id does not match report chip_id".to_string(),
@@ -1073,22 +1062,34 @@ mod tests {
     }
 
     #[test]
-    fn test_get_oid_octets_raw_bytes() {
-        // Raw chip_id bytes (no inner DER wrapper) — the common case for AMD VCEKs
-        let raw = [0x06u8; 64]; // first byte is NOT 0x04
-        assert_eq!(get_oid_octets(&raw), Some(raw.as_slice()));
+    fn hardware_id_is_the_raw_value_or_an_octet_string_of_its_length() {
+        for len in [64usize, 8] {
+            let raw: Vec<u8> = (0..len as u8).map(|b| b ^ 0x5a).collect();
+            assert_eq!(hardware_id(&raw, len), Some(raw.as_slice()), "raw {len}");
+            let wrapped = [&[0x04, len as u8][..], &raw].concat();
+            assert_eq!(
+                hardware_id(&wrapped, len),
+                Some(raw.as_slice()),
+                "DER {len}"
+            );
+            // Any other length is neither form.
+            assert_eq!(hardware_id(&raw[1..], len), None);
+            assert_eq!(hardware_id(&[&raw[..], &[0]].concat(), len), None);
+            let short = [&[0x04, len as u8 - 1][..], &raw[1..]].concat();
+            assert_eq!(hardware_id(&short, len), None);
+        }
+        assert_eq!(hardware_id(&[], 64), None);
     }
 
     #[test]
-    fn test_get_oid_octets_der_wrapped() {
-        // DER OCTET STRING: tag=0x04, len=0x03, data=[0xAA, 0xBB, 0xCC]
-        let wrapped = [0x04, 0x03, 0xAA, 0xBB, 0xCC];
-        assert_eq!(get_oid_octets(&wrapped), Some(&[0xAA, 0xBB, 0xCC][..]));
-    }
-
-    #[test]
-    fn test_get_oid_octets_empty() {
-        assert_eq!(get_oid_octets(&[]), None);
+    fn a_raw_hardware_id_that_reads_as_an_octet_string_header_is_taken_whole() {
+        // 04 3E then 62 bytes is also a well-formed OCTET STRING of 62 bytes.
+        let mut genoa = [0x11u8; 64];
+        genoa[..2].copy_from_slice(&[0x04, 0x3E]);
+        assert_eq!(hardware_id(&genoa, 64), Some(&genoa[..]));
+        // Turin's 8-byte ID beginning 04 06 reads as an OCTET STRING of 6.
+        let turin = [0x04, 0x06, 1, 2, 3, 4, 5, 6];
+        assert_eq!(hardware_id(&turin, 8), Some(&turin[..]));
     }
 
     // ---------------------------------------------------------------
@@ -1469,6 +1470,20 @@ mod tests {
         let ask = super::super::certs::get_ask(ProcessorGeneration::Genoa);
         let err = check_chain_not_revoked(ask, &crl, issuer.0.der()).expect_err("ECDSA CRL");
         assert!(err.to_string().contains("is not RSASSA-PSS"), "got: {err}");
+    }
+
+    #[test]
+    fn the_hardware_id_must_equal_the_report_chip_id() {
+        let mut report = parse_report(LIVE_REPORT_V5).expect("parse report");
+        report.chip_id[63] ^= 1;
+        let err = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Genoa)
+            .expect_err("another chip's VCEK");
+        assert!(err.to_string().contains("chip_id"), "got: {err}");
+        // Read as Turin, the 64-byte ID is neither form of an 8-byte one.
+        let report = parse_report(LIVE_REPORT_V5).expect("parse report");
+        let err = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Turin)
+            .expect_err("a 64-byte ID under Turin");
+        assert!(err.to_string().contains("neither 8 bytes"), "got: {err}");
     }
 
     #[test]
