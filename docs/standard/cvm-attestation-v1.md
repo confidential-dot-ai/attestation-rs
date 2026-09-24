@@ -1698,6 +1698,7 @@ switch  84982aa6b0e69839ac5b84d62d2c16f30239baa2a99add9975d09aa439c47051
 seed          60cdcaeac3f15a96cb2a1b85d42c5a4d129fced65435044c9250fdffef98984cc3bd420972c3af58295e0f61ba21e4a7
 R[0] genesis  edfcbed49c915465118143bd6ba1980e0fa6ccfe02242bc31676a275e31cd0081c9d8b9ba9d6f4ee70b94b030b1e04fa
 R[3] genesis  befc3a5c2b1a1842ea1e7d330a9671c09afa59f2b2e775bd9b77b1a3a89d68e77ea5d2fafe5dfd3767f5ea515c30307a
+R[4] genesis  b6f9d6a7dac04da2c2a358d488d540898eef7f4de44438a833f1d241835ffe3d6cbf4c6a93ddb13e26ffff220490058a
 R[15] genesis ca7955a6100998d9c4771d94e785098d878b66d2956c54a5f47e847694bfd246a251bb1dcd929fd945fa37de37b1c3b2
 header16      4154532d4d522d31 01 01 10 00 00000000
 ```
@@ -1749,6 +1750,13 @@ The log of those two records as `tcg-cel-cbor` (the CDDL's array: `82`, then the
 
 ```
 [{"recnum":0,"pcr":3,"digests":[{"hashAlg":"sha384","digest":"74eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc"}],"content_type":"cvm","content":{"seq":0,"event":"a300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d"}},{"recnum":0,"pcr":4,"digests":[{"hashAlg":"sha384","digest":"24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c"}],"content_type":"cvm","content":{"seq":1,"event":"a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164"}}]
+```
+
+The commitment a verifier recomputes over that log (Section 8.1): `R[3]` and `R[4]` as above, every other register at its genesis value, `chain_len = 2`, and `caller_data = pad64(anchor)` for the `spki-sha256` key of B.1:
+
+```
+C            5814f3414f422d63e4755996735dc8fa1cd369dca799a893685f65c8220c2df967441824bb8f400d360d06a29f1ced93
+report_data  4154532d4d522d310101100000000000 5814f3414f422d63e4755996735dc8fa1cd369dca799a893685f65c8220c2df967441824bb8f400d360d06a29f1ced93
 ```
 
 ### B.4. Policy identifier (Section 12.5)

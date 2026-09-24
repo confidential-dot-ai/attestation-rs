@@ -275,6 +275,7 @@ fn generate() -> BTreeMap<&'static str, String> {
     let mut regs: Vec<_> = (0..REG_COUNT as u8).map(genesis).collect();
     emit("genesis_0", &regs[0]);
     emit("genesis_3", &regs[3]);
+    emit("genesis_4", &regs[4]);
     emit("genesis_15", &regs[15]);
     let c0 = commit(&regs, 0, &pad64(&nonce));
     emit("commit_chain0", &c0);
@@ -314,6 +315,15 @@ fn generate() -> BTreeMap<&'static str, String> {
     emit("claim_r4", &extend(&genesis(4), &dc));
     emit("claim_cel_record", &claim_rec);
     emit("cel_log", &[cbor_head(4, 2), boot_rec, claim_rec].concat());
+
+    // The commitment over that log: slots 3 and 4 replayed, the rest at
+    // genesis, chain_len 2, caller_data = pad64(anchor) for the spki-sha256 key.
+    let mut chain: Vec<_> = (0..REG_COUNT as u8).map(genesis).collect();
+    chain[3] = extend(&chain[3], &db);
+    chain[4] = extend(&chain[4], &dc);
+    let c_log = commit(&chain, 2, &pad64(&a));
+    emit("commit_b3_log", &c_log);
+    emit("report_data_b3_log", &[header16(), c_log].concat());
 
     // Section 9.3: a dstack runtime event (type 0x08000001) under both versions.
     let (name, payload) = ("app-id", [0xde, 0xad, 0xbe, 0xef]);

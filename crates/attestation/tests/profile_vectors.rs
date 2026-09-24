@@ -64,7 +64,7 @@ fn appendix_b_vectors() {
     for (i, r) in regs.iter_mut().enumerate() {
         *r = genesis(i as u8, &SEED);
     }
-    for i in [0usize, 3, 15] {
+    for i in [0usize, 3, 4, 15] {
         v.check(&format!("genesis_{i}"), &regs[i]);
     }
     let c0 = commit(&regs, 0, &pad64(&nonce).unwrap());
@@ -108,6 +108,23 @@ fn appendix_b_vectors() {
     v.check("cel_log", &tcg_cel::encode_cbor(&log).unwrap());
     let json = tcg_cel::encode_json(&log).unwrap();
     v.check_text("cel_log_json", &json);
+
+    // The commitment over that log, from the registers the library's replay
+    // of it establishes.
+    let records = attestation::profile::cel::parse_cbor(&v.get("cel_log")).unwrap();
+    let replayed = attestation::profile::cel::replay(
+        &records,
+        |i| (usize::from(i) < REG_COUNT).then(|| genesis(i as u8, &SEED)),
+        true,
+    )
+    .unwrap();
+    let mut chain: [[u8; 48]; REG_COUNT] = std::array::from_fn(|i| genesis(i as u8, &SEED));
+    for (i, slot) in replayed.slots {
+        chain[usize::from(i)] = slot.value;
+    }
+    let c_log = commit(&chain, records.len() as u64, &pad64(&a).unwrap());
+    v.check("commit_b3_log", &c_log);
+    v.check("report_data_b3_log", &report_data(&HEADER16, &c_log));
 
     // Section 9.3: dstack runtime event digests, through tcg-cel.
     {
