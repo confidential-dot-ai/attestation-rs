@@ -224,7 +224,7 @@ pub(crate) async fn appraise(
     let reported = tcb(&report.reported_tcb);
     let vek_der = if signing_key == SigningKey::Vlek {
         // KDS serves VLEKs only to the cloud provider, so the envelope's copy
-        // is the only source and nothing is fetched (section 9.1.7).
+        // is the only source and nothing is fetched (section 9.1.4).
         collateral.inline_vlek().ok_or_else(|| {
             AttestationError::CertFetchError(
                 "a VLEK-signed report needs its VLEK inline, inside its window".to_string(),

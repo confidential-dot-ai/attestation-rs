@@ -19,26 +19,26 @@ evaluation time is an input.
 | `UNCOVERED.md` | the normative statements that have no case yet |
 
 The corpus is data. Every implementation runs it with its own runner, in its
-own repository, and pins it by the attestation-rs commit or tag it was taken
+own repository, and pins it by the commit or tag of the standard it was taken
 from. A runner reads a case's inputs, hands them to the implementation with
 the evaluation time pinned and the case's collateral and NRAS exchanges as the
 only ones available, and compares the decision: the appraisal as parsed JSON
 with the members of section 14.3 removed, or the refusal's section 14.4 code.
 
-The Rust library is the reference implementation:
+The reference implementation, attestation-rs (section 18 of the standard),
+generates the expected appraisals and runs the corpus natively and through
+its WebAssembly build:
 
 ```bash
 cargo test -p attestation --features nvidia-gpu --test conformance
 ```
 
-checks every case, and `UPDATE_CONFORMANCE=1` rewrites the cases and their
-expected appraisals from the reference implementation, which reviewers read as
-part of the change that regenerated them; `CONFORMANCE_EXPLAIN=1` prints each
-decision with the implementation's reason. The same test file holds the CDDL
-module (`schemas/cvm-profile-v1.cddl`) to the JSON Schemas and the parsers.
-
-The wasm build decides every case through its `appraise_with` entry:
-
 ```bash
 cargo test -p attestation-wasm --test conformance
 ```
+
+In that repository `UPDATE_CONFORMANCE=1` rewrites the cases and their
+expected appraisals from the reference implementation, which reviewers read as
+part of the change that regenerated them, and `CONFORMANCE_EXPLAIN=1` prints
+each decision with the implementation's reason. The same test holds the CDDL
+module (`schemas/cvm-profile-v1.cddl`) to the JSON Schemas and the parsers.

@@ -3,8 +3,8 @@
 | | |
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
-| Version | 1, draft of 2026-09-22 |
-| Conformance corpus | 1.6 |
+| Version | 1, draft of 2026-09-23 |
+| Conformance corpus | 1.7 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
 
@@ -14,7 +14,7 @@ Confidential virtual machines (CVMs) on AMD SEV-SNP, Intel TDX and Arm CCA, with
 
 ## Status of this document
 
-This is the normative specification of the EAT profile `tag:confidential.ai,2026:cvm#1`. It is a draft published for review and implementation. The machine-readable companions are normative and are published with it: the CDDL module of Appendix C (`schemas/cvm-profile-v1.cddl`), the test vectors of Appendix B (`docs/standard/vectors/cvm_profile_vectors.json`) and the conformance corpus of Section 14 (`conformance/`). Where this text and a companion disagree, the disagreement is a defect in this document or in the companion, and conformance is judged against the corpus until the defect is corrected.
+This is the normative specification of the EAT profile `tag:confidential.ai,2026:cvm#1`. It is a draft published for review and implementation. The machine-readable companions are normative and are published with it: the CDDL module of Appendix C (`schemas/cvm-profile-v1.cddl`), the test vectors of Appendix B (`docs/standard/vectors/cvm_profile_vectors.json`) and the conformance corpus of Section 14 (`conformance/`). Where this text and a companion disagree, the disagreement is a defect in this document or in the companion, and conformance is judged against the corpus until the defect is corrected; where the corpus is silent, this text governs. The JSON Schemas under `schemas/` are informative, and where one admits what the CDDL refuses, the CDDL governs.
 
 The profile identifier, the media types under `application/vnd.confidential-ai.` and the claim names in the `cvm_` namespace are controlled by Confidential AI. Changes that alter a decision in Sections 4 to 13 raise the corpus revision (Section 14.5); changes that alter the wire format define a new profile identifier.
 
@@ -46,7 +46,7 @@ Appendix A. CBOR claim keys. Appendix B. Test vectors. Appendix C. CDDL module. 
 
 ### 1.1. Problem statement
 
-A workload that relies on attestation, such as a key release service, a TLS client that verifies its peer, or an orchestrator that admits nodes, has to consume and verify evidence from every hardware vendor it runs on. AMD, Intel and Arm define different report formats, and out of the box they prove different things: Intel TDX reports hardware runtime measurement registers, AMD SEV-SNP has none, Arm CCA reports them with a width that follows a negotiated hash algorithm. Cloud providers add a further layer: Microsoft Azure wraps the hardware report behind a paravisor and a virtual TPM, so the freshness challenge lands in a TPM quote and the hardware report binds the TPM's key. Attached GPUs are attested by the GPU vendor's service with its own token format.
+A workload that relies on attestation, such as a key release service, a TLS client that verifies its peer, or an orchestrator that admits nodes, has to consume and verify evidence from every hardware vendor it runs on. AMD, Intel and Arm define different report formats, and out of the box they prove different things: Intel TDX reports hardware runtime measurement registers, AMD SEV-SNP has none, Arm CCA reports them with a width that follows the hash algorithm the host chose when it created the realm. Cloud providers add a further layer: Microsoft Azure wraps the hardware report behind a paravisor and a virtual TPM, so the freshness challenge lands in a TPM quote and the hardware report binds the TPM's key. Attached GPUs are attested by the GPU vendor's service with its own token format.
 
 Without a common contract, every relying party re-implements vendor-specific checks, and guarantees written against one vendor's fields have to be rebuilt for the next. With this contract, a relying party writes one policy, receives one result format, and reads in that result exactly which facts were established and how strongly each is protected.
 
@@ -57,9 +57,9 @@ This document covers the following attesters, each specified in Section 9. Secti
 | Attester | TEE | Hosting | Hardware evidence | Binding mode |
 | --- | --- | --- | --- | --- |
 | AMD SEV-SNP guest | `sev-snp` | `bare`, `gcp`, `dstack` | SNP attestation report | `report-data` |
-| AMD SEV-SNP guest with a register provider | `sev-snp` | `bare`, `gcp`, `dstack` | SNP attestation report whose report data is an `ats-mr-v1` commitment | `commitment` |
+| AMD SEV-SNP guest with a register provider | `sev-snp` | `bare`, `gcp`, `dstack` | SNP attestation report whose report data is an `ats-mr-v1` commitment (Section 8.1) | `commitment` |
 | Intel TDX guest | `tdx` | `bare`, `gcp`, `dstack` | TD quote, version 4 or 5 | `report-data` |
-| Azure SEV-SNP confidential VM | `sev-snp` | `azure` | SNP report inside the HCL report, and a vTPM quote | `vtpm-extradata` |
+| Azure SEV-SNP confidential VM | `sev-snp` | `azure` | SNP report inside the HCL report (Section 9.4.1), and a vTPM quote | `vtpm-extradata` |
 | Azure TDX confidential VM | `tdx` | `azure` | TD quote over the HCL report's TD report, and a vTPM quote | `vtpm-extradata` |
 | Arm CCA realm | `cca` | `bare` | CCA attestation token (platform and realm tokens) | `cca-challenge` |
 | NVIDIA Hopper and Blackwell GPUs | device | any | SPDM evidence appraised by NVIDIA NRAS | `nras-nonce` |
@@ -70,7 +70,7 @@ Out of scope for version 1: device assignment through TEE-IO (TDISP, TDX Connect
 ### 1.3. Design principles
 
 1. Three messages with three authorities. Evidence is what the attester sends. Policy is what the relying party requires. The appraisal is what the verifier established. A launch measurement in a result is always the value the verifier extracted from a signed report.
-2. Only signed or bound bytes decide. Every field of the evidence is classified as signed, bound or hint (Section 3.4). A hint selects a parser and nothing else, and a hint that contradicts signed data is a refusal.
+2. Only signed or bound bytes decide. Every field of the evidence is classified as signed, bound or hint (Section 3.4). A hint selects a parser and the combinations Section 4.3 admits, and a hint that contradicts signed data is a refusal.
 3. Fail closed. A check that cannot be performed is a failure unless the policy explicitly waives it, and a waived check is visible in the result.
 4. Name the protection level. Every runtime register carries a `backing` that states what protects it, and the policy sets a minimum, so a guarantee cannot be silently downgraded from hardware to software.
 5. One nonce, one declared binding per attester, one derivation of the binding input for every platform.
@@ -90,7 +90,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 - `pad64(x)` is `x` followed by zero bytes to a length of 64 bytes; `x` MUST be at most 64 bytes.
 - `SHA-256` and `SHA-384` are the functions of FIPS 180-4.
 - `len(x)` is the length of `x` in bytes.
-- Offsets in report layouts are byte offsets from the start of the structure, written in hexadecimal with a `0x` prefix; lengths are decimal byte counts.
+- Offsets in report layouts are byte offsets from the start of the structure. They are hexadecimal with a `0x` prefix in the SEV-SNP and HCL layouts, following AMD's and Microsoft's documents, and decimal in the TDX layouts, following Intel's; lengths are decimal byte counts.
 - Hexadecimal byte strings are written in lowercase without separators unless spaces are shown for readability, in which case the spaces are not part of the value.
 - CDDL is RFC 8610 with the control operators of RFC 9165 and RFC 9741.
 
@@ -104,7 +104,7 @@ Hardware report: the structure the TEE signs: an SNP attestation report, a TD qu
 
 Launch measurement: the digest the TEE computes over the initial contents of the CVM before it runs: SNP `MEASUREMENT`, TDX `MRTD`, CCA Realm Initial Measurement (RIM).
 
-Measurement register (register): an append-only value that can only be changed by extending it, `R' = H(R || d)`, where `d` is the digest of what is being recorded.
+Measurement register (register): an extend-only value that can only be changed by extending it, `R' = H(R || d)`, where `d` is the digest of what is being recorded.
 
 Slot: the index of a register within its source.
 
@@ -118,9 +118,15 @@ Measured producer: software, itself covered by a measurement, that extends regis
 
 Register provider: the component that holds software registers and computes the commitment on SEV-SNP (Section 8).
 
-Anchor: the verifier-derived binding input that combines the relying party's nonce with an optional key (Section 5.2).
+Anchor: the binding input that combines the nonce with an optional key. The attester and the verifier derive it with the same formula (Section 5.2).
 
 Binding mode: where and how an attester's evidence binds the anchor (Section 5.4).
+
+Paravisor: a privileged layer inside the CVM, below the guest operating system, that on Azure holds the vTPM and its attestation key.
+
+HCL report: the structure the Azure paravisor (its host compatibility layer) produces, carrying the hardware report and the vTPM's attestation key (Section 9.4.1).
+
+dstack: an open-source CVM framework whose guests extend RTMR 3 and keep a JSON event log of what they extended (Section 9.3).
 
 Submodule: one attester's claims inside the evidence envelope, in the sense of RFC 9711 section 4.2.18.
 
@@ -137,9 +143,9 @@ Refusal: the outcome of an appraisal that fails; it carries one refusal code (Se
 | Role | In this profile |
 | --- | --- |
 | Attester | an agent inside the CVM that collects the hardware report and builds the envelope; the TEE firmware that signs the report; the paravisor's vTPM on Azure; the Realm Management Monitor (RMM) for Arm realms; each NVIDIA GPU and NVSwitch |
-| Verifier | a library or service that implements Section 11 |
-| Relying party | the party that issued the nonce and consumes the appraisal |
-| Endorser | AMD Key Distribution Service (KDS), Intel Provisioning Certification Service (PCS), NVIDIA Remote Attestation Service (NRAS), the Arm CCA platform vendor's verification service, the cloud provider for paravisor-held keys |
+| Verifier | a library or service that implements Section 11; for NVIDIA devices, the NVIDIA Remote Attestation Service (NRAS) is a verifier whose results this verifier appraises (Section 9.7) |
+| Relying party | the party that consumes the appraisal, and in the challenge pattern issues the nonce |
+| Endorser | AMD Key Distribution Service (KDS), Intel Provisioning Certification Service (PCS), NVIDIA for the NRAS token signing keys, the Arm CCA platform vendor's verification service, the cloud provider for paravisor-held keys |
 | Reference value provider | the publisher of the measured image, which publishes launch measurements and expected register values (Section 13.4) |
 
 ### 3.2. Message flow
@@ -150,7 +156,7 @@ Refusal: the outcome of an appraisal that fails; it carries one refusal code (Se
       |------ nonce (16 to 64 bytes) --->|                              |
       |                                  | hardware reports bound to    |
       |                                  | the anchor (Section 5)       |
-      |<------------- Evidence envelope (Section 4) --------------------|
+      |<-- Evidence (Section 4) ---------|                              |
       |                                                                 |
       |---- Evidence, nonce, presented certificate (if any), Policy --->|
       |                                                                 | Section 11, with
@@ -169,30 +175,31 @@ The facts a relying party needs, and the claims that carry them:
 
 | Question | Claim | Notes |
 | --- | --- | --- |
-| Which image launched (L0) | `cvm_launch_measurement` | signed by the TEE; matched against reference values |
-| What ran after launch (L1) | `cvm_registers`, each with `backing` and `replayed` | only what measured producers recorded (Section 15.3) |
-| Is the evidence fresh (L2) | `cvm_freshness` | the binding of Section 5 passed |
+| Which image launched | `cvm_launch_measurement` | signed by the TEE; matched against reference values |
+| What ran after launch | `cvm_registers`, each with `backing` and `replayed` | only what measured producers recorded (Section 15.3) |
+| Is the evidence fresh | `cvm_freshness` | the binding of Section 5 passed |
 | Is the hardware genuine, and is its firmware acceptable | `hardware` in the trustworthiness vector, `cvm_tcb`, `cvm_collateral` | chain to the vendor root; TCB against named floors |
 | Is guest debug off, and are the other security settings acceptable | `cvm_policy`, `dbgstat`, `configuration` in the vector | debug is refused by default |
-| Which machine is this | `cvm_identity`, `instance-identity` in the vector | authenticated by the hardware chain |
+| Which machine is this | `cvm_identity`, `instance-identity` in the vector | authenticated by the hardware chain; an SEV-SNP report under a VLEK or with a masked `CHIP_ID` identifies no machine (Section 13.3) |
 | Which host-set labels were present | `cvm_host_data` | a label, Section 3.5 |
 | Did every attester answer this challenge | `ear_all_submods_bound` | same nonce; it does not prove co-location (Section 15.6) |
 
-A relying party that needs a single decision uses this rule: the appraisal is acceptable when `ear_all_submods_bound` is `"true"`, the `cpu` submodule and every device submodule have `ear_status` `affirming` (or `warning`, where the relying party accepts the vendor-reported vulnerabilities its policy admitted), the `vtpm` submodule, when present, has `affirming` or `none` (the latter when the policy pins no PCR), and the policy identifier in `ear_appraisal_policy_ids` is one the relying party recognizes. A `contraindicated` submodule, which debug produces, is never acceptable under this rule. The profile defines no separate boolean because a boolean detached from the policy that produced it does not say which requirements were met: a genuine report can still describe an image or a firmware version the relying party does not accept.
+A relying party that needs a single decision uses this rule: the appraisal is acceptable when `ear_all_submods_bound` is `"true"`, the `cpu` submodule and every device submodule have `ear_status` `affirming` (or `warning`, where the relying party accepts the vendor-reported vulnerabilities its policy admitted), the `vtpm` submodule, when present, has `affirming` or `none` (the latter when the policy pins no PCR), and the policy identifier in `ear_appraisal_policy_ids` is one the relying party recognizes. A `contraindicated` submodule, which debug and an SEV-SNP VMPL other than 0 produce (Section 12.4), is never acceptable under this rule. The profile defines no separate boolean because a boolean detached from the policy that produced it does not say which requirements were met: a genuine report can still describe an image or a firmware version the relying party does not accept.
 
 ### 3.4. Trust boundary inside the evidence
 
 The envelope is unprotected (Section 4.1). Every field is one of:
 
-- signed: bytes covered by a hardware or vendor signature: the SNP report, the TD quote, the HCL report's hardware report, the TPM quote, the CCA tokens, the NRAS tokens;
+- signed: bytes covered by a hardware or vendor signature: the SNP report, the TD quote, the HCL report's hardware report, the TPM quote, the CCA tokens, and the device evidence, whose SPDM signatures NRAS verifies and answers with signed tokens (Section 9.7);
 - bound: fields the verifier checks against signed bytes before use: registers against the report, the quote or the commitment; the log against the registers; the nonce against its binding; endorsements against pinned roots;
-- hint: every other field. A hint selects a parser, and `hosting` also selects which report types and binding modes are admitted (Section 4.3); a hint never raises what a verifier concludes, because every admitted combination is verified in full.
+- hint: every other field. A hint selects a parser, and `hosting` also selects which report types and binding modes are admitted (Section 4.3); a hint never raises what a verifier concludes, because every admitted combination is verified in full;
+- reserved: `cvm_provenance`, which a version 1 verifier ignores whatever it holds (Section 4.3).
 
-`cvm_platform` is a hint. The verifier MUST re-derive the vendor, the TEE and the generation from signed data (Section 9) and MUST refuse evidence whose hint contradicts them. `hosting` cannot be derived from signed data, so every path it admits is verified in full on its own terms: in particular `azure` admits `vtpm-extradata`, whose freshness rests on the paravisor, and a verifier therefore refuses that mode unless the policy pins the launch measurement that establishes the paravisor (Section 9.4.4). A verifier that reads `cvm_registers[].value` without binding it has a fail-open defect by definition.
+`cvm_platform` is a hint. The verifier MUST re-derive the vendor, the TEE and the generation from signed data (Section 9) and MUST refuse evidence whose hint contradicts them. `hosting` cannot be derived from signed data, so every path it admits is verified in full on its own terms: in particular `azure` admits `vtpm-extradata`, whose freshness rests on the paravisor, and a verifier therefore refuses that mode unless the policy pins the launch measurement that establishes the paravisor (Section 9.4.4). `commitment` rests on the register provider in the same way, and is refused under the same condition (Section 8.7). A verifier that reads `cvm_registers[].value` without binding it has a fail-open defect by definition.
 
 ### 3.5. Host-set fields
 
-Each TEE lets the host place a value in the signed report at launch that the launch measurement does not cover: SNP `HOST_DATA` (32 bytes), TDX `MRCONFIGID` (48 bytes), CCA Realm Personalization Value (RPV, 64 bytes). The host can choose a different value on every launch, so on its own such a field is a label, and the profile reports it as `cvm_host_data` with explicit semantics.
+Each TEE lets the host place a value in the signed report at launch that the launch measurement does not cover: SNP `HOST_DATA` (32 bytes), TDX `MRCONFIGID` (48 bytes), CCA Realm Personalization Value (RPV, 64 bytes). The host can choose a different value on every launch, so on its own such a field is a label, and the profile reports it as `cvm_host_data` with explicit semantics. Other signed fields are host-set in the same way and are reported in `cvm_owner`: TDX `MROWNER` and `MROWNERCONFIG`, and the SEV-SNP ID block fields, which establish something only when the policy pins the ID key that signs them (Section 13.4).
 
 A host-set field becomes a guarantee when the measured image contains code that enforces a relationship with it: for example, a guest that refuses to start unless `HOST_DATA` equals the digest of the configuration it loads. Only then does pinning it (`reference.host_data`, Section 13.4) establish something about the workload, and the guarantee rests on the launch measurement pin that establishes the enforcing code.
 
@@ -207,16 +214,20 @@ application/eat-ucs+json; eat_profile="tag:confidential.ai,2026:cvm#1"
 application/eat-ucs+cbor; eat_profile="tag:confidential.ai,2026:cvm#1"
 ```
 
-The envelope carries no signature of its own. Every byte a verifier relies on is signed by the TEE, a vendor service or the vTPM, or is bound by the verifier to such bytes (Section 3.4). A signature by a key inside the guest would add nothing a verifier could rely on beyond what those signatures already establish. RFC 9781 sections 3 and 7 require a use of unprotected claims sets to state its security argument and the roles of the endpoints; this section and Section 3 are that statement.
+The envelope carries no signature of its own. Every byte a verifier relies on is signed by the TEE, a vendor service or the vTPM, or is bound by the verifier to such bytes (Section 3.4). A signature by a key inside the guest would add nothing a verifier could rely on beyond what those signatures already establish.
+
+RFC 9781 section 4 premises the RATS use of unprotected claims sets on a secure channel in which the receiver authenticates the sender and the channel protects integrity. This profile departs from that premise: it relies on no property of the channel that carries the envelope, because every value an appraisal decides on is signed or bound (Section 3.4). RFC 9781 section 7 requires such a use to define the roles of its endpoints and its security argument; Section 3 and this section are that definition.
 
 Top-level claims:
 
 | Claim | CBOR key | Requirement | Value |
 | --- | --- | --- | --- |
 | `eat_profile` | 265 | MUST | `tag:confidential.ai,2026:cvm#1` |
-| `eat_nonce` | 10 | MUST | the relying party's nonce, a byte string of 16 to 64 bytes |
+| `eat_nonce` | 10 | MUST | the nonce, a byte string of 16 to 64 bytes: the relying party's in the challenge pattern, the attester's in the certificate pattern (Section 5.1) |
 | `cvm_version` | -70000 | MUST | the integer 1 |
 | `submods` | 266 | MUST | the submodules of Section 4.2 |
+
+In JSON, `eat_nonce` is the base64url text (Section 4.7) of the 16 to 64 byte nonce, a narrowing of RFC 9711's text form; the anchor and every binding use the decoded bytes. The array form of RFC 9711 section 4.1 is refused.
 
 A verifier MUST refuse an envelope with another `eat_profile` or another `cvm_version`, and MUST refuse an envelope whose `eat_nonce` differs from the nonce the relying party supplied to it. Other top-level claims are ignored, whatever they hold.
 
@@ -231,7 +242,7 @@ A verifier MUST refuse an envelope with another `eat_profile` or another `cvm_ve
 | `gpu/<ueid>` | zero or more | one NVIDIA GPU (Section 4.5) |
 | `nvswitch/<ueid>` | zero or more | one NVIDIA NVSwitch (Section 4.5) |
 
-`<ueid>` is the device's identifier as the NVIDIA SDK reports it: 1 to 128 printable ASCII characters (0x21 to 0x7E) excluding `/`. An envelope carries at most 66 submodules, of which at most 32 are device submodules (a verifier refuses more with `device-not-allowed`). A verifier MUST refuse an envelope with an unknown name, without a `cpu` submodule, with a `vtpm` submodule whose `cpu` does not bind through it, or with a `cpu` bound through `vtpm-extradata` and no `vtpm`.
+`<ueid>` is the device's identifier as the NVIDIA SDK reports it: 1 to 128 printable ASCII characters (0x21 to 0x7E) excluding `/`. A verifier refuses an envelope with more than 66 submodules with `envelope-invalid` while parsing it (Section 4.7), and a well-formed envelope with more than 32 device submodules with `device-not-allowed`. A verifier MUST refuse an envelope with an unknown name, without a `cpu` submodule, with a `vtpm` submodule whose `cpu` does not bind through it, or with a `cpu` bound through `vtpm-extradata` and no `vtpm`.
 
 ### 4.3. The `cpu` submodule
 
@@ -286,7 +297,7 @@ The combinations a `cpu` submodule may take are fixed by the TEE and the hosting
 | `cvm_registers` | -70005 | MUST | bound | 1 to 24 registers of source `vtpm-pcr` |
 | `cvm_log` | -70006 | MAY | bound | the vTPM's event log (Section 7) |
 
-`cvm_tpm_quote.message` is the marshaled `TPMS_ATTEST` structure the TPM signed, `signature` the signature value over it (for the RSA attestation key of Section 9.4, the RSASSA-PKCS1-v1_5 signature bytes of the `TPMS_SIGNATURE_RSA`), `pcrs` the 24 PCR values of the quoted bank in PCR order, and `bank` the bank's TPM algorithm name (`sha256`, `sha384` or `sha512`, Section 6.1). `cvm_tpm_ak.method` is `hcl-report` and `data` is the Azure HCL report that carries the attestation key and binds it to the hardware report (Section 9.4).
+`cvm_tpm_quote.message` is the marshaled `TPMS_ATTEST` structure the TPM signed, `signature` the signature value over it (for the RSA attestation key of Section 9.4, the `sig` buffer of the `TPMS_SIGNATURE_RSA` without its size prefix, an RSASSA-PKCS1-v1_5 signature), `pcrs` the 24 PCR values of the quoted bank in PCR order, and `bank` the bank's TPM algorithm name (`sha256`, `sha384` or `sha512`, Section 6.1). Version 1 appraises only the `sha256` bank (Section 9.4.3). `cvm_tpm_ak.method` is `hcl-report` and `data` is the Azure HCL report that carries the attestation key and binds it to the hardware report (Section 9.4).
 
 Each register's `alg` MUST be the quoted bank, its `index` a PCR inside the quote's signed selection, its `value` equal to the entry of `pcrs` at that index, its `source` `vtpm-pcr` and its `backing` `privileged-service`. Each index appears at most once.
 
@@ -302,11 +313,13 @@ A `gpu/<ueid>` or `nvswitch/<ueid>` submodule carries the device evidence exactl
 | `cert_chain_b64` | MUST | NVIDIA's standard-alphabet base64 text, 1 byte to 1 MiB, passed to NRAS verbatim |
 | `cvm_binding` | MUST | `{"pattern": "challenge", "mode": "nras-nonce"}` |
 
-The two base64 members keep NVIDIA's encoding because NRAS consumes them as text; they are the only byte-carrying members of the profile that do not follow Section 4.7. The attester obtains them from the device with the SPDM nonce of Section 5.4 (`nras-nonce`). A device submodule's binding names the challenge pattern because the device protocol always takes a nonce; the nonce is the envelope's, so under a `cpu` submodule in the certificate pattern the device evidence is as old as the certificate. Other members of a device submodule are ignored.
+The two base64 members keep NVIDIA's encoding because NRAS consumes them as text; they are the only byte-carrying members of the profile that do not follow Section 4.7. The attester obtains them from the device with the SPDM nonce of Section 5.4 (`nras-nonce`). A device submodule's binding names the challenge pattern because the device protocol takes a nonce on every exchange (Section 5.1); the nonce is the envelope's, so under a `cpu` submodule in the certificate pattern the device evidence is as old as the certificate. Other members of a device submodule are ignored.
 
 ### 4.6. Nested Arm CCA token
 
 For Arm CCA the `cpu` submodule is a nested token (RFC 9711 section 4.2.18.3): the CCA attestation token bytes exactly as the RMM returned them. In JSON it is the array `["CBOR", <token as base64url>]`; in CBOR it is the byte string. No `cvm_report` wrapper is used because the token is already an EAT, and the realm token's challenge carries the binding (Section 9.6).
+
+A CCA `cpu` submodule has no `cvm_binding`: it is in the challenge pattern, in `cca-challenge` mode, and binds no key in version 1. A policy that names `freshness.key` refuses it with `binding-mismatch`.
 
 ### 4.7. Encoding rules
 
@@ -316,12 +329,12 @@ JSON (the primary encoding):
 - Byte strings are base64url (RFC 4648 section 5) without padding and with zero trailing bits (RFC 4648 section 3.5), which is the strict `.b64u` of RFC 9741. A verifier MUST refuse the standard alphabet, padding and non-zero trailing bits.
 - Integers are JSON numbers. No profile claim holds a floating-point value. Integers are written without a fraction or an exponent (`1`, never `1.0` or `1e0`), are at most 2^64 - 1, and are exact: an implementation parses the 64-bit members (`chain_len`, `seq`, `recnum`) without loss.
 - Each value has exactly one encoding. An object with a duplicate member name is refused, in the envelope, in every `cvm_*` object and in every CMW collection. `null` is not a value: an optional member is absent or holds its type. An object is written as an object, never as the array of its members, and an enumerated value is its text, never an object naming it. An implementation whose JSON library admits any of these (keeping the last duplicate, reading `null` as absent, reading a struct from an array) MUST refuse them itself.
-- Unknown claims at the top level and in a submodule claims set, device submodules included, are ignored whatever they hold, as EAT extensibility requires. An unknown member inside any `cvm_*` object is refused.
+- Unknown claims at the top level and in a submodule claims set, device submodules included, are ignored whatever they hold, as EAT extensibility requires. An unknown member inside any `cvm_*` object is refused. `cvm_provenance` is reserved and exempt from both rules: its value is ignored whatever it holds.
 - A CMW record's indicator, where this document does not fix it, is 1 to 31 (RFC 9999 section 3.1).
 
-Bounds. A verifier parses untrusted input without buffering it whole and within these bounds, and refuses input that exceeds them: at most 66 submodules; a CMW collection has at most 32 entries and one level of nesting; every byte string field is at most 1 MiB (1048576 bytes) after decoding; the whole envelope is at most 10 MiB (10485760 bytes).
+Bounds. A verifier refuses input that exceeds these bounds, and checks each bound before it parses the input the bound covers: the whole envelope is at most 10 MiB (10485760 bytes); JSON is nested at most 32 levels deep, where each array and each object counts one level and the envelope's top-level object is level 1; at most 66 submodules; a CMW collection has at most 32 entries and one level of nesting; every byte string field is at most 1 MiB (1048576 bytes) after decoding. The nesting bound applies to unknown claims too, so that an ignored claim cannot exhaust a recursive parser.
 
-CBOR: claim keys are the integers of Appendix A; names inside profile objects stay text; byte strings are byte strings; every map and string has a definite length; every object the attester produces uses deterministic encoding (RFC 8949 section 4.2.1).
+CBOR: claim keys are the integers of Appendix A; names inside profile objects stay text; byte strings are byte strings; every map and string has a definite length; every object the attester produces uses deterministic encoding (RFC 8949 section 4.2.1). A verifier MUST refuse a CBOR envelope that is not a claims set under UCCS tag 601, that uses an indefinite length, that has a duplicate map key, or that is not in deterministic encoding, and a `cvm_report` or `cvm_endorsements` record whose `type` is a CoAP content-format integer (the CCA token's own records, inside its bytes, keep theirs); the same one-encoding rule as JSON applies, so that two verifiers cannot read different claims from the same bytes.
 
 ### 4.8. EAT profile checklist
 
@@ -333,9 +346,9 @@ RFC 9711 section 6.3 lists the decisions a profile makes. For this profile:
 | 6.3.2 map and array encoding | definite lengths only |
 | 6.3.3 string encoding | definite lengths only |
 | 6.3.4 preferred serialization | deterministic encoding (RFC 8949 section 4.2.1) for every CBOR object the attester produces |
-| 6.3.5 CBOR tags | UCCS tag 601 when a CBOR envelope is written; no tags inside JSON |
+| 6.3.5 CBOR tags | UCCS tag 601 when a CBOR envelope is written; no tags in JSON apart from those inside the bytes of a nested CCA token (Section 4.6) |
 | 6.3.6 COSE/JOSE protection | none at the envelope; Section 4.1 states the argument |
-| 6.3.7 COSE/JOSE algorithms | inherited from each hardware report; the profile adds SHA-384 for registers, the anchor and the commitment, and SHA-256 for the vTPM key binding and the NRAS nonce |
+| 6.3.7 COSE/JOSE algorithms | inherited from each hardware report; the profile adds SHA-384 for registers, the anchor and the commitment, and SHA-256 for the `spki-sha256` and `x509-tbs-sha256` key values, the vTPM key binding and the NRAS nonce |
 | 6.3.8 detached EAT bundle support | not used in version 1 |
 | 6.3.9 key identification | per submodule: VCEK or VLEK for SNP; the PCK chain for TDX; the HCL attestation key for the vTPM; the CCA platform and realm attestation keys; the NRAS key identifier (`kid`) |
 | 6.3.10 endorsement identification | inline in `cvm_endorsements` or fetched by the verifier, anchored to pinned roots either way (Section 10) |
@@ -349,7 +362,9 @@ RFC 9711 section 6.3 lists the decisions a profile makes. For this profile:
 `cvm_binding.pattern` names how the nonce was chosen:
 
 - `challenge`: the relying party chose `eat_nonce` for this exchange. This is the pattern for every exchange with a live peer.
-- `certificate`: the evidence is bound to an X.509 certificate that lives for the CVM's lifetime, as in attested TLS. The attester chose `eat_nonce` when it created the certificate, and binds the certificate through a key of kind `x509-tbs-sha256` (Section 5.3). The evidence is as fresh as the certificate: the relying party MUST check the certificate's validity window and bound its age. A version 1 verifier receives the certificate's digest (Section 5.5), and so does not report `not_before` and `not_after`; the members are defined for verifiers that receive the certificate itself.
+- `certificate`: the evidence is bound to an X.509 certificate (RFC 5280) that lives for the CVM's lifetime, as in attested TLS. The attester chose `eat_nonce` when it created the certificate, and binds the certificate through a key of kind `x509-tbs-sha256` (Section 5.3). The evidence is as fresh as the certificate: the relying party MUST check the certificate's validity window, and SHOULD refuse a certificate whose `notBefore` is older than the evidence age it accepts. A version 1 verifier receives the certificate's digest (Section 5.5), and MUST NOT emit `not_before` or `not_after`; the members are defined for verifiers that receive the certificate itself.
+
+A device submodule always declares `challenge`, because the device protocol takes a nonce on every exchange; the nonce it answers is the envelope's, whichever party chose it (Section 4.5).
 
 `eat_nonce` is REQUIRED in both patterns and is at least 16 bytes. A binding without a nonce is not defined by this profile.
 
@@ -386,7 +401,7 @@ A `challenge` binding carries no key or an `spki-sha256` or `raw` key. A `certif
 
 | Mode | Attesters | Rule |
 | --- | --- | --- |
-| `report-data` | SEV-SNP without a register provider, TDX, dstack | the report's 64-byte report data equals `pad64(anchor)` |
+| `report-data` | SEV-SNP without a register provider, and TDX, on any hosting other than `azure` | the report's 64-byte report data equals `pad64(anchor)` |
 | `commitment` | SEV-SNP with a register provider | the report data equals `header16 \|\| C` of Section 8.1, with `caller_data = pad64(anchor)` |
 | `vtpm-extradata` | Azure SEV-SNP and TDX | the TPM quote's `extraData` equals `anchor`, and the hardware report binds the quote's key (Section 9.4) |
 | `cca-challenge` | Arm CCA | the realm token's challenge equals `pad64(anchor)` |
@@ -398,7 +413,7 @@ The mode is constrained by the platform (Section 4.3): a verifier MUST refuse a 
 
 ### 5.5. Certificate carriage
 
-When evidence rides in an X.509 certificate, it is carried in the `id-pe-cmw` extension (RFC 9999 section 4.4, OID 1.3.6.1.5.5.7.1.35) as a CMW record whose type is `application/eat-ucs+json; eat_profile="tag:confidential.ai,2026:cvm#1"` and whose value is the envelope. The `x509-tbs-sha256` value is the SHA-256 of the certificate's DER `TBSCertificate` with every `id-pe-cmw` extension removed, since the extension cannot cover its own digest: the remaining extensions keep their order and encoding, the `Extensions` SEQUENCE and the `[3]` field that holds it are re-encoded with DER lengths, and the `[3]` field is omitted when no extension remains. For a certificate without the extension the value is the SHA-256 of its `TBSCertificate`. The relying party computes this value from the certificate it was presented and supplies it as `freshness.key`; without it the verifier MUST refuse the `certificate` pattern with `binding-mismatch`.
+When evidence rides in an X.509 certificate, it is carried in the `id-pe-cmw` extension (RFC 9999 section 4.4, OID 1.3.6.1.5.5.7.1.35) in the extension's `json` choice, as the JSON CMW record `[type, value, 4]` whose `type` is `application/eat-ucs+json; eat_profile="tag:confidential.ai,2026:cvm#1"` and whose `value` is the base64url of the envelope. RFC 5280 section 4.2 forbids a repeated extension, so a certificate with more than one `id-pe-cmw` extension is refused. The `x509-tbs-sha256` value is the SHA-256 of the certificate's DER `TBSCertificate` with the `id-pe-cmw` extension removed, since the extension cannot cover its own digest: the remaining extensions keep their order and encoding; the `Extensions` SEQUENCE, the `[3]` field that holds it and the enclosing `TBSCertificate` SEQUENCE are re-encoded with DER lengths; `version` is unchanged; and the `[3]` field is omitted when no extension remains. For a certificate without the extension the value is the SHA-256 of its `TBSCertificate`. The relying party computes this value from the certificate it was presented and supplies it as `freshness.key`; without it the verifier MUST refuse the `certificate` pattern with `binding-mismatch`.
 
 The dstack attested-TLS certificate extensions (private arc `1.3.6.1.4.1.62397.1`) are outside this profile.
 
@@ -416,11 +431,11 @@ The dstack attested-TLS certificate extensions (private arc `1.3.6.1.4.1.62397.1
 | `source` | `tdx-rtmr`, `snp-vmr`, `vtpm-pcr` or `cca-rem` |
 | `backing` | `hardware`, `privileged-service`, `kernel-service` or `virtualized` (Section 6.4) |
 
-Each `(source, index)` appears at most once. `alg` is pinned per source: `sha384` for `tdx-rtmr` and `snp-vmr`; the quoted bank for `vtpm-pcr`; the realm hash algorithm (`sha256`, `sha384` or `sha512`) for `cca-rem`. The array is REQUIRED whenever `cvm_log` is present, so that a verifier without support for a log format can still pin register values.
+Each `(source, index)` appears at most once. `alg` is pinned per source: `sha384` for `tdx-rtmr` and `snp-vmr`; the quoted bank for `vtpm-pcr`; the realm hash algorithm for `cca-rem` (`sha256` or `sha512` under RMM 1.0, and also `sha384` under RMM 2.0). The array is REQUIRED whenever `cvm_log` is present, so that a verifier without support for a log format can still pin register values.
 
 ### 6.2. Sources and index spaces
 
-| Source | Index | Width | Held by |
+| Source | Index | Width (bytes) | Held by |
 | --- | --- | --- | --- |
 | `tdx-rtmr` | RTMR ordinal 0 to 3 | 48 | the TDX module |
 | `cca-rem` | REM ordinal 0 to 3 | 32, 48 or 64 | the RMM |
@@ -444,6 +459,8 @@ Slots 0 to 3 carry the same meaning on every platform that has them, following t
 | 4 to 15 | workload slots, where the source has them; allocated at first use (Section 8.3) | none |
 
 `vtpm-pcr` entries keep their PCR numbers and are distinguished by `source`: RTMR 3, PCR 3 and SNP slot 3 are different registers.
+
+On `snp-vmr` the register provider starts with the guest kernel, so firmware cannot extend slots 0 to 2: they hold what the kernel records into them, and otherwise stay at genesis.
 
 ### 6.4. Backing
 
@@ -512,7 +529,7 @@ A `cvm` record is:
 - `content_type`: 200;
 - `content`: the map `{0: seq, 1: event}`, where `seq` is the record's position among the log's `cvm` records, from 0, and `event` is a byte string.
 
-`event` is the deterministic CBOR encoding (RFC 8949 section 4.2.1) of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, OPTIONAL)}`, with `domain` and `operation` each 1 to 255 bytes of UTF-8. `content_digest` is 48 bytes. A verifier refuses with `replay-mismatch` an `event` that is not deterministically encoded, carries a duplicate or unknown key, or has trailing bytes, because such bytes do not authenticate one reading. The meaning of `content_digest` belongs to the producer, except in the records of Section 8.2 and 8.3, where it is fixed. The digest extended into the register is:
+`event` is the deterministic CBOR encoding (RFC 8949 section 4.2.1) of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, OPTIONAL)}`, with `domain` and `operation` each 1 to 255 bytes of UTF-8. `content_digest` is 48 bytes. A verifier refuses with `replay-mismatch` an `event` that is not deterministically encoded, carries a duplicate or unknown key, has trailing bytes, or has a `domain` or `operation` outside 1 to 255 bytes, because such bytes do not authenticate one reading. The meaning of `content_digest` belongs to the producer, except in the records of Section 8.2 and 8.3, where it is fixed. The digest extended into the register is:
 
 ```
 d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)
@@ -520,22 +537,24 @@ d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)
 
 In CEL-CBOR a record is `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 9: 200, 10: {0: seq, 1: event}}`, with `event` stored as the exact bytes that were hashed; in CEL-JSON it is `{"recnum", "pcr", "digests", "content_type": "cvm", "content": {"seq", "event": hex}}`. The order across registers lives in the content because CEL keeps `recnum` per index (CEL section 4.2.2) and requires a record to carry what its digest covers (CEL section 4.2.1.2), and leaves how a digest derives from content to the content type (CEL section 4.2.5).
 
-CEL v1.1 Table 2 assigns content types 4 to 10 and defines no private range. The value 200 is taken through the `$TPMS_CEL_EVENT-extension` socket that the CEL CDDL provides; Section 17.4 records the registration request. Vectors are in Appendix B.3.
+Domain `ats` is reserved for this profile's own records. In any log, a `cvm` record in domain `ats` is refused with `replay-mismatch` unless it is the boot record of Section 8.2 (record 0, in slot 3, without `content`) or, in a `commitment` log, a claim record of Section 8.3.
+
+CEL v1.1 Table 2 assigns content types 4, 5 and 7 to 9, reserves 6 and 10, and defines no private range. The value 200 is taken through the `$TPMS_CEL_EVENT-extension` socket that the CEL CDDL provides; Section 17.4 records the registration request. Vectors are in Appendix B.3.
 
 ### 7.4. Replay
 
-The verifier replays every register a log covers, from that register's starting value, and marks each register `replayed: true` or `replayed: false` in the result:
+The verifier replays every register a log covers, from that register's starting value, and marks each register `replayed: true` or `replayed: false` in the result. Without a log, every register is reported with `replayed` false.
 
 - A register the log extends is replayed when its records, extended in order from the starting value, reproduce the authoritative value of Section 6.5. For `tcg-cel-cbor`, `tcg-cel-json`, `dstack-json` and `tpm2-event-log`, every register the log extends MUST reproduce, and one that does not is refused with `replay-mismatch`. For `tdx-ccel`, RTMR 0 to 2 MUST reproduce, and RTMR 3 is reported with `replayed` false when it does not, because agents that extend RTMR 3 after boot do not all append to the CCEL.
 - A register the log never extends is replayed exactly when it still holds its starting value, since the log then accounts for every extend into it.
 - Starting values: zero for an RTMR and a REM; for a PCR the PC Client starting value (PCRs 17 to 22 all ones; PCR 0 at the locality of a `StartupLocality` event, otherwise zero; every other PCR zero); for an `snp-vmr` slot its genesis value (Section 8.1).
-- `EV_NO_ACTION` records are skipped. A `tpm2-event-log` is replayed in the quoted bank; version 1 verifiers require SHA-256 for it and refuse other banks with `unsupported`. A register never extended keeps `replayed` false when no log is present.
+- `EV_NO_ACTION` records are skipped. A `tpm2-event-log` is replayed in the quoted bank, which version 1 requires to be SHA-256 (Section 9.4.3).
 - A `cvm` record is replayed by requiring `seq` to count the log's `cvm` records from 0 without a gap and `recnum` to count its slot's records from 0 without a gap, recomputing `d` from `seq`, the record's index and the stored `event` bytes, requiring it to equal the recorded digest, and extending it. A record that breaks any of these is refused with `replay-mismatch`. The verifier never re-encodes content.
 - dstack runtime events are replayed with the digest rules of Section 9.3, from zero, as `R = SHA-384(R || digest)`.
 
 `replay_until_event`, under which the verified value would be the replay up to and including a named record, and a policy naming the slots that must replay, are not defined in version 1.
 
-On an SNP `cpu` submodule in `commitment` mode the log is REQUIRED (refused with `log-required` when absent), every record MUST have content type `cvm`, `chain_len` MUST equal the number of records (refused with `log-required` otherwise), and Section 8 governs the replay from genesis.
+On an SNP `cpu` submodule in `commitment` mode the log is REQUIRED (refused with `log-required` when absent or in a format the mode does not admit), every record MUST have content type `cvm` (refused with `replay-mismatch` otherwise), `chain_len` MUST equal the number of records (refused with `log-required` otherwise), and Section 8 governs the replay from genesis.
 
 ## 8. Software registers on SEV-SNP
 
@@ -547,7 +566,7 @@ The construction does not make the registers hardware registers. Its guarantee r
 
 ```
 seed:        seed = SHA-384("ats-mr-v1/seed")
-genesis(i):  R[i] = SHA-384(zeros48 || "ats-mr-v1/genesis" || seed || u8(i))       for i in 0..15
+genesis(i):  R[i] = SHA-384(zeros48 || "ats-mr-v1/genesis" || seed || u8(i))       for i = 0 to 15
 extend:      R[i] = SHA-384(R[i] || d)                        d is the record digest of Section 7.3
 commit:      C    = SHA-384("ats-mr-v1/commit" || R[0] || R[1] || ... || R[15]
                             || u64le(chain_len) || caller_data)
@@ -566,11 +585,11 @@ The verifier recomputes `C` from the registers established by replaying the log 
 
 At initialization the provider draws `bootseed`, 32 bytes from the kernel's cryptographically secure random number generator, and extends into slot 3, as record 0 of the log (`seq` 0, `recnum` 0), a `cvm` event with `domain` `ats`, `operation` `boot`, `content_digest` `SHA-384(bootseed)` and no `content`. The seed itself travels in the `bootseed` claim, and the verifier checks the claim's digest against the record.
 
-A valid chain therefore has `chain_len` at least 1 and the boot record at record 0 in slot 3. A verifier MUST refuse, with `replay-mismatch`, a `commitment` submodule that lacks either, and a log that carries a record with `domain` `ats` other than this boot record and the claim records of Section 8.3. A `bootseed` distinguishes the chains of one launch only for an honest kernel; Section 8.8 keys chain memory by the launch, which the kernel cannot choose.
+A valid chain therefore has the boot record at record 0 in slot 3, and `chain_len` at least 1, which Section 4.3 makes a shape rule (`envelope-invalid`). A verifier MUST refuse with `replay-mismatch` a `commitment` log whose record 0 is not the boot record, or whose slot 3 is at its genesis value. Section 7.3 reserves domain `ats` in every log. A `bootseed` distinguishes the chains of one launch only for an honest kernel; Section 8.8 keys chain memory by the launch, which the kernel cannot choose.
 
 ### 8.3. Workload slots
 
-Slots 4 to 15 are allocated at first use. The first record extended into a workload slot is its claim record: a `cvm` event with `domain` `ats`, `operation` `claim`, `content` the deterministic CBOR map `{0: owner (tstr), 1: purpose (tstr)}` with each string 1 to 255 bytes of UTF-8 (a verifier refuses content that is not deterministically encoded or carries another key, with `log-invalid`), and `content_digest` `SHA-384(content)`.
+Slots 4 to 15 are allocated at first use. The first record extended into a workload slot is its claim record: a `cvm` event with `domain` `ats`, `operation` `claim`, `content` the deterministic CBOR map `{0: owner (tstr), 1: purpose (tstr)}` with each string 1 to 255 bytes of UTF-8 (a verifier refuses content that is not deterministically encoded, carries another key, or has a string outside that length, with `replay-mismatch`), and `content_digest` `SHA-384(content)`.
 
 `owner` is the producer's identity as the provider authenticates it (Section 8.4). The provider refuses an extend into an unclaimed slot, a claim of a claimed slot, and an extend from any producer other than the slot's owner. A claim holds until the next boot. When all twelve workload slots are claimed, further claims are refused; a deployment with more than twelve producers groups them under shared owners, distinguished by `domain` and `operation`.
 
@@ -580,12 +599,12 @@ The verifier MUST refuse a log in which a workload slot that left genesis does n
 
 A register provider conforming to this profile:
 
-1. Holds 16 registers of 48 bytes, initialized to their genesis values, in memory that guest userspace cannot write or read.
+1. Holds 16 registers of 48 bytes, initialized to their genesis values, in memory that guest userspace cannot write, and reads only through item 9.
 2. Implements extend as its only operation that changes a register. It implements no operation that sets, resets or truncates a register or the log.
-3. Accepts from a producer a slot and the `event` bytes, and itself assigns `seq` from its global extension counter and `recnum` from the slot's counter, computes `d`, extends, and appends the record, all under one lock. A producer can supply neither counter nor a precomputed digest.
-4. Stores the log in memory it controls, appends only, and exposes it read-only. When log storage is exhausted it refuses further extends; it never drops or overwrites a record.
+3. Accepts from a producer a slot and an event, given as its fields or as `event` bytes that the provider parses under Section 7.3. It refuses an event that a verifier would refuse and any event in domain `ats`: it builds the boot and claim records itself, taking a claim's `owner` from its authentication of the caller (item 6) and only `purpose` from the producer. It assigns `seq` from its global extension counter and `recnum` from the slot's counter, computes `d`, extends, and appends the record, all under one lock. A producer can supply neither counter nor a precomputed digest. A malformed record would otherwise make every later report of the launch unverifiable, since nothing truncates the log (item 2).
+4. Stores the log in memory it controls, appends only, and exposes it read-only. It refuses an extend after which the log, in the format the attester emits, would exceed the 1 MiB bound of Section 7.1, and refuses further extends when its storage is exhausted; it never drops or overwrites a record.
 5. Extends the boot record before it exposes any interface (Section 8.2).
-6. Authenticates each producer's identity for slot claims and refuses extends as Section 8.3 states. The authentication mechanism is the provider's (for example, the Linux credentials or the cgroup of the calling process), and the provider documents it, because `owner` is only as meaningful as that mechanism.
+6. Authenticates each producer's identity for slot claims and refuses extends as Section 8.3 states. The authentication mechanism is the provider's (for example, the Linux credentials or the cgroup of the calling process), and the provider documents it, because `owner` is only as meaningful as that mechanism. Guest root can act as any owner, so against root `owner` shows only which slot a record entered.
 7. Computes, for every report request, `C` over the register values and `chain_len` at that moment, under the same lock as extend, and places `header16 || C` in the request's report data. The caller supplies only `caller_data`, exactly 64 bytes, which the provider never interprets.
 8. Returns with the report the register values, `chain_len` and the log prefix of exactly `chain_len` records captured under that lock, so the attester's evidence is consistent with the commitment.
 9. Exposes register values read-only, for example through the Linux TSM measurement-register interface.
@@ -594,7 +613,7 @@ A register provider conforming to this profile:
 
 The provider's commitment is worth something only if no software in the guest can obtain a signed report without it. On SEV-SNP a guest obtains a report by the guest request protocol, which requires all of:
 
-- writing the GHCB MSR to start the protocol, an instruction that faults outside ring 0;
+- issuing the request through the GHCB (AMD publication 56421), a page only the kernel maps, whose address the kernel writes to the GHCB MSR (`WRMSR` faults outside ring 0) before a `VMGEXIT`; this is defense in depth, and the VMPCK below is the cryptographic control;
 - encrypting the request with a VM platform communication key (VMPCK), which the firmware places in the SNP secrets page;
 - a response only the AMD Secure Processor can produce, because the channel between the guest and the AMD Secure Processor is encrypted and integrity-protected with the VMPCK.
 
@@ -602,7 +621,7 @@ The host has one interface that produces a report for a running guest (`SNP_HV_R
 
 An image whose provider claims the guarantees of this section therefore MUST ensure that:
 
-1. The only ring-0 code is the measured kernel and code the kernel verified against keys inside the measured image (Section 8.6).
+1. The only ring-0 code is the launch-measured firmware and kernel, and code the kernel verified against keys inside the measured image (Section 8.6).
 2. The secrets page and every VMPCK are readable only by the kernel. A VMPCK disclosed to guest userspace can be handed to a colluding host, which can then obtain reports with report data of its choice; confidentiality of kernel memory is therefore as necessary as its integrity.
 3. Every kernel path that produces a report request, including the character-device interface, the configfs-tsm interface and any extended-report variant, passes through the provider's computation of Section 8.4 item 7.
 4. The kernel, its command line and its initial RAM disk are covered by the launch measurement (for example, by booting directly from a measured IGVM image), so no unmeasured boot configuration can alter items 1 to 3.
@@ -611,11 +630,11 @@ A verifier establishes these properties transitively: by pinning a launch measur
 
 ### 8.6. Kernel restriction set
 
-The table lists every interface through which guest root, or an unprivileged user who reaches root, obtains ring-0 execution or reads or writes kernel memory, with the configuration that removes it. Build configuration uses Linux Kconfig names. A provider that claims `kernel-service` backing (Section 8.7) MUST run in an image that satisfies every row marked MUST; rows marked SHOULD reduce the kernel attack surface that the residual risk of Section 15.4 depends on.
+The table lists at least the interfaces through which guest root, or an unprivileged user who reaches root, obtains ring-0 execution or reads or writes kernel memory, and the host influences ring-0 code, with the configuration that removes each. Build configuration uses Linux Kconfig names. A provider that claims `kernel-service` backing (Section 8.7) MUST run in an image that satisfies every row marked MUST; rows marked SHOULD reduce the kernel attack surface that the residual risk of Section 15.4 depends on.
 
 | Interface | Requirement | Build | Boot or runtime |
 | --- | --- | --- | --- |
-| loadable modules | MUST: no module loading, or loading only modules signed with a key generated for this build and discarded after it, whose public half is built into the measured kernel | `CONFIG_MODULES=n`, or `CONFIG_MODULE_SIG_FORCE=y` with an ephemeral `CONFIG_MODULE_SIG_KEY` | |
+| loadable modules | MUST: no module loading, or loading only modules signed with a key generated for this build and discarded after it, whose public half is built into the measured kernel and is the only key module signatures verify against | `CONFIG_MODULES=n`, or `CONFIG_MODULE_SIG_FORCE=y` with an ephemeral `CONFIG_MODULE_SIG_KEY`, `CONFIG_SYSTEM_TRUSTED_KEYS=""`, `CONFIG_SECONDARY_TRUSTED_KEYRING=n`, `CONFIG_INTEGRITY_MACHINE_KEYRING=n` and `CONFIG_SYSTEM_EXTRA_CERTIFICATE=n` | |
 | kernel live patching | MUST be absent | `CONFIG_LIVEPATCH=n` | |
 | kexec | MUST be absent | `CONFIG_KEXEC=n`, `CONFIG_KEXEC_FILE=n` | |
 | physical and kernel memory devices | MUST be absent | `CONFIG_DEVMEM=n`, `CONFIG_DEVPORT=n`, `CONFIG_PROC_KCORE=n` | |
@@ -624,9 +643,10 @@ The table lists every interface through which guest root, or an unprivileged use
 | hibernation | MUST be absent | `CONFIG_HIBERNATION=n` | |
 | kernel debuggers and dynamic probes | MUST be absent | `CONFIG_KGDB=n`, `CONFIG_KPROBES=n`, `CONFIG_DEBUG_FS=n` | |
 | ACPI table upgrade | MUST be absent | `CONFIG_ACPI_TABLE_UPGRADE=n`, `CONFIG_ACPI_CUSTOM_METHOD=n` | |
+| ACPI tables from the host | MUST be covered by the launch measurement, or checked against values in the measured image before the kernel interprets them: host-supplied AML runs in the kernel's interpreter and can read and write guest memory through a `SystemMemory` operation region | carried in the measured image, for example the IGVM image | |
 | kernel command line and initial RAM disk | MUST be covered by the launch measurement | built into the measured image | |
 | user namespaces | SHOULD be absent | `CONFIG_USER_NS=n` | |
-| io_uring, userfaultfd, perf events | SHOULD be absent or restricted | `CONFIG_IO_URING=n`, `CONFIG_USERFAULTFD=n` | `kernel.perf_event_paranoid=3` |
+| io_uring, userfaultfd, perf events | SHOULD be absent or restricted | `CONFIG_IO_URING=n`, `CONFIG_USERFAULTFD=n` | `kernel.io_uring_disabled=2`, `vm.unprivileged_userfaultfd=0`, `kernel.perf_event_paranoid=2` |
 | memory safety hardening | SHOULD be enabled | `CONFIG_KFENCE=y`, `CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y`, `CONFIG_INIT_ON_FREE_DEFAULT_ON=y`, `CONFIG_RANDOM_KMALLOC_CACHES=y`, `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_LIST_HARDENED=y`, `CONFIG_BUG_ON_DATA_CORRUPTION=y` | |
 | exploit attempts | SHOULD stop the node | | `kernel.panic_on_oops=1` |
 
@@ -638,7 +658,7 @@ Each row is a property of the image, checked at build time and, for runtime rows
 
 A version 1 verifier reports every `snp-vmr` register with backing `virtualized`, whatever the evidence claims. Promotion requires a way for a reference value to state that an image satisfies Sections 8.4 to 8.6; a later revision of this profile defines it, and verifiers will then report `kernel-service` for such an image. A register provider implemented in an SVSM at VMPL0, with the same format, will be reported as `privileged-service` under the same mechanism.
 
-Policies that accept SEV-SNP software registers under version 1 set `min_backing` to `virtualized` and pin the launch measurement.
+A verifier MUST refuse `commitment` mode with `binding-mismatch` unless the policy pins the launch measurement (`reference.launch_measurement`). Without the pin, any SEV-SNP guest can compute `header16 || C` over registers, a log and owners it invents, and the appraisal would report them as replayed; this is the rule Section 9.4.4 states for `vtpm-extradata`. Policies that accept SEV-SNP software registers under version 1 therefore pin the launch measurement and set `min_backing` to `virtualized`.
 
 ### 8.8. Chain memory
 
@@ -670,12 +690,13 @@ The `ATTESTATION_REPORT` (SNP-ABI) is exactly 1184 bytes; integers are little-en
 | 0x034 | 4 | `SIGNATURE_ALGO` | MUST be 1 (ECDSA P-384 with SHA-384) |
 | 0x038 | 8 | `CURRENT_TCB` | `cvm_tcb.current` |
 | 0x040 | 8 | `PLATFORM_INFO` | bit 0 `SMT_EN`, bit 1 `TSME_EN` |
-| 0x048 | 4 | key information | bit 0 `AUTHOR_KEY_EN`; bit 1 `MASK_CHIP_KEY`, MUST be 0; bits 4:2 `SIGNING_KEY`: 0 VCEK, 1 VLEK; every other value is refused in version 1 |
+| 0x048 | 4 | `KEY_INFO` | bit 0 `AUTHOR_KEY_EN`; bit 1 `MASK_CHIP_KEY`, MUST be 0; bits 4:2 `SIGNING_KEY`: 0 VCEK, 1 VLEK, every other value refused; bit 5 reserved, not checked; bits 31:6 MUST be zero |
 | 0x050 | 64 | `REPORT_DATA` | the binding (Section 9.1.6) |
 | 0x090 | 48 | `MEASUREMENT` | `cvm_launch_measurement`, `alg` `sha384` |
 | 0x0C0 | 32 | `HOST_DATA` | `cvm_host_data`, semantics `snp-host-data` |
 | 0x0E0 | 48 | `ID_KEY_DIGEST` | `cvm_owner.id_key_digest`; `owner.id_key_digests` |
 | 0x110 | 48 | `AUTHOR_KEY_DIGEST` | `cvm_owner.author_key_digest` |
+| 0x140 | 32 | `REPORT_ID` | chain memory (Section 8.8); not reported |
 | 0x180 | 8 | `REPORTED_TCB` | `cvm_tcb.reported`; VEK selection and cross-check |
 | 0x188 | 1 | `CPUID_FAM_ID` | generation, versions 3 and later |
 | 0x189 | 1 | `CPUID_MOD_ID` | generation, versions 3 and later |
@@ -684,7 +705,7 @@ The `ATTESTATION_REPORT` (SNP-ABI) is exactly 1184 bytes; integers are little-en
 | 0x1F0 | 8 | `LAUNCH_TCB` | `cvm_tcb.launch` |
 | 0x2A0 | 512 | `SIGNATURE` | `R` at 0x2A0 and `S` at 0x2E8, each 72 bytes |
 
-Reserved fields that the ABI specification requires to be zero MUST be zero. Version 6 reports add extended TCB fields at 0x220, 0x240 and 0x260 for generations after Turin; a version 1 verifier does not interpret them for Milan, Genoa and Turin.
+A violation of the `SIGNATURE_ALGO` or `KEY_INFO` rows is refused with `report-invalid`. A verifier also refuses with `report-invalid` a report with a non-zero byte in a reserved range: 0x04C to 0x04F; 0x18B to 0x19F (0x188 to 0x19F in version 2, which has no CPUID fields); 0x1EB; 0x1EF; and 0x1F8 to 0x29F in versions 2 to 4, or 0x208 to 0x29F in versions 5 and 6. In version 6 that last range spans the extended TCB fields at 0x220, 0x240 and 0x260, which ABI 1.59 defines for generations after Turin and which the generations of Section 9.1.3 leave zero. The ABI recommends checking every reserved field; the reserved bits inside `POLICY`, `PLATFORM_INFO` and the TCB values, `KEY_INFO` bit 5 and the signature field's bytes after `S` (0x330 to 0x49F, outside the signed range) are not checked by a verifier of this profile version, because the firmware refuses a guest policy with reserved bits set at launch and later ABI revisions assign bits in those fields.
 
 A TCB value (`TCB_VERSION`) is 8 bytes whose layout depends on the generation:
 
@@ -703,16 +724,16 @@ The generation is derived from signed data. For report versions 3 and later, fro
 | 0x19 | 0x10 to 0x1F, and 0xA0 to 0xAF (Siena, which shares Genoa's roots) | Genoa |
 | 0x1A | 0x00 to 0x1F | Turin |
 
-A version 2 report carries no CPUID fields; the generation is the suffix (`-Milan`, `-Genoa`, `-Turin`) of the VEK issuer's common name, which Section 9.1.4 then authenticates through the generation's pinned root. Any other family or model is refused with `report-invalid`; this includes later generations, whose TCB layout this version does not define. The family and model ranges follow AMD's VCEK specification (publication 57230, section 1.5).
+A version 2 report carries no CPUID fields; the generation is the suffix (`-Milan`, `-Genoa`, `-Turin`) of the VEK issuer's common name, which Section 9.1.4 then authenticates through the generation's pinned root, so a version 2 report without an inline VEK is refused with `report-invalid`. Any other family or model is refused with `report-invalid`; this includes later generations, whose TCB layout this version does not define. The family and model ranges follow AMD's VCEK specification (publication 57230, section 1.5).
 
 #### 9.1.4. Authentication
 
 1. Roots. The verifier pins AMD's ARK, ASK and ASVK for each generation (Appendix E). An ARK is self-signed; the ARK signs the ASK and the ASVK; all three use RSA-4096 keys with RSASSA-PSS, SHA-384 and a 48-byte salt. ASK and ARK certificates supplied in the evidence are ignored.
-2. Endorsement key. When `SIGNING_KEY` is 0 the report is signed by a VCEK, which the ASK signs; when it is 1, by a VLEK, which the ASVK signs. The VEK's issuer MUST agree with `SIGNING_KEY`. Every certificate in the chain MUST be inside its validity window at the evaluation time.
+2. Endorsement key. When `SIGNING_KEY` is 0 the report is signed by a VCEK, and the VEK MUST be signed by the ASK; when it is 1, by a VLEK, and the VEK MUST be signed by the ASVK. Every certificate in the chain (RFC 5280) MUST be inside its validity window at the evaluation time. KDS serves VLEKs only to the cloud provider, so a report signed by a VLEK and carrying no inline VEK is refused with `collateral-unavailable`, as is a report whose `CHIP_ID` is all zero and that carries no inline VEK.
 3. Report signature. The VEK's key is an ECDSA P-384 key. The signature covers bytes 0x000 to 0x29F of the report exactly as received. `R` and `S` are little-endian integers in the low 48 bytes of their 72-byte fields; the upper 24 bytes of each MUST be zero.
-4. Endorsement cross-check. The VEK's extensions MUST equal the report: `1.3.6.1.4.1.3704.1.3.1` (bootloader SPL), `.3.2` (TEE SPL), `.3.3` (SNP SPL) and `.3.8` (microcode SPL) equal the components of `REPORTED_TCB`, and on Turin `.3.9` (FMC SPL) equals its FMC component; this holds for a VCEK and a VLEK alike. A VCEK's `1.3.6.1.4.1.3704.1.4` (hardware ID) equals `CHIP_ID`: all 64 bytes on Milan and Genoa; on Turin the hardware ID's 8 bytes equal the first 8 bytes of `CHIP_ID` and the remaining 56 bytes of `CHIP_ID` are zero. A VLEK carries no hardware ID, so under a VLEK the chip identifier rests on the firmware's signed report alone. A cross-check failure is refused with `chain-invalid`.
-5. Revocation. AMD's CRL for the generation is signed by the ARK and MUST be inside its window at the evaluation time. The serial number of the ASK or ASVK in the chain MUST NOT appear in it. VCEK serial numbers are zero, so the CRL does not revoke an individual VCEK; a compromised chip is excluded through TCB floors and allowlists. The check is REQUIRED unless the policy sets `tcb.require_revocation` to false.
-6. Allowlist. With a machine allowlist, the report's `CHIP_ID` MUST be on it. A report whose `CHIP_ID` is all zero (the host masked it) identifies no machine and is refused with `machine-not-allowed` when an allowlist is present (Section 13.3).
+4. Endorsement cross-check. The VEK's extensions MUST equal the report: `1.3.6.1.4.1.3704.1.3.1` (bootloader SPL), `.3.2` (TEE SPL), `.3.3` (SNP SPL) and `.3.8` (microcode SPL) equal the components of `REPORTED_TCB`, and on Turin `.3.9` (FMC SPL) equals its FMC component; this holds for a VCEK and a VLEK alike. A VCEK's `1.3.6.1.4.1.3704.1.4` (hardware ID) equals `CHIP_ID`: all 64 bytes on Milan and Genoa; on Turin the hardware ID's 8 bytes equal the first 8 bytes of `CHIP_ID` and the remaining 56 bytes of `CHIP_ID` are zero. The hardware ID extension's value is either a DER OCTET STRING whose content is the hardware ID (AMD 57230) or the hardware ID's bytes themselves, as Azure's VCEKs carry it; the two forms differ in length, and the length decides. A VLEK carries no hardware ID, so under a VLEK no endorsement covers `CHIP_ID`. A cross-check failure is refused with `chain-invalid`.
+5. Revocation. AMD's CRL for the generation is signed by the ARK and MUST be inside its window at the evaluation time; a CRL without `nextUpdate` has no defined window and is refused with `collateral-invalid`. The serial number of the ASK or ASVK in the chain MUST NOT appear in it. VCEK serial numbers are zero, so the CRL does not revoke an individual VCEK; a compromised chip is excluded through TCB floors and allowlists. The check is REQUIRED unless the policy sets `tcb.require_revocation` to false.
+6. Allowlist. With a machine allowlist, the report's `CHIP_ID` MUST be on it. A report endorsed by a VLEK, or whose `CHIP_ID` is all zero (the host masked it), identifies no machine and is refused with `machine-not-allowed` when an allowlist is present (Section 13.3).
 
 #### 9.1.5. Guest policy and normalized claims
 
@@ -773,11 +794,11 @@ The quote header is 48 bytes, little-endian:
 | 12 | 16 | QE vendor ID | Intel's `939a7233f79c4ca9940a0db3957f0607` |
 | 28 | 20 | user data | not used |
 
-A version 4 quote carries the TD report body at offset 48. A version 5 quote carries a body type (2 bytes) at 48, a body size (4 bytes) at 50 and the body at 54; type 2 is a TDX 1.0 body of 584 bytes and type 3 a TDX 1.5 body of 648 bytes. Type 4 (TDX 1.5 with the extended feature set, 885 bytes) is refused with `report-invalid` in version 1. Offsets within the body:
+A version 4 quote carries the TD report body at offset 48. A version 5 quote carries a body type (2 bytes) at 48, a body size (4 bytes) at 50 and the body at 54; type 2 is a TDX 1.0 body of 584 bytes and type 3 a TDX 1.5 body of 648 bytes, and the body size MUST equal its type's length. Type 1 (an SGX enclave report) and type 4 (the 885-byte body Intel's quote verification library calls TD Report 1.5 Ex) are refused with `report-invalid` in version 1, as is any violation of the header table. Offsets within the body:
 
 | Body offset | Length | Field | Use |
 | --- | --- | --- | --- |
-| 0 | 16 | `TEE_TCB_SVN` | `cvm_tcb.tee_tcb_svn`; TCB level matching. Byte 0 is the TDX module's minor SVN, byte 1 its major version, byte 2 the microcode SVN |
+| 0 | 16 | `TEE_TCB_SVN` | `cvm_tcb.tee_tcb_svn`; TCB level matching. Byte 0 is the TDX module's minor SVN, byte 1 its major SVN, byte 2 the microcode SE_SVN when the module was loaded |
 | 16 | 48 | `MRSEAM` | `tdx_mrseam`; TDX module identity |
 | 64 | 48 | `MRSIGNERSEAM` | `tdx_mrsignerseam`; TDX module identity |
 | 112 | 8 | `SEAMATTRIBUTES` | TDX module identity |
@@ -792,19 +813,19 @@ A version 4 quote carries the TD report body at offset 48. A version 5 quote car
 | 584 | 16 | `TEE_TCB_SVN2` | TDX 1.5 bodies |
 | 600 | 48 | `MRSERVICETD` | TDX 1.5 bodies; `cvm_policy.service_td` is true when non-zero |
 
-After the body: a 4-byte signature data length, then the quote signature (64 bytes, `r || s`), the attestation key (64 bytes, `x || y` of a P-256 point), and certification data of type 6 (QE report certification data): the QE report body (384 bytes), its signature (64 bytes), the QE authentication data (a 2-byte length and the data), and nested certification data of type 5 (the PEM PCK certificate chain).
+After the body: a 4-byte signature data length, then the quote signature (64 bytes, `r || s`), the attestation key (64 bytes, `x || y` of a P-256 point), and certification data of type 6 (QE report certification data): the QE report body (384 bytes), its signature (64 bytes), the QE authentication data (a 2-byte length and the data), and nested certification data of type 5 (the PEM PCK certificate chain). Each certification data is a 2-byte type and a 4-byte size followed by that many bytes.
 
 #### 9.2.3. Authentication
 
 1. Quote signature. The attestation key verifies the ECDSA P-256 SHA-256 signature over the header and the body (for version 5, including the body type and size).
 2. Quoting enclave. The PCK leaf's key verifies the QE report signature over the 384-byte QE report body. The QE report's `REPORTDATA` (offset 320) equals `SHA-256(attestation key || QE authentication data) || zeros32`.
 3. PCK chain. The chain is leaf, PCK Platform or Processor CA, and Intel SGX Root CA, whose key the verifier pins (Appendix E). Every certificate is inside its window at the evaluation time. The leaf is not on the PCK CRL of its issuing CA, and the intermediate is not on the Root CA CRL; each CRL is signed by its issuer and inside its window.
-4. QE Identity. The TD QE Identity is signed by Intel's TCB signing certificate, which chains to the pinned root, has `id` `TD_QE`, and is inside its `nextUpdate`. The QE report's `MRSIGNER` and `ISVPRODID` equal its values, and `MISCSELECT` and `ATTRIBUTES` equal them under their masks. The QE's `ISVSVN` selects the first TCB level whose `isvsvn` it meets; a QE matching no level, or a `Revoked` level, is refused with `tcb-not-allowed`.
-5. TCB Info. The TCB Info is signed by Intel's TCB signing certificate, has `id` `TDX` and version 3, carries the FMSPC and PCE identifier of the PCK leaf's SGX extensions, and has a `nextUpdate` after the evaluation time. The QE Identity has version 2. The verifier then evaluates the TCB as Intel's quote verification library does:
-   1. TDX module identity. When `TEE_TCB_SVN[1]` is 0, `MRSIGNERSEAM` MUST equal the TCB Info's `tdxModule.mrsigner`, and `SEAMATTRIBUTES` MUST be zero and equal its `attributes`. When `TEE_TCB_SVN[1]` is greater than 0, the same checks use the `tdxModuleIdentities` entry whose `id` is `TDX_` followed by `TEE_TCB_SVN[1]` as two uppercase hexadecimal digits, and the module's status is that of the first of the entry's TCB levels, in descending `isvsvn` order, whose `isvsvn` is at most `TEE_TCB_SVN[0]`. A missing entry or level is refused with `tcb-not-allowed`.
+4. QE Identity. The TCB signing certificate is the one certificate of the collateral's issuer chain below the pinned root: its subject names it an Intel SGX TCB Signing certificate, the root signs it, it is inside its window at the evaluation time, and it is not on the Root CA CRL; a failure is refused with `collateral-invalid`. The TD QE Identity has version 2 and `id` `TD_QE`, is signed by the TCB signing certificate, and is inside its `nextUpdate`. The QE report's `MRSIGNER` and `ISVPRODID` equal its values, and `MISCSELECT` and `ATTRIBUTES` equal them under their masks. Its TCB levels are ordered descending by `isvsvn`, then by `tcbDate`, and two levels equal under that order make it invalid; the QE's `ISVSVN` selects the first level whose `isvsvn` it meets. A QE matching no level, or a `Revoked` level, is refused with `tcb-not-allowed`.
+5. TCB Info. The TCB Info is signed by the TCB signing certificate, has `id` `TDX` and version 3, carries the FMSPC and PCE identifier of the PCK leaf's SGX extensions, and has a `nextUpdate` after the evaluation time. The verifier then evaluates the TCB following Intel's quote verification library at the revision of Section 19.1, with the deviations step 4 states:
+   1. TDX module identity. When `TEE_TCB_SVN[1]` is 0, `MRSIGNERSEAM` MUST equal the TCB Info's `tdxModule.mrsigner`, and `SEAMATTRIBUTES` MUST be zero and equal its `attributes`. When `TEE_TCB_SVN[1]` is greater than 0, the same checks use the `tdxModuleIdentities` entry whose `id` is `TDX_` followed by `TEE_TCB_SVN[1]` as two hexadecimal digits, compared without regard to case, and the module's status is that of the first of the entry's TCB levels, in descending `isvsvn` order, whose `isvsvn` is at most `TEE_TCB_SVN[0]`. A missing entry or level is refused with `tcb-not-allowed`.
    2. Platform level. The TCB levels are ordered descending by their SGX components, then PCESVN, then TDX components, compared lexicographically, and two levels equal under that order make the TCB Info invalid. The selected level is the first whose SGX components are each at most the PCK certificate's corresponding component, whose PCESVN is at most the certificate's PCESVN, and whose TDX components are each at most the corresponding byte of `TEE_TCB_SVN`, comparing from byte 2 when `TEE_TCB_SVN[1]` is greater than 0. No matching level is refused with `tcb-not-allowed`.
    3. Effective status. Start from the selected level's status. If the module status or the QE Identity level's status is `OutOfDate`, `UpToDate` and `SWHardeningNeeded` become `OutOfDate`, and `ConfigurationNeeded` and `ConfigurationAndSWHardeningNeeded` become `OutOfDateConfigurationNeeded`. If either is `Revoked`, the effective status is `Revoked`. The advisories are the selected level's, then the QE Identity level's, then the module's.
-   4. The effective status MUST be in `tcb.tdx_allowed_status`; `Revoked` is always refused. For a TDX 1.5 body, version 1 evaluates `TEE_TCB_SVN` only; a module updated in place since launch is judged at its launch level.
+   4. The effective status MUST be in `tcb.tdx_allowed_status`; `Revoked` is always refused. Version 1 departs from the library in three ways: for a TDX 1.5 body it evaluates `TEE_TCB_SVN` only, where the library also evaluates `TEE_TCB_SVN2` and can return `TdRelaunchAdvised`, so a module updated in place since launch is judged at its launch level; and it does not restrict QE levels to the five statuses, or module levels to the three, that the library accepts, which Intel's collateral does not exceed.
 6. Allowlist. With a machine allowlist, the PPID of the PCK leaf MUST be on it.
 
 The PCK leaf's SGX extensions (PCK specification) supply: PPID (`1.2.840.113741.1.13.1.1`, 16 bytes), the TCB components and PCESVN (`.2.1` to `.2.17`), and FMSPC (`.4`, 6 bytes).
@@ -815,12 +836,12 @@ The generation of a TDX platform is its FMSPC, from the PCK leaf, as twelve lowe
 
 #### 9.2.5. Guest policy and normalized claims
 
-`TDATTRIBUTES` is read as a 64-bit little-endian integer, with the bit assignments of the TDX Module ABI specification (348551-007, Table 3.22):
+`TDATTRIBUTES` is read as a 64-bit little-endian integer, with the bit assignments of the TDX Module ABI specification (348551-008, Table 3.23):
 
 | Bits | Name | Rule |
 | --- | --- | --- |
 | 3:0 | TUD group (TD under debug); bit 0 is `DEBUG`, bits 3:1 reserved | any bit set puts the TD under debug; refused unless `allow_debug` |
-| 6:4 | TD-under-profiling group: `HGS_PLUS_PROF`, `PERF_PROF`, `PMT_PROF` | any bit set lets the host profile the TD, which this profile treats as debug; refused unless `allow_debug` |
+| 6:4 | TD-under-profiling group (bits 15:4 in the ABI, of which 15:7 are reserved): `HGS_PLUS_PROF`, `PERF_PROF`, `PMT_PROF` | any bit set lets the host profile the TD, which this profile treats as debug; refused unless `allow_debug` |
 | 16 | `ICSSD` | permitted |
 | 17 | `SERVTD_EXT` | permitted |
 | 22:18 | `RESERVED_P` | ignored, as the ABI specification allows |
@@ -850,7 +871,7 @@ A non-zero `MRSERVICETD` in a TDX 1.5 quote is refused unless `allow_service_td`
 
 #### 9.2.6. Binding, registers and logs
 
-The binding is `report-data`: `REPORTDATA == pad64(anchor)`; on Azure, `vtpm-extradata` (Section 9.4). The RTMRs are `tdx-rtmr` registers 0 to 3 with backing `hardware`. A `tdx-ccel` log maps `MrIndex` 1 to 4 to RTMR 0 to 3, skips records at `MrIndex` 0 (which describe `MRTD`), refuses any higher index, and replays in the SHA-384 bank from zero; a CEL log replays the same way.
+The binding is `report-data`: `REPORTDATA == pad64(anchor)`; on Azure, `vtpm-extradata` (Section 9.4). The RTMRs are `tdx-rtmr` registers 0 to 3 with backing `hardware`. A `tdx-ccel` log maps `MrIndex` 1 to 4 to RTMR 0 to 3, skips records at `MrIndex` 0 (which describe `MRTD`), refuses any higher index with `replay-mismatch`, and replays in the SHA-384 bank from zero; a CEL log replays the same way.
 
 #### 9.2.7. Collateral
 
@@ -859,11 +880,11 @@ The binding is `report-data`: `REPORTDATA == pad64(anchor)`; on Azure, `vtpm-ext
 ```
 https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc={fmspc}
 https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity
-https://api.trustedservices.intel.com/sgx/certification/v4/pckcrl?ca={platform|processor}
+https://api.trustedservices.intel.com/sgx/certification/v4/pckcrl?ca={platform|processor}[&encoding=der]
 https://certificates.trustedservices.intel.com/IntelSGXRootCA.der
 ```
 
-The TCB Info's issuer chain is in the `TCB-Info-Issuer-Chain` response header and the QE Identity's in `SGX-Enclave-Identity-Issuer-Chain`, percent-encoded PEM. The signature in each response covers the exact bytes of its `tcbInfo` or `enclaveIdentity` member.
+The TCB Info's issuer chain is in the `TCB-Info-Issuer-Chain` response header and the QE Identity's in `SGX-Enclave-Identity-Issuer-Chain`, percent-encoded PEM. The signature in each response covers the exact bytes of its `tcbInfo` or `enclaveIdentity` member. The `pckcrl` endpoint returns PEM unless `encoding=der` is given; a verifier accepts either and holds the DER (Section 10.1).
 
 ### 9.3. dstack
 
@@ -871,10 +892,11 @@ dstack runs TDX and SEV-SNP guests whose guest agent returns the hardware report
 
 dstack's log is carried as `dstack-json` (Section 7.1): a JSON array of events `{imr, event_type, digest, event, event_payload, version?, preimage?}`, strictly parsed (a duplicate or unknown member is refused), with `imr` the RTMR ordinal 0 to 3 (no offset), `digest` 48 bytes in hexadecimal, and `event_payload` in hexadecimal.
 
-- A boot event keeps the TCG digest it carries, and carries neither `version` nor `preimage`.
+- A boot event keeps the TCG digest it carries, carries no `preimage`, and carries `version` only as 1.
 - A runtime event has `event_type` 0x08000001, and its digest is recomputed from its content under its `version`, absent meaning 1:
   - version 1: `SHA-384(u32le(0x08000001) || ":" || event || ":" || event_payload)`, where `event` is the UTF-8 name and `event_payload` the payload bytes; a name containing `:` is refused, so the hash input splits back into one name; `preimage` MUST be absent;
   - version 2: `SHA-384(p)`, where `p` is the JCS serialization (RFC 8785) of `{"name": event, "payload": <lowercase hexadecimal of event_payload>, "type": 134217729}`; the event's `preimage` member is REQUIRED, is the hexadecimal encoding of `p`, and MUST decode to `p` byte for byte.
+- A log that breaks these shape rules (a name containing `:`, a missing, extra or non-matching `preimage`, another `version`) is refused with `log-invalid`; a runtime event whose recomputed digest differs from its `digest` is refused with `replay-mismatch`.
 - Replay is `R = SHA-384(R || digest)` from zero for each RTMR the log extends, and each MUST reproduce the signed RTMR.
 
 ### 9.4. Microsoft Azure confidential VMs
@@ -901,7 +923,7 @@ The attester writes a 64-byte request to the vTPM's NV index 0x01400002 and read
 | 0x4D0 | 4 | variable data size |
 | 0x4D4 | variable | variable data: a JSON object |
 
-The report type MUST name the TEE of the `cpu` submodule, and the hash type MUST be 1. The variable data is exactly `variable data size` bytes. Its `keys` array holds the AK as the JWK whose `kid` is `HCLAkPub`, an RSA key (`kty` `RSA`, `n` and `e` in base64url) of 2048 bits. The paravisor creates the AK as a restricted signing key, so it signs only structures the TPM itself generated, which is what gives the `TPMS_ATTEST` `magic` check below its meaning; this profile relies on that property of the paravisor, which the pinned launch measurement covers.
+The report type MUST name the TEE of the `cpu` submodule, the hash type MUST be 1, and the `version` at 0x4C4 MUST be 1: OpenHCL's request version 2 inserts a 4-byte extension before the variable data, which this layout does not describe. The variable data is exactly `variable data size` bytes. Its `keys` array holds the AK as exactly one JWK (RFC 7517) whose `kid` is `HCLAkPub`, an RSA key (`kty` `RSA`, `n` and `e` in base64url) of 2048 bits. Everything in the HCL report outside the hardware area and the variable data is unsigned, and the variable data is bound only through its digest (Section 9.4.2), so a violation of this section is refused with `envelope-invalid`. The paravisor creates the AK as a restricted signing key, so it signs only structures the TPM itself generated, which is what gives the `TPMS_ATTEST` `magic` check below its meaning; this profile relies on that property of the paravisor, which the pinned launch measurement covers.
 
 #### 9.4.2. Key binding
 
@@ -913,13 +935,13 @@ For TDX the TD report inside the HCL report is authenticated only by a platform 
 
 #### 9.4.3. TPM quote
 
-1. The AK from the HCL report verifies the RSASSA-PKCS1-v1_5 SHA-256 signature over `cvm_tpm_quote.message`.
-2. The message is a `TPMS_ATTEST` with `magic` `TPM_GENERATED_VALUE` (0xFF544347) and `type` `TPM_ST_ATTEST_QUOTE` (0x8018).
-3. `extraData` equals `anchor` in length and value (Section 5.4).
-4. The quoted `pcrDigest` equals the SHA-256 of the concatenation of the selected PCR values of the bank, in selection order (PCR `8i + b` for bit `b` of selection byte `i`), taken from `cvm_tpm_quote.pcrs`.
-5. Each register of the `vtpm` submodule is a PCR inside the signed selection and equals its quoted value (Section 4.4).
+`cvm_tpm_quote.bank` MUST be `sha256`, and the quote's `pcrSelect` MUST hold exactly one `TPMS_PCR_SELECTION`, for `TPM_ALG_SHA256`; otherwise the verifier refuses with `unsupported`. Then:
 
-Version 1 verifiers are REQUIRED to support the SHA-256 bank.
+1. The AK from the HCL report verifies the RSASSA-PKCS1-v1_5 SHA-256 signature (RFC 8017) over `cvm_tpm_quote.message`; a failure is refused with `signature-invalid`.
+2. The message is a `TPMS_ATTEST` with `magic` `TPM_GENERATED_VALUE` (0xFF544347) and `type` `TPM_ST_ATTEST_QUOTE` (0x8018); a failure is refused with `report-invalid`.
+3. `extraData` equals `anchor` in length and value (Section 5.4); a failure is refused with `binding-mismatch`.
+4. The quoted `pcrDigest` equals the SHA-256 of the concatenation of the selected PCR values, in selection order (PCR `8i + b` for bit `b` of selection byte `i`), taken from `cvm_tpm_quote.pcrs`; a failure is refused with `register-mismatch`.
+5. Each register of the `vtpm` submodule is a PCR inside the signed selection and equals its quoted value (Section 4.4); a failure is refused with `register-mismatch`.
 
 #### 9.4.4. Registers, logs and claims
 
@@ -937,7 +959,7 @@ An Arm CCA realm is attested by a token the Realm Management Monitor (RMM) retur
 
 #### 9.6.1. Evidence
 
-The realm calls `RSI_ATTESTATION_TOKEN_INIT` with the 64-byte challenge `pad64(anchor)` and reads the token with `RSI_ATTESTATION_TOKEN_CONTINUE` (RMM specification, section B5). Two top-level forms exist, and a verifier accepts exactly these two by allowlist:
+The realm calls `RSI_ATTESTATION_TOKEN_INIT` with the 64-byte challenge `pad64(anchor)` and reads the token with `RSI_ATTESTATION_TOKEN_CONTINUE` (RMM specification, section B5). Two top-level forms exist, and a verifier accepts exactly these two by allowlist. The collection MUST contain exactly the labels 44234 and 44241: draft-ffm-rats-cca-token-04 lets a tag-907 collection carry further entries (a firmware activity list, device tokens, a certificate chain), and version 1 refuses any other entry with `unsupported`.
 
 | Form | Encoding | Emitted by |
 | --- | --- | --- |
@@ -956,7 +978,7 @@ The platform token binds the realm token through the hash of the RAK: the hash, 
 | `tag:arm.com,2024:cca_platform#2.0.0` | `tag:arm.com,2024:realm#2.0.0` | challenge (10) |
 | `tag:arm.com,2026:cca_platform#2.0.0`, and its delegated variant (spelled `;delegated` in draft-ffm-rats-cca-token-04 and `#delegated` in the RMM specification 2.0-bet3) | `tag:arm.com,2026:realm#2.0.0` | workload binding (2408) |
 
-Either top-level form may carry any of these profile pairs. A token with another profile, without a realm profile, or using the direct or HESRAK binding variants is refused with `unsupported` in version 1.
+Either top-level form may carry any of these profile pairs. The realm token's profile claim (265) is OPTIONAL in the CCA token drafts and in the RMM 1.0 CDDL; when it is absent, the realm profile is the one the platform profile's row names. A token whose pair of profiles is not one row of this table (a pair taken from two rows included), a token under another platform profile (such as `tag:arm.com,2024:cca_platform#1.1.0` and `tag:arm.com,2026:cca_platform#2.1.0`, which draft-ffm-rats-cca-token-04 also defines), a 2026 platform token that also carries a challenge claim (10), and a token using the direct or HESRAK binding variants are refused with `unsupported` in version 1.
 
 #### 9.6.3. Claims used
 
@@ -986,7 +1008,7 @@ Platform token:
 #### 9.6.4. Authentication
 
 1. Endorsement. The verifier pins, per platform vendor, the key that signs the vendor's CoRIM (draft-ietf-rats-corim-11). The CoRIM for the implementation ID carries attestation-key triples that bind each instance ID to its CPAK, and reference-value triples for the platform software components. There is no single root for CCA platforms; the CoRIM is the endorsement, and it is REQUIRED: without it the platform token cannot be authenticated, and the verifier refuses with `collateral-unavailable` whatever the policy says.
-2. Platform token. The CPAK the CoRIM binds to the token's instance ID verifies the platform token's COSE_Sign1 signature (ES256 or ES384, as its protected header names).
+2. Platform token. The CPAK the CoRIM binds to the token's instance ID verifies the platform token's COSE_Sign1 signature (ES256 or ES384, RFC 9053, as its protected header names).
 3. Realm token. The RAK of claim 44237 verifies the realm token's COSE_Sign1 signature (ES384).
 4. Binding. The platform token's binding claim (Section 9.6.2) equals the hash of the RAK.
 5. Platform software. Every software component's measurement and signer ID equals a reference value the CoRIM endorses for the implementation ID. This one check is waived when the policy sets `tcb.require_signed_collateral` to false; the waiver is reported as `cca_corim` `skipped` with a reason, and `hardware` then makes no claim.
@@ -1011,12 +1033,12 @@ Version 1 does not replay REMs. The RMM specification and its reference implemen
 
 #### 9.6.6. Collateral
 
-The vendor's signed CoRIM, identified by the collateral key `cca_corim/<implementation id hex>` (Section 10.3). The platform token's verification service claim MAY tell the verifier where to fetch it.
+The vendor's signed CoRIM, identified by the collateral key `cca_corim/<implementation id hex>` (Section 10.3). The platform token's verification service claim is unauthenticated when the verifier reads it, so a verifier fetches only from origins its configuration names; the claim MAY select among them and never adds one.
 
 
 ### 9.7. NVIDIA GPUs and NVSwitch
 
-NVIDIA devices are appraised by NRAS, which verifies each device's SPDM evidence and certificate chain against NVIDIA's reference values and returns signed claims. The verifier's role is to bind the devices to the nonce, authenticate NRAS's answer, and apply the device policy.
+NVIDIA devices are appraised by NRAS, which verifies each device's SPDM evidence (DMTF DSP0274) and certificate chain against NVIDIA's reference values and returns signed claims. The verifier's role is to bind the devices to the nonce, authenticate NRAS's answer, and apply the device policy.
 
 #### 9.7.1. Request
 
@@ -1035,14 +1057,15 @@ The verifier does not ask NRAS to relax its certificate checks: a request that t
 
 NRAS answers with a detached EAT: `[["JWT", <overall token>], {<name>: <device token>, ...}]`. The verifier:
 
-1. verifies every token as a JWS (RFC 7515) with `alg` `ES384`, a `kid`, and no `crit`, under a key from NRAS's JWKS (the endpoint's origin plus `/.well-known/jwks.json`) whose `x5c` chain is valid at the evaluation time and ends at the pinned NVIDIA attestation root (Appendix E); it checks `exp` and, when present, `nbf`;
-2. requires the overall token's `iss` to be the endpoint's origin and `x-nvidia-ver` to be `3.0`, and its `x-nvidia-overall-att-result` to be true;
-3. requires the overall token's `submods` to hold, for each device token, `["DIGEST", ["SHA-256", <hex>]]` equal to the SHA-256 of that device token's compact serialization, and the number of device tokens to equal the number of devices sent;
-4. maps each device token back to its submodule by position: the verifier sends each batch's devices in ascending byte order of their submodule names, NRAS names the tokens `GPU-<i>` and `SWITCH-<i>` with `<i>` the device's position counted from 0, and the kind MUST match the endpoint;
-5. requires each device token's `eat_nonce` (NVIDIA encodes it in hexadecimal) to equal the device nonce;
-6. requires each device token's architecture, as its `hwmodel` claim names it, to be the batch's.
+1. verifies every token as a JWS (RFC 7515) and JWT (RFC 7519) with `alg` `ES384` (RFC 7518), a `kid`, and no `crit`, under a key from NRAS's JWKS (RFC 7517; the endpoint's origin plus `/.well-known/jwks.json`) whose `x5c` chain is valid at the evaluation time and ends at the pinned NVIDIA certificate of Appendix E; it checks `exp` and, when present, `nbf`;
+2. requires every token's `iss` to be the endpoint's origin, the overall token's `x-nvidia-ver` to be `3.0`, and its `x-nvidia-overall-att-result` to be true;
+3. requires the overall token's `eat_nonce` (NVIDIA encodes it in hexadecimal) to equal the device nonce;
+4. requires the overall token's `submods` to hold, for each device token, `["DIGEST", ["SHA-256", <hex>]]` (NRAS also writes the label `SHA256`, which is accepted) equal to the SHA-256 of that device token's compact serialization, and no other entry, and the number of device tokens to equal the number of devices sent;
+5. maps each device token back to its submodule by position: the verifier sends each batch's devices in ascending byte order of their submodule names, NRAS names the tokens `GPU-<i>` and `SWITCH-<i>` with `<i>` the device's position counted from 0, and the kind MUST match the endpoint;
+6. requires each device token's `eat_nonce` (hexadecimal) to equal the device nonce;
+7. requires each device token's architecture, as its `hwmodel` claim names it, to be the batch's. The architecture a `hwmodel` names is read without regard to case: `HOPPER` when it contains `HOPPER` or begins with `GH100`; otherwise `BLACKWELL` when it contains `BLACKWELL` or begins with `GB`; otherwise `LS10` when it contains `LS10`, `LS_10` or `SWITCH`; any other value names none and fails the step. NRAS reports, for example, `GH100 A01 GSP BROM` for a Hopper GPU and `LS_10 A01 FSP BROM` for an NVSwitch.
 
-Failures are refused as follows: a token that fails steps 1 or 2 (other than the overall result), step 3's digests, step 4, or its key identifier, with `device-token-invalid`; a false overall result, a device count that differs, or a failed step 6, with `device-policy`; a device nonce that differs (step 5), with `binding-mismatch`; an NRAS or JWKS endpoint that cannot be reached, with `collateral-unavailable`.
+Failures are refused as follows: a token that fails steps 1 or 2 (other than the overall result), step 4's digests or entries, step 5, or its key identifier, with `device-token-invalid`; a false overall result, a device count that differs, or a failed step 7, with `device-policy`; a nonce that differs (steps 3 and 6), with `binding-mismatch`; an NRAS or JWKS endpoint that cannot be reached, with `collateral-unavailable`.
 
 #### 9.7.3. Device policy and claims
 
@@ -1061,7 +1084,7 @@ A failed gate is refused with `device-policy`.
 | `ear_nvidia_evidence` | `signature_verified`, `parsed` and `nonce_match` from `x-nvidia-{gpu,switch}-attestation-report-signature-verified`, `-parsed` and `-nonce-match` |
 | vector | `sourced-data` 2; `instance-identity` 2 when the signed `ueid` is on the machine allowlist |
 
-The device's identity is the signed `ueid`. The `<ueid>` in the submodule name is the attester's label, is required to equal `uuid`, and is never compared against policy.
+The device's identity is the signed `ueid`. The `<ueid>` in the submodule name is the attester's label, is required to equal `uuid`, and is never compared against policy. Under a machine allowlist, a device token without a `ueid` identifies no machine and is refused with `machine-not-allowed`.
 
 
 ## 10. Endorsements
@@ -1078,9 +1101,9 @@ The device's identity is the signed `ueid`. The `<ueid>` in the submodule name i
 | `tdx.qe_identity` | `application/vnd.confidential-ai.pcs-signed+json` | the TD QE Identity, as `{body, issuer_chain}` | `tdx` |
 | `tdx.pck_crl` | `application/pkix-crl` | Intel's PCK CRL for the issuing CA, DER | `tdx` |
 | `tdx.root_crl` | `application/pkix-crl` | Intel's SGX Root CA CRL, DER | `tdx` |
-| `nras.jwks` | `application/jwk-set+json` | NRAS's token signing keys | any `cpu` with devices |
+| `nras.jwks` | `application/jwk-set+json` | NRAS's token signing keys (RFC 7517) | any; used only when the envelope carries device submodules |
 
-In `application/vnd.confidential-ai.pcs-signed+json`, `body` is the exact bytes of Intel's PCS response body and `issuer_chain` the PEM issuer chain from the response header, both as base64url byte strings, so Intel's signature verifies over the bytes Intel produced. A label whose TEE is not the `cpu` submodule's TEE is refused.
+The `application/pkix-cert` and `application/pkix-crl` types are those of RFC 2585. In `application/vnd.confidential-ai.pcs-signed+json`, `body` is the exact bytes of Intel's PCS response body and `issuer_chain` the PEM issuer chain from the response header, both as base64url byte strings, so Intel's signature verifies over the bytes Intel produced. A label whose TEE is not the `cpu` submodule's TEE is refused.
 
 ### 10.2. Authority and precedence
 
@@ -1088,10 +1111,10 @@ Inline endorsements are inputs the verifier authenticates before use. A verifier
 
 1. anchors every certificate to the pinned vendor roots (Section 9) and every signed document to its signing chain, and refuses a body presented without its chain;
 2. checks every validity window against the evaluation time before use: a certificate's `notBefore` and `notAfter`, a CRL's `thisUpdate` and `nextUpdate`, a TCB Info's or QE Identity's `nextUpdate`;
-3. binds each artifact to the parameters that name it: a VEK to the report's chip identifier and reported TCB, a TCB Info to the PCK certificate's FMSPC, a CRL to its issuer;
+3. binds each artifact to the parameters that name it: a VCEK to the report's chip identifier and reported TCB, a VLEK to the reported TCB, a TCB Info to the PCK certificate's FMSPC, a CRL to its issuer;
 4. prefers its own valid copy of a CRL or a TCB document, so an attester cannot substitute an older valid artifact for a newer one the verifier knows; a VEK is the same key from either source.
 
-An inline artifact that fails its binding or its window is ignored as if absent: the verifier uses its own copy, and when it has none the check is unavailable (`collateral-unavailable`, or skipped under a waiver). An artifact the verifier itself obtained and that fails is refused with `collateral-invalid`.
+An inline artifact that fails its binding or its window is ignored as if absent: the verifier uses its own copy, and when it has none the check is unavailable (`collateral-unavailable`, or skipped under a waiver). An inline artifact whose signature, signing chain or encoding fails is refused with `collateral-invalid`, since no reading of it is authentic, and so is an artifact the verifier itself obtained that fails any check.
 
 Freshness of collateral is each artifact's own validity window evaluated at the evaluation time. An artifact inside its window is usable however long ago it was fetched, and an artifact outside it is refused however recently it arrived; the verifier's cache timers play no part.
 
@@ -1101,33 +1124,33 @@ A verifier that holds collateral outside the evidence identifies each artifact b
 
 | Key | Artifact |
 | --- | --- |
-| `snp_vcek/<generation>/<chip id hex>-<TCB hex>` | a VCEK: `<generation>` is `Milan`, `Genoa` or `Turin`; `<TCB hex>` is the reported bootloader, TEE, SNP and microcode SPLs as two uppercase hexadecimal digits each, followed by the FMC SPL on Turin |
+| `snp_vcek/<generation>/<chip id hex>-<TCB hex>` | a VCEK: `<generation>` is `Milan`, `Genoa` or `Turin`; `<chip id hex>` is the report's 64-byte `CHIP_ID` in lowercase hexadecimal; `<TCB hex>` is the reported bootloader, TEE, SNP and microcode SPLs as two uppercase hexadecimal digits each, followed by the FMC SPL on Turin |
 | `snp_cert_chain/<generation>` | AMD's ASK and ARK for the generation |
 | `snp_crl/<generation>` | AMD's CRL for the generation |
 | `tdx_tcb_info/<fmspc>` | the TDX TCB Info for an FMSPC in lowercase hexadecimal, with its signing chain |
 | `tdx_qe_identity/td` | the TD QE Identity, with its signing chain |
 | `tdx_pck_crl/<ca>` | the PCK CRL, `<ca>` `platform` or `processor` |
 | `tdx_root_crl` | the SGX Root CA CRL |
-| `nras_jwks/<url>` | the NRAS JWKS served at `<url>` |
+| `nras_jwks/<url>` | the NRAS JWKS served at `<url>`, written as the URL itself; the corpus carries JWKS in `nras[].jwks` (Section 14.2) and uses no key of this form |
 | `cca_corim/<implementation id hex>` | the platform vendor's signed CoRIM for an Arm CCA implementation: the CPAK of each instance and the reference values of the platform software (Section 9.6.4) |
 
 ## 11. Verification procedure
 
-A verifier appraises evidence under a policy, with the relying party's nonce, the presented certificate in the certificate pattern, collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
+A verifier appraises evidence under a policy, with the relying party's nonce, the digest of the presented certificate in the certificate pattern (which a version 1 verifier receives as `freshness.key`, Section 5.5), collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
 
 For the `cpu` submodule:
 
-1. Parse. Parse the envelope within the bounds of Section 4.7. Refuse an unknown profile or `cvm_version` and any submodule name or combination Section 4.2 does not admit (`envelope-invalid`), and an `eat_nonce` that differs from the nonce the relying party supplied (`binding-mismatch`).
-2. Identify. Select the parser from `cvm_report`'s media type, parse the hardware report, and re-derive the vendor, the TEE and the generation from it (Section 9). Refuse a report the parser does not accept and a `cvm_platform` or `dbgstat` hint that contradicts the report.
-3. Authenticate. Verify the hardware chain to the pinned root and the report's signature, including every validity window at the evaluation time and the cross-checks Section 9 lists for the platform. When the policy carries a machine allowlist, the identity this step authenticated MUST be on it.
-4. Guest policy. Enforce the normalized security settings (Section 13.1): debug disabled unless allowed; on SEV-SNP, a guest-requested report (VMPL at most 3), VMPL 0 and migration disallowed unless allowed; on TDX, `SEPT_VE_DISABLE` set, reserved attributes zero, and no migration-service TD unless allowed; on Arm CCA, the platform lifecycle in a secured state unless debug is allowed.
-5. Freshness. Verify the binding of `cvm_binding.mode` (Section 5.4). For `commitment` the check is the recompute of Section 8.1 over the registers step 8 establishes.
-6. Collateral. Check revocation, the TCB status and advisories, the TCB floor that applies to this machine (Section 13.2) and, on TDX, the QE Identity, each with its signing chain anchored and its window checked; record each outcome.
-7. Registers. Establish the authoritative register values (Section 6.5) and refuse envelope values that differ.
-8. Replay. Replay the log when present (Section 7.4), mark each register `replayed`, and apply the slot rules of Section 8 in `commitment` mode.
-9. Reference values. Apply the reference values and the backing minimum (Section 13), then produce the claims and the trustworthiness vector (Section 12).
+1. Parse. Parse the envelope within the bounds of Section 4.7, and validate the policy (Section 13.1; `policy-invalid`). Refuse an unknown profile or `cvm_version` and any submodule name or combination Section 4.2 does not admit (`envelope-invalid`), and an `eat_nonce` that differs from the nonce the relying party supplied (`binding-mismatch`).
+2. Identify. Select the parser from `cvm_report`'s media type, parse the hardware report, and re-derive the vendor, the TEE and the generation from it (Section 9). Refuse a report the parser does not accept (`report-invalid`), a TEE or media type the verifier does not implement (`platform-unsupported`), and a `cvm_platform` or `dbgstat` hint that contradicts the report (`envelope-invalid`).
+3. Authenticate. Verify the hardware chain to the pinned root and the report's signature, including every validity window at the evaluation time and the cross-checks Section 9 lists for the platform (`signature-invalid`, `chain-invalid`, and `collateral-unavailable` for a VEK that can be neither found inline nor fetched). When the policy carries a machine allowlist, the identity this step authenticated MUST be on it (`machine-not-allowed`).
+4. Guest policy. Enforce the normalized security settings (Section 13.1): debug disabled unless allowed; on SEV-SNP, a guest-requested report (VMPL at most 3), VMPL 0 and migration disallowed unless allowed; on TDX, `SEPT_VE_DISABLE` set, reserved attributes zero, and no migration-service TD unless allowed; on Arm CCA, the platform lifecycle in a secured state unless debug is allowed (`guest-policy`).
+5. Freshness. Verify the binding of `cvm_binding.mode` (Section 5.4). For `commitment` the check is the recompute of Section 8.1 over the registers step 8 establishes (`binding-mismatch`).
+6. Collateral. Check revocation, the TCB status, the TCB floor that applies to this machine (Section 13.2) and, on TDX, the QE Identity, each with its signing chain anchored and its window checked; record each outcome (`revoked`, `collateral-unavailable`, `collateral-invalid`, `tcb-not-allowed`). Advisories are reported and not checked.
+7. Registers. Establish the authoritative register values (Section 6.5) and refuse envelope values that differ (`register-mismatch`).
+8. Replay. Replay the log when present (Section 7.4), mark each register `replayed`, and apply the slot rules of Section 8 in `commitment` mode (`log-required`, `log-invalid`, `replay-mismatch`, `unsupported`).
+9. Reference values. Apply the reference values and the backing minimum (Sections 13.1 and 13.4; `reference-mismatch`, `backing-below-minimum`), then produce the claims and the trustworthiness vector (Section 12).
 
-Steps 3, 4 and 6 operate on authenticated data and are independent of one another; a verifier MAY run them in any order. No step uses a value that a later step establishes, except the `commitment` recompute of step 5, which runs with steps 7 and 8. When evidence fails more than one check, a verifier MAY refuse with the code of any failing step; each conformance case exercises one failing statement (Section 14.2).
+Steps 4 to 9 read only values that step 3 has authenticated or that the envelope binds to them. A verifier MAY evaluate the steps in any order and MUST produce no appraisal unless every step passes; when evidence fails more than one check it MAY refuse with the code of any failing step. Each conformance case exercises one failing statement (Section 14.2).
 
 For the `vtpm` submodule, which is appraised before the `cpu` submodule that binds it: step 3 is the attestation key's signature over the quote and the checks of Section 9.4; step 5 is `extraData == anchor`; step 7 projects the quoted PCRs; step 8 replays the vTPM's log. The `cpu` submodule's step 5 is then the key binding of Section 9.4.
 
@@ -1161,7 +1184,7 @@ Each submodule entry:
 | `ear_attester_claims` | 1005 | the normalized claims of Section 12.2 |
 | `ear_verifier_claims` | 1006 | the verifier claims of Section 12.3 |
 
-The appraisal carries no signature. A verifier that hands an appraisal across a trust boundary signs it as an EAR token, a JWT or CWT (draft-ietf-rats-ear-04 section 3), or delivers it over an authenticated channel; the field names alone make nothing verifiable. A failed appraisal produces no appraisal: the verifier returns the refusal code. A relying party that records failures MAY express them with the AR4SI contraindicated values; this profile does not.
+The appraisal carries no signature. A verifier that hands an appraisal across a trust boundary signs it as an EAR token, a JWT (RFC 7519) or CWT (RFC 8392) as draft-ietf-rats-ear-04 section 3 defines, or delivers it over an authenticated channel; the field names alone make nothing verifiable. A failed appraisal produces no appraisal: the verifier returns the refusal code. A relying party that records failures MAY express them with the AR4SI contraindicated values; this profile does not.
 
 ### 12.2. Normalized attester claims
 
@@ -1177,8 +1200,8 @@ The appraisal carries no signature. A verifier that hands an appraisal across a 
 | `cvm_owner` | -70023 | SEV-SNP `{family_id, image_id, id_key_digest, author_key_digest}`; TDX `{mr_owner, mr_owner_config}`; absent on Arm CCA |
 | `cvm_policy` | -70024 | normalized security settings: `debug` and `migratable` on every TEE; `smt`, `single_socket` and `vmpl` on SEV-SNP; `sept_ve_disable`, `service_td` (TDX 1.5 quotes only) and `reserved_bits_zero` on TDX |
 | `dbgstat` | 263 | `enabled` when the TEE's guest-debug facility is enabled, `disabled-since-boot` otherwise (CBOR 0 and 2) |
-| `cvm_tcb` | -70025 | vendor-specific firmware versions (Section 9) |
-| `cvm_identity` | -70026 | the authenticated hardware identifier: SEV-SNP `chip_id`, TDX `ppid`, Arm CCA `instance_id` |
+| `cvm_tcb` | -70025 | vendor-specific TCB values and, on TDX, the vendor's status and advisories (Section 9) |
+| `cvm_identity` | -70026 | the hardware identifier: SEV-SNP `chip_id`, TDX `ppid`, Arm CCA `instance_id`, authenticated by the hardware chain; an SEV-SNP `chip_id` under a VLEK or a masked `CHIP_ID` is reported as the report carries it and identifies no machine (Section 13.3) |
 | `cvm_chain` | -70007 | in `commitment` mode, `{chain_len}` |
 | `bootseed` | 268 | in `commitment` mode, the chain's boot seed |
 
@@ -1197,9 +1220,11 @@ The appraisal carries no signature. A verifier that hands an appraisal across a 
 | Claim | CBOR key | Value |
 | --- | --- | --- |
 | `cvm_collateral` | -70030 | per check (`snp_crl`, `tdx_pck_crl`, `tdx_root_crl`, `tdx_tcb_info`, `tdx_qe_identity`, `nras_jwks`, `cca_corim`): `{status, reason?, this_update?, next_update?, signed?}` with `status` `checked`, `skipped` (the policy waived it; Section 13.1) or `not-applicable` (the evidence gives it nothing to check) |
-| `cvm_reference` | -70031 | which reference values were applied: `launch_measurement` true when a launch measurement pin matched and false when none was configured, and `registers` listing each pinned slot, which matched |
-| `cvm_backing_min` | -70032 | `{required, weakest_seen}` |
-| `ear_nvidia_evidence` | text | device submodules: `{signature_verified, parsed, nonce_match}` from NRAS's signed claims (Section 9.7) |
+| `cvm_reference` | -70031 | which reference values were applied: `launch_measurement` true when a launch measurement pin matched and false when none was configured, and `registers` listing each pinned slot, which matched; absent when the policy pins nothing that applies to the submodule |
+| `cvm_backing_min` | -70032 | `{required, weakest_seen}`; absent when the submodule has no registers |
+| `ear_nvidia_evidence` | text | device submodules: `{signature_verified, parsed, nonce_match}` from NRAS's signed claims (Section 9.7), each present when the device token carries the claim it comes from |
+
+In a `cvm_collateral` entry, `reason` is present on a `skipped` entry; `signed` is true on every `checked` entry and absent otherwise; `next_update` is the `nextUpdate` of a TCB Info or QE Identity and appears only on `tdx_tcb_info` and `tdx_qe_identity`; `this_update` is not emitted in version 1.
 
 A check the policy waived is reported as `skipped` with its reason. A configured expectation that fails is a refusal; a `false` in `cvm_reference` means only that nothing was pinned.
 
@@ -1225,7 +1250,7 @@ The `vtpm` submodule's vector carries `executables` alone: 2 when the policy pin
 
 ### 12.5. Policy identifier
 
-The second entry of `ear_appraisal_policy_ids` names the effective policy: `ni:///sha-384;<base64url>` (RFC 6920), the SHA-384 of the JCS serialization (RFC 8785) of the policy in which every member that has a default is present with its value or its default, and no member is null. The members without a default (`freshness.key`, `tcb.default_floor`, `identity`, `owner`, `gpu.expected_archs`) appear only when set; every other object appears, empty or not, as in Appendix B.4, which shows the effective default policy in full. Two appraisals carry the same identifier exactly when their effective policies serialize to the same bytes; reordering an array changes the identifier without changing the requirements. The identifier of the default policy is in Appendix B.4.
+The second entry of `ear_appraisal_policy_ids` names the effective policy: `ni:///sha-384;<base64url>` (RFC 6920), the SHA-384 of the JCS serialization (RFC 8785) of the policy in which every member that has a default is present with its value or its default, and no member is null. The members without a default (`freshness.key`, `reference.host_data`, `tcb.default_floor`, a machine's `tcb_floor`, the members of a floor, `identity`, `owner`, `gpu.expected_archs`) appear only when set; every other object appears, empty or not, as in Appendix B.4, which shows the effective default policy in full. Two appraisals carry the same identifier exactly when their effective policies serialize to the same bytes; reordering an array changes the identifier without changing the requirements. The identifier of the default policy is in Appendix B.4.
 
 ### 12.6. Composition with the TDX confidential-GPU EAR profile
 
@@ -1235,7 +1260,9 @@ draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines EAR claims for TDX guests with
 - device submodules carry NRAS's claim names unchanged, and `ear_nvidia_evidence` in `ear_verifier_claims`;
 - `ear_all_submods_bound` is the draft's text claim. The verifier emits `"true"` or `"false"` and never `"unknown"`, since it checks every binding. A binding that fails is a refusal, so the claim is `"false"` only when a device's signed nonce match is false and the policy (`gpu.device_policy.require_nonce_match`) tolerates it.
 
-A relying party written against that draft reads these appraisals without a mapping.
+The claim names and value encodings match that draft; its container and its submodule labels differ. The draft places the `tdx_*` claims in `ear_evidence_claims` of a submodule labeled `tdx` and names GPU submodules `gpu_0`, `gpu_1` and so on, where this profile uses `ear_attester_claims` of `cpu` and `gpu/<ueid>`. A relying party written against the draft maps `tdx` to `cpu`, `ear_evidence_claims` to `ear_attester_claims`, and `gpu_<i>` to the `i`-th `gpu/<ueid>` submodule in ascending byte order of the names. The draft makes every member of `ear_nvidia_evidence` required, and this profile omits a member whose source claim NRAS did not sign.
+
+EAR-04 section 3 requires an EAR extension to be a map, and `ear_all_submods_bound` is a text value because draft-kykdxy defines it so; a relying party that applies EAR-04's extension rule alone refuses it. The conflict lies between the two drafts, and this profile follows draft-kykdxy until they reconcile.
 
 ### 12.7. Composition with Confidential Containers Trustee
 
@@ -1249,7 +1276,7 @@ The policy is a verifier input, chosen by the relying party. It is a JSON object
 
 | Member | Default | Meaning |
 | --- | --- | --- |
-| `reference` | all empty | reference values, Section 13.4 |
+| `reference` | every array and map empty, `host_data` absent | reference values, Section 13.4 |
 | `min_backing` | `hardware` | the minimum backing of every verified register |
 | `freshness.key` | absent | the key binding the relying party requires (Section 5.2) |
 | `commitment.header16` | `QVRTLU1SLTEBARAAAAAAAA` | the `ats-mr-v1` header, base64url; any other value fails validation |
@@ -1273,7 +1300,7 @@ A pin that nothing in the evidence can satisfy is refused with `reference-mismat
 
 ### 13.2. TCB floors
 
-A floor is named, so a fleet carries one floor per generation and moves a machine between floors without editing every policy. A floor constrains at least one platform:
+A floor is named, so a fleet carries one floor per generation and moves a machine between floors without editing every policy. A floor constrains at least one platform, and a `tdx` member without members constrains nothing and fails validation:
 
 ```
 TcbFloor = {
@@ -1331,7 +1358,8 @@ conformance/
   README.md          how to run the corpus
   UNCOVERED.md       the normative statements that have no case yet
   cases/<id>.json    one case per file
-  inputs/            the evidence, policies, collateral and recorded NRAS exchanges the cases reference
+  inputs/            the evidence, policies, collateral, expected appraisals (inputs/expected/)
+                     and recorded NRAS exchanges the cases reference
 ```
 
 The corpus is data. Each implementation runs it with its own runner and pins it by the revision it was taken from.
@@ -1351,8 +1379,12 @@ case = {
 }
 path = text                           ; relative to conformance/inputs, forward slashes
 collateral-key = text                 ; Section 10.3
+refusal-code = text                   ; Section 14.4
 nras-exchange = { "arch": "HOPPER" / "BLACKWELL" / "LS10", "nonce": text, "response": path, "jwks": path }
+                                      ; nonce: the request's nonce, lowercase hexadecimal (Section 9.7.1)
 ```
+
+`signing_chain` is the PEM issuer chain that Section 10.1 calls `issuer_chain`.
 
 `rule.section` names the section of this document the case exercises and `rule.statement` states the rule, so a case traces to the text. An input whose path ends in `.gz` is stored gzip-compressed (RFC 1952) and is its decompressed content; only inputs over 1 MiB are compressed.
 
@@ -1362,12 +1394,13 @@ A case fixes everything a decision depends on:
 - `collateral` is the whole collateral available to the appraisal, each file the artifact's bytes as the source serves them, with signed Intel artifacts carrying their signing chain beside the body. A request for a key the case does not carry fails as unavailable collateral. The envelope's inline endorsements are inputs like any other, and Section 10.2 applies.
 - `nras` holds the recorded exchange for each architecture batch: the nonce the verifier will send, NRAS's detached EAT, and the JWKS that verifies it. Nothing in the corpus reaches a network.
 - the policy is complete; a case without one runs under the defaults, and its identifier (Section 12.5) is the one the expected appraisal carries.
+- the relying party's nonce is the envelope's `eat_nonce`, and the digest of the presented certificate, in the certificate pattern, is the policy's `freshness.key`. The rule that refuses an `eat_nonce` other than the relying party's therefore has no case (`UNCOVERED.md`).
 
 A case exercises one statement. Where an input cannot avoid breaking several, `rule.statement` names the refusal expected.
 
 ### 14.3. Comparison
 
-For `expect.appraisal`, the runner encodes the implementation's appraisal as the JSON of Section 12 and compares it with the expected file as parsed JSON values after removing, from both, the members that are the implementation's own: `iat`; `ear_verifier_id`; `ear_raw_evidence`; `reason` inside every `cvm_collateral` entry. Everything else must be equal. An implementation that emits an extra claim fails the case.
+For `expect.appraisal`, the runner encodes the implementation's appraisal as the JSON of Section 12 and compares it with the expected file as parsed JSON values after removing, from both, the members that vary between implementations: `iat`; `ear_verifier_id`; `ear_raw_evidence`; `reason` inside every `cvm_collateral` entry. Everything else must be equal. An implementation that emits an extra claim fails the case.
 
 For `expect.refusal`, the runner maps the implementation's error to one code of Section 14.4 and compares codes. An error that maps to no code is no decision and fails the case, as does a refusal with another code, or an appraisal where a refusal was expected, or the reverse.
 
@@ -1377,42 +1410,42 @@ A refusal names the rule family that failed:
 
 | Code | Sections | Meaning |
 | --- | --- | --- |
-| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.4, 6.5, 8.1, 10.1, 11 step 1 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, version or consistency rule, including a hint that contradicts the signed report, a backing or source the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (a vTPM register and its quoted PCR, an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved kind or claim |
-| `policy-invalid` | 13 | the policy fails its own validation |
-| `platform-unsupported` | 9 | the TEE or hosting is one this verifier does not implement |
-| `report-invalid` | 11 step 2 | the hardware report cannot be parsed, or its version is outside the supported range |
-| `signature-invalid` | 11 step 3 | a hardware or vendor signature does not verify: the report, the quote, the TPM quote |
+| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.2, 6.4, 6.5, 8.1, 9.4.1, 10.1, 11 steps 1 and 2 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, nesting, version or consistency rule, including a hint that contradicts the signed report, a backing the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved key kind |
+| `policy-invalid` | 11 step 1, 13 | the policy fails its own validation |
+| `platform-unsupported` | 9, 11 step 2 | the TEE, hosting or report media type is one this verifier does not implement |
+| `report-invalid` | 9.1.2, 9.1.3, 9.2.2, 9.4.3, 11 step 2 | the hardware report cannot be parsed, breaks a layout rule of Section 9 (a reserved byte, the signature algorithm, the key selection, a body type or size), or its version is outside the supported range; a TPM quote that is not a quote |
+| `signature-invalid` | 9.1.4, 9.2.3, 9.4.3, 11 step 3 | a hardware or vendor signature does not verify: the report, the quote, the TPM quote |
 | `chain-invalid` | 9.1.4, 9.2.3, 11 steps 3 and 6 | a certificate chain does not reach the pinned root, contradicts the report, or is outside its validity at the evaluation time; a quoting enclave that is not the one Intel's QE Identity names |
-| `machine-not-allowed` | 13.3 | the authenticated machine identity is not on the allowlist |
+| `machine-not-allowed` | 9.1.4, 9.7.3, 11 step 3, 13.3 | the authenticated machine identity is not on the allowlist, or the evidence identifies no machine while an allowlist is present |
 | `guest-policy` | 11 step 4 | a guest policy bit, TD attribute, VMPL, host-requested report, debug state or lifecycle violates policy |
-| `binding-mismatch` | 4.1, 5, 9.4, 9.7.2 | the binding of the submodule's mode does not hold (including the HCL report's key binding), the envelope's `eat_nonce` differs from the relying party's nonce, a device token's nonce differs, a key binding the policy requires is absent or different, the certificate pattern without `freshness.key`, or `vtpm-extradata` without a pinned launch measurement |
-| `collateral-unavailable` | 10, 11 step 6 | an artifact the policy requires could not be obtained, including an NRAS or JWKS endpoint that cannot be reached and a missing CCA CoRIM |
-| `collateral-invalid` | 10, 11 step 6 | an artifact fails its signature, its signing chain, its binding or its window at the evaluation time, or cannot be parsed |
+| `binding-mismatch` | 4.1, 4.6, 5, 8.7, 9.4, 9.7.2, 11 steps 1 and 5 | the binding of the submodule's mode does not hold (including the HCL report's key binding), the envelope's `eat_nonce` differs from the relying party's nonce, NRAS's overall or device nonce differs, a key binding the policy requires is absent or different (a CCA submodule under a policy key included), the certificate pattern without `freshness.key`, or `vtpm-extradata` or `commitment` without a pinned launch measurement |
+| `collateral-unavailable` | 9.1.4, 9.6.4, 9.7.2, 10, 11 steps 3 and 6 | an artifact the policy requires could not be obtained, including a VEK that a VLEK-signed or masked report does not carry, an NRAS or JWKS endpoint that cannot be reached and a missing CCA CoRIM |
+| `collateral-invalid` | 9.1.4, 9.2.3, 10, 11 step 6 | an artifact fails its signature, its signing chain, its binding or its window at the evaluation time, or cannot be parsed; an inline artifact that fails only its binding or window is ignored (Section 10.2) |
 | `revoked` | 11 step 6 | a certificate is revoked |
-| `tcb-not-allowed` | 9.2.3, 13.2 | a TCB status outside the allowed set, a TCB value below its floor, a TDX module identity or TCB level that matches no entry, or a QE TCB level the QE Identity revokes or does not list |
-| `register-mismatch` | 6.5 | an envelope register differs from the authoritative value |
-| `log-required` | 7.4, 8 | a log the mode requires is absent, or `chain_len` and the log disagree |
-| `log-invalid` | 7.1 | the log cannot be parsed whole under its format's rules |
-| `replay-mismatch` | 7.3, 7.4, 8 | a replay does not reproduce a register that must reproduce, a record digest does not reproduce, a `cvm` event or claim is not deterministically encoded, a slot or `ats` record rule is broken, or chain memory detects a restart or a fork |
-| `reference-mismatch` | 13.4 | a pinned launch measurement, register, PCR, host data, owner key or slot owner differs |
-| `backing-below-minimum` | 13.1 | a register's backing is below the policy minimum |
+| `tcb-not-allowed` | 9.2.3, 11 step 6, 13.2 | a TCB status outside the allowed set, a TCB value below its floor, a TDX module identity or TCB level that matches no entry, or a QE TCB level the QE Identity revokes or does not list |
+| `register-mismatch` | 6.5, 9.4.3, 11 step 7 | an envelope register differs from the authoritative value |
+| `log-required` | 4.3, 7.1, 7.4, 8, 11 step 8 | a log the mode requires is absent or in a format the mode does not admit, or `chain_len` and the log disagree |
+| `log-invalid` | 7.1, 9.3, 11 step 8 | the log cannot be parsed whole under its format's rules, or breaks a shape rule of its format |
+| `replay-mismatch` | 7.3, 7.4, 8, 9.2.6, 9.3, 11 step 8 | a replay does not reproduce a register that must reproduce, a record digest does not reproduce, a `cvm` event or claim is not deterministically encoded, a commitment log carries a record of another content type, a slot or `ats` record rule is broken, a CCEL record names an index above 4, or chain memory detects a restart or a fork |
+| `reference-mismatch` | 11 step 9, 13.1, 13.4 | a pinned launch measurement, register, PCR, host data, owner key or slot owner differs, or a pin nothing in the evidence can satisfy |
+| `backing-below-minimum` | 11 step 9, 13.1 | a register's backing is below the policy minimum |
 | `device-required` | 13.5 | the policy requires a device and the envelope carries none |
-| `device-not-allowed` | 13.5 | a device's architecture is outside the allowed set, or the envelope carries more than 32 device submodules |
-| `device-token-invalid` | 9.7.2 | NRAS answered with a token the verifier refuses: signature, issuer, claims version, `submods` digest, key identifier, or a token that maps to no device |
+| `device-not-allowed` | 4.2, 13.5 | a device's architecture is outside the allowed set, or the envelope carries more than 32 device submodules |
+| `device-token-invalid` | 9.7.2 | NRAS answered with a token the verifier refuses: signature, issuer, claims version, `submods` digest or entries, key identifier, or a token that maps to no device |
 | `device-policy` | 9.7.2, 9.7.3, 13.5 | NRAS's overall result is false, the device count differs, a device token is of another architecture, or a device gate failed |
-| `unsupported` | 7.1, 7.4, 9.4.4, 9.6.2, 9.7.1 | a format or feature this version does not implement: the `aael` log, a log format the submodule does not admit, a TPM bank other than SHA-256, a CCA profile or binding variant outside Section 9.6.2, an NRAS request that relaxes NRAS's certificate checks |
+| `unsupported` | 7.1, 7.4, 9.4.3, 9.4.4, 9.6.1, 9.6.2, 9.7.1, 11 step 8 | a format or feature this version does not implement: the `aael` log, a log format the submodule does not admit, a TPM bank other than SHA-256 or a quote selection other than one SHA-256 selection, a CCA collection entry, profile or binding variant outside Sections 9.6.1 and 9.6.2, an NRAS request that relaxes NRAS's certificate checks |
 
 ### 14.5. Versioning and change control
 
-The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.6") and pins that version in its continuous integration.
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.7") and pins that version in its continuous integration.
 
-The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in the implementation or in the case, and the corpus is corrected first. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
+The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
 ## 15. Security considerations
 
 ### 15.1. Unprotected evidence
 
-The envelope carries no signature (Section 4.1), so every decision rests on the classification of Section 3.4. A verifier that uses a hint to make a decision, or reads a bound field before binding it, fails open. The profile constrains every hint by the signed field it describes (a register's `backing` by its `source`, `cvm_platform` by the report, `dbgstat` by the debug bit) so that a free choice by the attester never widens what a verifier accepts.
+The envelope carries no signature (Section 4.1), so every decision rests on the classification of Section 3.4. A verifier that uses a hint to make a decision, or reads a bound field before binding it, fails open. The profile constrains every hint by the signed field it describes (a register's `backing` by its `source`, `cvm_platform` by the report, `dbgstat` by the debug bit) so that a free choice by the attester never widens what a verifier accepts. The exception is `hosting`, which no signed field describes; each path it admits is verified in full on its own terms (Section 3.4).
 
 ### 15.2. Backing is a floor
 
@@ -1420,17 +1453,17 @@ A policy states the minimum backing, and the verifier reports the weakest backin
 
 ### 15.3. Measurement coverage
 
-Registers record what measured producers extend. Code that runs through a path that extends no register leaves no trace. On every platform this includes guest root executing a program the runtime did not measure, and on SEV-SNP with a register provider root can additionally extend registers (visibly, in the log). The guarantee is therefore "what the sanctioned producers recorded". A deployment that needs "everything that ran" either measures every execution into a slot (an exec hook feeding a register) or removes the paths (no interactive root, no exec outside the measured runtime). `backing` and per-slot `replayed` let a relying party see which it received.
+Registers record what measured producers extend. Code that runs through a path that extends no register leaves no trace. On every platform this includes guest root executing a program the runtime did not measure. Guest root can also extend registers on every platform: vTPM PCRs through the TPM device, TDX RTMRs through the kernel, SEV-SNP slots through the register provider. Only the provider records such an extend in the log; elsewhere it surfaces as a replay failure, or as `replayed` false for a register the log does not have to reproduce (Section 7.4). The guarantee is therefore "what the sanctioned producers recorded". A deployment that needs "everything that ran" either measures every execution into a slot (an exec hook feeding a register) or removes the paths (no interactive root, no exec outside the measured runtime). `backing` and per-slot `replayed` let a relying party see which it received.
 
 ### 15.4. Software registers on SEV-SNP
 
-Section 8's construction is secure against every guest user, root included, when the image satisfies Sections 8.4 to 8.6. It is not secure against code executing in the guest kernel: a kernel exploit can rewrite registers, patch the provider, and compute commitments over fabricated state. This residual is why such registers are never `hardware` and why version 1 reports them as `virtualized` (Section 8.7). The mitigations are the hardening rows of Section 8.6, panic on oops so that attempts stop the node, chain memory (Section 8.8) so that a rewritten history shows as a restart or a fork, and deterministic reference values for images whose register values are known in advance.
+When the image satisfies Sections 8.4 to 8.6, Section 8's construction keeps every guest user, root included, from rewriting or hiding records; root can still append records under any owner identity it can assume (Section 8.4 item 6). It is not secure against code executing in the guest kernel: a kernel exploit can rewrite registers, patch the provider, and compute commitments over fabricated state. This residual is why such registers are never `hardware` and why version 1 reports them as `virtualized` (Section 8.7). The mitigations are the hardening rows of Section 8.6, panic on oops so that attempts stop the node, chain memory (Section 8.8) so that a rewritten history shows as a restart or a fork, and deterministic reference values for images whose register values are known in advance.
 
-The commitment header is pinned in full, so an attacker cannot use its 16 bytes as free choice next to the commitment. The domain tags `ats-anchor-v1`, `ats-mr-v1/seed`, `ats-mr-v1/genesis`, `ats-mr-v1/record` and `ats-mr-v1/commit` separate every hash in this profile from the others and from register values.
+The commitment header is pinned in full, so an attacker cannot use its 16 bytes as free choice next to the commitment. The domain tags `ats-anchor-v1`, `ats-mr-v1/seed`, `ats-mr-v1/genesis`, `ats-mr-v1/record` and `ats-mr-v1/commit` separate the tagged hashes from one another. The extend `SHA-384(R || d)` carries no tag. Its input is 96 bytes; every tagged input either has another length or begins with its ASCII tag, so an extend input and a tagged input coincide only when a register value, a SHA-384 output, begins with that tag.
 
 ### 15.5. Debug and privileged configuration
 
-With the TEE's guest-debug facility enabled, the host reads and writes guest memory and every other claim is meaningless. Verifiers refuse debug by default and check debug, VMPL, TD attributes and lifecycle before any register claim is evaluated. A setting that cannot be checked is treated as unsafe.
+With the TEE's guest-debug facility enabled, the host reads and writes guest memory and every other claim is meaningless. Verifiers refuse debug by default and check debug, VMPL, TD attributes and lifecycle before any register claim is evaluated. A setting that cannot be checked is treated as unsafe. A migration agent (SEV-SNP `MIGRATE_MA`) and a service TD bound to a TD (TDX `MRSERVICETD`) can read guest state by design; policies refuse both by default (`allow_migration`, `allow_service_td`), and a policy that admits one extends the trusted computing base to it.
 
 ### 15.6. Multiple attesters
 
@@ -1438,11 +1471,11 @@ With the TEE's guest-debug facility enabled, the host reads and writes guest mem
 
 ### 15.7. Freshness
 
-The nonce is at least 16 bytes and chosen by the relying party. The verifier compares the envelope's nonce with the one the relying party gave it, because an appraisal bound only to the envelope's own nonce accepts a replay. Every comparison of a binding value is constant time over the full field. In the certificate pattern the evidence is as fresh as the certificate: the relying party bounds its age, and the certificate lives no longer than the CVM.
+The nonce is at least 16 bytes, and in the challenge pattern the relying party chooses it. The verifier compares the envelope's nonce with the one the relying party gave it, because an appraisal bound only to the envelope's own nonce accepts a replay. Every comparison of a binding value is constant time over the full field. In the certificate pattern the evidence is as fresh as the certificate: the relying party bounds its age, and the certificate lives no longer than the CVM.
 
 ### 15.8. Collateral
 
-The TCB a verifier evaluates is read from the endorsement (the VCEK's extensions, the PCK certificate's) and cross-checked against the report. A TCB Info older than one the verifier has seen can still be inside its validity window; `tcbEvaluationDataNumber` floors close that gap. A verifier prefers its own valid collateral to the attester's (Section 10.2).
+The TCB a verifier evaluates comes from signed data: on SEV-SNP the report's four TCB values, of which `REPORTED_TCB` is cross-checked against the VEK's extensions; on TDX the PCK certificate's components and PCESVN, and the quote's `TEE_TCB_SVN`. A TCB Info older than one the verifier has seen can still be inside its validity window; `tcbEvaluationDataNumber` floors close that gap. In the same way, a CRL still inside its window can predate a revocation: a verifier that keeps state SHOULD refuse a CRL whose CRL number is lower than one it has accepted for the same issuer, and SHOULD refresh collateral at the vendor's publication cadence. A verifier prefers its own valid collateral to the attester's (Section 10.2).
 
 ### 15.9. Evaluation time
 
@@ -1450,7 +1483,7 @@ The evaluation time is an input so that decisions are reproducible and conforman
 
 ### 15.10. Parsing
 
-Evidence is attacker-controlled. The bounds of Section 4.7 are enforced before a value is buffered; the one-encoding rules close parser differentials in which two implementations read different values from the same bytes; every binary length is converted with overflow checks so that the same bytes parse identically on 32-bit and 64-bit targets; and a binary log parses whole or is refused.
+Evidence is attacker-controlled. Each bound of Section 4.7 is checked before the input it covers is parsed, and the nesting bound keeps an ignored claim from exhausting a recursive parser; the one-encoding rules, for JSON and CBOR alike, close parser differentials in which two implementations read different values from the same bytes; every binary length is converted with overflow checks so that the same bytes parse identically on 32-bit and 64-bit targets; and a binary log parses whole or is refused.
 
 ### 15.11. Delegated appraisal
 
@@ -1462,27 +1495,45 @@ Reference values carry the security of Section 8.6 and of every launch measureme
 
 ### 15.13. Results
 
-An appraisal is a statement by the verifier. Across a trust boundary it is signed or delivered over an authenticated channel (Section 12.1), and the relying party authenticates the verifier. An appraisal's policy identifier tells the relying party which requirements were applied; a relying party that accepts appraisals produced under policies it did not choose accepts those policies.
+An appraisal is a statement by the verifier. Across a trust boundary it is signed or delivered over an authenticated channel (Section 12.1), and the relying party authenticates the verifier. A signed appraisal can be replayed like any signed statement, so a relying party MUST check that its `eat_nonce` is the nonce it issued or, in the certificate pattern, that its `iat` is within the age it accepts. An appraisal's policy identifier tells the relying party which requirements were applied; a relying party that accepts appraisals produced under policies it did not choose accepts those policies.
 
 ### 15.14. Settings version 1 does not normalize
 
-Some signed settings are carried in the raw report and neither normalized nor enforced by version 1: on SEV-SNP, `POLICY` bits 21 to 25 (`CXL_ALLOW`, `MEM_AES_256_XTS`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM`, `PAGE_SWAP_DISABLE`) and `PLATFORM_INFO` bits 2 to 7 (`ECC_EN`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM_EN`, `ALIAS_CHECK_COMPLETE`, `IOMMU_WRITE_SAFE`, `TIO_EN`); on TDX, `TEE_TCB_SVN2`. Two of these bear directly on isolation: `ALIAS_CHECK_COMPLETE` reports that the firmware checked the memory configuration for aliased addresses, which defends against memory-aliasing attacks on SEV-SNP integrity, and `CXL_ALLOW` admits CXL-attached memory into the guest. A relying party that depends on them reads them from `ear_raw_evidence` until a later version adds policy members for them.
+Some signed settings are carried in the raw report and neither normalized nor enforced by version 1: on SEV-SNP, `POLICY` bits 21 to 25 (`CXL_ALLOW`, `MEM_AES_256_XTS`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM`, `PAGE_SWAP_DISABLE`), `PLATFORM_INFO` bits 2 to 7 (`ECC_EN`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM_EN`, `ALIAS_CHECK_COMPLETE`, `IOMMU_WRITE_SAFE`, `TIO_EN`), and `LAUNCH_MIT_VECTOR` and `CURRENT_MIT_VECTOR`, which on platforms without the hardware fix that `IOMMU_WRITE_SAFE` reports state the verified mitigations; on TDX, `TEE_TCB_SVN2`. Two of these bear directly on isolation: `ALIAS_CHECK_COMPLETE` reports that the firmware checked the memory configuration for aliased addresses, which defends against memory-aliasing attacks on SEV-SNP integrity, and `CXL_ALLOW` admits CXL-attached memory into the guest. A relying party that depends on them reads them from the hardware report in the evidence (Section 4.3) until a later version adds policy members for them.
+
+### 15.15. Relay and channel binding
+
+An appraisal without a key binding shows that a CVM in the appraised state answered the nonce. It does not show that the relying party's channel peer is that CVM: a peer can relay the nonce to a genuine CVM and return its evidence. A relying party that releases a secret on the strength of an appraisal MUST encrypt the secret to, or deliver it over a channel authenticated by, a key the evidence binds (`spki-sha256` or `x509-tbs-sha256`, Section 5.3), named in the policy's `freshness.key` or compared with the appraisal's `cvm_freshness.key` (Section 5.2). The `tls-exporter` kind that version 2 reserves binds the channel itself.
+
+### 15.16. Time of check and key custody
+
+An appraisal describes the state when the report was signed. Registers that keep changing (RTMR 3, workload slots, PCRs) can move on after it, and a kernel compromise after it can exfiltrate a bound key; in the certificate pattern the appraisal then vouches for that key for the certificate's lifetime. The private half of a bound key MUST be generated inside the CVM and MUST NOT leave it. A relying party that needs current state appraises again at an interval its risk accepts, or uses the challenge pattern on every connection.
+
+### 15.17. Verifier resources
+
+Evidence drives work the verifier does before it has authenticated anything: an unverified `CHIP_ID` and TCB select the VCEK a verifier requests from AMD KDS, which rate-limits repeated requests, and device submodules drive up to three NRAS requests per envelope. A verifier applies the bounds of Section 4.7 before any request, caches collateral by its key (Section 10.3), bounds its concurrent requests, and requests collateral only from origins its configuration names (Section 9.6.6).
+
+### 15.18. Profile version
+
+The envelope is unprotected, so whoever handles it chooses the profile version it claims. A relying party that needs a guarantee a later version adds checks the profile URI in `ear_appraisal_policy_ids`.
 
 ## 16. Privacy considerations
 
-`cvm_identity` carries stable hardware identifiers: the SEV-SNP chip identifier, the TDX PPID, the Arm CCA instance identifier and the GPU UEID. Each identifies one physical machine or device for its lifetime and can correlate a workload across relying parties and over time. `ear_raw_evidence` carries the same identifiers inside the raw reports and certificates. A verifier SHOULD omit the OPTIONAL `ear_raw_evidence` when the relying party does not need it, and a deployment that forwards appraisals to parties that do not need identity SHOULD remove `cvm_identity` before forwarding; conformance compares appraisals as the verifier produces them. A relying party that keeps appraisals keeps these identifiers with them.
+`cvm_identity` carries stable hardware identifiers: the SEV-SNP chip identifier, the TDX PPID, the Arm CCA instance identifier and the GPU UEID. Each identifies one physical machine or device for its lifetime and can correlate a workload across relying parties and over time. `ear_raw_evidence` carries the same identifiers inside the raw reports and certificates. A verifier SHOULD omit the OPTIONAL `ear_raw_evidence` when it forwards an appraisal to a party that does not hold the evidence (the relying party that supplied the evidence learns nothing from it), and a deployment that forwards appraisals to parties that do not need identity SHOULD remove `cvm_identity` before forwarding; conformance compares appraisals as the verifier produces them. A relying party that keeps appraisals keeps these identifiers with them.
 
-An SEV-SNP host can mask the chip identifier, and the report then carries zeros that identify no machine (Section 13.3). A VLEK, the key a cloud provider holds, removes the chip identifier from the endorsement certificate but leaves it in the report. The identifiers also appear outside `cvm_identity`: in the `snp` compatibility object (`chip_id`) and in the NRAS device claims (`ueid`), so a deployment that removes identity before forwarding removes those as well, and forwards the appraisal outside any signature made over the original.
+An SEV-SNP host can mask the chip identifier, and the report then carries zeros that identify no machine (Section 13.3); such a report verifies only under a VLEK, the key a cloud provider holds, since a VCEK-signed report is cross-checked against its `CHIP_ID` (Section 9.1.4). A VLEK alone removes the chip identifier from the endorsement certificate and leaves it in the report. The identifiers also appear outside `cvm_identity`: in the `snp` compatibility object (`chip_id`), in the NRAS device claims (`ueid`), in the device submodules' names (`gpu/<ueid>`, `nvswitch/<ueid>`), and in the vTPM's `cvm_tpm_ak`, which is stable for a VM instance. A deployment that removes identity before forwarding removes those as well, and the forwarded appraisal is no longer covered by any signature over the original.
+
+Identifiers also leave the appraisal path. In the certificate pattern the evidence, with the chip identifier or the PCK chain that carries the PPID, goes to every peer the certificate is presented to (RFC 9999 section 7 raises the same concern). A verifier discloses identifiers to vendors when it fetches collateral: the chip identifier and TCB go to AMD KDS in the request URL, and the full device evidence goes to NRAS. Within one launch, `REPORT_ID`, `bootseed` and the TPM quote's `clockInfo` correlate attestations of the same guest.
 
 Event logs record what producers measured: container image digests, configuration digests, and in claim records the producer names. A relying party that receives the log learns the workload's composition. Deployments that treat the composition as confidential deliver evidence only to relying parties entitled to it.
 
-The nonce is chosen by the relying party and carries no information about the attester. Host-set fields (Section 3.5) can carry deployment labels chosen by the host, which a relying party sees.
+In the challenge pattern the relying party chooses the nonce, and it carries no information about the attester. In the certificate pattern the attester chooses it, and it can carry whatever the attester puts there. Host-set fields (Section 3.5) can carry deployment labels chosen by the host, which a relying party sees.
 
 ## 17. IANA considerations
 
 ### 17.1. Media types
 
-This document requests registration of the following media types in the vendor tree (RFC 6838 section 3.2). Change controller for all three: Confidential AI, contact mahmoud@confidential.ai.
+The following media types are registered in the vendor tree (RFC 6838 section 3.2) through IANA's registration form, which is submitted when this document is published. For all three: Author and change controller Confidential AI; person and email address to contact for further information, Mahmoud Shehata, mahmoud@confidential.ai; deprecated alias names, none; Macintosh file type code, none.
 
 `application/vnd.confidential-ai.sev-snp-report`
 
@@ -1522,8 +1573,8 @@ This document requests registration of the following media types in the vendor t
 - Subtype name: vnd.confidential-ai.pcs-signed+json
 - Required parameters: none
 - Optional parameters: none
-- Encoding considerations: 8bit; a JSON object (RFC 8259) `{"body": <base64url>, "issuer_chain": <base64url>}`
-- Security considerations: `body` is a document signed by Intel PCS and `issuer_chain` the PEM chain that verifies it; the content is authentic only after that signature is verified to Intel's root (Section 10.1)
+- Encoding considerations: binary, as for every `+json` type (RFC 6839 section 3.1); a JSON object (RFC 8259) `{"body": <base64url>, "issuer_chain": <base64url>}`
+- Security considerations: `body` is a document signed by Intel PCS and `issuer_chain` the PEM chain that verifies it; the content is authentic only after that signature is verified to Intel's root (Sections 9.2.3 and 10.2)
 - Interoperability considerations: the +json suffix applies (RFC 6839)
 - Published specification: this document, Section 10.1
 - Applications that use this media type: attestation verifiers that carry Intel collateral offline
@@ -1534,7 +1585,7 @@ This document requests registration of the following media types in the vendor t
 
 ### 17.2. CWT and EAT claims
 
-The profile's claims use CBOR keys in the private-use range of the CWT Claims registry (RFC 8392 section 9.1.1, keys below -65536), listed in Appendix A. No registration is requested for version 1. A later version published through a standards body would request registration of the `cvm_` claims in the CWT Claims and JWT Claims registries and replace the private keys.
+The profile's claims use CBOR keys in the Private Use range of the CWT Claims registry (RFC 8392 section 9.1.1, keys below -65536), listed in Appendix A, and JSON names in the `cvm_` namespace, which are Private Names under RFC 7519 section 4.3. Private use protects against no collision (RFC 8126 section 4.1): draft-ietf-rats-ear-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation` in attestation results. Both registries register under Specification Required, CWT keys from -65536 to -257 and JWT claim names alike, and this document is such a specification. Version 1 requests no registration; registering the `cvm_` claims in both registries would give them keys in the Specification Required range, and the private keys would then be replaced in a new profile version.
 
 ### 17.3. CBOR tags
 
@@ -1542,7 +1593,7 @@ This document defines no CBOR tags. It uses tag 601 (UCCS, RFC 9781). It accepts
 
 ### 17.4. TCG Canonical Event Log content type
 
-The CEL content type `cvm` with value 200 (Section 7.3) is outside the values the TCG CEL specification assigns. A registration request is made to the Trusted Computing Group; until it is granted, 200 is used through the CEL extension socket and a registry assignment would replace it in a new profile version.
+The CEL content type `cvm` with value 200 (Section 7.3) is outside the values the TCG CEL specification assigns. A registration request will be submitted to the Trusted Computing Group when this document is published; until one is granted, 200 is used through the CEL extension socket, and an assignment would replace it in a new profile version.
 
 ### 17.5. EAT profile
 
@@ -1552,9 +1603,9 @@ The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) 
 
 This section records the status of known implementations at the time of writing, in the manner of RFC 7942.
 
-attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.6 (154 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7 and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
+attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly; https://github.com/confidential-dot-ai/attestation-rs; contact mahmoud@confidential.ai; pre-release, tracking this draft; status as of 2026-09-23) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.7 (160 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7, 9 (except 9.6) and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
 
-Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; `replay_until_event`; appraisal of the standalone `aael` log; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
+Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
 
 Requirements of Section 9 that the reference implementation does not yet enforce, each tracked for correction:
 
@@ -1568,19 +1619,24 @@ The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` 
 
 - [RFC1952] Deutsch, P., "GZIP file format specification version 4.3", RFC 1952, May 1996.
 - [RFC2119] Bradner, S., "Key words for use in RFCs to Indicate Requirement Levels", BCP 14, RFC 2119, March 1997.
+- [RFC2585] Housley, R. and P. Hoffman, "Internet X.509 Public Key Infrastructure Operational Protocols: FTP and HTTP", RFC 2585, May 1999.
 - [RFC3339] Klyne, G. and C. Newman, "Date and Time on the Internet: Timestamps", RFC 3339, July 2002.
 - [RFC4648] Josefsson, S., "The Base16, Base32, and Base64 Data Encodings", RFC 4648, October 2006.
 - [RFC5280] Cooper, D., Santesson, S., Farrell, S., Boeyen, S., Housley, R., and W. Polk, "Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile", RFC 5280, May 2008.
 - [RFC6920] Farrell, S., Kutscher, D., Dannewitz, C., Ohlman, B., Keranen, A., and P. Hallam-Baker, "Naming Things with Hashes", RFC 6920, April 2013.
 - [RFC7515] Jones, M., Bradley, J., and N. Sakimura, "JSON Web Signature (JWS)", RFC 7515, May 2015.
 - [RFC7517] Jones, M., "JSON Web Key (JWK)", RFC 7517, May 2015.
+- [RFC7518] Jones, M., "JSON Web Algorithms (JWA)", RFC 7518, May 2015.
 - [RFC7519] Jones, M., Bradley, J., and N. Sakimura, "JSON Web Token (JWT)", RFC 7519, May 2015.
+- [RFC8017] Moriarty, K., Ed., Kaliski, B., Jonsson, J., and A. Rusch, "PKCS #1: RSA Cryptography Specifications Version 2.2", RFC 8017, November 2016.
 - [RFC8174] Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words", BCP 14, RFC 8174, May 2017.
+- [RFC8259] Bray, T., Ed., "The JavaScript Object Notation (JSON) Data Interchange Format", STD 90, RFC 8259, December 2017.
 - [RFC8392] Jones, M., Wahlstroem, E., Erdtman, S., and H. Tschofenig, "CBOR Web Token (CWT)", RFC 8392, May 2018.
 - [RFC8610] Birkholz, H., Vigano, C., and C. Bormann, "Concise Data Definition Language (CDDL): A Notational Convention to Express Concise Binary Object Representation (CBOR) and JSON Data Structures", RFC 8610, June 2019.
 - [RFC8785] Rundgren, A., Jordan, B., and S. Erdtman, "JSON Canonicalization Scheme (JCS)", RFC 8785, June 2020.
 - [RFC8949] Bormann, C. and P. Hoffman, "Concise Binary Object Representation (CBOR)", STD 94, RFC 8949, December 2020.
 - [RFC9052] Schaad, J., "CBOR Object Signing and Encryption (COSE): Structures and Process", STD 96, RFC 9052, August 2022.
+- [RFC9053] Schaad, J., "CBOR Object Signing and Encryption (COSE): Initial Algorithms", RFC 9053, August 2022.
 - [RFC9165] Bormann, C., "Additional Control Operators for the Concise Data Definition Language (CDDL)", RFC 9165, December 2021.
 - [RFC9334] Birkholz, H., Thaler, D., Richardson, M., Smith, N., and W. Pan, "Remote ATtestation procedureS (RATS) Architecture", RFC 9334, January 2023.
 - [RFC9711] Lundblade, L., Mandyam, G., O'Donoghue, J., and C. Wallace, "The Entity Attestation Token (EAT)", RFC 9711, April 2025.
@@ -1591,18 +1647,23 @@ The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` 
 - [EAR] Fossati, T., Voit, E., Trofimov, S., and H. Birkholz, "EAT Attestation Results", Work in Progress, Internet-Draft, draft-ietf-rats-ear-04, 26 May 2026.
 - [AR4SI] Voit, E., Birkholz, H., Hardjono, T., Fossati, T., and V. Scarlata, "Attestation Results for Secure Interactions", Work in Progress, Internet-Draft, draft-ietf-rats-ar4si-10, 18 May 2026.
 - [CCA-TOKEN] Frost, S., Fossati, T., and G. Mandyam, "Arm's Confidential Compute Architecture Reference Attestation Token", Work in Progress, Internet-Draft, draft-ffm-rats-cca-token-04, 7 September 2026.
+- [CORIM] Birkholz, H., Fossati, T., Deshpande, Y., Smith, N., and W. Pan, "Concise Reference Integrity Manifest", Work in Progress, Internet-Draft, draft-ietf-rats-corim-11, 6 July 2026.
+- [TDX-CGPU] Kostal, G., et al., "EAT Attestation Result (EAR) profile for Intel Trust Domain Extensions (TDX) + Confidential GPU (C-GPU) composite attestation", Work in Progress, Internet-Draft, draft-kykdxy-rats-tdx-cgpu-ear-profile-02, 19 July 2026.
 - [CEL] Trusted Computing Group, "TCG Canonical Event Log Format", Version 1.1, Revision 11, 9 October 2025.
 - [PFP] Trusted Computing Group, "TCG PC Client Platform Firmware Profile Specification", Level 00 Version 1.06 Revision 52, 4 December 2023.
-- [PTP] Trusted Computing Group, "TCG PC Client Platform TPM Profile Specification for TPM 2.0", Version 1.05 Revision 14, 4 September 2020.
 - [TPM2] Trusted Computing Group, "Trusted Platform Module Library, Part 1: Architecture" and "Part 2: Structures", Family 2.0, Level 00 Revision 01.83, 25 January 2024.
 - [SNP-ABI] AMD, "SEV Secure Nested Paging Firmware ABI Specification", publication 56860, Revision 1.59, August 2026. Section 7.3, Table 27, and Appendix B.
 - [VCEK] AMD, "Versioned Chip Endorsement Key (VCEK) Certificate and KDS Interface Specification", publication 57230, Revision 1.05, September 2026. Section 1.5.
-- [TDX-DCAP] Intel, "Intel Trust Domain Extensions Data Center Attestation Primitives (Intel TDX DCAP): Quote Generation Library and Quote Verification Library", Revision 0.91, September 2026; and Intel's quote verification library, intel/confidential-computing.tee.dcap.qvl.
-- [TDX-ABI] Intel, "Intel Trust Domain Extensions (Intel TDX) Module Architecture Application Binary Interface (ABI) Reference Specification", document 348551-007, September 2025. Section 3.4.1, Table 3.22.
+- [TDX-DCAP] Intel, "Intel Trust Domain Extensions Data Center Attestation Primitives (Intel TDX DCAP): Quote Generation Library and Quote Verification Library", Revision 0.91, September 2026; and Intel's quote verification library, intel/confidential-computing.tee.dcap.qvl, at commit d12717e3.
+- [TDX-ABI] Intel, "Intel Trust Domain Extensions (Intel TDX) Module Architecture Application Binary Interface (ABI) Reference Specification", document 348551-008, May 2026. Section 3.4.1, Table 3.23.
 - [PCK] Intel, "Intel SGX PCK Certificate and Certificate Revocation List Profile Specification", Revision 1.5, 26 January 2022.
 - [PCS] Intel, "Intel Provisioning Certification Service for ECDSA Attestation", API version 4.
 - [RMM] Arm, "Realm Management Monitor specification", DEN0137, version 1.0-rel0, and version 2.0-bet3 (beta). Section B5.
 - [NRAS] NVIDIA, "NVIDIA Remote Attestation Service", API version 4 (Attest GPU V4, `POST /v4/attest/gpu`, and Attest Switch V4, `POST /v4/attest/switch`).
+- [UEFI] UEFI Forum, "Unified Extensible Firmware Interface (UEFI) Specification", Version 2.10, August 2022 (`EFI_CC_MEASUREMENT_PROTOCOL`, `CC_EVENT`); and "Advanced Configuration and Power Interface (ACPI) Specification", Version 6.5, August 2022, Section 5.2.34 (the CCEL table).
+- [TSM-REPORT] Veraison, `application/vnd.veraison.tsm-report+json`, a media type registered in the IANA Media Types registry, for the Linux configfs-tsm report.
+- [DSTACK] Dstack-TEE, "dstack", the guest agent's event log format (github.com/Dstack-TEE/dstack).
+- [COCO-AA] Confidential Containers, "guest-components", the attestation agent's event log entries (github.com/confidential-containers/guest-components).
 - [FIPS180-4] National Institute of Standards and Technology, "Secure Hash Standard (SHS)", FIPS PUB 180-4, August 2015.
 
 ### 19.2. Informative references
@@ -1611,11 +1672,12 @@ The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` 
 - [RFC6838] Freed, N., Klensin, J., and T. Hansen, "Media Type Specifications and Registration Procedures", BCP 13, RFC 6838, January 2013.
 - [RFC6839] Hansen, T. and A. Melnikov, "Additional Media Type Structured Syntax Suffixes", RFC 6839, January 2013.
 - [RFC7942] Sheffer, Y. and A. Farrel, "Improving Awareness of Running Code: The Implementation Status Section", BCP 205, RFC 7942, July 2016.
-- [RFC8259] Bray, T., Ed., "The JavaScript Object Notation (JSON) Data Interchange Format", STD 90, RFC 8259, December 2017.
+- [RFC8126] Cotton, M., Leiba, B., and T. Narten, "Guidelines for Writing an IANA Considerations Section in RFCs", BCP 26, RFC 8126, June 2017.
 - [RFC9266] Whited, S., "Channel Bindings for TLS 1.3", RFC 9266, July 2022.
-- [CORIM] Birkholz, H., Fossati, T., Deshpande, Y., Smith, N., and W. Pan, "Concise Reference Integrity Manifest", Work in Progress, Internet-Draft, draft-ietf-rats-corim-11, 6 July 2026.
-- [TDX-CGPU] Kostal, G., et al., "EAT Attestation Result (EAR) profile for Intel Trust Domain Extensions (TDX) + Confidential GPU (C-GPU) composite attestation", Work in Progress, Internet-Draft, draft-kykdxy-rats-tdx-cgpu-ear-profile-02, 19 July 2026.
-- [COMPOSITE] Sun, X., Krishnamurthy, R., and R. Golizadeh Mojarad, "An EAT Profile for Composite Platform Attestation", Work in Progress, Internet-Draft, draft-sun-rats-composite-eat-00, 1 September 2026.
+- [SPDM] DMTF, "Security Protocol and Data Model (SPDM) Specification", DSP0274.
+- [GHCB] AMD, "SEV-ES Guest-Hypervisor Communication Block Standardization", publication 56421.
+- [IGVM] Microsoft, "Independent Guest Virtual Machine (IGVM) file format" (github.com/microsoft/igvm).
+- [ITA] Intel, "Intel Trust Authority", attestation token claims.
 - [TRUSTEE] Confidential Containers, "Trustee", attestation service and key broker service.
 - [LOCKDOWN] The Linux kernel, "Kernel lockdown" security module documentation.
 - [TSM] The Linux kernel, "Trusted Security Module" report and measurement-register interfaces.
@@ -2600,7 +2662,7 @@ Evidence from a Genoa guest bound in `report-data` mode, with its VCEK inline (`
 }
 ```
 
-The appraisal under a policy that requires revocation and holds the machine to a TCB floor (`conformance/inputs/expected/snp-hardware-affirmed.json`). `iat`, `ear_verifier_id` and `ear_raw_evidence` are the verifier's own and are omitted here, as the comparison rules of Section 14.3 omit them:
+The appraisal under a policy that requires revocation and holds the machine to a TCB floor (`conformance/inputs/expected/snp-hardware-affirmed.json`; the case `conformance/cases/snp-hardware-affirmed.json` names the policy and collateral). `iat`, `ear_verifier_id` and `ear_raw_evidence` vary between implementations, are absent from the expected file, and are removed before comparison (Section 14.3):
 
 ```json
 {
@@ -2749,4 +2811,4 @@ The roots a verifier pins, with the values the reference implementation pins at 
 
 ## Acknowledgments
 
-The requirements in this document come from the Confidential AI design documents "Standardizing Attestation" and "SEV-SNP Measurement Registers" and from their reviews. The author thanks Amean Asad and Yolan Romailler for the design discussions and reviews this document builds on.
+The author thanks Amean Asad and Yolan Romailler for the design discussions and reviews this document builds on.

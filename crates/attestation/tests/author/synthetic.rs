@@ -498,7 +498,7 @@ pub(super) fn cases() -> Vec<Authored> {
             Some(R::EnvelopeInvalid)),
         snp_case("snp-commitment-without-chain", "8.1", "commitment requires cvm_chain, bootseed and all 16 registers",
             cpu(|v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("commitment")), Some(R::EnvelopeInvalid)),
-        case("snp-commitment-without-launch-measurement", "8.5",
+        case("snp-commitment-without-launch-measurement", "8.7",
             "only a pinned launch measurement establishes the register provider, so the commitment binding without reference.launch_measurement is refused with binding-mismatch",
             SNP_NOW, snp_commitment_envelope(&nonce).into(),
             Some(with_policy(lenient(), |p| p.min_backing = Backing::Virtualized).into()),
@@ -784,7 +784,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 });
             }).into()),
             none(), Some(R::MachineNotAllowed)),
-        case("snp-vlek-without-inline-vek", "9.1.7",
+        case("snp-vlek-without-inline-vek", "9.1.4",
             "KDS serves a VLEK only to the cloud provider, so a VLEK-signed report whose envelope does not carry its VLEK is refused with collateral-unavailable, before any fetch",
             "2025-06-01T00:00:00Z", tweak(vlek_envelope(), |v| {
                 v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_endorsements");
