@@ -1,0 +1,13 @@
+{
+  "id": "policy-floor-constrains-nothing",
+  "rule": {
+    "section": "13.2",
+    "statement": "a named floor constrains something"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-floor-constrains-nothing.json",
+  "policy": "policy/policy-floor-constrains-nothing.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

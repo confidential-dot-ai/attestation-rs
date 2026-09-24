@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-hcl-variable-data-size-includes-padding",
+  "rule": {
+    "section": "9.4.1",
+    "statement": "the variable data is exactly its declared size; a size that takes in the zero padding after the JSON object is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-hcl-variable-data-size-includes-padding.json",
+  "policy": "policy/azure-snp-hcl-variable-data-size-includes-padding.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

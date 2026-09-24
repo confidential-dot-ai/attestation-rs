@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-backing-below-minimum",
+  "rule": {
+    "section": "13.1",
+    "statement": "min_backing: a privileged-service register under the default hardware floor is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-backing-below-minimum.json",
+  "policy": "policy/azure-snp-backing-below-minimum.json",
+  "expect": {
+    "refusal": "backing-below-minimum"
+  }
+}

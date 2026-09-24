@@ -1,0 +1,1145 @@
+{
+  "$defs": {
+    "AllBound": {
+      "description": "`ear_all_submods_bound` as draft-kykdxy-rats-tdx-cgpu-ear-profile-02\ndefines it: text, `\"true\"` or `\"false\"`. Its `\"unknown\"` never applies\nhere, since every binding is checked.",
+      "enum": [
+        "true",
+        "false"
+      ],
+      "type": "string"
+    },
+    "AttesterClaims": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CpuClaims"
+        },
+        {
+          "$ref": "#/$defs/VtpmClaims"
+        },
+        {
+          "$ref": "#/$defs/DeviceClaims",
+          "description": "NVIDIA device claims with the NRAS and `ear_nvidia_*` names unchanged (section 12.6)."
+        }
+      ],
+      "description": "`ear_attester_claims`, shaped by the submodule kind."
+    },
+    "Backing": {
+      "description": "Who holds a register's value. Ordered weakest first so a policy floor is a\nplain comparison: `seen >= required`.",
+      "enum": [
+        "virtualized",
+        "kernel-service",
+        "privileged-service",
+        "hardware"
+      ],
+      "type": "string"
+    },
+    "BackingMin": {
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "$ref": "#/$defs/Backing"
+        },
+        "weakest_seen": {
+          "$ref": "#/$defs/Backing"
+        }
+      },
+      "required": [
+        "required",
+        "weakest_seen"
+      ],
+      "type": "object"
+    },
+    "Base64Url": {
+      "contentEncoding": "base64url",
+      "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-][AQgw])?$",
+      "type": "string"
+    },
+    "Base64UrlBytes16": {
+      "contentEncoding": "base64url",
+      "description": "exactly 16 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
+      "type": "string"
+    },
+    "Base64UrlBytes32": {
+      "contentEncoding": "base64url",
+      "description": "exactly 32 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
+      "type": "string"
+    },
+    "Base64UrlBytes48": {
+      "contentEncoding": "base64url",
+      "description": "exactly 48 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{64}$",
+      "type": "string"
+    },
+    "Base64UrlBytes64": {
+      "contentEncoding": "base64url",
+      "description": "exactly 64 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$",
+      "type": "string"
+    },
+    "BindingMode": {
+      "enum": [
+        "report-data",
+        "commitment",
+        "vtpm-extradata",
+        "cca-challenge",
+        "nras-nonce"
+      ],
+      "type": "string"
+    },
+    "CcaSwComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "measurement_type": {
+          "type": "string"
+        },
+        "measurement_value": {
+          "$ref": "#/$defs/Base64Url"
+        },
+        "signer_id": {
+          "$ref": "#/$defs/Base64Url"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "measurement_value",
+        "signer_id"
+      ],
+      "type": "object"
+    },
+    "ChainInfo": {
+      "additionalProperties": false,
+      "description": "`cvm_chain` (section 8.1).",
+      "properties": {
+        "chain_len": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chain_len"
+      ],
+      "type": "object"
+    },
+    "CmwRecord": {
+      "description": "RFC 9999 record: [media type, base64url value, optional indicator bits]",
+      "maxItems": 3,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "pattern": "^[^/]+/.+$",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Base64Url"
+        },
+        {
+          "maximum": 31,
+          "minimum": 1,
+          "type": "integer"
+        }
+      ],
+      "type": "array"
+    },
+    "CollateralOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "next_update": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "signed": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/CollateralStatus"
+        },
+        "this_update": {
+          "description": "RFC 3339.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "CollateralStatus": {
+      "enum": [
+        "checked",
+        "skipped",
+        "not-applicable"
+      ],
+      "type": "string"
+    },
+    "CpuClaims": {
+      "additionalProperties": true,
+      "description": "Normalized `cpu` claims (section 12.2). `compat` carries the `tdx_*` claims of\nsection 12.6 and the `snp` object of section 12.7 beside them.",
+      "properties": {
+        "bootseed": {
+          "$ref": "#/$defs/Base64UrlBytes32"
+        },
+        "cvm_chain": {
+          "$ref": "#/$defs/ChainInfo"
+        },
+        "cvm_freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "cvm_host_data": {
+          "$ref": "#/$defs/HostData"
+        },
+        "cvm_identity": {
+          "$ref": "#/$defs/Identity"
+        },
+        "cvm_launch_measurement": {
+          "$ref": "#/$defs/Digest"
+        },
+        "cvm_owner": {
+          "$ref": "#/$defs/Owner"
+        },
+        "cvm_platform": {
+          "$ref": "#/$defs/VerifiedPlatform"
+        },
+        "cvm_policy": {
+          "$ref": "#/$defs/PolicyBits"
+        },
+        "cvm_registers": {
+          "items": {
+            "$ref": "#/$defs/VerifiedRegister"
+          },
+          "type": "array"
+        },
+        "cvm_tcb": {
+          "$ref": "#/$defs/Tcb"
+        },
+        "dbgstat": {
+          "$ref": "#/$defs/DebugStatus",
+          "description": "EAT `dbgstat` derived from the guest policy, which is fixed at launch:\n`enabled`, or `disabled-since-boot`."
+        }
+      },
+      "required": [
+        "cvm_platform",
+        "cvm_launch_measurement",
+        "cvm_freshness",
+        "cvm_policy",
+        "dbgstat",
+        "cvm_tcb",
+        "cvm_identity"
+      ],
+      "type": "object"
+    },
+    "DebugStatus": {
+      "description": "EAT `dbgstat` (RFC 9711 section 4.2.9): the text value in JSON, the\ninteger in CBOR.",
+      "enum": [
+        "enabled",
+        "disabled",
+        "disabled-since-boot",
+        "disabled-permanently",
+        "disabled-fully-and-permanently"
+      ],
+      "type": "string"
+    },
+    "DeviceClaims": {
+      "additionalProperties": true,
+      "description": "Device claims are the NRAS EAT claims verbatim.",
+      "type": "object"
+    },
+    "Digest": {
+      "description": "`{alg, value}` with the value the length of the algorithm's digest.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha384"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha512"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes64"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Freshness": {
+      "additionalProperties": false,
+      "description": "`cvm_freshness`: presence means the binding check passed.",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/KeyBinding"
+        },
+        "mode": {
+          "$ref": "#/$defs/BindingMode"
+        },
+        "not_after": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        "not_before": {
+          "description": "RFC 3339, certificate pattern only.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "type": "string"
+        },
+        "pattern": {
+          "$ref": "#/$defs/FreshnessPattern"
+        }
+      },
+      "required": [
+        "pattern",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "FreshnessPattern": {
+      "enum": [
+        "challenge",
+        "certificate"
+      ],
+      "type": "string"
+    },
+    "HashAlg": {
+      "description": "TPM 2.0 algorithm names, as CEL uses them.",
+      "enum": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "type": "string"
+    },
+    "HostData": {
+      "additionalProperties": false,
+      "properties": {
+        "semantics": {
+          "$ref": "#/$defs/HostDataSemantics"
+        },
+        "value": {
+          "$ref": "#/$defs/Base64Url"
+        }
+      },
+      "required": [
+        "semantics",
+        "value"
+      ],
+      "type": "object"
+    },
+    "HostDataSemantics": {
+      "enum": [
+        "snp-host-data",
+        "tdx-mrconfigid",
+        "cca-rpv"
+      ],
+      "type": "string"
+    },
+    "Hosting": {
+      "enum": [
+        "bare",
+        "azure",
+        "gcp",
+        "dstack"
+      ],
+      "type": "string"
+    },
+    "Identity": {
+      "anyOf": [
+        {
+          "properties": {
+            "chip_id": {
+              "$ref": "#/$defs/Base64UrlBytes64"
+            }
+          },
+          "required": [
+            "chip_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The 16-byte PPID from the PCK certificate (OID 1.2.840.113741.1.13.1.1).",
+          "properties": {
+            "ppid": {
+              "$ref": "#/$defs/Base64UrlBytes16"
+            }
+          },
+          "required": [
+            "ppid"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "instance_id": {
+              "$ref": "#/$defs/Base64Url"
+            }
+          },
+          "required": [
+            "instance_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ueid": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ueid"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "`cvm_identity`, distinguished by its fields."
+    },
+    "KeyBinding": {
+      "description": "`cvm_binding.key` (section 5.3): an SPKI or TBSCertificate digest, or raw bytes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spki-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "x509-tbs-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw"
+            },
+            "value": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/Base64Url"
+                }
+              ],
+              "maxLength": 87380
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NvidiaEvidenceOutcome": {
+      "additionalProperties": false,
+      "description": "`ear_nvidia_evidence` of draft-kykdxy-rats-tdx-cgpu-ear-profile: what the\nverifier established about the device evidence. NRAS reports these; the\nchain and key details the draft also lists stay with NRAS.",
+      "properties": {
+        "nonce_match": {
+          "type": "boolean"
+        },
+        "parsed": {
+          "type": "boolean"
+        },
+        "signature_verified": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "Owner": {
+      "anyOf": [
+        {
+          "properties": {
+            "author_key_digest": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            },
+            "family_id": {
+              "$ref": "#/$defs/Base64UrlBytes16"
+            },
+            "id_key_digest": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            },
+            "image_id": {
+              "$ref": "#/$defs/Base64UrlBytes16"
+            }
+          },
+          "required": [
+            "family_id",
+            "image_id",
+            "id_key_digest",
+            "author_key_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mr_owner": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            },
+            "mr_owner_config": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            }
+          },
+          "required": [
+            "mr_owner",
+            "mr_owner_config"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "`cvm_owner`, distinguished by its fields."
+    },
+    "PolicyBits": {
+      "additionalProperties": false,
+      "description": "`cvm_policy`: normalized guest policy.",
+      "properties": {
+        "debug": {
+          "type": "boolean"
+        },
+        "migratable": {
+          "type": "boolean"
+        },
+        "reserved_bits_zero": {
+          "type": "boolean"
+        },
+        "sept_ve_disable": {
+          "type": "boolean"
+        },
+        "service_td": {
+          "type": "boolean"
+        },
+        "single_socket": {
+          "type": "boolean"
+        },
+        "smt": {
+          "description": "SNP only; a TD carries no SMT policy.",
+          "type": "boolean"
+        },
+        "vmpl": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "debug",
+        "migratable"
+      ],
+      "type": "object"
+    },
+    "ReferenceOutcome": {
+      "additionalProperties": false,
+      "description": "Which reference values matched. `launch_measurement` is absent for a\nsubmodule that has none (the vtpm).",
+      "minProperties": 1,
+      "properties": {
+        "launch_measurement": {
+          "type": "boolean"
+        },
+        "registers": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "patternProperties": {
+            "^(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "RegisterSource": {
+      "enum": [
+        "tdx-rtmr",
+        "snp-vmr",
+        "vtpm-pcr",
+        "cca-rem"
+      ],
+      "type": "string"
+    },
+    "SnpTcb": {
+      "additionalProperties": false,
+      "description": "SNP TCB version components (used for KDS URL construction and TCB checks).",
+      "properties": {
+        "bootloader": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fmc": {
+          "description": "FMC (Firmware Microcontroller) SPL, present only on Turin processors.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "microcode": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snp": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tee": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bootloader",
+        "tee",
+        "snp",
+        "microcode"
+      ],
+      "type": "object"
+    },
+    "SnpTcbSet": {
+      "additionalProperties": false,
+      "description": "All four SNP TCB values: what the platform runs, what is committed, what\nthe guest launched with, and what was reported.",
+      "properties": {
+        "committed": {
+          "$ref": "#/$defs/SnpTcb"
+        },
+        "current": {
+          "$ref": "#/$defs/SnpTcb"
+        },
+        "launch": {
+          "$ref": "#/$defs/SnpTcb"
+        },
+        "reported": {
+          "$ref": "#/$defs/SnpTcb"
+        }
+      },
+      "required": [
+        "reported",
+        "committed",
+        "current",
+        "launch"
+      ],
+      "type": "object"
+    },
+    "SubmodAppraisal": {
+      "description": "One EAR appraisal record.",
+      "properties": {
+        "ear_appraisal_policy_ids": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "const": "tag:confidential.ai,2026:cvm#1"
+            },
+            {
+              "pattern": "^ni:///sha-384;[A-Za-z0-9_-]{64}$",
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        "ear_attester_claims": {
+          "$ref": "#/$defs/AttesterClaims"
+        },
+        "ear_status": {
+          "$ref": "#/$defs/Tier"
+        },
+        "ear_trustworthiness_vector": {
+          "$ref": "#/$defs/TrustVector"
+        },
+        "ear_verifier_claims": {
+          "$ref": "#/$defs/VerifierClaims"
+        }
+      },
+      "required": [
+        "ear_status",
+        "ear_trustworthiness_vector",
+        "ear_appraisal_policy_ids",
+        "ear_attester_claims",
+        "ear_verifier_claims"
+      ],
+      "type": "object"
+    },
+    "Tcb": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SnpTcbSet"
+        },
+        {
+          "$ref": "#/$defs/TdxTcb"
+        },
+        {
+          "properties": {
+            "lifecycle": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sw_components": {
+              "items": {
+                "$ref": "#/$defs/CcaSwComponent"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "lifecycle",
+            "sw_components"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "driver": {
+              "type": "string"
+            },
+            "vbios": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "driver",
+            "vbios"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "`cvm_tcb`, distinguished by its fields."
+    },
+    "TdxTcb": {
+      "additionalProperties": false,
+      "properties": {
+        "advisories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fmspc": {
+          "description": "Twelve lowercase hex characters.",
+          "pattern": "^[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "pcesvn": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pck_tcb": {
+          "$ref": "#/$defs/Base64UrlBytes16",
+          "description": "CPUSVN of the PCK certificate's TCB level."
+        },
+        "status": {
+          "$ref": "#/$defs/TdxTcbStatus",
+          "description": "Absent only when policy allowed the collateral checks to be skipped."
+        },
+        "tee_tcb_svn": {
+          "$ref": "#/$defs/Base64UrlBytes16"
+        }
+      },
+      "required": [
+        "tee_tcb_svn",
+        "pck_tcb",
+        "pcesvn",
+        "fmspc"
+      ],
+      "type": "object"
+    },
+    "TdxTcbStatus": {
+      "description": "TDX TCB status from Intel DCAP collateral evaluation.",
+      "enum": [
+        "UpToDate",
+        "SWHardeningNeeded",
+        "ConfigurationNeeded",
+        "ConfigurationAndSWHardeningNeeded",
+        "OutOfDate",
+        "OutOfDateConfigurationNeeded",
+        "Revoked"
+      ],
+      "type": "string"
+    },
+    "Tee": {
+      "enum": [
+        "sev-snp",
+        "tdx",
+        "cca"
+      ],
+      "type": "string"
+    },
+    "Tier": {
+      "description": "AR4SI trustworthiness tier. JSON carries the names, CBOR the values.",
+      "enum": [
+        "none",
+        "affirming",
+        "warning",
+        "contraindicated"
+      ],
+      "type": "string"
+    },
+    "TpmAkBinding": {
+      "additionalProperties": false,
+      "description": "`cvm_tpm_ak`: how the AK is bound into the CPU report.",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/Base64Url",
+          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE.",
+          "maxLength": 1398102,
+          "minLength": 2
+        },
+        "method": {
+          "$ref": "#/$defs/TpmAkMethod"
+        }
+      },
+      "required": [
+        "method",
+        "data"
+      ],
+      "type": "object"
+    },
+    "TpmAkMethod": {
+      "enum": [
+        "hcl-report"
+      ],
+      "type": "string"
+    },
+    "TrustVector": {
+      "additionalProperties": false,
+      "description": "AR4SI trustworthiness vector (section 12.4). Absent categories are \"no claim\".",
+      "properties": {
+        "configuration": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "executables": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "file-system": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "hardware": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "instance-identity": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "runtime-opaque": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "sourced-data": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        },
+        "storage-opaque": {
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Vendor": {
+      "enum": [
+        "amd",
+        "intel",
+        "arm"
+      ],
+      "type": "string"
+    },
+    "VerifiedPlatform": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "hosting": {
+          "$ref": "#/$defs/Hosting",
+          "description": "As reported by the attester; never hardware-proven (section 3.4)."
+        },
+        "tee": {
+          "$ref": "#/$defs/Tee"
+        },
+        "vendor": {
+          "$ref": "#/$defs/Vendor"
+        }
+      },
+      "required": [
+        "vendor",
+        "tee",
+        "hosting"
+      ],
+      "type": "object"
+    },
+    "VerifiedRegister": {
+      "additionalProperties": false,
+      "description": "A register the verifier established, plus what the log said about it.",
+      "properties": {
+        "alg": {
+          "$ref": "#/$defs/HashAlg"
+        },
+        "backing": {
+          "$ref": "#/$defs/Backing"
+        },
+        "index": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "owner": {
+          "description": "From the slot's claim record (section 8.3), workload slots only.",
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "purpose": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/RegisterSource"
+        },
+        "value": {
+          "$ref": "#/$defs/Base64Url"
+        }
+      },
+      "required": [
+        "index",
+        "alg",
+        "value",
+        "source",
+        "backing",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "VerifierClaims": {
+      "additionalProperties": false,
+      "description": "`ear_verifier_claims` (section 12.3), never empty.",
+      "minProperties": 1,
+      "properties": {
+        "cvm_backing_min": {
+          "$ref": "#/$defs/BackingMin"
+        },
+        "cvm_collateral": {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "cca_corim": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "nras_jwks": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "snp_crl": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "tdx_pck_crl": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "tdx_qe_identity": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "tdx_root_crl": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
+            "tdx_tcb_info": {
+              "$ref": "#/$defs/CollateralOutcome"
+            }
+          },
+          "type": "object"
+        },
+        "cvm_reference": {
+          "$ref": "#/$defs/ReferenceOutcome"
+        },
+        "ear_nvidia_evidence": {
+          "$ref": "#/$defs/NvidiaEvidenceOutcome",
+          "description": "Device submodules only: the composing draft's `ear_nvidia_evidence`\n(section 12.6), derived from NRAS's signed per-device claims."
+        }
+      },
+      "type": "object"
+    },
+    "VerifierId": {
+      "additionalProperties": false,
+      "properties": {
+        "build": {
+          "type": "string"
+        },
+        "developer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "developer",
+        "build"
+      ],
+      "type": "object"
+    },
+    "VtpmClaims": {
+      "additionalProperties": true,
+      "description": "Normalized `vtpm` claims: the projected PCRs and the AK binding that held.",
+      "properties": {
+        "cvm_freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "cvm_registers": {
+          "items": {
+            "$ref": "#/$defs/VerifiedRegister"
+          },
+          "type": "array"
+        },
+        "cvm_tpm_ak": {
+          "$ref": "#/$defs/TpmAkBinding"
+        }
+      },
+      "required": [
+        "cvm_registers",
+        "cvm_freshness",
+        "cvm_tpm_ak"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://confidential.ai/schemas/cvm-claims-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The EAR claims set.",
+  "properties": {
+    "ear_all_submods_bound": {
+      "$ref": "#/$defs/AllBound",
+      "description": "Every submodule's freshness binding held (section 12.6). The TDX and\nconfidential-GPU EAR profile defines the claim with a text value."
+    },
+    "ear_raw_evidence": {
+      "$ref": "#/$defs/CmwRecord",
+      "description": "A record of type `application/cmw+json` whose value is a CMW collection\ncarrying the envelope as appraised (indicator bit 2) and the endorsement\nsnapshot the verifier used (bit 1)."
+    },
+    "ear_verifier_id": {
+      "$ref": "#/$defs/VerifierId"
+    },
+    "eat_nonce": {
+      "$ref": "#/$defs/Base64Url",
+      "description": "The nonce that was bound: 16 to 64 bytes, 22 to 86 characters.",
+      "maxLength": 86,
+      "minLength": 22
+    },
+    "eat_profile": {
+      "const": "tag:ietf.org,2026:rats/ear#04",
+      "description": "Always [`EAR_PROFILE_URI`].",
+      "type": "string"
+    },
+    "iat": {
+      "description": "Seconds since the epoch when the appraisal was produced.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "submods": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SubmodAppraisal"
+      },
+      "description": "One appraisal per evidence submodule, same names.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "eat_profile",
+    "iat",
+    "ear_verifier_id",
+    "eat_nonce",
+    "ear_all_submods_bound",
+    "submods"
+  ],
+  "title": "CVM attestation profile v1: EAR claims",
+  "type": "object"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "snp-crl-past-its-window",
+  "rule": {
+    "section": "10.2",
+    "statement": "every validity window and nextUpdate is checked before use: AMD's CRL after its nextUpdate is refused"
+  },
+  "now": "2026-12-01T00:00:00Z",
+  "evidence": "evidence/snp-crl-past-its-window.json",
+  "policy": "policy/snp-crl-past-its-window.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.der"
+  },
+  "expect": {
+    "refusal": "collateral-invalid"
+  }
+}

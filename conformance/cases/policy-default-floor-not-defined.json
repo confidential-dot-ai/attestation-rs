@@ -1,0 +1,13 @@
+{
+  "id": "policy-default-floor-not-defined",
+  "rule": {
+    "section": "13.2",
+    "statement": "default_floor names one of tcb.floors"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-default-floor-not-defined.json",
+  "policy": "policy/policy-default-floor-not-defined.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

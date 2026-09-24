@@ -1,0 +1,13 @@
+{
+  "id": "envelope-no-cpu-submodule",
+  "rule": {
+    "section": "4.2",
+    "statement": "the cpu submodule is required"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-no-cpu-submodule.json",
+  "policy": "policy/envelope-no-cpu-submodule.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

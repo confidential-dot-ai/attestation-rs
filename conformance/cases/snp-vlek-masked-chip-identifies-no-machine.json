@@ -1,0 +1,13 @@
+{
+  "id": "snp-vlek-masked-chip-identifies-no-machine",
+  "rule": {
+    "section": "13.3",
+    "statement": "a VLEK-endorsed report whose CHIP_ID is all zero identifies no machine, so an allowlist entry of 64 zero bytes does not match it"
+  },
+  "now": "2025-06-01T00:00:00Z",
+  "evidence": "evidence/snp-vlek-masked-chip-identifies-no-machine.json",
+  "policy": "policy/snp-vlek-masked-chip-identifies-no-machine.json",
+  "expect": {
+    "refusal": "machine-not-allowed"
+  }
+}

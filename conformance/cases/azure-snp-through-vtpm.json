@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-through-vtpm",
+  "rule": {
+    "section": "9.4",
+    "statement": "vtpm: the SNP report binds through vtpm-extradata and the quoted PCRs become privileged-service registers"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-through-vtpm.json",
+  "policy": "policy/azure-snp-through-vtpm.json",
+  "expect": {
+    "appraisal": "expected/azure-snp-through-vtpm.json"
+  }
+}
