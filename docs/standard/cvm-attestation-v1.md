@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
-| Version | 1, draft of 2026-09-23 |
+| Version | 1, draft of 2026-09-24 |
 | Conformance corpus | 1.7 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
@@ -731,7 +731,7 @@ A version 2 report carries no CPUID fields; the generation is the suffix (`-Mila
 1. Roots. The verifier pins AMD's ARK, ASK and ASVK for each generation (Appendix E). An ARK is self-signed; the ARK signs the ASK and the ASVK; all three use RSA-4096 keys with RSASSA-PSS, SHA-384 and a 48-byte salt. ASK and ARK certificates supplied in the evidence are ignored.
 2. Endorsement key. When `SIGNING_KEY` is 0 the report is signed by a VCEK, and the VEK MUST be signed by the ASK; when it is 1, by a VLEK, and the VEK MUST be signed by the ASVK. Every certificate in the chain (RFC 5280) MUST be inside its validity window at the evaluation time. KDS serves VLEKs only to the cloud provider, so a report signed by a VLEK and carrying no inline VEK is refused with `collateral-unavailable`, as is a report whose `CHIP_ID` is all zero and that carries no inline VEK.
 3. Report signature. The VEK's key is an ECDSA P-384 key. The signature covers bytes 0x000 to 0x29F of the report exactly as received. `R` and `S` are little-endian integers in the low 48 bytes of their 72-byte fields; the upper 24 bytes of each MUST be zero.
-4. Endorsement cross-check. The VEK's extensions MUST equal the report: `1.3.6.1.4.1.3704.1.3.1` (bootloader SPL), `.3.2` (TEE SPL), `.3.3` (SNP SPL) and `.3.8` (microcode SPL) equal the components of `REPORTED_TCB`, and on Turin `.3.9` (FMC SPL) equals its FMC component; this holds for a VCEK and a VLEK alike. A VCEK's `1.3.6.1.4.1.3704.1.4` (hardware ID) equals `CHIP_ID`: all 64 bytes on Milan and Genoa; on Turin the hardware ID's 8 bytes equal the first 8 bytes of `CHIP_ID` and the remaining 56 bytes of `CHIP_ID` are zero. The hardware ID extension's value is either a DER OCTET STRING whose content is the hardware ID (AMD 57230) or the hardware ID's bytes themselves, as Azure's VCEKs carry it; the two forms differ in length, and the length decides. A VLEK carries no hardware ID, so under a VLEK no endorsement covers `CHIP_ID`. A cross-check failure is refused with `chain-invalid`.
+4. Endorsement cross-check. The VEK's extensions MUST equal the report: `1.3.6.1.4.1.3704.1.3.1` (bootloader SPL), `.3.2` (TEE SPL), `.3.3` (SNP SPL) and `.3.8` (microcode SPL) equal the components of `REPORTED_TCB`, and on Turin `.3.9` (FMC SPL) is present and equals its FMC component, whatever that component's value, since without it the FMC is unendorsed (AMD 57230, Table 11); this holds for a VCEK and a VLEK alike. AMD's VLEK certificate definition (publication 58369, revision 0.10) predates Turin and lists no FMC extension, so a Turin VLEK issued without one is refused. A VCEK's `1.3.6.1.4.1.3704.1.4` (hardware ID) equals `CHIP_ID`: all 64 bytes on Milan and Genoa; on Turin the hardware ID's 8 bytes equal the first 8 bytes of `CHIP_ID` and the remaining 56 bytes of `CHIP_ID` are zero. The hardware ID extension's value is either a DER OCTET STRING whose content is the hardware ID (AMD 57230) or the hardware ID's bytes themselves, as Azure's VCEKs carry it; the two forms differ in length, and the length decides. A VLEK carries no hardware ID, so under a VLEK no endorsement covers `CHIP_ID`. A cross-check failure is refused with `chain-invalid`.
 5. Revocation. AMD's CRL for the generation is signed by the ARK and MUST be inside its window at the evaluation time; a CRL without `nextUpdate` has no defined window and is refused with `collateral-invalid`. The serial number of the ASK or ASVK in the chain MUST NOT appear in it. VCEK serial numbers are zero, so the CRL does not revoke an individual VCEK; a compromised chip is excluded through TCB floors and allowlists. The check is REQUIRED unless the policy sets `tcb.require_revocation` to false.
 6. Allowlist. With a machine allowlist, the report's `CHIP_ID` MUST be on it. A report endorsed by a VLEK, or whose `CHIP_ID` is all zero (the host masked it), identifies no machine and is refused with `machine-not-allowed` when an allowlist is present (Section 13.3).
 
@@ -1607,11 +1607,7 @@ attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly; https
 
 Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
 
-Requirements of Section 9 that the reference implementation does not yet enforce, each tracked for correction:
-
-- SEV-SNP: a VEK cross-check failure is refused with `tcb-not-allowed`, and on Turin a VCEK without the FMC extension passes when the report's FMC is 0.
-
-The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` lists the statements without a case.
+Known departure from the text, tracked for correction: an inline VCEK is bound to the report by its generation and key type only (its issuer and subject), so a VCEK of the same generation issued for another chip or TCB is used and the report signature then fails (`signature-invalid`), where Section 10.2 item 3 ignores it and falls back to the verifier's own copy. `conformance/UNCOVERED.md` lists the statements the corpus does not yet exercise.
 
 ## 19. References
 
@@ -1653,7 +1649,8 @@ The corpus does not yet exercise these requirements; `conformance/UNCOVERED.md` 
 - [PFP] Trusted Computing Group, "TCG PC Client Platform Firmware Profile Specification", Level 00 Version 1.06 Revision 52, 4 December 2023.
 - [TPM2] Trusted Computing Group, "Trusted Platform Module Library, Part 1: Architecture" and "Part 2: Structures", Family 2.0, Level 00 Revision 01.83, 25 January 2024.
 - [SNP-ABI] AMD, "SEV Secure Nested Paging Firmware ABI Specification", publication 56860, Revision 1.59, August 2026. Section 7.3, Table 27, and Appendix B.
-- [VCEK] AMD, "Versioned Chip Endorsement Key (VCEK) Certificate and KDS Interface Specification", publication 57230, Revision 1.05, September 2026. Section 1.5.
+- [VCEK] AMD, "Versioned Chip Endorsement Key (VCEK) Certificate and KDS Interface Specification", publication 57230, Revision 1.05, September 2026. Section 1.5 and Table 11.
+- [VLEK] AMD, "Versioned Loaded Endorsement Key (VLEK) Certificate Definition", publication 58369, Revision 0.10, October 2023.
 - [TDX-DCAP] Intel, "Intel Trust Domain Extensions Data Center Attestation Primitives (Intel TDX DCAP): Quote Generation Library and Quote Verification Library", Revision 0.91, September 2026; and Intel's quote verification library, intel/confidential-computing.tee.dcap.qvl, at commit d12717e3.
 - [TDX-ABI] Intel, "Intel Trust Domain Extensions (Intel TDX) Module Architecture Application Binary Interface (ABI) Reference Specification", document 348551-008, May 2026. Section 3.4.1, Table 3.23.
 - [PCK] Intel, "Intel SGX PCK Certificate and Certificate Revocation List Profile Specification", Revision 1.5, 26 January 2022.
