@@ -79,10 +79,13 @@ impl SubmodName {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Evidence {
     /// Always [`PROFILE_URI`].
+    #[schemars(extend("const" = PROFILE_URI))]
     pub eat_profile: String,
-    /// The relying party's challenge, 16 to 64 bytes.
+    /// The relying party's challenge, 16 to 64 bytes: 22 to 86 characters.
+    #[schemars(extend("minLength" = 22, "maxLength" = 86))]
     pub eat_nonce: Bytes,
     /// Always [`CVM_VERSION`].
+    #[schemars(extend("const" = CVM_VERSION))]
     pub cvm_version: u32,
     /// Keyed by the reserved name forms; see [`SubmodName`].
     #[schemars(schema_with = "submods_schema")]
@@ -427,6 +430,7 @@ pub struct CpuEvidence {
         deserialize_with = "super::strict::present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(extend("minItems" = 1, "maxItems" = MAX_REGISTERS))]
     pub cvm_registers: Option<Vec<Register>>,
     #[serde(
         default,
@@ -470,6 +474,7 @@ pub struct PlatformHint {
         deserialize_with = "super::strict::present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(extend("pattern" = "^(Milan|Genoa|Turin|[0-9a-f]{12})$"))]
     pub generation: Option<String>,
     pub hosting: Hosting,
 }
@@ -542,11 +547,38 @@ pub enum BindingMode {
 
 /// `cvm_binding.key`. The `tls-exporter` kind is reserved for v2 and, being
 /// absent here, is rejected as unknown.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyBinding {
     pub kind: KeyKind,
     pub value: Bytes,
+}
+
+impl JsonSchema for KeyBinding {
+    fn schema_name() -> Cow<'static, str> {
+        "KeyBinding".into()
+    }
+    fn json_schema(g: &mut SchemaGenerator) -> Schema {
+        let shape = |kind: &str, value: Schema| {
+            json_schema!({
+                "type": "object",
+                "properties": {"kind": {"const": kind}, "value": value},
+                "required": ["kind", "value"],
+                "additionalProperties": false
+            })
+        };
+        let digest = g.subschema_for::<FixedBytes<32>>();
+        // 65535 bytes are 87380 base64url characters.
+        let raw = json_schema!({"allOf": [g.subschema_for::<Bytes>()], "maxLength": 87380});
+        json_schema!({
+            "description": "`cvm_binding.key` (section 5.3): an SPKI or TBSCertificate digest, or raw bytes.",
+            "oneOf": [
+                shape("spki-sha256", digest.clone()),
+                shape("x509-tbs-sha256", digest),
+                shape("raw", raw)
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -744,8 +776,12 @@ pub enum Backing {
 #[serde(deny_unknown_fields)]
 pub struct EventLog {
     pub format: LogFormat,
+    #[schemars(extend("minLength" = 2, "maxLength" = FIELD_B64U_MAX))]
     pub data: Bytes,
 }
+
+/// Base64url characters of a byte string field at its 1 MiB bound (section 4.7).
+const FIELD_B64U_MAX: usize = 1_398_102;
 
 impl EventLog {
     pub fn validate(&self) -> Result<()> {
@@ -802,6 +838,7 @@ impl DebugStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChainInfo {
+    #[schemars(range(min = 1))]
     pub chain_len: u64,
 }
 
@@ -810,6 +847,7 @@ pub struct ChainInfo {
 pub struct VtpmEvidence {
     pub cvm_tpm_quote: TpmQuote,
     pub cvm_tpm_ak: TpmAkBinding,
+    #[schemars(length(min = 1, max = 24))]
     pub cvm_registers: Vec<Register>,
     #[serde(
         default,
@@ -823,8 +861,11 @@ pub struct VtpmEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TpmQuote {
+    #[schemars(extend("minLength" = 2, "maxLength" = FIELD_B64U_MAX))]
     pub message: Bytes,
+    #[schemars(extend("minLength" = 2, "maxLength" = FIELD_B64U_MAX))]
     pub signature: Bytes,
+    #[schemars(length(min = 24, max = 24))]
     pub pcrs: Vec<Bytes>,
     pub bank: HashAlg,
 }
@@ -864,6 +905,7 @@ pub struct TpmAkBinding {
     /// For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK
     /// public key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU
     /// report, and its report type must name the same TEE.
+    #[schemars(extend("minLength" = 2, "maxLength" = FIELD_B64U_MAX))]
     pub data: Bytes,
 }
 
@@ -910,10 +952,13 @@ impl From<GpuArch> for crate::types::NvidiaGpuArch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GpuDeviceEvidence {
     pub arch: GpuArch,
+    #[schemars(extend("pattern" = "^[!-.0-~]{1,128}$"))]
     pub uuid: String,
     /// Base64 SPDM blob, as the SDK and NRAS exchange it.
+    #[schemars(length(min = 1, max = 1_048_576))]
     pub evidence_b64: String,
     /// Base64 PEM certificate chain, leaf first.
+    #[schemars(length(min = 1, max = 1_048_576))]
     pub cert_chain_b64: String,
     pub cvm_binding: Binding,
 }

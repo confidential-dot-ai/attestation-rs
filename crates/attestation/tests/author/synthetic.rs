@@ -875,6 +875,9 @@ pub(super) fn cases() -> Vec<Authored> {
             Some(R::PolicyInvalid)),
         snp_case("policy-floor-constrains-nothing", "13.2", "a named floor constrains something", snp.clone(),
             Some(R::PolicyInvalid)),
+        snp_case("policy-floor-tdx-constrains-nothing", "13.2",
+            "a floor constrains at least one platform: an empty tdx object names no bound and is refused",
+            snp.clone(), Some(R::PolicyInvalid)),
         snp_case("policy-commitment-header-not-pinned", "13.1", "commitment.header16 is the value section 8.1 pins", snp.clone(),
             Some(R::PolicyInvalid)),
         // Section 5.1: the policy's identifier names the effective policy.
@@ -1031,6 +1034,13 @@ pub(super) fn cases() -> Vec<Authored> {
             "policy-floor-constrains-nothing",
             tweak(serde_json::to_value(lenient()).unwrap(), |v| {
                 v["tcb"]["floors"] = json!({"f": {}})
+            })
+            .into(),
+        ),
+        (
+            "policy-floor-tdx-constrains-nothing",
+            tweak(serde_json::to_value(lenient()).unwrap(), |v| {
+                v["tcb"]["floors"] = json!({"f": {"tdx": {}}})
             })
             .into(),
         ),

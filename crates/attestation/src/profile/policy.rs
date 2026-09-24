@@ -6,9 +6,12 @@ use super::evidence::{Backing, GpuArch, KeyBinding};
 use super::registers::{HEADER16, SEED};
 use crate::error::{AttestationError, Result};
 use crate::types::{SnpTcb, TdxTcbStatus};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::marker::PhantomData;
 
 fn policy_err(msg: impl Into<String>) -> AttestationError {
     AttestationError::PolicyInvalid(msg.into())
@@ -62,12 +65,18 @@ pub struct ReferenceValues {
     /// Any of these launch measurements is acceptable. Empty means unpinned.
     pub launch_measurement: Vec<Digest>,
     /// Acceptable values per slot. A slot absent here is not pinned.
+    #[serde(deserialize_with = "index_map")]
+    #[schemars(schema_with = "register_digests_schema")]
     pub registers: BTreeMap<u16, Vec<Digest>>,
     /// Acceptable values per vTPM PCR, for the `vtpm` submodule; a PCR absent
     /// here is not pinned. Azure's initdata convention pins PCR 8 to
     /// `SHA-256(zeros32 || initdata_hash)`.
+    #[serde(deserialize_with = "index_map")]
+    #[schemars(schema_with = "pcr_digests_schema")]
     pub pcrs: BTreeMap<u16, Vec<Digest>>,
-    /// Required `owner` of a workload slot's claim record (section 4.9).
+    /// Required `owner` of a workload slot's claim record (section 8.3).
+    #[serde(deserialize_with = "index_map")]
+    #[schemars(schema_with = "slot_owners_schema")]
     pub slot_owners: BTreeMap<u16, String>,
     /// The value `cvm_host_data` must carry, zero-padded to the platform's
     /// length (32 bytes on SNP, 48 on TDX): the Kata initdata gate.
@@ -76,7 +85,86 @@ pub struct ReferenceValues {
         deserialize_with = "super::strict::present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(extend("minLength" = 2, "maxLength" = 64))]
     pub host_data: Option<Bytes>,
+}
+
+/// A register index as decimal text, 0 to 65535 without a sign or a leading
+/// zero: the RFC 9741 `.base10` of the CDDL `register-index`.
+pub(crate) const REGISTER_INDEX_PATTERN: &str =
+    "^(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$";
+/// A PCR number 0 to 23 as decimal text (the CDDL `pcr-index`).
+const PCR_INDEX_PATTERN: &str = "^([0-9]|1[0-9]|2[0-3])$";
+
+/// A register index in the one text form `.base10` admits.
+fn parse_index(key: &str) -> Option<u16> {
+    let canonical = key == "0"
+        || (!key.is_empty() && !key.starts_with('0') && key.bytes().all(|b| b.is_ascii_digit()));
+    canonical.then(|| key.parse().ok()).flatten()
+}
+
+/// A map keyed by register index, one key per index: serde_json keeps the
+/// last of two equal keys, a second encoding of the map.
+fn index_map<'de, D, V>(d: D) -> std::result::Result<BTreeMap<u16, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct IndexMap<V>(PhantomData<V>);
+    impl<'de, V: Deserialize<'de>> Visitor<'de> for IndexMap<V> {
+        type Value = BTreeMap<u16, V>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an object keyed by register index in decimal")
+        }
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let index = parse_index(&key).ok_or_else(|| {
+                    de::Error::custom(format!(
+                        "{key:?} is not a register index: decimal 0 to 65535 without a leading zero"
+                    ))
+                })?;
+                if out.insert(index, map.next_value()?).is_some() {
+                    return Err(de::Error::custom(format!("index {index} appears twice")));
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(IndexMap(PhantomData))
+}
+
+fn index_map_schema(pattern: &str, value: Schema) -> Schema {
+    let mut properties = serde_json::Map::new();
+    properties.insert(pattern.to_string(), value.to_value());
+    json_schema!({
+        "type": "object",
+        "patternProperties": properties,
+        "additionalProperties": false
+    })
+}
+
+fn digests_schema(g: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type": "array", "items": g.subschema_for::<Digest>(), "minItems": 1})
+}
+
+fn register_digests_schema(g: &mut SchemaGenerator) -> Schema {
+    index_map_schema(REGISTER_INDEX_PATTERN, digests_schema(g))
+}
+
+fn pcr_digests_schema(g: &mut SchemaGenerator) -> Schema {
+    index_map_schema(PCR_INDEX_PATTERN, digests_schema(g))
+}
+
+fn slot_owners_schema(_: &mut SchemaGenerator) -> Schema {
+    // Characters bound UTF-8 bytes from above, so this admits every CDDL owner.
+    index_map_schema(
+        REGISTER_INDEX_PATTERN,
+        json_schema!({"type": "string", "minLength": 1, "maxLength": 255}),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -95,9 +183,15 @@ pub struct FreshnessPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CommitmentPolicy {
+    #[schemars(extend("const" = HEADER16_B64U))]
     pub header16: FixedBytes<16>,
+    #[schemars(extend("const" = SEED_B64U))]
     pub seed: FixedBytes<48>,
 }
+
+/// [`HEADER16`] and [`SEED`] as the policy writes them; version 1 admits no other value.
+const HEADER16_B64U: &str = "QVRTLU1SLTEBARAAAAAAAA";
+const SEED_B64U: &str = "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn";
 
 impl Default for CommitmentPolicy {
     fn default() -> Self {
@@ -119,6 +213,7 @@ pub struct TcbPolicy {
         skip_serializing_if = "Option::is_none"
     )]
     pub default_floor: Option<String>,
+    #[schemars(schema_with = "allowed_status_schema")]
     pub tdx_allowed_status: Vec<TdxTcbStatus>,
     pub require_revocation: bool,
     pub require_signed_collateral: bool,
@@ -136,8 +231,29 @@ impl Default for TcbPolicy {
     }
 }
 
+/// A TDX status a policy may accept: every status but `Revoked`.
+fn allowed_status_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": [
+                "UpToDate",
+                "SWHardeningNeeded",
+                "ConfigurationNeeded",
+                "ConfigurationAndSWHardeningNeeded",
+                "OutOfDate",
+                "OutOfDateConfigurationNeeded"
+            ]
+        },
+        "minItems": 1
+    })
+}
+
+/// A named floor constrains at least one platform (section 13.2).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
+#[schemars(extend("minProperties" = 1))]
 pub struct TcbFloor {
     #[serde(
         default,
@@ -160,6 +276,7 @@ pub struct SnpFloor {
     pub min: SnpTcb,
     /// The TCB values held to `min`; all four when omitted.
     #[serde(default = "SnpTcbValue::all")]
+    #[schemars(length(min = 1, max = 4))]
     pub values: Vec<SnpTcbValue>,
 }
 
@@ -280,8 +397,10 @@ fn jcs_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// A TDX floor names at least one bound.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
+#[schemars(extend("minProperties" = 1))]
 pub struct TdxFloor {
     #[serde(
         default,
@@ -294,6 +413,7 @@ pub struct TdxFloor {
         deserialize_with = "super::strict::present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(extend("maximum" = u32::MAX))]
     pub min_tcb_evaluation_data_number: Option<u32>,
 }
 
@@ -329,6 +449,7 @@ pub const MAX_MACHINE_ID: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityPolicy {
+    #[schemars(length(min = 1))]
     pub machines: Vec<MachineEntry>,
 }
 
@@ -336,7 +457,8 @@ pub struct IdentityPolicy {
 #[serde(deny_unknown_fields)]
 pub struct MachineEntry {
     /// The `cvm_identity` value: SNP `chip_id`, TDX `ppid`, CCA `instance_id`,
-    /// or a GPU `ueid` as UTF-8.
+    /// or a GPU `ueid` as UTF-8. 1 to 128 bytes: 2 to 171 base64url characters.
+    #[schemars(extend("minLength" = 2, "maxLength" = 171))]
     pub id: Bytes,
     #[serde(
         default,
@@ -350,6 +472,7 @@ pub struct MachineEntry {
 #[serde(deny_unknown_fields)]
 pub struct OwnerPolicy {
     /// SNP `id_key_digest` values that make `cvm_owner` trustworthy.
+    #[schemars(length(min = 1))]
     pub id_key_digests: Vec<FixedBytes<48>>,
 }
 
@@ -367,6 +490,7 @@ pub struct GpuPolicy {
         deserialize_with = "super::strict::present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(extend("minItems" = 1))]
     pub expected_archs: Option<Vec<GpuArch>>,
     pub device_policy: GpuDevicePolicy,
 }
@@ -460,6 +584,13 @@ impl VerifyPolicy {
             if f.snp.is_none() && f.tdx.is_none() {
                 return Err(policy_err(format!(
                     "tcb.floors[{name:?}]: constrains nothing"
+                )));
+            }
+            if f.tdx.as_ref().is_some_and(|t| {
+                t.min_tee_tcb_svn.is_none() && t.min_tcb_evaluation_data_number.is_none()
+            }) {
+                return Err(policy_err(format!(
+                    "tcb.floors[{name:?}].tdx: constrains nothing"
                 )));
             }
             if let Some(snp) = &f.snp {
@@ -557,6 +688,9 @@ mod tests {
         assert_eq!(p.tcb.tdx_allowed_status, vec![TdxTcbStatus::UpToDate]);
         assert_eq!(p.commitment.header16.0, HEADER16);
         assert_eq!(p.commitment.seed.0, SEED);
+        // The schema's constants are these values' encodings.
+        assert_eq!(FixedBytes(HEADER16).encode(), HEADER16_B64U);
+        assert_eq!(FixedBytes(SEED).encode(), SEED_B64U);
         p.validate().unwrap();
         let empty = VerifyPolicy::from_json(b"{}").unwrap();
         assert_eq!(empty, p);
@@ -670,5 +804,44 @@ mod tests {
             let p: VerifyPolicy = serde_json::from_str(&json).unwrap();
             assert!(p.validate().is_err(), "{values}");
         }
+    }
+
+    #[test]
+    fn a_floor_with_an_empty_tdx_object_constrains_nothing() {
+        let msg = |v: serde_json::Value| {
+            VerifyPolicy::from_json(&serde_json::to_vec(&v).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        let err = msg(json!({"tcb": {"floors": {"f": {"tdx": {}}}}}));
+        assert!(err.contains("tdx: constrains nothing"), "{err}");
+        let snp = json!({"min": {"bootloader": 1, "tee": 0, "snp": 1, "microcode": 1}});
+        let err = msg(json!({"tcb": {"floors": {"f": {"snp": snp, "tdx": {}}}}}));
+        assert!(err.contains("tdx: constrains nothing"), "{err}");
+        let ok = json!({"tcb": {"floors": {"f": {"tdx": {"min_tcb_evaluation_data_number": 1}}}}});
+        VerifyPolicy::from_json(&serde_json::to_vec(&ok).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn register_indexes_have_one_text_form() {
+        let pin = json!([{"alg": "sha384", "value": FixedBytes([0u8; 48]).encode()}]);
+        let parse = |key: &str| {
+            let text = format!(r#"{{"reference":{{"registers":{{"{key}":{pin}}}}}}}"#);
+            VerifyPolicy::from_json(text.as_bytes())
+        };
+        for key in ["0", "7", "65535"] {
+            let p = parse(key).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!(p.reference.registers.len(), 1);
+        }
+        for key in ["01", "00", "-0", "+1", " 1", "1.0", "1e0", "65536", ""] {
+            let err = parse(key).expect_err(key).to_string();
+            assert!(err.contains("not a register index"), "{key}: {err}");
+        }
+        let twice = format!(r#"{{"reference":{{"pcrs":{{"8":{pin},"8":{pin}}}}}}}"#);
+        let err = VerifyPolicy::from_json(twice.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("appears twice"), "{err}");
+        // What serde_json alone admits, and this parser refuses.
+        use std::collections::BTreeMap;
+        assert!(serde_json::from_str::<BTreeMap<u16, u8>>(r#"{"1":1,"1":2}"#).is_ok());
     }
 }

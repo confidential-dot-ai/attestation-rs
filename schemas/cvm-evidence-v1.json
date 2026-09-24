@@ -58,7 +58,7 @@
       "properties": {
         "chain_len": {
           "format": "uint64",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         }
       },
@@ -141,6 +141,8 @@
           "items": {
             "$ref": "#/$defs/Register"
           },
+          "maxItems": 64,
+          "minItems": 1,
           "type": "array"
         },
         "cvm_report": {
@@ -174,7 +176,9 @@
       "description": "`cvm_log` (section 4.8).",
       "properties": {
         "data": {
-          "$ref": "#/$defs/Base64Url"
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
         },
         "format": {
           "$ref": "#/$defs/LogFormat"
@@ -210,6 +214,8 @@
         },
         "cert_chain_b64": {
           "description": "Base64 PEM certificate chain, leaf first.",
+          "maxLength": 1048576,
+          "minLength": 1,
           "type": "string"
         },
         "cvm_binding": {
@@ -217,9 +223,12 @@
         },
         "evidence_b64": {
           "description": "Base64 SPDM blob, as the SDK and NRAS exchange it.",
+          "maxLength": 1048576,
+          "minLength": 1,
           "type": "string"
         },
         "uuid": {
+          "pattern": "^[!-.0-~]{1,128}$",
           "type": "string"
         }
       },
@@ -251,29 +260,62 @@
       "type": "string"
     },
     "KeyBinding": {
-      "additionalProperties": false,
-      "description": "`cvm_binding.key`. The `tls-exporter` kind is reserved for v2 and, being\nabsent here, is rejected as unknown.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/KeyKind"
+      "description": "`cvm_binding.key` (section 5.3): an SPKI or TBSCertificate digest, or raw bytes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spki-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
         },
-        "value": {
-          "$ref": "#/$defs/Base64Url"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "x509-tbs-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw"
+            },
+            "value": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/Base64Url"
+                }
+              ],
+              "maxLength": 87380
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "kind",
-        "value"
-      ],
-      "type": "object"
-    },
-    "KeyKind": {
-      "enum": [
-        "spki-sha256",
-        "x509-tbs-sha256",
-        "raw"
-      ],
-      "type": "string"
+      ]
     },
     "LogFormat": {
       "enum": [
@@ -304,6 +346,7 @@
       "additionalProperties": false,
       "properties": {
         "generation": {
+          "pattern": "^(Milan|Genoa|Turin|[0-9a-f]{12})$",
           "type": "string"
         },
         "hosting": {
@@ -378,7 +421,9 @@
       "properties": {
         "data": {
           "$ref": "#/$defs/Base64Url",
-          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE."
+          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE.",
+          "maxLength": 1398102,
+          "minLength": 2
         },
         "method": {
           "$ref": "#/$defs/TpmAkMethod"
@@ -404,16 +449,22 @@
           "$ref": "#/$defs/HashAlg"
         },
         "message": {
-          "$ref": "#/$defs/Base64Url"
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
         },
         "pcrs": {
           "items": {
             "$ref": "#/$defs/Base64Url"
           },
+          "maxItems": 24,
+          "minItems": 24,
           "type": "array"
         },
         "signature": {
-          "$ref": "#/$defs/Base64Url"
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
         }
       },
       "required": [
@@ -442,6 +493,8 @@
           "items": {
             "$ref": "#/$defs/Register"
           },
+          "maxItems": 24,
+          "minItems": 1,
           "type": "array"
         },
         "cvm_tpm_ak": {
@@ -464,6 +517,7 @@
   "description": "The envelope (section 4.3). Unknown top-level claims are ignored, as EAT\nextensibility requires; everything the profile defines is checked.",
   "properties": {
     "cvm_version": {
+      "const": 1,
       "description": "Always [`CVM_VERSION`].",
       "format": "uint32",
       "minimum": 0,
@@ -471,9 +525,12 @@
     },
     "eat_nonce": {
       "$ref": "#/$defs/Base64Url",
-      "description": "The relying party's challenge, 16 to 64 bytes."
+      "description": "The relying party's challenge, 16 to 64 bytes: 22 to 86 characters.",
+      "maxLength": 86,
+      "minLength": 22
     },
     "eat_profile": {
+      "const": "tag:confidential.ai,2026:cvm#1",
       "description": "Always [`PROFILE_URI`].",
       "type": "string"
     },

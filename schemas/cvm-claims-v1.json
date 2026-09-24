@@ -117,7 +117,7 @@
       "properties": {
         "chain_len": {
           "format": "uint64",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         }
       },
@@ -150,6 +150,7 @@
       "additionalProperties": false,
       "properties": {
         "next_update": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
           "type": "string"
         },
         "reason": {
@@ -163,6 +164,7 @@
         },
         "this_update": {
           "description": "RFC 3339.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
           "type": "string"
         }
       },
@@ -252,21 +254,57 @@
       "type": "object"
     },
     "Digest": {
-      "additionalProperties": false,
       "description": "`{alg, value}` with the value the length of the algorithm's digest.",
-      "properties": {
-        "alg": {
-          "$ref": "#/$defs/HashAlg"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
         },
-        "value": {
-          "$ref": "#/$defs/Base64Url"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha384"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes48"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alg": {
+              "const": "sha512"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes64"
+            }
+          },
+          "required": [
+            "alg",
+            "value"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "alg",
-        "value"
-      ],
-      "type": "object"
+      ]
     },
     "Freshness": {
       "additionalProperties": false,
@@ -279,10 +317,12 @@
           "$ref": "#/$defs/BindingMode"
         },
         "not_after": {
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
           "type": "string"
         },
         "not_before": {
           "description": "RFC 3339, certificate pattern only.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
           "type": "string"
         },
         "pattern": {
@@ -395,29 +435,62 @@
       "description": "`cvm_identity`, distinguished by its fields."
     },
     "KeyBinding": {
-      "additionalProperties": false,
-      "description": "`cvm_binding.key`. The `tls-exporter` kind is reserved for v2 and, being\nabsent here, is rejected as unknown.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/KeyKind"
+      "description": "`cvm_binding.key` (section 5.3): an SPKI or TBSCertificate digest, or raw bytes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spki-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
         },
-        "value": {
-          "$ref": "#/$defs/Base64Url"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "x509-tbs-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw"
+            },
+            "value": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/Base64Url"
+                }
+              ],
+              "maxLength": 87380
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "kind",
-        "value"
-      ],
-      "type": "object"
-    },
-    "KeyKind": {
-      "enum": [
-        "spki-sha256",
-        "x509-tbs-sha256",
-        "raw"
-      ],
-      "type": "string"
+      ]
     },
     "NvidiaEvidenceOutcome": {
       "additionalProperties": false,
@@ -520,14 +593,16 @@
     "ReferenceOutcome": {
       "additionalProperties": false,
       "description": "Which reference values matched. `launch_measurement` is absent for a\nsubmodule that has none (the vtpm).",
+      "minProperties": 1,
       "properties": {
         "launch_measurement": {
           "type": "boolean"
         },
         "registers": {
           "additionalProperties": false,
+          "minProperties": 1,
           "patternProperties": {
-            "^\\d+$": {
+            "^(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$": {
               "type": "boolean"
             }
           },
@@ -618,9 +693,17 @@
       "description": "One EAR appraisal record.",
       "properties": {
         "ear_appraisal_policy_ids": {
-          "items": {
-            "type": "string"
-          },
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "const": "tag:confidential.ai,2026:cvm#1"
+            },
+            {
+              "pattern": "^ni:///sha-384;[A-Za-z0-9_-]{64}$",
+              "type": "string"
+            }
+          ],
           "type": "array"
         },
         "ear_attester_claims": {
@@ -703,6 +786,7 @@
         },
         "fmspc": {
           "description": "Twelve lowercase hex characters.",
+          "pattern": "^[0-9a-f]{12}$",
           "type": "string"
         },
         "pcesvn": {
@@ -768,7 +852,9 @@
       "properties": {
         "data": {
           "$ref": "#/$defs/Base64Url",
-          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE."
+          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE.",
+          "maxLength": 1398102,
+          "minLength": 2
         },
         "method": {
           "$ref": "#/$defs/TpmAkMethod"
@@ -890,10 +976,14 @@
           "type": "integer"
         },
         "owner": {
-          "description": "From the slot's claim record (section 4.9), workload slots only.",
+          "description": "From the slot's claim record (section 8.3), workload slots only.",
+          "maxLength": 255,
+          "minLength": 1,
           "type": "string"
         },
         "purpose": {
+          "maxLength": 255,
+          "minLength": 1,
           "type": "string"
         },
         "replayed": {
@@ -918,14 +1008,19 @@
     },
     "VerifierClaims": {
       "additionalProperties": false,
-      "description": "`ear_verifier_claims` (section 5.1).",
+      "description": "`ear_verifier_claims` (section 12.3), never empty.",
+      "minProperties": 1,
       "properties": {
         "cvm_backing_min": {
           "$ref": "#/$defs/BackingMin"
         },
         "cvm_collateral": {
           "additionalProperties": false,
+          "minProperties": 1,
           "properties": {
+            "cca_corim": {
+              "$ref": "#/$defs/CollateralOutcome"
+            },
             "nras_jwks": {
               "$ref": "#/$defs/CollateralOutcome"
             },
@@ -1015,9 +1110,12 @@
     },
     "eat_nonce": {
       "$ref": "#/$defs/Base64Url",
-      "description": "The nonce that was bound."
+      "description": "The nonce that was bound: 16 to 64 bytes, 22 to 86 characters.",
+      "maxLength": 86,
+      "minLength": 22
     },
     "eat_profile": {
+      "const": "tag:ietf.org,2026:rats/ear#04",
       "description": "Always [`EAR_PROFILE_URI`].",
       "type": "string"
     },

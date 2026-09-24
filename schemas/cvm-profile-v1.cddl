@@ -10,11 +10,13 @@
 ; trailing bits) and byte strings in CBOR. The policy is a verifier input and
 ; JSON only.
 ;
-; Rules prefixed eat., ear., ar4si. and cmw. are copied from RFC 9711,
-; draft-ietf-rats-ear-04, draft-ietf-rats-ar4si-10 and RFC 9999 with their
-; import prefixes, unchanged. A rule is prose when CDDL cannot state it
-; (uniqueness, equality between two members, duplicate member names in the
-; encoding); section 4.7 states those rules.
+; Rules prefixed eat., ear. and ar4si. are copied from RFC 9711,
+; draft-ietf-rats-ear-04 and draft-ietf-rats-ar4si-10 with their import
+; prefixes, unchanged. The CMW rules (report-record, endorsement,
+; raw-evidence, cmw-ind) are local definitions that follow RFC 9999
+; section 3. A rule is prose when CDDL cannot state it (uniqueness,
+; equality between two members, duplicate member names in the encoding);
+; section 4.7 states those rules.
 
 ; ===================================================================
 ; Evidence (section 4)
@@ -621,8 +623,8 @@ pcr-index = text .base10 (0..23)
 
 policy-digest = digest<"sha256", 32> / digest<"sha384", 48> / digest<"sha512", 64>
 
-; A named floor must constrain something; default_floor and every machine's
-; tcb_floor name one of the floors.
+; A named floor must constrain something, and its tdx member names at least
+; one bound; default_floor and every machine's tcb_floor name one of the floors.
 tcb-policy = {
   ? "floors" ^ => { * text => tcb-floor },
   ? "default_floor" ^ => text,
@@ -641,10 +643,10 @@ tcb-floor = ar4si.non-empty<{
     "min" ^ => snp-tcb,
     ? "values" ^ => [1*4 snp-tcb-value],           ; each at most once
   },
-  ? "tdx" ^ => {
+  ? "tdx" ^ => ar4si.non-empty<{
     ? "min_tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
     ? "min_tcb_evaluation_data_number" ^ => uint .le 4294967295,
-  },
+  }>,
 }>
 
 snp-tcb-value = "reported" / "current" / "committed" / "launch"

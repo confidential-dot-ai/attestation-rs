@@ -10,25 +10,33 @@ use super::evidence::{
     Backing, BindingMode, DebugStatus, FreshnessPattern, HashAlg, Hosting, KeyBinding,
     RegisterSource, Tee, Vendor,
 };
-use super::{invalid, EAR_PROFILE_URI};
+use super::policy::REGISTER_INDEX_PATTERN;
+use super::{invalid, EAR_PROFILE_URI, PROFILE_URI};
 use crate::error::Result;
 use crate::types::{SnpTcb, TdxTcbStatus};
-use schemars::JsonSchema;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// Media type of a CMW collection carried inside a CMW record (RFC 9999).
 pub const MEDIA_TYPE_CMW_JSON: &str = "application/cmw+json";
 
+/// The CDDL `rfc3339`, anchored as JSON Schema patterns are not.
+const RFC3339_PATTERN: &str =
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$";
+
 /// The EAR claims set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Appraisal {
     /// Always [`EAR_PROFILE_URI`].
+    #[schemars(extend("const" = EAR_PROFILE_URI))]
     pub eat_profile: String,
     /// Seconds since the epoch when the appraisal was produced.
     pub iat: i64,
     pub ear_verifier_id: VerifierId,
-    /// The nonce that was bound.
+    /// The nonce that was bound: 16 to 64 bytes, 22 to 86 characters.
+    #[schemars(extend("minLength" = 22, "maxLength" = 86))]
     pub eat_nonce: Bytes,
     /// A record of type `application/cmw+json` whose value is a CMW collection
     /// carrying the envelope as appraised (indicator bit 2) and the endorsement
@@ -86,9 +94,23 @@ pub struct VerifierId {
 pub struct SubmodAppraisal {
     pub ear_status: Tier,
     pub ear_trustworthiness_vector: TrustVector,
+    #[schemars(schema_with = "policy_ids_schema")]
     pub ear_appraisal_policy_ids: Vec<String>,
     pub ear_attester_claims: AttesterClaims,
     pub ear_verifier_claims: VerifierClaims,
+}
+
+/// The profile URI, then the policy's `ni` name (section 12.5).
+fn policy_ids_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "array",
+        "prefixItems": [
+            {"const": PROFILE_URI},
+            {"type": "string", "pattern": "^ni:///sha-384;[A-Za-z0-9_-]{64}$"}
+        ],
+        "minItems": 2,
+        "maxItems": 2
+    })
 }
 
 /// AR4SI trustworthiness tier. JSON carries the names, CBOR the values.
@@ -246,11 +268,35 @@ pub struct VerifiedPlatform {
 }
 
 /// `{alg, value}` with the value the length of the algorithm's digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Digest {
     pub alg: HashAlg,
     pub value: Bytes,
+}
+
+impl JsonSchema for Digest {
+    fn schema_name() -> Cow<'static, str> {
+        "Digest".into()
+    }
+    fn json_schema(g: &mut SchemaGenerator) -> Schema {
+        let shape = |alg: &str, value: Schema| {
+            json_schema!({
+                "type": "object",
+                "properties": {"alg": {"const": alg}, "value": value},
+                "required": ["alg", "value"],
+                "additionalProperties": false
+            })
+        };
+        json_schema!({
+            "description": "`{alg, value}` with the value the length of the algorithm's digest.",
+            "oneOf": [
+                shape("sha256", g.subschema_for::<FixedBytes<32>>()),
+                shape("sha384", g.subschema_for::<FixedBytes<48>>()),
+                shape("sha512", g.subschema_for::<FixedBytes<64>>())
+            ]
+        })
+    }
 }
 
 impl Digest {
@@ -276,10 +322,12 @@ pub struct VerifiedRegister {
     pub source: RegisterSource,
     pub backing: Backing,
     pub replayed: bool,
-    /// From the slot's claim record (section 4.9), workload slots only.
+    /// From the slot's claim record (section 8.3), workload slots only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("minLength" = 1, "maxLength" = 255))]
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("minLength" = 1, "maxLength" = 255))]
     pub purpose: Option<String>,
 }
 
@@ -293,8 +341,10 @@ pub struct Freshness {
     pub key: Option<KeyBinding>,
     /// RFC 3339, certificate pattern only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = RFC3339_PATTERN))]
     pub not_before: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = RFC3339_PATTERN))]
     pub not_after: Option<String>,
 }
 
@@ -396,6 +446,7 @@ pub struct TdxTcb {
     pub pck_tcb: FixedBytes<16>,
     pub pcesvn: u16,
     /// Twelve lowercase hex characters.
+    #[schemars(extend("pattern" = "^[0-9a-f]{12}$"))]
     pub fmspc: String,
     /// Absent only when policy allowed the collateral checks to be skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -451,11 +502,13 @@ pub struct DeviceClaims {
     pub claims: BTreeMap<String, serde_json::Value>,
 }
 
-/// `ear_verifier_claims` (section 5.1).
+/// `ear_verifier_claims` (section 12.3), never empty.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("minProperties" = 1))]
 pub struct VerifierClaims {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("minProperties" = 1))]
     pub cvm_collateral: BTreeMap<CollateralCheck, CollateralOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_reference: Option<ReferenceOutcome>,
@@ -492,6 +545,9 @@ pub enum CollateralCheck {
     TdxTcbInfo,
     TdxQeIdentity,
     NrasJwks,
+    // Arm CCA's endorsement (section 9.6.4); this release appraises no CCA
+    // token. A doc comment here would turn the key schema into a oneOf.
+    CcaCorim,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -502,8 +558,10 @@ pub struct CollateralOutcome {
     pub reason: Option<String>,
     /// RFC 3339.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = RFC3339_PATTERN))]
     pub this_update: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("pattern" = RFC3339_PATTERN))]
     pub next_update: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed: Option<bool>,
@@ -521,11 +579,27 @@ pub enum CollateralStatus {
 /// submodule that has none (the vtpm).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("minProperties" = 1))]
 pub struct ReferenceOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_measurement: Option<bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(schema_with = "matched_registers_schema")]
     pub registers: BTreeMap<u16, bool>,
+}
+
+fn matched_registers_schema(_: &mut SchemaGenerator) -> Schema {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        REGISTER_INDEX_PATTERN.to_string(),
+        serde_json::json!({"type": "boolean"}),
+    );
+    json_schema!({
+        "type": "object",
+        "patternProperties": properties,
+        "additionalProperties": false,
+        "minProperties": 1
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
