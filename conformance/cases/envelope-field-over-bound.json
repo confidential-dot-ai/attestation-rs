@@ -1,0 +1,13 @@
+{
+  "id": "envelope-field-over-bound",
+  "rule": {
+    "section": "4.7",
+    "statement": "every byte string field is at most 1 MiB: one byte more is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-field-over-bound.json.gz",
+  "policy": "policy/envelope-field-over-bound.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

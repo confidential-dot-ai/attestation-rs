@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-pcr8-not-in-reference",
+  "rule": {
+    "section": "13.4",
+    "statement": "reference.pcrs: a quoted PCR outside its reference values is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-pcr8-not-in-reference.json",
+  "policy": "policy/azure-snp-pcr8-not-in-reference.json",
+  "expect": {
+    "refusal": "reference-mismatch"
+  }
+}

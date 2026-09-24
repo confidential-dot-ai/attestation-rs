@@ -1,0 +1,13 @@
+{
+  "id": "snp-generation-hint-contradicts-report",
+  "rule": {
+    "section": "3.4",
+    "statement": "a hint that contradicts the signed data is an error: generation Milan on a Genoa report"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-generation-hint-contradicts-report.json",
+  "policy": "policy/snp-generation-hint-contradicts-report.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

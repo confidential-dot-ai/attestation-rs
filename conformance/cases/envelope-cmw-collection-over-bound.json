@@ -1,0 +1,13 @@
+{
+  "id": "envelope-cmw-collection-over-bound",
+  "rule": {
+    "section": "4.7",
+    "statement": "a CMW collection carries at most 32 entries"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-cmw-collection-over-bound.json",
+  "policy": "policy/envelope-cmw-collection-over-bound.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

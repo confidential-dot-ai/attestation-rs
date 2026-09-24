@@ -1,0 +1,13 @@
+{
+  "id": "policy-floor-tdx-constrains-nothing",
+  "rule": {
+    "section": "13.2",
+    "statement": "a floor constrains at least one platform: an empty tdx object names no bound and is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-floor-tdx-constrains-nothing.json",
+  "policy": "policy/policy-floor-tdx-constrains-nothing.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

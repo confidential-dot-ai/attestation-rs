@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-cpu-report-not-the-hcl-area",
+  "rule": {
+    "section": "9.4.2",
+    "statement": "the cpu submodule's SNP report is the HCL report's hardware area byte for byte; a genuine report of another machine with its own VCEK is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-cpu-report-not-the-hcl-area.json",
+  "policy": "policy/azure-snp-cpu-report-not-the-hcl-area.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
