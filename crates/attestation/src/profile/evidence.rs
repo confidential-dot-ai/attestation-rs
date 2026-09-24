@@ -1510,6 +1510,33 @@ mod tests {
     }
 
     #[test]
+    fn an_ignored_claim_nested_past_the_bound_is_refused() {
+        // The envelope is level 1, so an unknown claim of n arrays reaches n + 1.
+        let with_claim = |arrays: usize| {
+            let mut v = tdx_envelope();
+            v["x_deep"] =
+                serde_json::from_str(&format!("{}{}", "[".repeat(arrays), "]".repeat(arrays)))
+                    .unwrap();
+            v
+        };
+        parse(&with_claim(31)).unwrap();
+        let e = parse(&with_claim(32)).unwrap_err();
+        assert_eq!(
+            e.refusal_code(),
+            Some(crate::error::RefusalCode::EnvelopeInvalid),
+            "{e}"
+        );
+        assert!(e.to_string().contains("nested more than 32"), "{e}");
+        let deep_policy = format!(r#"{{"x":{}{}}}"#, "[".repeat(32), "]".repeat(32));
+        let e = super::super::VerifyPolicy::from_json(deep_policy.as_bytes()).unwrap_err();
+        assert_eq!(
+            e.refusal_code(),
+            Some(crate::error::RefusalCode::PolicyInvalid),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn duplicate_members_rejected() {
         let cpu = serde_json::to_string(&snp_envelope()["submods"]["cpu"]).unwrap();
         let nonce = b64(&[7u8; 16]);

@@ -1,9 +1,10 @@
-//! Section 4.10: one JSON encoding per value. serde's defaults admit others,
+//! Section 4.7: one JSON encoding per value. serde's defaults admit others,
 //! each of which would let two implementations disagree about an envelope or
 //! a policy: `null` for an absent optional member, a JSON array for a struct
 //! (its fields in order), and `{"variant": null}` for a unit enum. `present`
 //! closes the first on each optional member; `from_slice` closes the other
-//! two for everything it parses, streaming, at every depth.
+//! two for everything it parses, streaming, at every depth, and bounds the
+//! nesting depth before it parses anything.
 
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
@@ -21,9 +22,47 @@ where
     T::deserialize(d).map(Some)
 }
 
+/// Section 4.7: JSON input nests at most this many levels, each array and
+/// object one level, the top-level value at level 1.
+pub const MAX_DEPTH: usize = 32;
+
+/// Refuses input nested deeper than [`MAX_DEPTH`] in one pass over the bytes,
+/// so no parser recurses into it, ignored members included. In any valid
+/// prefix the brackets outside strings are exactly the parser's nesting.
+fn check_depth(json: &[u8]) -> serde_json::Result<()> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in json {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(de::Error::custom(format!(
+                        "JSON is nested more than {MAX_DEPTH} levels deep"
+                    )));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Parses one JSON value from `json` into `T`, reading structs only from
-/// objects and enums only from strings, and refusing trailing data.
+/// objects and enums only from strings, and refusing trailing data and
+/// nesting past [`MAX_DEPTH`].
 pub fn from_slice<'de, T: Deserialize<'de>>(json: &'de [u8]) -> serde_json::Result<T> {
+    check_depth(json)?;
     let mut de = serde_json::Deserializer::from_slice(json);
     let value = T::deserialize(Strict(&mut de))?;
     de.end()?;
@@ -358,6 +397,28 @@ mod tests {
             assert!(super::from_slice::<Outer>(bad).is_err(), "{why}");
         }
         assert!(super::from_slice::<Outer>(br#"{"inner":{},"list":[],"e":"other"} {}"#).is_err());
+    }
+
+    #[test]
+    fn nesting_is_bounded_before_parsing() {
+        use serde_json::Value;
+        let arrays = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+        assert!(super::from_slice::<Value>(arrays(super::MAX_DEPTH).as_bytes()).is_ok());
+        let e = super::from_slice::<Value>(arrays(super::MAX_DEPTH + 1).as_bytes()).unwrap_err();
+        assert!(e.to_string().contains("nested more than 32"), "{e}");
+        // Objects count as arrays do; the top-level object is level 1.
+        let deep = format!(r#"{{"x":{{"y":{}}}}}"#, arrays(31));
+        assert!(super::from_slice::<Value>(deep.as_bytes()).is_err());
+        let at = format!(r#"{{"x":{{"y":{}}}}}"#, arrays(30));
+        assert!(super::from_slice::<Value>(at.as_bytes()).is_ok());
+        // Brackets inside strings are not structure, escaped quotes included.
+        let quoted = format!(r#"{{"a":"\"{}","b":"\\"}}"#, "[{".repeat(40));
+        assert!(super::from_slice::<Value>(quoted.as_bytes()).is_ok());
+        let after = format!(r#"{{"a":"\\","b":{}}}"#, arrays(32));
+        assert!(super::from_slice::<Value>(after.as_bytes()).is_err());
+        // A 10 MiB run of brackets is refused without recursing into it.
+        let run = "[".repeat(10 << 20);
+        assert!(super::from_slice::<Value>(run.as_bytes()).is_err());
     }
 
     #[test]

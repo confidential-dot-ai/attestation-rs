@@ -81,6 +81,11 @@ fn padded_to(v: &Value, size: usize) -> Input {
     Input::Raw(out.into_bytes())
 }
 
+/// `levels` arrays, each holding the next, the innermost empty.
+fn nested_arrays(levels: usize) -> Value {
+    (1..levels).fold(json!([]), |inner, _| json!([inner]))
+}
+
 fn gpu_device(ueid: &str, arch: &str) -> Value {
     json!({
         "arch": arch,
@@ -438,6 +443,12 @@ pub(super) fn cases() -> Vec<Authored> {
             SNP_NOW, padded_to(&snp, 10 << 20), Some(lenient().into()), none(), None),
         case("envelope-over-size-bound", "4.7", "the whole envelope is at most 10 MiB: one byte more is refused",
             SNP_NOW, padded_to(&snp, (10 << 20) + 1), Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
+        snp_case("envelope-nesting-at-bound", "4.7",
+            "JSON input is nested at most 32 levels deep, the envelope at level 1: an ignored claim of 31 nested arrays appraises",
+            tweak(snp.clone(), |v| v["x_nested"] = nested_arrays(31)), None),
+        snp_case("envelope-nesting-over-bound", "4.7",
+            "JSON input is nested at most 32 levels deep, the envelope at level 1: an ignored claim of 32 nested arrays is refused",
+            tweak(snp.clone(), |v| v["x_nested"] = nested_arrays(32)), Some(R::EnvelopeInvalid)),
         snp_case("envelope-cmw-collection-over-bound", "4.7", "a CMW collection carries at most 32 entries",
             tweak(snp.clone(), |v| {
                 for i in 0..32 {

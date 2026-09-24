@@ -1148,6 +1148,7 @@ mod author {
             "snp-crl-checked-with-defaults-spelled-out",
         );
         same("envelope-at-size-bound", "snp-genoa-report-data");
+        same("envelope-nesting-at-bound", "snp-genoa-report-data");
     }
 }
 
@@ -1319,6 +1320,10 @@ const PROSE: &[(&str, &str)] = &[
     (
         "evidence too large",
         "4.7: the whole envelope is at most 10 MiB",
+    ),
+    (
+        "nested more than 32 levels",
+        "4.7: JSON input is nested at most 32 levels deep",
     ),
 ];
 
