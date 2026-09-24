@@ -225,11 +225,14 @@ pub(crate) async fn appraise(
     let vek_der = if signing_key == SigningKey::Vlek {
         // KDS serves VLEKs only to the cloud provider, so the envelope's copy
         // is the only source and nothing is fetched (section 9.1.4).
-        collateral.inline_vlek().ok_or_else(|| {
-            AttestationError::CertFetchError(
-                "a VLEK-signed report needs its VLEK inline, inside its window".to_string(),
-            )
-        })?
+        collateral
+            .inline_vlek(&report.chip_id, &reported, generation)
+            .ok_or_else(|| {
+                AttestationError::CertFetchError(
+                    "a VLEK-signed report needs its VLEK inline, inside its window and certifying the reported TCB"
+                        .to_string(),
+                )
+            })?
     } else if collateral.has("snp.vek") || !report.chip_id.iter().all(|&b| b == 0) {
         collateral
             .get_snp_vcek(generation, &report.chip_id, &reported)

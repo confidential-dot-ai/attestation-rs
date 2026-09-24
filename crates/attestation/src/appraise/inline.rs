@@ -4,8 +4,9 @@
 //! inline copy only stands in when a provider is absent or fails. Every inline
 //! artifact is parsed as the kind its label names, bound to the parameters the
 //! verifier asks for, and checked to be inside its window before use. The VEK
-//! is the exception that is taken inline first: it is bound to the report by
-//! the chain and the TCB cross-check, and a masked chip id has no other source.
+//! is the exception that is taken inline first, once it is bound to the
+//! report: a VCEK by the chip identifier and reported TCB it certifies, a VLEK
+//! by the TCB, since KDS serves VLEKs only to the cloud provider.
 
 use crate::collateral::artifact::validity;
 use crate::collateral::{
@@ -58,16 +59,46 @@ impl<'a> InlineCollateral<'a> {
         self.entry(label).is_some()
     }
 
-    /// The inline `snp.vek` when it is a VLEK inside its window. A VLEK is not
-    /// keyed by chip id, so its binding is the chain and the TCB cross-check
-    /// the SNP path runs.
+    /// The inline `snp.vek` when it is a VLEK bound to the report (section
+    /// 10.2): inside its window and certifying the reported TCB.
     #[cfg(feature = "snp")]
-    pub fn inline_vlek(&self) -> Option<Vec<u8>> {
-        use crate::platforms::snp::verify::{is_vlek_cert, verify_vek_validity_period_at};
+    pub fn inline_vlek(
+        &self,
+        chip_id: &[u8; 64],
+        reported: &SnpTcb,
+        processor_gen: ProcessorGeneration,
+    ) -> Option<Vec<u8>> {
+        self.bound_vek(true, chip_id, reported, processor_gen)
+    }
+
+    /// The inline `snp.vek` when it is a VEK of the requested key type, inside
+    /// its window, that certifies the parameters naming it: the chip
+    /// identifier (a VCEK) and the reported TCB. Any other is ignored as if
+    /// absent (section 10.2), so the verifier's own source can serve.
+    #[cfg(feature = "snp")]
+    fn bound_vek(
+        &self,
+        vlek: bool,
+        chip_id: &[u8; 64],
+        reported: &SnpTcb,
+        processor_gen: ProcessorGeneration,
+    ) -> Option<Vec<u8>> {
+        use crate::platforms::snp::verify::{
+            is_vlek_cert, verify_vek_endorses, verify_vek_validity_period_at,
+        };
         let bytes = self.entry("snp.vek")?;
-        (is_vlek_cert(bytes).unwrap_or(false)
-            && verify_vek_validity_period_at(bytes, self.now).is_ok())
-        .then(|| bytes.to_vec())
+        let why = match is_vlek_cert(bytes) {
+            Err(e) => e.to_string(),
+            Ok(is_vlek) if is_vlek != vlek => "is not the key type the report names".to_string(),
+            Ok(_) => match verify_vek_validity_period_at(bytes, self.now)
+                .and_then(|()| verify_vek_endorses(bytes, chip_id, reported, processor_gen))
+            {
+                Ok(()) => return Some(bytes.to_vec()),
+                Err(e) => e.to_string(),
+            },
+        };
+        log::warn!("inline snp.vek is not the report's VEK ({why}); not used");
+        None
     }
 
     /// The raw bytes under a label, unchecked; callers bind them themselves.
@@ -162,15 +193,18 @@ impl CertProvider for InlineCollateral<'_> {
             chip_id: *chip_id,
             tcb: *reported_tcb,
         };
+        // The key binds the generation and the window; the VEK's own
+        // extensions bind the chip identifier and the reported TCB.
+        #[cfg(feature = "snp")]
         if let Some(bytes) = self.entry("snp.vek") {
-            if let Some(v) = self.bound("snp.vek", &key, bytes) {
-                return Ok(v);
-            }
-            #[cfg(feature = "snp")]
-            if let Some(v) = self.inline_vlek() {
-                return Ok(v);
+            if self.bound("snp.vek", &key, bytes).is_some() {
+                if let Some(v) = self.bound_vek(false, chip_id, reported_tcb, processor_gen) {
+                    return Ok(v);
+                }
             }
         }
+        #[cfg(not(feature = "snp"))]
+        let _ = key;
         self.cert
             .get_snp_vcek(processor_gen, chip_id, reported_tcb)
             .await
@@ -277,5 +311,119 @@ impl TdxCollateralProvider for InlineCollateral<'_> {
     /// window, whatever clock the provider keeps for its own serving.
     fn now(&self) -> DateTime<Utc> {
         self.now
+    }
+}
+
+#[cfg(all(test, feature = "snp"))]
+mod tests {
+    use super::*;
+    use crate::collateral::HeldCollateral;
+    use crate::profile::CmwRecord;
+    use std::collections::BTreeMap;
+
+    const VLEK: &[u8] = include_bytes!("../../test_data/snp/test-vlek.der");
+    const VCEK_GENOA: &[u8] = include_bytes!("../../test_data/snp/live-vcek-genoa.der");
+    /// The TCB and chip of the report the Genoa VCEK endorses.
+    const GENOA_TCB: SnpTcb = SnpTcb {
+        bootloader: 10,
+        tee: 0,
+        snp: 27,
+        microcode: 27,
+        fmc: None,
+    };
+    /// The TCB the Milan VLEK certifies.
+    const VLEK_TCB: SnpTcb = SnpTcb {
+        bootloader: 4,
+        tee: 0,
+        snp: 24,
+        microcode: 217,
+        fmc: None,
+    };
+
+    fn genoa_chip() -> [u8; 64] {
+        let report = include_bytes!("../../test_data/snp/live-report-v5-genoa.bin");
+        report[0x1A0..0x1E0].try_into().unwrap()
+    }
+
+    fn endorsements(vek: &[u8]) -> CmwCollection {
+        CmwCollection {
+            collection_type: Some("tag:confidential.ai,2026:cvm-endorsements#1".into()),
+            entries: BTreeMap::from([(
+                "snp.vek".to_string(),
+                CmwEntry::Record(CmwRecord::new(
+                    "application/pkix-cert",
+                    vek.to_vec(),
+                    Some(2),
+                )),
+            )]),
+        }
+    }
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339).unwrap().into()
+    }
+
+    #[tokio::test]
+    async fn an_inline_vcek_is_used_only_for_its_chip_and_tcb() {
+        let held = HeldCollateral::new();
+        let e = endorsements(VCEK_GENOA);
+        let inline = InlineCollateral::new(Some(&e), &held, None, at("2026-09-22T00:00:00Z"));
+        let chip = genoa_chip();
+        let got = inline
+            .get_snp_vcek(ProcessorGeneration::Genoa, &chip, &GENOA_TCB)
+            .await
+            .expect("the report's own VCEK is used");
+        assert_eq!(got, VCEK_GENOA);
+        // Another TCB or another chip: ignored, and the empty provider has none.
+        let other_tcb = SnpTcb {
+            microcode: 26,
+            ..GENOA_TCB
+        };
+        let mut other_chip = chip;
+        other_chip[0] ^= 1;
+        for (chip, tcb) in [(chip, other_tcb), (other_chip, GENOA_TCB)] {
+            let err = inline
+                .get_snp_vcek(ProcessorGeneration::Genoa, &chip, &tcb)
+                .await
+                .expect_err("an inline VCEK that does not name this report is not used");
+            assert_eq!(
+                err.refusal_code(),
+                Some(crate::error::RefusalCode::CollateralUnavailable),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_vlek_is_used_only_for_its_tcb() {
+        let held = HeldCollateral::new();
+        let e = endorsements(VLEK);
+        let inline = InlineCollateral::new(Some(&e), &held, None, at("2025-06-01T00:00:00Z"));
+        let chip = [0u8; 64];
+        assert_eq!(
+            inline.inline_vlek(&chip, &VLEK_TCB, ProcessorGeneration::Milan),
+            Some(VLEK.to_vec())
+        );
+        let other = SnpTcb {
+            snp: 23,
+            ..VLEK_TCB
+        };
+        assert_eq!(
+            inline.inline_vlek(&chip, &other, ProcessorGeneration::Milan),
+            None
+        );
+        // Outside its window it is ignored as well.
+        let late = InlineCollateral::new(Some(&e), &held, None, at("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            late.inline_vlek(&chip, &VLEK_TCB, ProcessorGeneration::Milan),
+            None
+        );
+        // A VLEK never stands in for a VCEK.
+        let vcek_e = endorsements(VCEK_GENOA);
+        let vcek = InlineCollateral::new(Some(&vcek_e), &held, None, at("2026-09-22T00:00:00Z"));
+        assert_eq!(
+            vcek.inline_vlek(&genoa_chip(), &GENOA_TCB, ProcessorGeneration::Genoa),
+            None
+        );
     }
 }

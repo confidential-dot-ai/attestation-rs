@@ -419,6 +419,26 @@ pub fn verify_vcek_tcb(
     vcek_der: &[u8],
     processor_gen: ProcessorGeneration,
 ) -> Result<()> {
+    let t = &report.reported_tcb;
+    let reported = SnpTcb {
+        bootloader: t.bootloader,
+        tee: t.tee,
+        snp: t.snp,
+        microcode: t.microcode,
+        fmc: t.fmc,
+    };
+    verify_vek_endorses(vcek_der, &report.chip_id, &reported, processor_gen)
+}
+
+/// The cross-check of [`verify_vcek_tcb`] over the parameters that name a
+/// VEK: the chip identifier (for a VCEK) and the reported TCB. Section 10.2
+/// binds an inline VEK with it before the VEK is used.
+pub(crate) fn verify_vek_endorses(
+    vcek_der: &[u8],
+    chip_id: &[u8; 64],
+    reported: &SnpTcb,
+    processor_gen: ProcessorGeneration,
+) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vcek_der)
         .map_err(|e| AttestationError::CertChainError(format!("VCEK x509 parse: {e}")))?;
 
@@ -453,15 +473,15 @@ pub fn verify_vcek_tcb(
         let hwid_len = if processor_gen == ProcessorGeneration::Turin {
             8
         } else {
-            report.chip_id.len()
+            chip_id.len()
         };
         let hwid = hardware_id(ext.value, hwid_len).ok_or_else(|| {
             AttestationError::CertChainError(format!(
                 "VCEK HW_ID is neither {hwid_len} bytes nor an OCTET STRING of {hwid_len} bytes"
             ))
         })?;
-        let ok = crate::utils::constant_time_eq(hwid, &report.chip_id[..hwid_len])
-            && report.chip_id[hwid_len..].iter().all(|b| *b == 0);
+        let ok = crate::utils::constant_time_eq(hwid, &chip_id[..hwid_len])
+            && chip_id[hwid_len..].iter().all(|b| *b == 0);
         if !ok {
             return Err(AttestationError::CertChainError(
                 "VCEK chip_id does not match report chip_id".to_string(),
@@ -471,10 +491,10 @@ pub fn verify_vcek_tcb(
 
     // Validate TCB SPL values (exact equality)
     let checks: &[(&str, u8, &str)] = &[
-        (LOADER_SPL_OID, report.reported_tcb.bootloader, "bootloader"),
-        (TEE_SPL_OID, report.reported_tcb.tee, "tee"),
-        (SNP_SPL_OID, report.reported_tcb.snp, "snp"),
-        (UCODE_SPL_OID, report.reported_tcb.microcode, "microcode"),
+        (LOADER_SPL_OID, reported.bootloader, "bootloader"),
+        (TEE_SPL_OID, reported.tee, "tee"),
+        (SNP_SPL_OID, reported.snp, "snp"),
+        (UCODE_SPL_OID, reported.microcode, "microcode"),
     ];
 
     for &(oid_str, expected, name) in checks {
@@ -500,7 +520,7 @@ pub fn verify_vcek_tcb(
     // Turin adds the FMC SPL. A Turin VEK without it leaves that component
     // unendorsed, whatever value the report carries.
     if processor_gen == ProcessorGeneration::Turin {
-        let fmc_expected = report.reported_tcb.fmc.ok_or_else(|| {
+        let fmc_expected = reported.fmc.ok_or_else(|| {
             AttestationError::QuoteParseFailed("a Turin report carries no FMC SPL".to_string())
         })?;
         let ext = cert

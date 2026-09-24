@@ -707,6 +707,34 @@ pub(super) fn cases() -> Vec<Authored> {
             "inline endorsements are inputs: a VEK that is not the report's is not used, and with no other source the VEK is unavailable",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][1] = json!(b64url(TEST_VCEK))),
             Some(R::CollateralUnavailable)),
+        case("snp-inline-vek-for-another-tcb", "10.2",
+            "item 3: an inline VCEK AMD issued for the report's chip at another TCB is not bound to the report and is ignored as if absent; with no other source the VEK is unavailable",
+            "2026-09-24T00:00:00Z",
+            tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][1] = json!(b64url(SNP_VCEK_UCODE26))).into(),
+            Some(lenient().into()), none(), Some(R::CollateralUnavailable)),
+        case("snp-inline-vek-for-another-tcb-provider-serves", "10.2",
+            "item 3: an inline VCEK for another TCB is ignored, and the VCEK the verifier's provider holds for the report's chip and TCB serves the appraisal",
+            "2026-09-24T00:00:00Z",
+            tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_endorsements"]["snp.vek"][1] = json!(b64url(SNP_VCEK_UCODE26))).into(),
+            Some(lenient().into()),
+            BTreeMap::from([(
+                attestation::collateral::CollateralKey::SnpVcek {
+                    generation: attestation::ProcessorGeneration::Genoa,
+                    chip_id: report.chip_id,
+                    tcb: SnpTcb {
+                        bootloader: report.reported_tcb.bootloader,
+                        tee: report.reported_tcb.tee,
+                        snp: report.reported_tcb.snp,
+                        microcode: report.reported_tcb.microcode,
+                        fmc: report.reported_tcb.fmc,
+                    },
+                }.id(),
+                {
+                    write("collateral/genoa_vcek.der", SNP_VCEK);
+                    CollateralRef::File("collateral/genoa_vcek.der".into())
+                },
+            )]),
+            None),
         case("snp-vek-from-the-provider", "10.2", "a VEK the verifier's provider holds serves an envelope that carries none",
             SNP_NOW, tweak(snp.clone(), |v| {
                 v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_endorsements");

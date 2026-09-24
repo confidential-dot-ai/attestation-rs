@@ -341,6 +341,9 @@ mod author {
 
     const SNP_REPORT: &[u8] = include_bytes!("../test_data/snp/live-report-v5-genoa.bin");
     const SNP_VCEK: &[u8] = include_bytes!("../test_data/snp/live-vcek-genoa.der");
+    /// The same chip's VCEK at microcode SPL 26, which AMD KDS issued on
+    /// 2026-09-23; the recorded report's REPORTED_TCB has 27.
+    const SNP_VCEK_UCODE26: &[u8] = include_bytes!("../test_data/snp/live-vcek-genoa-ucode26.der");
     const V4_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_4.dat");
     const LIVE_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_live.dat");
     const LIVE_CCEL: &[u8] = include_bytes!("../test_data/tdx_ccel_live.bin");
