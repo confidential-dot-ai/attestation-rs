@@ -23,9 +23,12 @@ async fn get_td_quote_from_imds(td_report: &tdx::TdReport) -> Result<Vec<u8>> {
     let report_b64 = BASE64URL.encode(td_report.as_bytes());
     let body = serde_json::json!({ "report": report_b64 });
 
+    // Microsoft requires IMDS clients to bypass proxies; reqwest honors
+    // HTTP_PROXY and similar settings unless told not to.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
         .map_err(|e| AttestationError::HardwareAccessFailed(format!("build HTTP client: {}", e)))?;
     let response = client

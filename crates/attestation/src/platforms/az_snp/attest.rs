@@ -147,9 +147,12 @@ where
 async fn get_imds_certs() -> Result<ImdsCertificates> {
     // Same budget as the az_tdx IMDS call, which this one previously lacked
     // entirely: without a timeout a stalled connect blocks evidence generation.
+    // Microsoft requires IMDS clients to bypass proxies; reqwest honors
+    // HTTP_PROXY and similar settings unless told not to.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
         .map_err(|e| AttestationError::CertFetchError(format!("build HTTP client: {}", e)))?;
 
