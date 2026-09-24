@@ -403,14 +403,17 @@ fn hardware_id(ext_value: &[u8], len: usize) -> Option<&[u8]> {
     }
 }
 
-/// Verify VCEK certificate TCB extensions match the SNP attestation report.
+/// Verify VCEK certificate TCB extensions match the SNP attestation report
+/// (standard section 9.1.4 step 4). Every failure is `chain-invalid`: the
+/// endorsement contradicts the report it is meant to endorse.
 ///
 /// - For "VCEK" certificates: validates chip_id and TCB SPL exact equality.
 /// - For "VLEK" certificates: skips chip_id check, only validates TCB SPLs.
 ///
 /// `processor_gen` sets the hardware ID's length: 8 bytes on Turin, which
 /// must equal the first 8 bytes of a chip_id whose rest is zero, and the full
-/// 64-byte chip_id on Milan and Genoa.
+/// 64-byte chip_id on Milan and Genoa. On Turin the FMC SPL extension is
+/// required (AMD 57230, Table 11).
 pub fn verify_vcek_tcb(
     report: &AttestationReport,
     vcek_der: &[u8],
@@ -441,7 +444,7 @@ pub fn verify_vcek_tcb(
             .iter()
             .find(|e| e.oid.to_string() == HW_ID_OID)
             .ok_or_else(|| {
-                AttestationError::TcbMismatch(
+                AttestationError::CertChainError(
                     "VCEK missing required HW_ID OID extension".to_string(),
                 )
             })?;
@@ -453,14 +456,14 @@ pub fn verify_vcek_tcb(
             report.chip_id.len()
         };
         let hwid = hardware_id(ext.value, hwid_len).ok_or_else(|| {
-            AttestationError::TcbMismatch(format!(
+            AttestationError::CertChainError(format!(
                 "VCEK HW_ID is neither {hwid_len} bytes nor an OCTET STRING of {hwid_len} bytes"
             ))
         })?;
         let ok = crate::utils::constant_time_eq(hwid, &report.chip_id[..hwid_len])
             && report.chip_id[hwid_len..].iter().all(|b| *b == 0);
         if !ok {
-            return Err(AttestationError::TcbMismatch(
+            return Err(AttestationError::CertChainError(
                 "VCEK chip_id does not match report chip_id".to_string(),
             ));
         }
@@ -480,40 +483,41 @@ pub fn verify_vcek_tcb(
             .iter()
             .find(|e| e.oid.to_string() == oid_str)
             .ok_or_else(|| {
-                AttestationError::TcbMismatch(format!(
+                AttestationError::CertChainError(format!(
                     "VCEK missing required OID extension: {name}"
                 ))
             })?;
         let cert_val = get_oid_int(ext.value).ok_or_else(|| {
-            AttestationError::TcbMismatch(format!("VCEK {name} OID has unparseable value"))
+            AttestationError::CertChainError(format!("VCEK {name} OID has unparseable value"))
         })?;
         if cert_val != expected {
-            return Err(AttestationError::TcbMismatch(format!(
+            return Err(AttestationError::CertChainError(format!(
                 "VCEK {name} SPL {cert_val} does not match report {expected}"
             )));
         }
     }
 
-    // Turin processors have an additional FMC SPL OID
-    if let Some(fmc_expected) = report.reported_tcb.fmc {
-        if let Some(ext) = cert
+    // Turin adds the FMC SPL. A Turin VEK without it leaves that component
+    // unendorsed, whatever value the report carries.
+    if processor_gen == ProcessorGeneration::Turin {
+        let fmc_expected = report.reported_tcb.fmc.ok_or_else(|| {
+            AttestationError::QuoteParseFailed("a Turin report carries no FMC SPL".to_string())
+        })?;
+        let ext = cert
             .extensions()
             .iter()
             .find(|e| e.oid.to_string() == FMC_SPL_OID)
-        {
-            let cert_val = get_oid_int(ext.value).ok_or_else(|| {
-                AttestationError::TcbMismatch("VCEK FMC OID has unparseable value".to_string())
+            .ok_or_else(|| {
+                AttestationError::CertChainError(
+                    "Turin VEK missing required OID extension: fmc".to_string(),
+                )
             })?;
-            if cert_val != fmc_expected {
-                return Err(AttestationError::TcbMismatch(format!(
-                    "VCEK fmc SPL {cert_val} does not match report {fmc_expected}"
-                )));
-            }
-        } else if fmc_expected != 0 {
-            // Non-zero FMC in the report but VCEK lacks the OID — the cert cannot
-            // attest to the platform's FMC level, so reject.
-            return Err(AttestationError::TcbMismatch(format!(
-                "report FMC SPL is {fmc_expected} but VCEK certificate lacks FMC OID extension"
+        let cert_val = get_oid_int(ext.value).ok_or_else(|| {
+            AttestationError::CertChainError("VCEK fmc OID has unparseable value".to_string())
+        })?;
+        if cert_val != fmc_expected {
+            return Err(AttestationError::CertChainError(format!(
+                "VCEK fmc SPL {cert_val} does not match report {fmc_expected}"
             )));
         }
     }
@@ -1038,7 +1042,7 @@ mod tests {
         assert_eq!(get_oid_int(&[0x02, 0x01, 0x73]), Some(115));
         assert_eq!(get_oid_int(&[0x02, 0x01, 0x00]), Some(0));
         assert_eq!(get_oid_int(&[0x02, 0x01, 0x7F]), Some(127));
-        // 0xFF unpadded is -1 in DER signed integer — must use 2-byte padded form
+        // 0xFF unpadded is -1 as a DER signed integer, so the 2-byte padded form is required
         assert_eq!(get_oid_int(&[0x02, 0x01, 0xFF]), None);
     }
 
@@ -1247,7 +1251,7 @@ mod tests {
             &self,
             _processor_gen: ProcessorGeneration,
         ) -> Result<(Vec<u8>, Vec<u8>)> {
-            // Not used — the bare-metal SNP path uses bundled ARK/ASK directly.
+            // Not used: the bare-metal SNP path uses the bundled ARK and ASK directly.
             Err(AttestationError::CertFetchError(
                 "stub provider does not serve full chain".to_string(),
             ))
@@ -1492,10 +1496,86 @@ mod tests {
         report.reported_tcb.microcode = report.reported_tcb.microcode.wrapping_add(1);
         let err = verify_vcek_tcb(&report, LIVE_VCEK_GENOA, ProcessorGeneration::Genoa)
             .expect_err("VEK/report TCB disagreement must be rejected");
-        assert!(
-            matches!(err, AttestationError::TcbMismatch(_)),
+        assert_eq!(
+            err.refusal_code(),
+            Some(crate::error::RefusalCode::ChainInvalid),
             "got: {err}"
         );
+    }
+
+    /// A Turin VEK carrying the report's SPLs, the 8-byte hardware ID and,
+    /// when `fmc` is set, the FMC SPL extension.
+    fn mint_turin_vek(cn: &str, report: &AttestationReport, fmc: Option<u8>) -> Vec<u8> {
+        fn der_u8(v: u8) -> Vec<u8> {
+            if v < 0x80 {
+                vec![0x02, 0x01, v]
+            } else {
+                vec![0x02, 0x02, 0x00, v]
+            }
+        }
+        let spl = |arc: u64, v: u8| {
+            rcgen::CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 4, 1, 3704, 1, 3, arc],
+                der_u8(v),
+            )
+        };
+        let tcb = &report.reported_tcb;
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
+        params.custom_extensions = vec![
+            spl(1, tcb.bootloader),
+            spl(2, tcb.tee),
+            spl(3, tcb.snp),
+            spl(8, tcb.microcode),
+            rcgen::CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 4, 1, 3704, 1, 4],
+                [&[0x04, 0x08][..], &report.chip_id[..8]].concat(),
+            ),
+        ];
+        if let Some(v) = fmc {
+            params.custom_extensions.push(spl(9, v));
+        }
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    fn turin_report(fmc: u8) -> AttestationReport {
+        let mut report = parse_report(LIVE_REPORT_V5).expect("parse report");
+        report.chip_id = [0; 64];
+        report.chip_id[..8].copy_from_slice(&[0xa5, 0x5a, 1, 2, 3, 4, 5, 6]);
+        report.reported_tcb.fmc = Some(fmc);
+        report
+    }
+
+    #[test]
+    fn a_turin_vek_must_carry_the_fmc_spl() {
+        let chain_invalid = |r: Result<()>| {
+            let err = r.expect_err("refused");
+            assert_eq!(
+                err.refusal_code(),
+                Some(crate::error::RefusalCode::ChainInvalid),
+                "got: {err}"
+            );
+        };
+        for fmc in [0u8, 3] {
+            let report = turin_report(fmc);
+            for cn in ["SEV-VCEK", "SEV-VLEK"] {
+                let with = mint_turin_vek(cn, &report, Some(fmc));
+                verify_vcek_tcb(&report, &with, ProcessorGeneration::Turin)
+                    .unwrap_or_else(|e| panic!("{cn} with fmc {fmc}: {e}"));
+                // Absent, the FMC component is unendorsed even when it is 0.
+                let without = mint_turin_vek(cn, &report, None);
+                chain_invalid(verify_vcek_tcb(
+                    &report,
+                    &without,
+                    ProcessorGeneration::Turin,
+                ));
+                let other = mint_turin_vek(cn, &report, Some(fmc + 1));
+                chain_invalid(verify_vcek_tcb(&report, &other, ProcessorGeneration::Turin));
+            }
+        }
     }
 
     #[test]
