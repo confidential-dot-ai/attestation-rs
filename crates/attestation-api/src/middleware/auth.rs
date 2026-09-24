@@ -4,21 +4,35 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use std::sync::OnceLock;
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
 
-/// Constant-time comparison of an API key against all configured keys.
-/// Keys are hashed with SHA-256 before comparison to prevent timing
-/// side-channels that could leak key lengths.
+/// The key API keys are compared under, drawn once per process.
+fn comparison_key() -> &'static [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    KEY.get_or_init(rand::random)
+}
+
+fn comparison_tag(value: &str) -> [u8; 32] {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(comparison_key()).expect("HMAC accepts a key of any length");
+    mac.update(value.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Whether `provided` is one of the configured keys, compared as HMAC tags
+/// under a per-process key: constant time whatever the keys' lengths, and the
+/// tags are never stored or shown, so a slow password hash would add nothing.
 fn verify_api_key(provided: &str, keys: &[String]) -> bool {
-    let provided_hash: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
+    let provided_tag = comparison_tag(provided);
     let mut found = subtle::Choice::from(0);
     for expected in keys {
-        let expected_hash: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
-        found |= expected_hash.ct_eq(&provided_hash);
+        found |= comparison_tag(expected).ct_eq(&provided_tag);
     }
     bool::from(found)
 }
@@ -112,6 +126,16 @@ mod tests {
     fn rejects_when_no_keys_configured() {
         let keys: Vec<String> = vec![];
         assert!(!verify_api_key("anything", &keys));
+    }
+
+    #[test]
+    fn keys_are_compared_as_tags_under_the_process_key() {
+        use sha2::Digest;
+        assert_eq!(comparison_tag("k"), comparison_tag("k"));
+        assert_ne!(comparison_tag("k"), comparison_tag("k2"));
+        // A tag is keyed: without the process key it cannot be recomputed.
+        let bare: [u8; 32] = Sha256::digest(b"k").into();
+        assert_ne!(comparison_tag("k"), bare);
     }
 
     #[test]

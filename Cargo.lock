@@ -225,6 +225,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "hmac",
  "p256",
  "pem",
  "rand 0.8.6",

@@ -55,6 +55,7 @@ pem = { workspace = true }
 
 # Hashing
 sha2 = { workspace = true }
+hmac = { workspace = true }
 
 # Utilities
 base64 = { workspace = true }
