@@ -1,4 +1,4 @@
-//! SEV-SNP `cpu` submodule (section 6), over the primitives in `platforms::snp`.
+//! SEV-SNP `cpu` submodule (sections 9.1 and 11), over the primitives in `platforms::snp`.
 
 use super::inline::InlineCollateral;
 use super::resolve_floor;
@@ -109,7 +109,7 @@ fn generation_from_issuer(vek_der: &[u8]) -> Result<ProcessorGeneration> {
     })
 }
 
-/// Section 4.9 replay: the log's records, `chain_len` of them, replay every
+/// Section 8 replay: the log's records, `chain_len` of them, replay every
 /// touched slot from genesis to the committed value; untouched slots must
 /// still be at genesis; workload slots report their claim.
 fn replay_chain(
@@ -210,7 +210,7 @@ pub(crate) async fn appraise(
     }
     let signing_key = report_signing_key(report_bytes)?;
     let generation = generation(&report, collateral.raw("snp.vek"))?;
-    // Section 4.2: a hint that contradicts the signed data is an error.
+    // Section 3.4: a hint that contradicts the signed data is an error.
     if let Some(hint) = &cpu.cvm_platform.generation {
         if hint != generation.product_name() {
             return Err(invalid(format!(
@@ -411,7 +411,7 @@ pub(crate) async fn appraise(
             }
             // The commitment binds the values. Backing is what the pinned image
             // establishes; until that table exists it is `virtualized`
-            // (section 10), never what the envelope claims.
+            // (section 8.7), never what the envelope claims.
             for r in regs {
                 registers.push(VerifiedRegister {
                     index: r.index,

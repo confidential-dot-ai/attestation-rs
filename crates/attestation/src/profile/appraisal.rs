@@ -1,4 +1,4 @@
-//! Section 5: results, as EAR draft-ietf-rats-ear-04 claims sets.
+//! Section 12: results, as EAR draft-ietf-rats-ear-04 claims sets.
 //!
 //! The library produces the claims; the relying party signs. Layout follows the
 //! EAR CDDL: nonce, verifier id and raw evidence at the top, one appraisal
@@ -43,7 +43,7 @@ pub struct Appraisal {
     /// snapshot the verifier used (bit 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ear_raw_evidence: Option<CmwRecord>,
-    /// Every submodule's freshness binding held (section 5.3). The TDX and
+    /// Every submodule's freshness binding held (section 12.6). The TDX and
     /// confidential-GPU EAR profile defines the claim with a text value.
     pub ear_all_submods_bound: AllBound,
     /// One appraisal per evidence submodule, same names.
@@ -152,7 +152,7 @@ impl Tier {
     }
 }
 
-/// AR4SI trustworthiness vector (section 5.2). Absent categories are "no claim".
+/// AR4SI trustworthiness vector (section 12.4). Absent categories are "no claim".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TrustVector {
@@ -225,12 +225,12 @@ impl TrustVector {
 pub enum AttesterClaims {
     Cpu(Box<CpuClaims>),
     Vtpm(Box<VtpmClaims>),
-    /// NVIDIA device claims with the NRAS and `ear_nvidia_*` names unchanged (section 5.3).
+    /// NVIDIA device claims with the NRAS and `ear_nvidia_*` names unchanged (section 12.6).
     Device(DeviceClaims),
 }
 
-/// Normalized `cpu` claims (section 5.1). `compat` carries the `tdx_*` claims of
-/// section 5.3 and the `snp` object of section 5.4 beside them.
+/// Normalized `cpu` claims (section 12.2). `compat` carries the `tdx_*` claims of
+/// section 12.6 and the `snp` object of section 12.7 beside them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CpuClaims {
     pub cvm_platform: VerifiedPlatform,
@@ -263,7 +263,7 @@ pub struct VerifiedPlatform {
     pub tee: Tee,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
-    /// As reported by the attester; never hardware-proven (section 4.2).
+    /// As reported by the attester; never hardware-proven (section 3.4).
     pub hosting: Hosting,
 }
 
@@ -515,7 +515,7 @@ pub struct VerifierClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_backing_min: Option<BackingMin>,
     /// Device submodules only: the composing draft's `ear_nvidia_evidence`
-    /// (section 5.3), derived from NRAS's signed per-device claims.
+    /// (section 12.6), derived from NRAS's signed per-device claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ear_nvidia_evidence: Option<NvidiaEvidenceOutcome>,
 }

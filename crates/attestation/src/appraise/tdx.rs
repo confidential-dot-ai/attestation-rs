@@ -1,4 +1,4 @@
-//! Intel TDX `cpu` submodule (section 6), over the primitives in `platforms::tdx`.
+//! Intel TDX `cpu` submodule (sections 9.2 and 11), over the primitives in `platforms::tdx`.
 
 use super::inline::InlineCollateral;
 use super::resolve_floor;
@@ -73,7 +73,7 @@ pub(crate) async fn appraise(
     let auth = dcap::parse_auth_data(quote_bytes, body_end)?;
     let pck_pem = auth.pck_cert_chain_pem;
     let fmspc = dcap::extract_fmspc_from_pck(pck_pem)?.to_ascii_lowercase();
-    // Section 4.2: a hint that contradicts the signed data is an error.
+    // Section 3.4: a hint that contradicts the signed data is an error.
     if let Some(hint) = &cpu.cvm_platform.generation {
         if *hint != fmspc {
             return Err(invalid(format!(
@@ -342,7 +342,7 @@ pub(crate) async fn appraise(
                 let out = cel::replay(&records, |i| (i < 4).then_some([0u8; 48]), false)?;
                 // Every RTMR the log extends must reproduce. One it never
                 // extends is accounted for exactly when it is still zero, as
-                // the CCEL counts RTMR 3 (section 4.8).
+                // the CCEL counts RTMR 3 (section 7.4).
                 for (index, rtmr) in rtmrs.iter().enumerate() {
                     let slot = out.slots.get(&(index as u16)).filter(|s| s.extended > 0);
                     replayed[index] = match slot {

@@ -1,4 +1,4 @@
-//! Sections 4.8 and 4.9: runtime event records and the `ats-mr-v1` commitment.
+//! Sections 7.3 and 8: runtime event records and the `ats-mr-v1` commitment.
 //!
 //! Everything here is a pure function over bytes so the attester, the verifier
 //! and the vector script agree byte for byte. Vectors: Appendix B.
@@ -34,7 +34,7 @@ const CVM_FIELDS: [tcg_cel::Field; 2] = [
         optional: false,
     },
 ];
-/// The CEL content type of a c8s runtime event (section 4.8), taken through
+/// The CEL content type of a c8s runtime event (section 7.3), taken through
 /// the CEL extension socket: value 200, name `cvm`, content `{0: seq, 1: event}`.
 pub static CVM: tcg_cel::ContentType = tcg_cel::ContentType {
     value: 200,
@@ -133,7 +133,7 @@ pub mod cbor {
 }
 
 /// Content bytes of one c8s event: the deterministic CBOR map
-/// `{0: domain, 1: operation, 2: content_digest, 3: content?}` (section 4.8).
+/// `{0: domain, 1: operation, 2: content_digest, 3: content?}` (section 7.3).
 pub fn event_content(
     domain: &str,
     operation: &str,
@@ -171,7 +171,7 @@ pub fn record_digest(seq: u64, index: u16, event: &[u8]) -> [u8; 48] {
 }
 
 /// The boot record: domain `ats`, operation `boot`, `content_digest = SHA-384(bootseed)`,
-/// no content (section 4.9).
+/// no content (section 8.2).
 pub fn boot_record(bootseed: &[u8; 32]) -> Vec<u8> {
     event_content(DOMAIN_ATS, OP_BOOT, &sha384(&[bootseed]), None)
 }
@@ -193,7 +193,7 @@ pub fn claim_body(owner: &str, purpose: &str) -> Option<Vec<u8>> {
 }
 
 /// The claim record that opens a workload slot: domain `ats`, operation `claim`,
-/// content the claim body and its digest (section 4.9).
+/// content the claim body and its digest (section 8.3).
 pub fn claim_record(owner: &str, purpose: &str) -> Option<Vec<u8>> {
     let body = claim_body(owner, purpose)?;
     Some(event_content(

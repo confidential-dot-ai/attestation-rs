@@ -361,7 +361,7 @@ pub(super) fn cases() -> Vec<Authored> {
     };
 
     let mut out = vec![
-        // Section 4.3 and step 1: the envelope's own claims.
+        // Section 4.1 and step 1: the envelope's own claims.
         snp_case("envelope-nonce-too-short", "4.1", "eat_nonce is 16 to 64 bytes: 15 is refused",
             snp_envelope(&filled(7, 15)), Some(R::EnvelopeInvalid)),
         snp_case("envelope-nonce-too-long", "4.1", "eat_nonce is 16 to 64 bytes: 65 is refused",
@@ -376,7 +376,7 @@ pub(super) fn cases() -> Vec<Authored> {
             Some(R::EnvelopeInvalid)),
         snp_case("envelope-no-cpu-submodule", "4.2", "the cpu submodule is required",
             tweak(snp.clone(), |v| v["submods"] = json!({})), Some(R::EnvelopeInvalid)),
-        // Section 4.10: encoding.
+        // Section 4.7: encoding.
         case("envelope-duplicate-member", "4.7", "an object with a duplicate member name is rejected: the envelope",
             SNP_NOW, with_duplicate(&snp, &[], "eat_nonce", &json!(b64url(&[7u8; 16]))),
             Some(lenient().into()), none(), Some(R::EnvelopeInvalid)),
@@ -426,7 +426,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 v["eat_nonce"] = json!(format!("{}{bumped}", &text[..text.len() - 1]));
             }),
             Some(R::EnvelopeInvalid)),
-        // Section 4.10: bounds.
+        // Section 4.7: bounds.
         snp_case("envelope-submodules-at-bound", "4.7",
             "an envelope carries at most 66 submodules: 66 parse, and the appraisal refuses more devices than it accepts (device-not-allowed)",
             with_gpus(&nonce, 65), Some(R::DeviceNotAllowed)),
@@ -463,7 +463,7 @@ pub(super) fn cases() -> Vec<Authored> {
                     json!({"snp.vek": ["application/pkix-cert", b64url(SNP_VCEK), 2]});
             }),
             Some(R::EnvelopeInvalid)),
-        // Section 4.4 and 4.2: the cpu claims set.
+        // Sections 4.3 and 3.4: the cpu claims set.
         snp_case("snp-platform-vendor-disagrees-with-tee", "4.3", "cvm_platform: the vendor is the TEE's vendor",
             cpu(|v| v["submods"]["cpu"]["cvm_platform"]["vendor"] = json!("intel")), Some(R::EnvelopeInvalid)),
         snp_case("snp-generation-hint-contradicts-report", "3.4",
@@ -508,7 +508,7 @@ pub(super) fn cases() -> Vec<Authored> {
         case("tdx-binding-commitment", "5.4", "the commitment binding is SEV-SNP's; a TD quote binds its report data",
             SNP_NOW, tweak(tdx_regs.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("commitment")).into(),
             Some(live_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        // Section 4.5: keys and the anchor.
+        // Section 5: keys and the anchor.
         snp_case("snp-key-kind-reserved", "5.3", "tls-exporter is reserved for v2; a v1 verifier rejects it as an unknown kind",
             tweak(snp.clone(), |v| v["submods"]["cpu"]["cvm_binding"]["key"] =
                 json!({"kind": "tls-exporter", "value": b64url(&[0x11; 32])})),
@@ -545,7 +545,7 @@ pub(super) fn cases() -> Vec<Authored> {
                     json!({"kind": "x509-tbs-sha256", "value": b64url(&[0x22; 32])});
             }),
             Some(R::BindingMismatch)),
-        // Section 4.7: registers.
+        // Section 6: registers.
         case("tdx-log-without-registers", "6.1", "cvm_registers is required whenever cvm_log is present",
             SNP_NOW, tweak(tdx_live.clone(), |v| {
                 v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_registers");
@@ -597,7 +597,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 v["submods"]["vtpm"]["cvm_registers"][0]["value"] = json!(b64url(&[0u8; 48]));
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
-        // Sections 4.4 and 4.5: the vTPM binding.
+        // Sections 4.4 and 5.4: the vTPM binding.
         case("azure-snp-nonce-not-bound", "5.4", "vtpm-extradata: extraData == anchor; another nonce of the same length is refused",
             SNP_NOW, tweak(az_snp.clone(), |v| {
                 let mut other = az_nonce.clone();
@@ -684,7 +684,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 p.owner = Some(OwnerPolicy { id_key_digests: vec![FixedBytes(az_report.id_key_digest)] });
             }).into()),
             none(), None),
-        // Section 4.6: endorsements.
+        // Section 10: endorsements.
         snp_case("snp-endorsement-label-unknown", "10.1", "cvm_endorsements labels are exactly the ones section 10.1 lists",
             cpu(|v| v["submods"]["cpu"]["cvm_endorsements"]["snp.ask"] = json!(["application/pkix-cert", b64url(SNP_VCEK), 2])),
             Some(R::EnvelopeInvalid)),
@@ -730,7 +730,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 },
             )]),
             None),
-        // Section 4.8: logs.
+        // Section 7: logs.
         case("tdx-cel-cbor-replays", "7.4",
             "tcg-cel-cbor: the log replays from zero into the RTMRs it extends, each reproducing the signed value",
             SNP_NOW, tdx_with_log("tcg-cel-cbor", &cel_log(LIVE_CCEL2, false)).into(), Some(live_policy.clone().into()), none(), None),
@@ -751,7 +751,7 @@ pub(super) fn cases() -> Vec<Authored> {
         case("dstack-json-runtime-event-altered", "9.3", "dstack-json: a runtime event whose digest does not recompute is refused",
             SNP_NOW, dstack_envelope(&dstack_log_with_altered_runtime_event()).into(),
             Some(live_policy.clone().into()), none(), Some(R::ReplayMismatch)),
-        // Sections 5.2 and 7: reference values.
+        // Sections 12.4 and 13.4: reference values.
         snp_case("snp-launch-measurement-pinned", "12.4",
             "executables is 3 when only the launch measurement matched", snp.clone(), None),
         snp_case("snp-host-data-pinned", "13.4", "reference.host_data: the value cvm_host_data must carry appraises", snp.clone(), None),
@@ -820,7 +820,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 p.owner = Some(OwnerPolicy { id_key_digests: vec![FixedBytes([0x11; 48])] });
             }).into()),
             none(), Some(R::ReferenceMismatch)),
-        // Section 7: floors.
+        // Section 13.2: floors.
         snp_case("snp-machine-floor-overrides-default", "13.3", "a machine that names a tcb_floor is held to it, not to default_floor",
             snp.clone(), None),
         snp_case("snp-machine-floor-applies", "13.3", "a machine's own tcb_floor applies", snp.clone(), Some(R::TcbNotAllowed)),
@@ -849,7 +849,7 @@ pub(super) fn cases() -> Vec<Authored> {
                 p.tcb.default_floor = Some("f".into());
             }).into()),
             tdx.clone(), None),
-        // Section 7: devices.
+        // Section 13.5: devices.
         snp_case("snp-gpu-required-without-device", "13.5", "gpu.required with no device submodule is refused",
             snp.clone(), Some(R::DeviceRequired)),
         snp_case("snp-gpu-arch-not-allowed", "13.5", "gpu.expected_archs: a device of another architecture is refused",
@@ -877,7 +877,7 @@ pub(super) fn cases() -> Vec<Authored> {
         snp_case("cca-nested-token-not-implemented", "9", "Arm CCA is a platform this release does not appraise",
             tweak(snp.clone(), |v| v["submods"]["cpu"] = json!(["CBOR", b64url(b"\xd9\x03\x8b\xa0")])),
             Some(R::PlatformUnsupported)),
-        // Section 7: the policy's own validation.
+        // Section 13: the policy's own validation.
         snp_case("policy-unknown-member", "13.1", "a policy with an unknown member fails its validation", snp.clone(),
             Some(R::PolicyInvalid)),
         snp_case("policy-null-member", "13.1", "null is not a value in a policy either", snp.clone(), Some(R::PolicyInvalid)),
@@ -898,7 +898,7 @@ pub(super) fn cases() -> Vec<Authored> {
             snp.clone(), Some(R::PolicyInvalid)),
         snp_case("policy-commitment-header-not-pinned", "13.1", "commitment.header16 is the value section 8.1 pins", snp.clone(),
             Some(R::PolicyInvalid)),
-        // Section 5.1: the policy's identifier names the effective policy.
+        // Section 12.5: the policy's identifier names the effective policy.
         case("snp-crl-checked-under-the-default-policy", "13.1", "a case without a policy runs under the section 13.1 defaults",
             SNP_NOW, snp.clone().into(), None, genoa_crl.clone(), None),
         case("snp-crl-checked-with-defaults-spelled-out", "12.5",

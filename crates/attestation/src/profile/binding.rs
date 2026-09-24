@@ -1,4 +1,4 @@
-//! Section 4.5: freshness anchors and the NVIDIA nonce derivation.
+//! Section 5: freshness anchors and the NVIDIA nonce derivation.
 //!
 //! `||` is byte concatenation with no separators; quoted strings are ASCII
 //! bytes with no terminator. Vectors: Appendix B, `tests/profile_vectors.rs`.

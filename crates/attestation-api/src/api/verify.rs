@@ -196,7 +196,7 @@ pub async fn handler(
     }))
 }
 
-/// A profile envelope is appraised under the request's policy (section 6);
+/// A profile envelope is appraised under the request's policy (section 11);
 /// the appraisal is the result, so no token is minted for it.
 async fn appraise_profile(
     state: &AppState,

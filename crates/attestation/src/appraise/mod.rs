@@ -1,5 +1,5 @@
-//! Section 6 of the profile: the normative verification procedure over the
-//! profile types, producing an EAR appraisal (section 5).
+//! Section 11 of the standard: the verification procedure over the
+//! profile types, producing an EAR appraisal (section 12).
 //!
 //! `appraise` orchestrates the platform primitives the crate already has
 //! (report parsing, signature and chain verification, DCAP, revocation) and
@@ -42,7 +42,7 @@ use inline::InlineCollateral;
 /// What every submodule appraiser works from.
 #[cfg_attr(not(any(feature = "snp", feature = "tdx")), allow(dead_code))]
 pub(crate) struct Ctx<'a> {
-    /// The relying party's binding input (section 4.5).
+    /// The relying party's binding input (section 5.2).
     pub anchor: Vec<u8>,
     pub policy: &'a VerifyPolicy,
     /// The evaluation time every validity window is judged against (section 14).
@@ -70,7 +70,7 @@ impl<'a> Ctx<'a> {
                 ));
             }
         } else if binding.pattern == FreshnessPattern::Certificate {
-            // Section 4.5.1: the verifier compares the certificate it was
+            // Section 5.5: the verifier compares the certificate it was
             // presented with, which reaches it as the policy's key. Without
             // it the evidence would vouch for a certificate nobody saw.
             return Err(refuse(RefusalCode::BindingMismatch,
@@ -131,7 +131,7 @@ impl Verifier {
         self.appraise(&evidence, policy).await
     }
 
-    /// Appraise a validated envelope against a policy (section 6).
+    /// Appraise a validated envelope against a policy (section 11).
     pub async fn appraise(&self, evidence: &Evidence, policy: &VerifyPolicy) -> Result<Appraisal> {
         evidence.validate()?;
         policy.validate()?;
@@ -218,7 +218,7 @@ impl Verifier {
             ));
         }
 
-        // Devices go to NRAS in one request per architecture (section 6).
+        // Devices go to NRAS in one request per architecture (section 9.7.1).
         for (name, outcome) in self.appraise_devices(devices, nonce, policy, now).await? {
             all_bound &= outcome.bound;
             submods.insert(name, outcome.appraisal);
@@ -313,7 +313,7 @@ impl Verifier {
 }
 
 /// The floor a machine is held to: its allowlist entry's, else the default.
-/// `identity` is the value the hardware chain authenticated (section 7).
+/// `identity` is the value the hardware chain authenticated (section 13.3).
 #[cfg_attr(
     not(any(feature = "snp", feature = "tdx", feature = "nvidia-gpu")),
     allow(dead_code)

@@ -42,7 +42,7 @@
     },
     "CommitmentPolicy": {
       "additionalProperties": false,
-      "description": "The pinned commitment parameters (section 4.9).",
+      "description": "The pinned commitment parameters (section 8.1).",
       "properties": {
         "header16": {
           "$ref": "#/$defs/Base64UrlBytes16",
@@ -154,7 +154,7 @@
     },
     "GpuPolicy": {
       "additionalProperties": false,
-      "description": "NVIDIA device policy (section 7, `gpu`). Defined without a feature gate so\nthe policy schema is one schema; the `nvidia-gpu` verifier converts it to\nits own parameter types.",
+      "description": "NVIDIA device policy (section 13.5, `gpu`). Defined without a feature gate so\nthe policy schema is one schema; the `nvidia-gpu` verifier converts it to\nits own parameter types.",
       "properties": {
         "device_policy": {
           "$ref": "#/$defs/GpuDevicePolicy",
@@ -183,7 +183,7 @@
     },
     "IdentityPolicy": {
       "additionalProperties": false,
-      "description": "Machine allowlist (section 7). An identity absent from `machines` fails.",
+      "description": "Machine allowlist (section 13.3). An identity absent from `machines` fails.",
       "properties": {
         "machines": {
           "items": {

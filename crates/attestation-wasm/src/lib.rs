@@ -239,7 +239,7 @@ fn to_json(appraisal: &attestation::profile::Appraisal) -> Result<String, Failur
         .map_err(|e| Failure::Usage(format!("json serialize: {e}")))
 }
 
-/// Appraise a profile envelope (`tag:confidential.ai,2026:cvm#1`, section 6)
+/// Appraise a profile envelope (`tag:confidential.ai,2026:cvm#1`, section 11)
 /// against a policy and return the EAR appraisal as JSON.
 ///
 /// - `evidence_json`: the envelope (`schemas/cvm-evidence-v1.json`)
@@ -307,7 +307,7 @@ struct Inputs {
     /// the caller compares the appraisal's `eat_nonce` itself.
     #[serde(default)]
     nonce: Option<String>,
-    /// Section 8 collateral keys to artifacts, base64; a key not given is
+    /// Section 10.3 collateral keys to artifacts, base64; a key not given is
     /// unavailable collateral, and inline endorsements stay inputs.
     #[serde(default)]
     collateral: BTreeMap<String, Artifact>,
@@ -406,7 +406,7 @@ pub async fn appraise_with_inputs(
 /// fetches collateral itself.
 ///
 /// - `evidence_json`: the envelope
-/// - `policy_json`: a `VerifyPolicy`, or absent for the section 7 default
+/// - `policy_json`: a `VerifyPolicy`, or absent for the section 13.1 default
 /// - `inputs_json`: the [`Inputs`] object
 ///
 /// Throws a JS `Error` whose `code` is the refusal code (section 14.4); an
@@ -424,7 +424,7 @@ pub async fn appraise_with(
 }
 
 /// Appraise a pre-profile `{ platform, evidence }` envelope through the
-/// section 9 mapping. `nonce` is what the relying party issued (the anchor
+/// legacy mapping. `nonce` is what the relying party issued (the anchor
 /// with no key); `key_json` is an optional `KeyBinding` (`{kind, value}`).
 ///
 /// Throws a JS `Error` whose `code` is the refusal code (section 14.4).

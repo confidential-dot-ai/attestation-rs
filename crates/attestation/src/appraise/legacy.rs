@@ -1,4 +1,4 @@
-//! Section 9: the pre-profile envelope `{platform, evidence}` mapped to the
+//! The pre-profile envelope `{platform, evidence}` mapped to the
 //! profile so existing callers keep working while they migrate.
 
 use super::invalid;
@@ -200,7 +200,7 @@ impl Evidence {
     }
 }
 
-/// The four RTMRs of a quote as profile registers (section 4.7).
+/// The four RTMRs of a quote as profile registers (section 6.1).
 #[cfg(feature = "tdx")]
 fn tdx_registers(quote: &[u8]) -> Result<Vec<Register>> {
     let parsed = crate::platforms::tdx::verify::parse_tdx_quote(quote)?;

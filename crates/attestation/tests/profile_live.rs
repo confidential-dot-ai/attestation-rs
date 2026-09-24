@@ -128,7 +128,7 @@ async fn common(platform: PlatformType, verifier: &Verifier, policy: &VerifyPoli
     verifier
         .appraise_legacy_json(&legacy, &nonce, None, policy)
         .await
-        .expect("the old envelope appraises through section 9");
+        .expect("the old envelope appraises through the legacy mapping");
     let old = verifier
         .verify(
             &legacy,

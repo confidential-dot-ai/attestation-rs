@@ -348,8 +348,8 @@ async fn cmd_attest(args: AttestArgs) {
     }
 }
 
-/// The profile path (section 6): the envelope, or a legacy envelope mapped
-/// through section 9 with the relying party's nonce, appraised under a policy.
+/// The profile path (section 11): the envelope, or a legacy envelope mapped
+/// through the legacy mapping with the relying party's nonce, appraised under a policy.
 /// The legacy expectation flags keep their meaning on the profile path: each
 /// becomes the corresponding policy pin, so a caller that migrates the
 /// evidence format loses no check.

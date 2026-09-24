@@ -240,8 +240,8 @@ pub async fn attest(
     serde_json::to_vec(&envelope).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
 }
 
-/// Attest under the profile (section 4.3): `nonce` (16 to 64 bytes) and an
-/// optional key binding form the anchor of section 4.5, which every platform
+/// Attest under the profile (section 4.1): `nonce` (16 to 64 bytes) and an
+/// optional key binding form the anchor of section 5.2, which every platform
 /// binds in its own mode; the returned envelope is the profile's JSON, so
 /// `Verifier::appraise_json` is its verifier. `with_devices` also collects
 /// NVIDIA device evidence (needs the `nvidia-gpu-attest` feature).
@@ -269,7 +269,7 @@ pub async fn attest_profile(
     })?;
     // Azure binds the anchor as the vTPM quote's extraData verbatim, a
     // TPM2B_DATA of at most sizeof(TPMT_HA) = 50 bytes on Azure's vTPM; every
-    // other platform carries pad64(anchor) in report_data (section 4.5).
+    // other platform carries pad64(anchor) in report_data (section 5.4).
     let report_data = match platform {
         PlatformType::AzSnp | PlatformType::AzTdx => {
             const AZURE_QUALIFYING_DATA_MAX: usize = 50;

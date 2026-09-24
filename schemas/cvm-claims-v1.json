@@ -18,7 +18,7 @@
         },
         {
           "$ref": "#/$defs/DeviceClaims",
-          "description": "NVIDIA device claims with the NRAS and `ear_nvidia_*` names unchanged (section 5.3)."
+          "description": "NVIDIA device claims with the NRAS and `ear_nvidia_*` names unchanged (section 12.6)."
         }
       ],
       "description": "`ear_attester_claims`, shaped by the submodule kind."
@@ -113,7 +113,7 @@
     },
     "ChainInfo": {
       "additionalProperties": false,
-      "description": "`cvm_chain` (section 4.9).",
+      "description": "`cvm_chain` (section 8.1).",
       "properties": {
         "chain_len": {
           "format": "uint64",
@@ -183,7 +183,7 @@
     },
     "CpuClaims": {
       "additionalProperties": true,
-      "description": "Normalized `cpu` claims (section 5.1). `compat` carries the `tdx_*` claims of\nsection 5.3 and the `snp` object of section 5.4 beside them.",
+      "description": "Normalized `cpu` claims (section 12.2). `compat` carries the `tdx_*` claims of\nsection 12.6 and the `snp` object of section 12.7 beside them.",
       "properties": {
         "bootseed": {
           "$ref": "#/$defs/Base64UrlBytes32"
@@ -874,7 +874,7 @@
     },
     "TrustVector": {
       "additionalProperties": false,
-      "description": "AR4SI trustworthiness vector (section 5.2). Absent categories are \"no claim\".",
+      "description": "AR4SI trustworthiness vector (section 12.4). Absent categories are \"no claim\".",
       "properties": {
         "configuration": {
           "format": "int8",
@@ -943,7 +943,7 @@
         },
         "hosting": {
           "$ref": "#/$defs/Hosting",
-          "description": "As reported by the attester; never hardware-proven (section 4.2)."
+          "description": "As reported by the attester; never hardware-proven (section 3.4)."
         },
         "tee": {
           "$ref": "#/$defs/Tee"
@@ -1047,7 +1047,7 @@
         },
         "ear_nvidia_evidence": {
           "$ref": "#/$defs/NvidiaEvidenceOutcome",
-          "description": "Device submodules only: the composing draft's `ear_nvidia_evidence`\n(section 5.3), derived from NRAS's signed per-device claims."
+          "description": "Device submodules only: the composing draft's `ear_nvidia_evidence`\n(section 12.6), derived from NRAS's signed per-device claims."
         }
       },
       "type": "object"
@@ -1099,7 +1099,7 @@
   "properties": {
     "ear_all_submods_bound": {
       "$ref": "#/$defs/AllBound",
-      "description": "Every submodule's freshness binding held (section 5.3). The TDX and\nconfidential-GPU EAR profile defines the claim with a text value."
+      "description": "Every submodule's freshness binding held (section 12.6). The TDX and\nconfidential-GPU EAR profile defines the claim with a text value."
     },
     "ear_raw_evidence": {
       "$ref": "#/$defs/CmwRecord",

@@ -67,7 +67,7 @@ pub(crate) fn appraise(
     extract_ak_pub_from_jwk_json(&hcl.var_data).map_err(|e| invalid(format!("cvm_tpm_ak: {e}")))?;
 
     // The AK inside var_data signs the quote; the quote's digest covers the
-    // selected PCRs; extraData is the anchor, exactly (section 4.5).
+    // selected PCRs; extraData is the anchor, exactly (section 5.4).
     let quote = &v.cvm_tpm_quote;
     let pcrs: Vec<Vec<u8>> = quote.pcrs.iter().map(|p| p.0.clone()).collect();
     verify_tpm_signature(
@@ -82,7 +82,7 @@ pub(crate) fn appraise(
 
     // 8. A TCG2 log replays into the quoted PCRs in the quoted bank: a PCR
     // the log extends must reproduce, and one it never extends is accounted
-    // for exactly when it holds its PC Client starting value (section 4.8).
+    // for exactly when it holds its PC Client starting value (section 7.4).
     let mut replayed: BTreeMap<u16, bool> = BTreeMap::new();
     if let Some(log) = &v.cvm_log {
         if log.format != LogFormat::Tpm2EventLog {

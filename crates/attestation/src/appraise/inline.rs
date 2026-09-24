@@ -1,4 +1,4 @@
-//! Inline endorsements (`cvm_endorsements`, section 4.6) as a collateral
+//! Inline endorsements (`cvm_endorsements`, section 10.1) as a collateral
 //! source behind the verifier's providers. Inline artifacts are inputs, never
 //! authority: the verifier's own collateral is used when it has any, and an
 //! inline copy only stands in when a provider is absent or fails. Every inline
@@ -24,7 +24,7 @@ pub struct InlineCollateral<'a> {
     now: DateTime<Utc>,
 }
 
-/// The inline form of a signed PCS body (section 4.6): the exact response
+/// The inline form of a signed PCS body (section 10.1): the exact response
 /// bytes and the PEM issuer chain, both byte strings.
 #[derive(serde::Deserialize)]
 struct InlinePcs {

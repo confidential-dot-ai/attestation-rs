@@ -24,7 +24,7 @@
     },
     "Binding": {
       "additionalProperties": false,
-      "description": "`cvm_binding` (section 4.5).",
+      "description": "`cvm_binding` (section 5).",
       "properties": {
         "key": {
           "$ref": "#/$defs/KeyBinding"
@@ -54,7 +54,7 @@
     },
     "ChainInfo": {
       "additionalProperties": false,
-      "description": "`cvm_chain` (section 4.9).",
+      "description": "`cvm_chain` (section 8.1).",
       "properties": {
         "chain_len": {
           "format": "uint64",
@@ -113,11 +113,11 @@
       "type": "array"
     },
     "CpuEvidence": {
-      "description": "`cpu` submodule claims set (section 4.4). Unknown claims are ignored;\nunknown fields inside any `cvm_*` object are rejected by the field types.",
+      "description": "`cpu` submodule claims set (section 4.3). Unknown claims are ignored;\nunknown fields inside any `cvm_*` object are rejected by the field types.",
       "properties": {
         "bootseed": {
           "$ref": "#/$defs/Base64UrlBytes32",
-          "description": "EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 4.9)."
+          "description": "EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 8.2)."
         },
         "cvm_binding": {
           "$ref": "#/$defs/Binding"
@@ -135,7 +135,7 @@
           "$ref": "#/$defs/PlatformHint"
         },
         "cvm_provenance": {
-          "description": "Reserved (section 4.4): carried through, never interpreted in v1."
+          "description": "Reserved (section 4.3): carried through, never interpreted in v1."
         },
         "cvm_registers": {
           "items": {
@@ -173,7 +173,7 @@
     },
     "EventLog": {
       "additionalProperties": false,
-      "description": "`cvm_log` (section 4.8).",
+      "description": "`cvm_log` (section 7.1).",
       "properties": {
         "data": {
           "$ref": "#/$defs/Base64Url",
@@ -207,7 +207,7 @@
       "type": "string"
     },
     "GpuDeviceEvidence": {
-      "description": "`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence\nplus the nonce binding (section 4.4). A claims set like the others, so an\nunknown claim is ignored (section 4.10).",
+      "description": "`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence\nplus the nonce binding (section 4.5). A claims set like the others, so an\nunknown claim is ignored (section 4.7).",
       "properties": {
         "arch": {
           "$ref": "#/$defs/GpuArch"
@@ -368,7 +368,7 @@
     },
     "Register": {
       "additionalProperties": false,
-      "description": "One register (section 4.7).",
+      "description": "One register (section 6.1).",
       "properties": {
         "alg": {
           "$ref": "#/$defs/HashAlg"
@@ -514,7 +514,7 @@
   },
   "$id": "https://confidential.ai/schemas/cvm-evidence-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "The envelope (section 4.3). Unknown top-level claims are ignored, as EAT\nextensibility requires; everything the profile defines is checked.",
+  "description": "The envelope (section 4.1). Unknown top-level claims are ignored, as EAT\nextensibility requires; everything the profile defines is checked.",
   "properties": {
     "cvm_version": {
       "const": 1,

@@ -1,6 +1,6 @@
-//! Section 4.8: the `cvm` CEL content type, whose custodian this profile is,
+//! Section 7.3: the `cvm` CEL content type, whose custodian this profile is,
 //! the logs that carry it, and the replay that reproduces registers from them
-//! (sections 4.8 and 4.9). CEL parsing, record numbering and register
+//! (sections 7.4 and 8). CEL parsing, record numbering and register
 //! arithmetic are `tcg_cel`'s; this module adds what `cvm` defines.
 //!
 //! A `cvm` record's content is `{0: seq, 1: event}`: `seq` is its place among
@@ -39,7 +39,7 @@ pub(crate) fn cel_err(e: tcg_cel::Error) -> AttestationError {
     }
 }
 
-/// A c8s event (section 4.8): `{0: domain, 1: operation, 2: content_digest, 3: content?}`.
+/// A c8s event (section 7.3): `{0: domain, 1: operation, 2: content_digest, 3: content?}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CvmEvent {
     pub domain: String,
@@ -213,7 +213,7 @@ pub fn parse_cvm_event(event: &[u8]) -> Result<CvmEvent> {
     })
 }
 
-/// The claim body `{0: owner, 1: purpose}` (section 4.9).
+/// The claim body `{0: owner, 1: purpose}` (section 8.3).
 pub fn parse_claim_body(body: &[u8]) -> Result<(String, String)> {
     let mut r = cbor::Reader::new(body);
     if r.map(2)? != 2 {
@@ -246,7 +246,7 @@ pub fn parse_json(data: &[u8]) -> Result<Vec<Record>> {
     tcg_cel::decode_json(data, &[&CVM]).map_err(cel_err)
 }
 
-/// The dstack runtime log (section 4.8), each runtime event's digest
+/// The dstack runtime log (section 9.3), each runtime event's digest
 /// recomputed from its fields by its declared version's rule.
 pub fn parse_dstack_json(data: &[u8]) -> Result<Vec<Record>> {
     tcg_cel::dstack::to_cel(data).map_err(cel_err)
@@ -296,7 +296,7 @@ fn slot_of(rec: &Record, pos: usize) -> Result<u16> {
 /// must reproduce. With `workload_rules` (an SNP commitment log), every record
 /// must be `cvm`, since other content carries no sequence binding, and slots
 /// from [`FIRST_WORKLOAD_SLOT`] up must open with a claim record and take no
-/// second one (section 4.9). Without them, other content types replay as
+/// second one (section 8.3). Without them, other content types replay as
 /// recorded, so a `cvm` record relabeled as one is indistinguishable from it:
 /// such a replay establishes register values, never the set of `cvm` events.
 pub fn replay(

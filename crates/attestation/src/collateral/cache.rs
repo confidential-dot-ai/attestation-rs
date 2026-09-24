@@ -3,7 +3,7 @@
 //! held and pinned artifacts warm. It implements the three provider traits, so
 //! a verifier is wired with one call and a service needs no adapters.
 //!
-//! Serving rule (profile section 10): a copy is served while it is inside the
+//! Serving rule (profile section 10.2): a copy is served while it is inside the
 //! artifact's own validity window. The per-kind max age is a refresh trigger,
 //! never a reason to refuse a copy that the vendor still says is valid. Kinds
 //! without a window (a JWKS) are bounded by their max age alone.

@@ -30,7 +30,7 @@ pub struct AttestRequest {
     /// (profile only).
     #[serde(default)]
     pub nonce: Option<String>,
-    /// Optional key binding (profile section 4.5.1).
+    /// Optional key binding (profile section 5.5).
     #[serde(default)]
     pub key: Option<attestation::profile::KeyBinding>,
 }
@@ -67,7 +67,7 @@ pub struct AttestResponse {
     pub nvidia_gpu: Option<Value>,
 }
 
-/// The profile envelope (section 4.3) as the body, or the legacy split form
+/// The profile envelope (section 4.1) as the body, or the legacy split form
 /// `{platform, evidence, nvidia_gpu?}`.
 pub async fn handler(
     State(state): State<AppState>,

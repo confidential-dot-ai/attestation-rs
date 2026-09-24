@@ -103,7 +103,7 @@ impl CollateralKind {
         }
     }
 
-    /// Media type of the canonical bytes (section 4.6 of the profile).
+    /// Media type of the canonical bytes (section 10.1 of the profile).
     pub fn media_type(self) -> &'static str {
         match self {
             CollateralKind::SnpVcek => "application/pkix-cert",

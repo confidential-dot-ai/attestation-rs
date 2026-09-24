@@ -1,4 +1,4 @@
-//! Byte strings on the wire: base64url without padding (section 4.10).
+//! Byte strings on the wire: base64url without padding (section 4.7).
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

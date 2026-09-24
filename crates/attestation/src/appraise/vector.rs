@@ -1,5 +1,5 @@
 //! Reference values, machine allowlists, backing floors and the AR4SI
-//! trustworthiness vector (sections 5.2 and 7).
+//! trustworthiness vector (sections 12.4 and 13).
 
 use super::refuse;
 use crate::error::{RefusalCode, Result};
@@ -25,7 +25,7 @@ fn matches_any(refs: &[Digest], alg: HashAlg, value: &[u8]) -> bool {
         .any(|d| d.alg == alg && constant_time_eq(d.value.as_slice(), value))
 }
 
-/// Section 5.1 `cvm_reference` and the executables claim. A configured
+/// Section 12.3 `cvm_reference` and the executables claim. A configured
 /// expectation that fails is an error, never a lower value.
 pub(crate) fn evaluate_reference(
     policy: &VerifyPolicy,
@@ -79,7 +79,7 @@ pub(crate) fn evaluate_reference(
     if !launch_pinned && registers.is_empty() {
         return Ok((None, None));
     }
-    // Section 5.2: 2 needs the launch measurement and every pinned register;
+    // Section 12.4: 2 needs the launch measurement and every pinned register;
     // 3 is the launch measurement alone; with the launch measurement unpinned
     // nothing vouches for the firmware, so no claim is made.
     let executables = match (launch_pinned, registers.is_empty()) {
@@ -96,7 +96,7 @@ pub(crate) fn evaluate_reference(
     ))
 }
 
-/// Section 4.7: the weakest backing seen must reach the policy floor.
+/// Section 6.4: the weakest backing seen must reach the policy floor.
 pub(crate) fn evaluate_backing(
     policy: &VerifyPolicy,
     registers: &[VerifiedRegister],

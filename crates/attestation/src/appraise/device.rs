@@ -1,4 +1,4 @@
-//! `gpu/<ueid>` and `nvswitch/<ueid>` submodules (sections 4.4, 5.3 and 6):
+//! `gpu/<ueid>` and `nvswitch/<ueid>` submodules (sections 4.5, 9.7 and 12.6):
 //! NVIDIA devices appraised through NRAS, one request per architecture.
 //!
 //! NRAS signs one JWT per device, named `GPU-<i>` or `SWITCH-<i>` by the
@@ -171,7 +171,7 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
             claim_value(&Tcb::Gpu { driver, vbios })?,
         );
     }
-    // Section 5.2: sourced-data is what an NRAS-affirmed device with an
+    // Section 12.4: sourced-data is what an NRAS-affirmed device with an
     // acceptable device policy earns; the CPU carries the platform claims.
     let vector = TrustVector {
         instance_identity,
@@ -212,7 +212,7 @@ fn device_outcome(claims: NvidiaGpuDeviceClaims, policy: &VerifyPolicy) -> Resul
             },
         },
         // A device NRAS reports unmatched is not bound to this session, even
-        // when policy tolerates the mismatch (section 5.3).
+        // when policy tolerates the mismatch (section 12.6).
         bound: claims.nonce_match == Some(true),
     })
 }

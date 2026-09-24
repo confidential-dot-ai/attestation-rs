@@ -466,7 +466,7 @@ async fn tdx_quote_with_fixture_collateral_appraises() {
         .await
         .unwrap();
     let cpu = &appraisal.submods["cpu"];
-    // Policy allowed debug; the vector still says so (section 5.2).
+    // Policy allowed debug; the vector still says so (section 12.4).
     assert_eq!(cpu.ear_trustworthiness_vector.configuration, Some(96));
     assert_eq!(cpu.ear_status, Tier::Contraindicated);
     let AttesterClaims::Cpu(claims) = &cpu.ear_attester_claims else {

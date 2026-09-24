@@ -1137,7 +1137,7 @@ mod author {
             text.push('\n');
             std::fs::write(dir.join(format!("{}.json", a.id)), text).unwrap();
         }
-        // Section 5.1: the policy id names the effective policy, so the
+        // Section 12.5: the policy id names the effective policy, so the
         // defaults written out and no policy at all are one appraisal.
         let same = |a: &str, b: &str| {
             let read_expected = |id: &str| read(&format!("expected/{id}.json"));
@@ -1152,7 +1152,7 @@ mod author {
     }
 }
 
-/// Section 8: the CDDL module (`schemas/cvm-profile-v1.cddl`) agrees with the
+/// Appendix C: the CDDL module (`schemas/cvm-profile-v1.cddl`) agrees with the
 /// committed JSON Schemas and with this implementation's parsers, on every
 /// input of the corpus and on single-point changes of the inputs that cover
 /// every member path. For each instance:

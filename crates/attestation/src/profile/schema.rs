@@ -11,7 +11,7 @@ pub const EVIDENCE_SCHEMA_FILE: &str = "cvm-evidence-v1.json";
 pub const CLAIMS_SCHEMA_FILE: &str = "cvm-claims-v1.json";
 pub const POLICY_SCHEMA_FILE: &str = "cvm-policy-v1.json";
 
-/// Section 4.10: null is not a value, so no schema admits it where the
+/// Section 4.7: null is not a value, so no schema admits it where the
 /// profile types have an optional member (schemars writes `Option<T>` as
 /// `T` or null).
 fn drop_null(schema: &mut schemars::Schema) {

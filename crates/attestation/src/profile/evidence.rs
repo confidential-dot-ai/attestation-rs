@@ -1,7 +1,7 @@
 //! Section 4: the evidence envelope and its submodules.
 //!
 //! `Evidence::from_json` is the only entry point a verifier should use: it
-//! bounds the input, dispatches each submodule by its name form (section 4.3),
+//! bounds the input, dispatches each submodule by its name form (section 4.2),
 //! and runs every structural rule of section 4 before returning.
 
 use super::bytes::{Bytes, FixedBytes};
@@ -32,7 +32,7 @@ pub const MAX_SUBMODS: usize = 66;
 /// A device `<ueid>` is printable ASCII without `/`, at most this long.
 pub const MAX_UEID_LEN: usize = 128;
 
-/// The reserved submodule name forms (section 4.3).
+/// The reserved submodule name forms (section 4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmodName {
     Cpu,
@@ -74,7 +74,7 @@ impl SubmodName {
     }
 }
 
-/// The envelope (section 4.3). Unknown top-level claims are ignored, as EAT
+/// The envelope (section 4.1). Unknown top-level claims are ignored, as EAT
 /// extensibility requires; everything the profile defines is checked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Evidence {
@@ -100,7 +100,7 @@ fn submods_schema(g: &mut SchemaGenerator) -> Schema {
     let device = g.subschema_for::<GpuDeviceEvidence>();
     json_schema!({
         "type": "object",
-        "description": "one entry per attester, keyed by the reserved name forms of section 4.3",
+        "description": "one entry per attester, keyed by the reserved name forms of section 4.2",
         "properties": {
             "cpu": { "anyOf": [cpu, token] },
             "vtpm": vtpm
@@ -335,7 +335,7 @@ impl<'de> Visitor<'de> for CpuOrTokenVisitor {
     }
 }
 
-/// One attester's submodule (section 4.4).
+/// One attester's submodule (section 4.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Submod {
@@ -412,7 +412,7 @@ impl JsonSchema for NestedToken {
     }
 }
 
-/// `cpu` submodule claims set (section 4.4). Unknown claims are ignored;
+/// `cpu` submodule claims set (section 4.3). Unknown claims are ignored;
 /// unknown fields inside any `cvm_*` object are rejected by the field types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CpuEvidence {
@@ -444,7 +444,7 @@ pub struct CpuEvidence {
         skip_serializing_if = "Option::is_none"
     )]
     pub cvm_chain: Option<ChainInfo>,
-    /// EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 4.9).
+    /// EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 8.2).
     #[serde(
         default,
         deserialize_with = "super::strict::present",
@@ -459,7 +459,7 @@ pub struct CpuEvidence {
         skip_serializing_if = "Option::is_none"
     )]
     pub dbgstat: Option<DebugStatus>,
-    /// Reserved (section 4.4): carried through, never interpreted in v1.
+    /// Reserved (section 4.3): carried through, never interpreted in v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cvm_provenance: Option<serde_json::Value>,
 }
@@ -514,7 +514,7 @@ pub enum Hosting {
     Dstack,
 }
 
-/// `cvm_binding` (section 4.5).
+/// `cvm_binding` (section 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -617,7 +617,7 @@ impl KeyBinding {
     }
 }
 
-/// One register (section 4.7).
+/// One register (section 6.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Register {
@@ -629,7 +629,7 @@ pub struct Register {
 }
 
 impl Register {
-    /// Structural rules of section 4.7. `backing` in evidence is a hint: the
+    /// Structural rules of sections 6.1 and 6.4. `backing` in evidence is a hint: the
     /// sources with a hardware-signed value are `hardware`, a vTPM is
     /// `privileged-service`, and an SNP register can never claim `hardware`;
     /// the verifier reports what the pinned image establishes, never more.
@@ -771,7 +771,7 @@ pub enum Backing {
     Hardware,
 }
 
-/// `cvm_log` (section 4.8).
+/// `cvm_log` (section 7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EventLog {
@@ -834,7 +834,7 @@ impl DebugStatus {
     }
 }
 
-/// `cvm_chain` (section 4.9).
+/// `cvm_chain` (section 8.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChainInfo {
@@ -947,8 +947,8 @@ impl From<GpuArch> for crate::types::NvidiaGpuArch {
 }
 
 /// `gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence
-/// plus the nonce binding (section 4.4). A claims set like the others, so an
-/// unknown claim is ignored (section 4.10).
+/// plus the nonce binding (section 4.5). A claims set like the others, so an
+/// unknown claim is ignored (section 4.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GpuDeviceEvidence {
     pub arch: GpuArch,
@@ -1018,7 +1018,7 @@ impl CpuEvidence {
             return Err(invalid("cvm_platform: vendor and tee disagree"));
         }
         // The hint names what the verifier derives from the report (section
-        // 4.4): an SNP generation, or a TDX FMSPC in lowercase hex.
+        // 4.3): an SNP generation, or a TDX FMSPC in lowercase hex.
         if let Some(g) = &p.generation {
             let ok = match p.tee {
                 Tee::SevSnp => SNP_GENERATIONS.contains(&g.as_str()),
@@ -1117,7 +1117,7 @@ impl CpuEvidence {
         let commitment = b.mode == BindingMode::Commitment;
         if p.tee == Tee::SevSnp && self.cvm_registers.is_some() && !commitment {
             return Err(invalid(
-                "cpu: snp-vmr registers bind only through the commitment (section 4.7)",
+                "cpu: snp-vmr registers bind only through the commitment (section 6.5)",
             ));
         }
         if let Some(regs) = &self.cvm_registers {

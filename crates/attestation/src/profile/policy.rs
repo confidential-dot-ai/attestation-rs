@@ -1,4 +1,4 @@
-//! Section 7: the verifier's policy. Every default fails closed.
+//! Section 13: the verifier's policy. Every default fails closed.
 
 use super::appraisal::Digest;
 use super::bytes::{Bytes, FixedBytes};
@@ -179,7 +179,7 @@ pub struct FreshnessPolicy {
     pub key: Option<KeyBinding>,
 }
 
-/// The pinned commitment parameters (section 4.9).
+/// The pinned commitment parameters (section 8.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CommitmentPolicy {
@@ -317,7 +317,7 @@ impl SnpTcbValue {
 }
 
 impl VerifyPolicy {
-    /// This policy's identifier for `ear_appraisal_policy_ids` (section 5.1):
+    /// This policy's identifier for `ear_appraisal_policy_ids` (section 12.5):
     /// `ni:///sha-384;<base64url>` (RFC 6920) over the JCS (RFC 8785)
     /// serialization of the effective policy, every member present with its
     /// value or default and null members omitted.
@@ -445,7 +445,7 @@ impl Default for PolicyBitsPolicy {
 /// 128 characters; chip ids are 64 bytes, PPIDs 16.
 pub const MAX_MACHINE_ID: usize = 128;
 
-/// Machine allowlist (section 7). An identity absent from `machines` fails.
+/// Machine allowlist (section 13.3). An identity absent from `machines` fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityPolicy {
@@ -476,7 +476,7 @@ pub struct OwnerPolicy {
     pub id_key_digests: Vec<FixedBytes<48>>,
 }
 
-/// NVIDIA device policy (section 7, `gpu`). Defined without a feature gate so
+/// NVIDIA device policy (section 13.5, `gpu`). Defined without a feature gate so
 /// the policy schema is one schema; the `nvidia-gpu` verifier converts it to
 /// its own parameter types.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
