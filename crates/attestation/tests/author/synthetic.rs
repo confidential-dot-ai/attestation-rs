@@ -607,6 +607,13 @@ pub(super) fn cases() -> Vec<Authored> {
                 h[0x4CC] = 2;
             }).into(),
             Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
+        case("azure-snp-hcl-version-not-1", "9.4.1",
+            "the HCL report's request data version (offset 0x4C4) is 1, since version 2 moves the variable data; another value is refused",
+            SNP_NOW, with_hcl(&az_snp, |h| {
+                assert_eq!(h[0x4C4..0x4C8], 1u32.to_le_bytes());
+                h[0x4C4] = 2;
+            }).into(),
+            Some(az_snp_policy.clone().into()), none(), Some(R::EnvelopeInvalid)),
         case("azure-snp-hcl-report-type-for-tdx", "9.4.1",
             "the HCL report's type names the TEE of the cpu submodule; an SEV-SNP cpu with report type 4 (TDX) is refused",
             SNP_NOW, with_hcl(&az_snp, |h| {

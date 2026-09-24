@@ -38,6 +38,16 @@ pub(crate) fn appraise(
     ctx: &Ctx<'_>,
 ) -> Result<VtpmOutcome> {
     let policy = ctx.policy;
+    // Section 9.4.3: version 1 quotes the SHA-256 bank only.
+    if v.cvm_tpm_quote.bank != HashAlg::Sha256 {
+        return Err(refuse(
+            RefusalCode::Unsupported,
+            format!(
+                "cvm_tpm_quote.bank {} is not sha256",
+                v.cvm_tpm_quote.bank.as_str()
+            ),
+        ));
+    }
     let TpmAkMethod::HclReport = v.cvm_tpm_ak.method;
     // The HCL report is unsigned envelope data: a shape failure is the envelope's.
     let hcl = parse_hcl_report(v.cvm_tpm_ak.data.as_slice())
@@ -67,9 +77,8 @@ pub(crate) fn appraise(
     )?;
     verify_tpm_pcrs(quote.message.as_slice(), &pcrs)?;
     verify_tpm_nonce(quote.message.as_slice(), &ctx.anchor)?;
-    // Only the SHA-256 bank's selection counts: a PCR selected in another
-    // bank is not what the quoted values cover.
-    let selected = quote_selection(quote.message.as_slice(), tcg_cel::HashAlg::SHA256.0)?;
+    // The quote's one selection, of the SHA-256 bank: the PCRs it authenticates.
+    let selected = quote_selection(quote.message.as_slice())?;
 
     // 8. A TCG2 log replays into the quoted PCRs in the quoted bank: a PCR
     // the log extends must reproduce, and one it never extends is accounted
@@ -83,12 +92,6 @@ pub(crate) fn appraise(
                     "vtpm event log format {:?} is not a TPM2 event log",
                     log.format
                 ),
-            ));
-        }
-        if quote.bank != HashAlg::Sha256 {
-            return Err(refuse(
-                RefusalCode::Unsupported,
-                "vtpm log replay is defined for the SHA-256 bank",
             ));
         }
         let integrity = crate::profile::cel::cel_err;

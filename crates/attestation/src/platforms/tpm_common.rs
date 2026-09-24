@@ -81,6 +81,9 @@ const TPM_ALG_RSA: u16 = 0x0001;
 /// TPM_ALG_NULL (used for symmetric and scheme fields)
 const TPM_ALG_NULL: u16 = 0x0010;
 
+/// TPM_ALG_SHA256, the one bank a version 1 quote selects.
+const TPM_ALG_SHA256: u16 = 0x000B;
+
 /// TPMS_ATTEST magic value: 0xFF544347 ("TCG\xFF")
 const TPM_ATTEST_MAGIC: u32 = 0xFF544347;
 
@@ -142,6 +145,10 @@ pub fn verify_hcl_var_data_binding(report_data: &[u8], var_data: &[u8]) -> Resul
 /// IGVM report data hash type SHA-256 (OpenHCL `IgvmAttestHashType::SHA_256`).
 const HCL_HASH_TYPE_SHA256: u32 = 1;
 
+/// `IgvmAttestRequestData.version` of the layout below. OpenHCL's version 2
+/// inserts an extension before the variable data, which would shift it.
+const HCL_REQUEST_DATA_VERSION: u32 = 1;
+
 /// Parsed HCL report data.
 pub struct HclReportData {
     /// Raw TEE report bytes (1184 bytes).
@@ -159,9 +166,9 @@ pub struct HclReportData {
 /// hardware report area):
 /// - Bytes 0x00..0x1F: Header (starts with "HCLA" magic)
 /// - Bytes 0x20..0x4BF: TEE report (1184 bytes, SNP or TDX)
-/// - Bytes 0x4C0..0x4D3: 5 × LE u32: data_size, version, report_type,
-///   report_data_hash_type (1 is SHA-256, the only one accepted),
-///   variable_data_size
+/// - Bytes 0x4C0..0x4D3: 5 × LE u32: data_size, version (1, the only one
+///   accepted), report_type, report_data_hash_type (1 is SHA-256, the only
+///   one accepted), variable_data_size
 /// - Bytes 0x4D4..: variable data (JSON with JWK keys), then padding
 pub fn parse_hcl_report(hcl_report: &[u8]) -> Result<HclReportData> {
     let tee_report_end = HCL_TEE_REPORT_OFFSET + HCL_TEE_REPORT_SIZE;
@@ -186,6 +193,14 @@ pub fn parse_hcl_report(hcl_report: &[u8]) -> Result<HclReportData> {
 
     // Parse var_data header (all fields are little-endian u32)
     let header = &hcl_report[tee_report_end..content_start];
+    let version = u32::from_le_bytes(header[4..8].try_into().map_err(|_| {
+        AttestationError::QuoteParseFailed("HCL request data version slice".to_string())
+    })?);
+    if version != HCL_REQUEST_DATA_VERSION {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "HCL request data version {version} is not {HCL_REQUEST_DATA_VERSION}"
+        )));
+    }
     let report_type = u32::from_le_bytes(
         header[8..12]
             .try_into()
@@ -222,45 +237,72 @@ pub fn parse_hcl_report(hcl_report: &[u8]) -> Result<HclReportData> {
     })
 }
 
+/// The members of the HCL variable data this crate reads. Members it does
+/// not name are ignored; a named member written twice is refused.
+#[derive(Deserialize)]
+struct HclVarData {
+    keys: Vec<HclJwk>,
+}
+
+#[derive(Deserialize)]
+struct HclJwk {
+    #[serde(default)]
+    kid: Option<String>,
+    #[serde(default)]
+    kty: Option<String>,
+    #[serde(default)]
+    n: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
+}
+
+/// The attestation key's modulus length: RSA 2048 (section 9.4.1).
+const AK_MODULUS_LEN: usize = 256;
+
+fn check_ak_modulus(modulus: &[u8]) -> Result<()> {
+    if modulus.len() != AK_MODULUS_LEN || modulus[0] & 0x80 == 0 {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "the attestation key is not a 2048-bit RSA key ({} modulus bytes)",
+            modulus.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Extract the AK public key (RSA modulus and exponent) from HCL var_data JSON.
 ///
-/// The var_data contains JSON with a "keys" array. The AK public key
-/// has `kid="HCLAkPub"` and `kty="RSA"`, with base64url-encoded `n`
-/// (modulus) and `e` (exponent) fields.
+/// The var_data is a JSON object whose `keys` array holds exactly one JWK
+/// with `kid` `HCLAkPub`: an RSA key (`kty` `RSA`) of 2048 bits with
+/// base64url `n` and `e`.
 pub fn extract_ak_pub_from_jwk_json(json_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    let json: serde_json::Value = serde_json::from_slice(json_bytes)
+    let var_data: HclVarData = crate::profile::strict::from_slice(json_bytes)
         .map_err(|e| AttestationError::QuoteParseFailed(format!("HCL var_data JSON: {e}")))?;
-
-    let keys = json["keys"].as_array().ok_or_else(|| {
-        AttestationError::QuoteParseFailed("HCL var_data JSON missing 'keys' array".to_string())
-    })?;
-
-    for key in keys {
-        let kid = key["kid"].as_str().unwrap_or("");
-        let kty = key["kty"].as_str().unwrap_or("");
-
-        if kid == "HCLAkPub" && kty == "RSA" {
-            let n_b64 = key["n"].as_str().ok_or_else(|| {
-                AttestationError::QuoteParseFailed("HCLAkPub missing 'n' field".to_string())
-            })?;
-            let e_b64 = key["e"].as_str().ok_or_else(|| {
-                AttestationError::QuoteParseFailed("HCLAkPub missing 'e' field".to_string())
-            })?;
-
-            let modulus = BASE64URL.decode(n_b64).map_err(|e| {
-                AttestationError::QuoteParseFailed(format!("HCLAkPub 'n' base64: {e}"))
-            })?;
-            let exponent = BASE64URL.decode(e_b64).map_err(|e| {
-                AttestationError::QuoteParseFailed(format!("HCLAkPub 'e' base64: {e}"))
-            })?;
-
-            return Ok((modulus, exponent));
-        }
+    let mut aks = var_data
+        .keys
+        .iter()
+        .filter(|k| k.kid.as_deref() == Some("HCLAkPub"));
+    let (Some(ak), None) = (aks.next(), aks.next()) else {
+        return Err(AttestationError::QuoteParseFailed(
+            "HCL var_data JSON must carry exactly one HCLAkPub key".to_string(),
+        ));
+    };
+    if ak.kty.as_deref() != Some("RSA") {
+        return Err(AttestationError::QuoteParseFailed(
+            "HCLAkPub is not an RSA key".to_string(),
+        ));
     }
-
-    Err(AttestationError::QuoteParseFailed(
-        "HCL var_data JSON does not contain HCLAkPub RSA key".to_string(),
-    ))
+    let decode = |field: &Option<String>, name: &str| {
+        let text = field.as_deref().ok_or_else(|| {
+            AttestationError::QuoteParseFailed(format!("HCLAkPub missing '{name}' field"))
+        })?;
+        BASE64URL.decode(text).map_err(|e| {
+            AttestationError::QuoteParseFailed(format!("HCLAkPub '{name}' base64: {e}"))
+        })
+    };
+    let modulus = decode(&ak.n, "n")?;
+    let exponent = decode(&ak.e, "e")?;
+    check_ak_modulus(&modulus)?;
+    Ok((modulus, exponent))
 }
 
 /// TPM quote data, shared between Azure SNP and Azure TDX platforms.
@@ -289,6 +331,8 @@ pub fn verify_tpm_signature(signature: &[u8], message: &[u8], var_data: &[u8]) -
             extract_ak_pub_from_var_data(var_data)?
         }
     };
+    check_ak_modulus(&modulus)
+        .map_err(|e| AttestationError::SignatureVerificationFailed(e.to_string()))?;
 
     let n = rsa::BigUint::from_bytes_be(&modulus);
     let e = rsa::BigUint::from_bytes_be(&exponent);
@@ -552,9 +596,9 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
 /// TPM_ST_ATTEST_QUOTE: the attest type a PCR quote carries.
 pub(crate) const TPM_ST_ATTEST_QUOTE: u16 = 0x8018;
 
-/// The PCR indices a quote selects in `bank` (a TPM_ALG_ID), after checking
-/// the TPMS_ATTEST magic and that its type is a quote.
-pub(crate) fn quote_selection(message: &[u8], bank: u16) -> Result<Vec<usize>> {
+/// The PCR indices a quote's SHA-256 selection names, after checking the
+/// TPMS_ATTEST magic and that its type is a quote.
+pub(crate) fn quote_selection(message: &[u8]) -> Result<Vec<usize>> {
     if read_be_u32(message, 0, "TPM magic")? != TPM_ATTEST_MAGIC {
         return Err(AttestationError::QuoteParseFailed(
             "invalid TPM Attest magic".to_string(),
@@ -565,37 +609,7 @@ pub(crate) fn quote_selection(message: &[u8], bank: u16) -> Result<Vec<usize>> {
             "TPMS_ATTEST is not a quote".to_string(),
         ));
     }
-    let mut offset = 6;
-    let signer_size = read_be_u16(message, offset, "qualifiedSigner size")? as usize;
-    offset += 2 + signer_size;
-    let extra_size = read_be_u16(message, offset, "extraData size")? as usize;
-    offset += 2 + extra_size;
-    offset += 17 + 8;
-    let count = read_be_u32(message, offset, "PCR selection count")? as usize;
-    offset += 4;
-    let mut selected = Vec::new();
-    for _ in 0..count {
-        let alg = read_be_u16(message, offset, "PCR hash alg")?;
-        offset += 2;
-        let select_size = *message.get(offset).ok_or_else(|| {
-            AttestationError::QuoteParseFailed("truncated at PCR selection size".to_string())
-        })? as usize;
-        offset += 1;
-        let bitmap = message.get(offset..offset + select_size).ok_or_else(|| {
-            AttestationError::QuoteParseFailed("truncated at PCR selection bitmap".to_string())
-        })?;
-        if alg == bank {
-            for (byte_idx, byte) in bitmap.iter().enumerate() {
-                for bit in 0..8u8 {
-                    if byte & (1 << bit) != 0 {
-                        selected.push(byte_idx * 8 + usize::from(bit));
-                    }
-                }
-            }
-        }
-        offset += select_size;
-    }
-    Ok(selected)
+    parse_quote_info(message).map(|(selected, _)| selected)
 }
 
 pub(crate) fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
@@ -626,13 +640,27 @@ pub(crate) fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> 
     // TPML_PCR_SELECTION: count(4) + selections
     let pcr_selection_count = read_be_u32(message, offset, "PCR selection count")? as usize;
     offset += 4;
+    // Section 9.4.3: one selection, of the SHA-256 bank. The digest covers the
+    // values of every selection, and only the SHA-256 values are carried.
+    if pcr_selection_count != 1 {
+        return Err(AttestationError::refused(
+            crate::error::RefusalCode::Unsupported,
+            format!("the quote holds {pcr_selection_count} PCR selections; version 1 takes one"),
+        ));
+    }
 
     let mut selected_pcrs = Vec::new();
 
     for _ in 0..pcr_selection_count {
         // TPMS_PCR_SELECTION: hash(2) + sizeofSelect(1) + pcrSelect(sizeofSelect)
-        let _hash_alg = read_be_u16(message, offset, "PCR hash alg")?;
+        let hash_alg = read_be_u16(message, offset, "PCR hash alg")?;
         offset += 2;
+        if hash_alg != TPM_ALG_SHA256 {
+            return Err(AttestationError::refused(
+                crate::error::RefusalCode::Unsupported,
+                format!("the quote selects bank 0x{hash_alg:04x}; version 1 takes SHA-256"),
+            ));
+        }
 
         if offset >= message.len() {
             return Err(AttestationError::QuoteParseFailed(
@@ -1317,6 +1345,53 @@ mod tests {
     }
 
     #[test]
+    fn hcl_request_data_version_must_be_1() {
+        let mut hcl = build_hcl_report(&[0u8; 1184], HCL_REPORT_TYPE_SNP, b"{}");
+        for version in [0u32, 2, 3] {
+            hcl[0x4C4..0x4C8].copy_from_slice(&version.to_le_bytes());
+            let e = parse_hcl_report(&hcl).err().expect("version accepted");
+            assert!(e.to_string().contains("version"), "{e}");
+        }
+        for recorded in [
+            &include_bytes!("../../test_data/az_snp/hcl-report.bin")[..],
+            &include_bytes!("../../test_data/az_tdx/hcl-report.bin")[..],
+        ] {
+            assert_eq!(recorded[0x4C4..0x4C8], 1u32.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn a_quote_selects_the_sha256_bank_once() {
+        let refused = |msg: Vec<u8>| {
+            let e = parse_quote_info(&msg).unwrap_err();
+            assert_eq!(
+                e.refusal_code(),
+                Some(crate::error::RefusalCode::Unsupported),
+                "{e}"
+            );
+        };
+        let one = build_tpms_attest(&[1; 16], &[3, 0xFF, 0xFF, 0xFF], &[0; 32]);
+        let count_at = one.len() - 2 - 32 - 6 - 4;
+        assert_eq!(one[count_at..count_at + 6], [0, 0, 0, 1, 0x00, 0x0B]);
+        // The SHA-384 bank.
+        let mut sha384 = one.clone();
+        sha384[count_at + 5] = 0x0C;
+        refused(sha384);
+        // A second selection, of the SHA-256 bank again.
+        let mut two = one[..count_at].to_vec();
+        two.extend_from_slice(&[0, 0, 0, 2, 0x00, 0x0B, 3, 0xFF, 0xFF, 0xFF]);
+        two.extend_from_slice(&[0x00, 0x0B, 3, 0x00, 0x00, 0x00]);
+        two.extend_from_slice(&one[one.len() - 34..]);
+        refused(two);
+        // No selection at all.
+        let mut none = one[..count_at].to_vec();
+        none.extend_from_slice(&[0, 0, 0, 0]);
+        none.extend_from_slice(&one[one.len() - 34..]);
+        refused(none);
+        assert_eq!(quote_selection(&one).unwrap().len(), 24);
+    }
+
+    #[test]
     fn test_parse_hcl_report_too_short() {
         let hcl = vec![0u8; 100];
         assert!(parse_hcl_report(&hcl).is_err());
@@ -1331,17 +1406,80 @@ mod tests {
 
     // --- JWK JSON extraction tests ---
 
+    /// A JWK member list for an RSA key with this modulus.
+    fn rsa_jwk(kid: &str, modulus: &[u8]) -> String {
+        format!(
+            r#"{{"kid":"{kid}","key_ops":["sign"],"kty":"RSA","e":"AQAB","n":"{}"}}"#,
+            BASE64URL.encode(modulus)
+        )
+    }
+
+    fn ak_2048() -> Vec<u8> {
+        let mut n = vec![0x5A; 256];
+        n[0] = 0xC3;
+        n
+    }
+
     #[test]
     fn test_extract_ak_pub_from_jwk_json_valid() {
-        // 256 zero bytes = 342 base64url chars (all 'A')
-        let n_b64 = "A".repeat(342);
+        let ek = rsa_jwk("HCLEkPub", &ak_2048());
         let json_str = format!(
-            r#"{{"keys":[{{"kid":"HCLAkPub","key_ops":["sign"],"kty":"RSA","e":"AQAB","n":"{n_b64}"}}]}}"#,
+            r#"{{"keys":[{},{ek}],"vm-configuration":{{"secure-boot":true}}}}"#,
+            rsa_jwk("HCLAkPub", &ak_2048())
         );
 
         let (modulus, exponent) = extract_ak_pub_from_jwk_json(json_str.as_bytes()).unwrap();
         assert_eq!(exponent, vec![0x01, 0x00, 0x01]); // 65537
-        assert_eq!(modulus.len(), 256); // RSA 2048
+        assert_eq!(modulus, ak_2048()); // RSA 2048
+    }
+
+    #[test]
+    fn the_attestation_key_is_one_2048_bit_rsa_key() {
+        let refused = |json: String, why: &str| {
+            let e = extract_ak_pub_from_jwk_json(json.as_bytes()).unwrap_err();
+            assert!(e.to_string().contains(why), "{why}: {e}");
+        };
+        let ak = rsa_jwk("HCLAkPub", &ak_2048());
+        refused(format!(r#"{{"keys":[{ak},{ak}]}}"#), "exactly one HCLAkPub");
+        let mut short = ak_2048();
+        short.truncate(128);
+        refused(
+            format!(r#"{{"keys":[{}]}}"#, rsa_jwk("HCLAkPub", &short)),
+            "2048-bit",
+        );
+        // 256 bytes whose top bit is clear is a key of fewer than 2048 bits.
+        let mut low = ak_2048();
+        low[0] = 0x40;
+        refused(
+            format!(r#"{{"keys":[{}]}}"#, rsa_jwk("HCLAkPub", &low)),
+            "2048-bit",
+        );
+        refused(
+            format!(
+                r#"{{"keys":[{}]}}"#,
+                ak.replace(r#""kty":"RSA""#, r#""kty":"EC""#)
+            ),
+            "not an RSA key",
+        );
+        // A member this parser reads, written twice, is refused whichever comes last.
+        refused(
+            format!(
+                r#"{{"keys":[{}],"keys":[{ak}]}}"#,
+                rsa_jwk("HCLEkPub", &ak_2048())
+            ),
+            "duplicate field",
+        );
+        refused(
+            format!(
+                r#"{{"keys":[{}]}}"#,
+                ak.replacen(r#""kid":"HCLAkPub","#, r#""kid":"HCLAkPub","kid":"x","#, 1)
+            ),
+            "duplicate field",
+        );
+        // The same rule holds for a key read from TPM2B_PUBLIC.
+        let var_data = build_tpm2b_public_rsa(&short);
+        let e = verify_tpm_signature(&[0u8; 256], &[0u8; 10], &var_data).unwrap_err();
+        assert!(e.to_string().contains("2048-bit"), "{e}");
     }
 
     #[test]
