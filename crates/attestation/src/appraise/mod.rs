@@ -145,6 +145,16 @@ impl Verifier {
         let mut var_data: Option<Vec<u8>> = None;
         let mut tee_report: Option<Vec<u8>> = None;
         if let Some(Submod::Cpu(cpu)) = evidence.submods.get("cpu") {
+            // Section 8.5: only a pinned launch measurement establishes the register
+            // provider. Without it any guest could commit registers and a log it invented.
+            if cpu.cvm_binding.mode == BindingMode::Commitment
+                && policy.reference.launch_measurement.is_empty()
+            {
+                return Err(refuse(
+                    RefusalCode::BindingMismatch,
+                    "commitment needs a pinned launch measurement to establish the register provider",
+                ));
+            }
             if cpu.cvm_binding.mode == BindingMode::VtpmExtradata {
                 let Some(Submod::Vtpm(v)) = evidence.submods.get("vtpm") else {
                     return Err(invalid(

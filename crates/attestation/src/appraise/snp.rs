@@ -222,7 +222,15 @@ pub(crate) async fn appraise(
 
     // 3. Hardware chain and signature.
     let reported = tcb(&report.reported_tcb);
-    let vek_der = if collateral.has("snp.vek") || !report.chip_id.iter().all(|&b| b == 0) {
+    let vek_der = if signing_key == SigningKey::Vlek {
+        // KDS serves VLEKs only to the cloud provider, so the envelope's copy
+        // is the only source and nothing is fetched (section 9.1.7).
+        collateral.inline_vlek().ok_or_else(|| {
+            AttestationError::CertFetchError(
+                "a VLEK-signed report needs its VLEK inline, inside its window".to_string(),
+            )
+        })?
+    } else if collateral.has("snp.vek") || !report.chip_id.iter().all(|&b| b == 0) {
         collateral
             .get_snp_vcek(generation, &report.chip_id, &reported)
             .await?
@@ -387,12 +395,12 @@ pub(crate) async fn appraise(
                 .chain_len;
             let caller_data = ctx.expected_report_data();
             // The boot record is always the first extend into slot 3, so a
-            // live chain never leaves that slot at genesis (section 4.9).
+            // live chain never leaves that slot at genesis (section 8.2).
             if chain_len >= 1
                 && bank[usize::from(BOOT_SLOT)] == genesis(BOOT_SLOT, &policy.commitment.seed.0)
             {
                 return Err(refuse(
-                    RefusalCode::RegisterMismatch,
+                    RefusalCode::ReplayMismatch,
                     "slot 3 is at genesis but the chain claims a boot record",
                 ));
             }

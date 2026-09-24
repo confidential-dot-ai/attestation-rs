@@ -177,9 +177,10 @@ pub fn boot_record(bootseed: &[u8; 32]) -> Vec<u8> {
 }
 
 /// Body of a claim record: the deterministic CBOR map `{0: owner, 1: purpose}`.
-/// `None` when either string exceeds [`CLAIM_STRING_MAX`] bytes.
+/// `None` when either string is empty or exceeds [`CLAIM_STRING_MAX`] bytes.
 pub fn claim_body(owner: &str, purpose: &str) -> Option<Vec<u8>> {
-    if owner.len() > CLAIM_STRING_MAX || purpose.len() > CLAIM_STRING_MAX {
+    let bounded = |s: &str| (1..=CLAIM_STRING_MAX).contains(&s.len());
+    if !bounded(owner) || !bounded(purpose) {
         return None;
     }
     let mut out = Vec::with_capacity(8 + owner.len() + purpose.len());
@@ -256,5 +257,8 @@ mod tests {
     fn claim_strings_bounded() {
         assert!(claim_body(&"a".repeat(256), "x").is_none());
         assert!(claim_body("x", &"a".repeat(255)).is_some());
+        assert!(claim_body("", "x").is_none());
+        assert!(claim_body("x", "").is_none());
+        assert!(claim_record("", "x").is_none());
     }
 }

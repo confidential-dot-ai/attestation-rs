@@ -627,6 +627,147 @@ async fn a_legacy_tdx_log_must_replay_to_the_signed_rtmrs() {
     );
 }
 
+/// The Genoa report under the commitment binding: `bank` as its 16 snp-vmr
+/// registers, a chain of `chain_len`, and a log of the boot record alone.
+fn snp_commitment_envelope(bank: &[[u8; 48]; 16], chain_len: u64) -> Vec<u8> {
+    use attestation::profile::registers::{boot_record, cel_record, record_digest};
+    let bootseed = [0x33u8; 32];
+    let boot = boot_record(&bootseed);
+    let log =
+        tcg_cel::encode_cbor(&[cel_record(0, 3, 0, &record_digest(0, 3, &boot), &boot)]).unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&snp_envelope(&snp_nonce())).unwrap();
+    let cpu = &mut v["submods"]["cpu"];
+    cpu["cvm_binding"]["mode"] = json!("commitment");
+    cpu["cvm_registers"] = bank
+        .iter()
+        .enumerate()
+        .map(|(i, r)| json!({"index": i, "alg": "sha384", "value": b64url(r), "source": "snp-vmr", "backing": "virtualized"}))
+        .collect();
+    cpu["cvm_chain"] = json!({"chain_len": chain_len});
+    cpu["bootseed"] = json!(b64url(&bootseed));
+    cpu["cvm_log"] = json!({"format": "tcg-cel-cbor", "data": b64url(&log)});
+    serde_json::to_vec(&v).unwrap()
+}
+
+fn genesis_bank() -> [[u8; 48]; 16] {
+    use attestation::profile::registers::{genesis, SEED};
+    std::array::from_fn(|i| genesis(i as u8, &SEED))
+}
+
+fn snp_launch_pin() -> Digest {
+    let report = attestation::platforms::snp::verify::parse_report(SNP_REPORT).unwrap();
+    Digest {
+        alg: HashAlg::Sha384,
+        value: Bytes(report.measurement.to_vec()),
+    }
+}
+
+#[tokio::test]
+async fn commitment_needs_a_pinned_launch_measurement() {
+    use attestation::profile::registers::{boot_record, extend, record_digest};
+    let mut bank = genesis_bank();
+    bank[3] = extend(&bank[3], &record_digest(0, 3, &boot_record(&[0x33; 32])));
+    let envelope = snp_commitment_envelope(&bank, 1);
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let mut policy = lenient_policy();
+    policy.min_backing = Backing::Virtualized;
+    // Nothing establishes the register provider, so the commitment binds nothing.
+    let err = verifier
+        .appraise_json(&envelope, &policy)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.refusal_code(),
+        Some(attestation::RefusalCode::BindingMismatch),
+        "{err}"
+    );
+    assert!(err.to_string().contains("launch measurement"), "{err}");
+    // Pinned, the appraisal reaches the commitment, which this report does not carry.
+    policy.reference.launch_measurement = vec![snp_launch_pin()];
+    let err = verifier
+        .appraise_json(&envelope, &policy)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, attestation::AttestationError::ReportDataMismatch),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn a_chain_whose_boot_slot_is_at_genesis_is_a_replay_failure() {
+    let envelope = snp_commitment_envelope(&genesis_bank(), 1);
+    let verifier = Verifier::offline().with_cert_provider(NoCollateral);
+    let mut policy = lenient_policy();
+    policy.min_backing = Backing::Virtualized;
+    policy.reference.launch_measurement = vec![snp_launch_pin()];
+    let err = verifier
+        .appraise_json(&envelope, &policy)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.refusal_code(),
+        Some(attestation::RefusalCode::ReplayMismatch),
+        "{err}"
+    );
+    assert!(err.to_string().contains("slot 3 is at genesis"), "{err}");
+}
+
+/// A provider that records every VEK request it is asked for.
+#[derive(Default)]
+struct CountingVek(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl CertProvider for CountingVek {
+    async fn get_snp_vcek(
+        &self,
+        _: ProcessorGeneration,
+        _: &[u8; 64],
+        _: &SnpTcb,
+    ) -> attestation::Result<Vec<u8>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(SNP_VCEK.to_vec())
+    }
+    async fn get_snp_cert_chain(
+        &self,
+        _: ProcessorGeneration,
+    ) -> attestation::Result<(Vec<u8>, Vec<u8>)> {
+        Err(attestation::AttestationError::CertFetchError(
+            "offline".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_vlek_report_without_its_vlek_inline_is_unavailable_without_a_fetch() {
+    const VLEK_REPORT: &[u8] = include_bytes!("../test_data/snp/test-vlek-report.bin");
+    let parsed = attestation::platforms::snp::verify::parse_report(VLEK_REPORT).unwrap();
+    let nonce = attestation::utils::strip_trailing_nulls(&parsed.report_data).to_vec();
+    // A non-zero CHIP_ID would otherwise send the verifier to KDS for a VCEK.
+    let mut report = VLEK_REPORT.to_vec();
+    report[0x1A0] = 1;
+    let mut v: serde_json::Value = serde_json::from_slice(&snp_envelope(&nonce)).unwrap();
+    v["submods"]["cpu"]["cvm_report"][1] = json!(b64url(&report));
+    v["submods"]["cpu"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cvm_endorsements");
+    let provider = std::sync::Arc::new(CountingVek::default());
+    let verifier = Verifier::offline().with_cert_provider(provider.clone());
+    let mut policy = lenient_policy();
+    policy.policy_bits.require_vmpl0 = false;
+    let err = verifier
+        .appraise_json(&serde_json::to_vec(&v).unwrap(), &policy)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.refusal_code(),
+        Some(attestation::RefusalCode::CollateralUnavailable),
+        "{err}"
+    );
+    assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 /// The nonce a recorded Azure attestation bound (its TPM quote's extraData),
 /// and the same nonce with its last byte changed.
 fn recorded_nonce(evidence: &serde_json::Value) -> (Vec<u8>, Vec<u8>) {
@@ -690,7 +831,7 @@ async fn azure_tdx_evidence_appraises_through_the_vtpm() {
         .unwrap_err();
     assert_eq!(
         err.refusal_code(),
-        attestation::RefusalCode::BindingMismatch,
+        Some(attestation::RefusalCode::BindingMismatch),
         "{err}"
     );
     let a = verifier

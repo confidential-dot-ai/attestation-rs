@@ -1534,7 +1534,10 @@ mod tests {
                 matches!(e, AttestationError::NvidiaGpuDevicePolicyFailed { .. }),
                 "got {e}"
             );
-            assert_eq!(e.refusal_code(), crate::error::RefusalCode::DevicePolicy);
+            assert_eq!(
+                e.refusal_code(),
+                Some(crate::error::RefusalCode::DevicePolicy)
+            );
         };
         refused(claims(Some("GB100")), NvidiaGpuArch::Hopper);
         refused(claims(Some("GH100 A01 GSP BROM")), NvidiaGpuArch::Blackwell);

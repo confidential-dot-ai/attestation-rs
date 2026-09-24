@@ -43,6 +43,11 @@ impl IntoResponse for ApiError {
             ApiError::Verification(attestation::AttestationError::CertFetchError(_)) => {
                 (StatusCode::BAD_GATEWAY, "cert_fetch_failed")
             }
+            // An error that maps to no refusal code is this service's failure,
+            // not a verdict on the evidence.
+            ApiError::Verification(e) if e.refusal_code().is_none() => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+            }
             ApiError::Verification(_) => (StatusCode::UNPROCESSABLE_ENTITY, "verification_failed"),
             ApiError::NoPlatform => (StatusCode::SERVICE_UNAVAILABLE, "no_platform"),
             ApiError::AttestNotAvailable => (StatusCode::BAD_REQUEST, "attest_not_available"),
@@ -58,6 +63,10 @@ impl IntoResponse for ApiError {
         let message = match &self {
             ApiError::Internal(detail) => {
                 tracing::error!(detail, "internal error");
+                "an internal error occurred".to_string()
+            }
+            ApiError::Verification(e) if e.refusal_code().is_none() => {
+                tracing::error!(detail = %e, "internal error during verification");
                 "an internal error occurred".to_string()
             }
             // The inner error alone: `Verification`'s "verification failed" prefix
@@ -111,5 +120,15 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error_key(resp).await, "verification_failed");
+    }
+
+    #[tokio::test]
+    async fn an_error_without_a_refusal_code_is_internal() {
+        let resp =
+            ApiError::Verification(AttestationError::Other(anyhow::anyhow!("unexpected state")))
+                .into_response();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error_key(resp).await, "internal_error");
     }
 }

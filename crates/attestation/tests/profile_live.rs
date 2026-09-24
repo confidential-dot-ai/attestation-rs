@@ -282,7 +282,7 @@ async fn azure(platform: PlatformType, mut policy: VerifyPolicy) {
         .unwrap_err();
     assert_eq!(
         err.refusal_code(),
-        attestation::RefusalCode::BindingMismatch,
+        Some(attestation::RefusalCode::BindingMismatch),
         "{err}"
     );
     // Pinned, strict defaults refuse the vTPM's privileged-service registers.

@@ -154,6 +154,7 @@ async fn the_corpus_holds_through_appraise_with() {
                 Err(format!("refused with {code}, expected {want}: {message}"))
             }
             (_, Err(Failure::Usage(m))) => Err(format!("did not decide: {m}")),
+            (_, Err(Failure::Internal(m))) => Err(format!("did not decide: {m}")),
             (Expect::Refusal(want), Ok(_)) => Err(format!("appraised, expected refusal {want}")),
             (Expect::Appraisal(_), Err(Failure::Refused { code, message })) => Err(format!(
                 "refused with {code}, expected an appraisal: {message}"

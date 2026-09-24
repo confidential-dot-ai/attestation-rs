@@ -256,21 +256,26 @@ async fn the_corpus_holds_against_this_implementation() {
         if std::env::var_os("CONFORMANCE_EXPLAIN").is_some() {
             match &decided {
                 Ok(_) => eprintln!("{:<60} appraised", case.id),
-                Err(e) => eprintln!("{:<60} {:<22} {e}", case.id, e.refusal_code().to_string()),
+                Err(e) => eprintln!("{:<60} {:<22} {e}", case.id, code_name(e)),
             }
         }
-        let got = decided.map_err(|e| e.refusal_code());
-        let verdict = match (&case.expect, &got) {
-            (Expect::Refusal(want), Err(code)) if want == code => Ok(()),
-            (Expect::Refusal(want), Err(code)) => {
-                Err(format!("refused with {code}, expected {want}"))
+        let verdict = match (&case.expect, &decided) {
+            // Section 14.3: an error that maps to no code is no decision.
+            (_, Err(e)) if e.refusal_code().is_none() => {
+                Err(format!("no decision: an internal error: {e}"))
+            }
+            (Expect::Refusal(want), Err(e)) if e.refusal_code() == Some(*want) => Ok(()),
+            (Expect::Refusal(want), Err(e)) => {
+                Err(format!("refused with {}, expected {want}", code_name(e)))
             }
             (Expect::Refusal(want), Ok(_)) => Err(format!("appraised, expected refusal {want}")),
-            (Expect::Appraisal(_), Err(code)) => {
-                Err(format!("refused with {code}, expected an appraisal"))
-            }
+            (Expect::Appraisal(_), Err(e)) => Err(format!(
+                "refused with {}, expected an appraisal",
+                code_name(e)
+            )),
             (Expect::Appraisal(path), Ok(v)) => {
-                let want: Value = serde_json::from_slice(&read(path)).unwrap();
+                let mut want: Value = serde_json::from_slice(&read(path)).unwrap();
+                strip(&mut want);
                 if *v == want {
                     Ok(())
                 } else {
@@ -292,6 +297,12 @@ async fn the_corpus_holds_against_this_implementation() {
         cases.len(),
         failures.join("\n")
     );
+}
+
+/// An error's Section 14.4 code, or a marker for an error that maps to none.
+fn code_name(e: &AttestationError) -> String {
+    e.refusal_code()
+        .map_or_else(|| "(no code)".to_string(), |c| c.to_string())
 }
 
 /// The JSON pointers at which two values differ.
@@ -1106,11 +1117,11 @@ mod author {
                     write(&path, &serde_json::to_vec_pretty(&v).unwrap());
                     Expect::Appraisal(path)
                 }
-                (Some(want), Err(e)) if want == e.refusal_code() => Expect::Refusal(want),
+                (Some(want), Err(e)) if Some(want) == e.refusal_code() => Expect::Refusal(want),
                 (Some(want), Err(e)) => panic!(
                     "{}: authored to refuse with {want}, this implementation refuses with {}: {e}",
                     a.id,
-                    e.refusal_code()
+                    code_name(&e)
                 ),
                 (Some(want), Ok(_)) => panic!(
                     "{}: authored to refuse with {want}, this implementation appraises",
@@ -1119,7 +1130,7 @@ mod author {
                 (None, Err(e)) => panic!(
                     "{}: authored to appraise, this implementation refuses with {}: {e}",
                     a.id,
-                    e.refusal_code()
+                    code_name(&e)
                 ),
             };
             let mut text = serde_json::to_string_pretty(&case).unwrap();

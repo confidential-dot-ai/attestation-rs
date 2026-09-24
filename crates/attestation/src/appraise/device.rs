@@ -434,6 +434,6 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.refusal_code(), RefusalCode::Unsupported, "{err}");
+        assert_eq!(err.refusal_code(), Some(RefusalCode::Unsupported), "{err}");
     }
 }

@@ -190,6 +190,9 @@ pub fn parse_cvm_event(event: &[u8]) -> Result<CvmEvent> {
     if r.uint()? != 2 {
         return Err(bad("cvm event: key 2 expected"));
     }
+    if domain.is_empty() || operation.is_empty() {
+        return Err(bad("cvm event: domain and operation are at least 1 byte"));
+    }
     let content_digest = digest48(r.bstr(48)?)?;
     let inner = if n == 4 {
         if r.uint()? != 3 {
@@ -226,6 +229,9 @@ pub fn parse_claim_body(body: &[u8]) -> Result<(String, String)> {
     let purpose = r.tstr(CLAIM_STRING_MAX)?.to_string();
     if !r.at_end() {
         return Err(bad("claim body: trailing bytes"));
+    }
+    if owner.is_empty() || purpose.is_empty() {
+        return Err(bad("claim body: owner and purpose are at least 1 byte"));
     }
     Ok((owner, purpose))
 }
@@ -575,6 +581,39 @@ mod tests {
         let r3 = extend(&extend(&[0u8; 48], &record_digest(0, 3, &start)), &[5; 48]);
         assert_eq!(out.slots[&3].value, r3);
         assert_eq!(out.slots[&3].records, 2);
+    }
+
+    #[test]
+    fn empty_event_and_claim_strings_are_refused_as_replay_failures() {
+        use crate::profile::registers::cbor;
+        for (domain, operation) in [("", "start"), ("c8s", "")] {
+            let e = parse_cvm_event(&event_content(domain, operation, &[1; 48], None)).unwrap_err();
+            assert!(
+                matches!(e, AttestationError::EventlogIntegrityFailed(_)),
+                "{e}"
+            );
+            assert!(e.to_string().contains("at least 1 byte"), "{e}");
+        }
+        let v = vectors();
+        let boot = hexv(&v, "boot_content");
+        for (owner, purpose) in [("", "workload"), ("c8s", "")] {
+            let mut body = Vec::new();
+            cbor::map_head(2, &mut body);
+            cbor::uint(0, &mut body);
+            cbor::tstr(owner, &mut body);
+            cbor::uint(1, &mut body);
+            cbor::tstr(purpose, &mut body);
+            let e = parse_claim_body(&body).unwrap_err();
+            assert!(
+                matches!(e, AttestationError::EventlogIntegrityFailed(_)),
+                "{e}"
+            );
+            let digest = <[u8; 48]>::from(Sha384::digest(&body));
+            let claim = event_content("ats", "claim", &digest, Some(&body));
+            let e =
+                replay(&log(vec![rec(0, 3, &boot), rec(1, 4, &claim)]), init, true).unwrap_err();
+            assert!(e.to_string().contains("at least 1 byte"), "{e}");
+        }
     }
 
     #[test]

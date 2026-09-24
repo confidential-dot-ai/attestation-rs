@@ -169,8 +169,8 @@ pub enum AttestationError {
 
 pub type Result<T> = std::result::Result<T, AttestationError>;
 
-/// The rule family a refusal belongs to: the codes of design doc section 14.4,
-/// which the conformance corpus compares across implementations.
+/// The rule family a refusal belongs to: the codes of Section 14.4, which the
+/// conformance corpus compares across implementations.
 #[derive(
     Debug,
     Clone,
@@ -257,12 +257,13 @@ impl AttestationError {
         }
     }
 
-    /// The section 14.4 code of this error. Errors of the attester side and
-    /// of collateral fetching map to the code a verifier would report.
-    pub fn refusal_code(&self) -> RefusalCode {
+    /// The Section 14.4 code of this error. Errors of the attester side and
+    /// of collateral fetching map to the code a verifier would report. `None`
+    /// is an internal failure, which no rule of the profile decided.
+    pub fn refusal_code(&self) -> Option<RefusalCode> {
         use AttestationError as E;
         use RefusalCode as C;
-        match self {
+        let code = match self {
             E::Refused { code, .. } => *code,
             E::NoPlatformDetected | E::PlatformNotEnabled(_) | E::HardwareAccessFailed(_) => {
                 C::PlatformUnsupported
@@ -318,7 +319,25 @@ impl AttestationError {
                 | crate::collateral::CollateralError::Unsigned { .. } => C::CollateralInvalid,
                 _ => C::CollateralUnavailable,
             },
-            E::Other(_) => C::EnvelopeInvalid,
-        }
+            E::Other(_) => return None,
+        };
+        Some(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_internal_failure_maps_to_no_code() {
+        let internal = AttestationError::Other(anyhow::anyhow!("unexpected state"));
+        assert_eq!(internal.refusal_code(), None);
+        let refused = AttestationError::refused(RefusalCode::ReplayMismatch, "x");
+        assert_eq!(refused.refusal_code(), Some(RefusalCode::ReplayMismatch));
+        assert_eq!(
+            AttestationError::ProfileEvidenceInvalid("x".into()).refusal_code(),
+            Some(RefusalCode::EnvelopeInvalid)
+        );
     }
 }

@@ -1,0 +1,13 @@
+{
+  "id": "snp-vlek-without-inline-vek",
+  "rule": {
+    "section": "9.1.7",
+    "statement": "KDS serves a VLEK only to the cloud provider, so a VLEK-signed report whose envelope does not carry its VLEK is refused with collateral-unavailable, before any fetch"
+  },
+  "now": "2025-06-01T00:00:00Z",
+  "evidence": "evidence/snp-vlek-without-inline-vek.json",
+  "policy": "policy/snp-vlek-without-inline-vek.json",
+  "expect": {
+    "refusal": "collateral-unavailable"
+  }
+}

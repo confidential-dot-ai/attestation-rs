@@ -609,10 +609,11 @@ impl Register {
                 "sha384",
                 "hardware",
             ),
+            // The realm hash algorithm; RMM 2.0 adds SHA-384.
             RegisterSource::CcaRem => (
-                matches!(self.alg, HashAlg::Sha256 | HashAlg::Sha512),
+                true,
                 self.backing == Backing::Hardware,
-                "sha256 or sha512",
+                "the realm hash algorithm",
                 "hardware",
             ),
             RegisterSource::VtpmPcr => (
@@ -1668,12 +1669,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("sha384"));
-        assert!(reg("cca-rem", "sha384", "hardware", 48)
+        for (alg, len) in [("sha256", 32), ("sha384", 48), ("sha512", 64)] {
+            assert!(
+                reg("cca-rem", alg, "hardware", len).validate().is_ok(),
+                "{alg}"
+            );
+        }
+        assert!(reg("cca-rem", "sha384", "hardware", 32)
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("sha256 or sha512"));
-        assert!(reg("cca-rem", "sha512", "hardware", 64).validate().is_ok());
+            .contains("needs 48"));
         assert!(reg("vtpm-pcr", "sha256", "hardware", 32)
             .validate()
             .unwrap_err()

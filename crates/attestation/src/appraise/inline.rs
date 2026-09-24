@@ -58,6 +58,18 @@ impl<'a> InlineCollateral<'a> {
         self.entry(label).is_some()
     }
 
+    /// The inline `snp.vek` when it is a VLEK inside its window. A VLEK is not
+    /// keyed by chip id, so its binding is the chain and the TCB cross-check
+    /// the SNP path runs.
+    #[cfg(feature = "snp")]
+    pub fn inline_vlek(&self) -> Option<Vec<u8>> {
+        use crate::platforms::snp::verify::{is_vlek_cert, verify_vek_validity_period_at};
+        let bytes = self.entry("snp.vek")?;
+        (is_vlek_cert(bytes).unwrap_or(false)
+            && verify_vek_validity_period_at(bytes, self.now).is_ok())
+        .then(|| bytes.to_vec())
+    }
+
     /// The raw bytes under a label, unchecked; callers bind them themselves.
     #[cfg_attr(not(feature = "snp"), allow(dead_code))]
     pub fn raw(&self, label: &str) -> Option<&'a [u8]> {
@@ -154,15 +166,9 @@ impl CertProvider for InlineCollateral<'_> {
             if let Some(v) = self.bound("snp.vek", &key, bytes) {
                 return Ok(v);
             }
-            // A VLEK is not keyed by chip id, so the binding is the chain and
-            // the TCB cross-check the SNP path runs; only its window is
-            // checked here.
             #[cfg(feature = "snp")]
-            if crate::platforms::snp::verify::is_vlek_cert(bytes).unwrap_or(false)
-                && crate::platforms::snp::verify::verify_vek_validity_period_at(bytes, self.now)
-                    .is_ok()
-            {
-                return Ok(bytes.to_vec());
+            if let Some(v) = self.inline_vlek() {
+                return Ok(v);
             }
         }
         self.cert

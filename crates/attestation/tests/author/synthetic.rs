@@ -233,6 +233,35 @@ fn vlek_envelope() -> Value {
     })
 }
 
+/// The Genoa envelope under the commitment binding with a well-formed chain
+/// of one record, the boot record, and the 16 registers it replays to.
+fn snp_commitment_envelope(nonce: &[u8]) -> Value {
+    use attestation::profile::registers::{
+        boot_record, cel_record, extend, genesis, record_digest, SEED,
+    };
+    let bootseed = [0x33u8; 32];
+    let boot = boot_record(&bootseed);
+    let d = record_digest(0, 3, &boot);
+    let log = attestation::tcg_cel::encode_cbor(&[cel_record(0, 3, 0, &d, &boot)]).unwrap();
+    let registers: Vec<Value> = (0..16u8)
+        .map(|i| {
+            let mut r = genesis(i, &SEED);
+            if i == 3 {
+                r = extend(&r, &d);
+            }
+            json!({"index": i, "alg": "sha384", "value": b64url(&r), "source": "snp-vmr", "backing": "virtualized"})
+        })
+        .collect();
+    tweak(snp_envelope(nonce), |v| {
+        let cpu = &mut v["submods"]["cpu"];
+        cpu["cvm_binding"]["mode"] = json!("commitment");
+        cpu["cvm_registers"] = json!(registers);
+        cpu["cvm_chain"] = json!({"chain_len": 1});
+        cpu["bootseed"] = json!(b64url(&bootseed));
+        cpu["cvm_log"] = json!({"format": "tcg-cel-cbor", "data": b64url(&log)});
+    })
+}
+
 fn with_policy(base: VerifyPolicy, f: impl FnOnce(&mut VerifyPolicy)) -> VerifyPolicy {
     let mut p = base;
     f(&mut p);
@@ -458,6 +487,11 @@ pub(super) fn cases() -> Vec<Authored> {
             Some(R::EnvelopeInvalid)),
         snp_case("snp-commitment-without-chain", "8.1", "commitment requires cvm_chain, bootseed and all 16 registers",
             cpu(|v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("commitment")), Some(R::EnvelopeInvalid)),
+        case("snp-commitment-without-launch-measurement", "8.5",
+            "only a pinned launch measurement establishes the register provider, so the commitment binding without reference.launch_measurement is refused with binding-mismatch",
+            SNP_NOW, snp_commitment_envelope(&nonce).into(),
+            Some(with_policy(lenient(), |p| p.min_backing = Backing::Virtualized).into()),
+            none(), Some(R::BindingMismatch)),
         snp_case("snp-binding-mode-for-other-platform", "5.4", "vtpm-extradata binds Azure evidence; a bare SEV-SNP report binds its report data",
             cpu(|v| v["submods"]["cpu"]["cvm_binding"]["mode"] = json!("vtpm-extradata")), Some(R::EnvelopeInvalid)),
         case("tdx-binding-commitment", "5.4", "the commitment binding is SEV-SNP's; a TD quote binds its report data",
@@ -732,6 +766,13 @@ pub(super) fn cases() -> Vec<Authored> {
                 });
             }).into()),
             none(), Some(R::MachineNotAllowed)),
+        case("snp-vlek-without-inline-vek", "9.1.7",
+            "KDS serves a VLEK only to the cloud provider, so a VLEK-signed report whose envelope does not carry its VLEK is refused with collateral-unavailable, before any fetch",
+            "2025-06-01T00:00:00Z", tweak(vlek_envelope(), |v| {
+                v["submods"]["cpu"].as_object_mut().unwrap().remove("cvm_endorsements");
+            }).into(),
+            Some(with_policy(lenient(), |p| p.policy_bits.require_vmpl0 = false).into()),
+            none(), Some(R::CollateralUnavailable)),
         case("tdx-registers-pinned", "12.4", "executables is 2 when the launch measurement and every pinned register match",
             SNP_NOW, tdx_live.clone().into(),
             Some(with_policy(live_policy.clone(), |p| {

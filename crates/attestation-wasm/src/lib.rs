@@ -155,23 +155,28 @@ pub async fn verify(
 }
 
 /// Why a profile entry returned no appraisal: a refusal with its section 14.4
-/// code, or a usage error, which no rule of the profile decided.
+/// code, a usage error, or an internal error. Only a refusal is a decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     Refused { code: RefusalCode, message: String },
     Usage(String),
+    Internal(String),
 }
 
 impl Failure {
     fn refused(e: AttestationError) -> Self {
-        Failure::Refused {
-            code: e.refusal_code(),
-            message: format!("appraise: {e}"),
+        match e.refusal_code() {
+            Some(code) => Failure::Refused {
+                code,
+                message: format!("appraise: {e}"),
+            },
+            None => Failure::Internal(format!("appraise: internal error: {e}")),
         }
     }
 
     /// A JS `Error`. A refusal carries its code as `code`, so a caller acts
-    /// on the rule family that failed and never on the message.
+    /// on the rule family that failed and never on the message; an internal
+    /// error carries no `code` and is named `InternalError`.
     fn into_js(self) -> JsValue {
         match self {
             Failure::Refused { code, message } => {
@@ -185,6 +190,11 @@ impl Failure {
                 err.into()
             }
             Failure::Usage(message) => js_sys::Error::new(&message).into(),
+            Failure::Internal(message) => {
+                let err = js_sys::Error::new(&message);
+                err.set_name("InternalError");
+                err.into()
+            }
         }
     }
 }
@@ -400,7 +410,8 @@ pub async fn appraise_with_inputs(
 /// - `inputs_json`: the [`Inputs`] object
 ///
 /// Throws a JS `Error` whose `code` is the refusal code (section 14.4); an
-/// error without a `code` is a usage error, never a decision.
+/// error without a `code` is a usage error or, named `InternalError`, an
+/// internal failure, and never a decision.
 #[wasm_bindgen]
 pub async fn appraise_with(
     evidence_json: String,
@@ -1095,6 +1106,25 @@ mod tests {
             .expect("milan v3 fixture must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json["collateral_verified"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn an_error_without_a_code_is_internal_and_no_refusal() {
+        let internal = Failure::refused(AttestationError::Other(
+            std::io::Error::other("unexpected state").into(),
+        ));
+        assert!(matches!(internal, Failure::Internal(_)), "{internal:?}");
+        let refused = Failure::refused(AttestationError::PolicyInvalid("x".to_string()));
+        assert!(
+            matches!(
+                refused,
+                Failure::Refused {
+                    code: RefusalCode::PolicyInvalid,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
     }
 
     #[tokio::test]
