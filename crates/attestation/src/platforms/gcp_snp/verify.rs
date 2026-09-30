@@ -113,18 +113,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gcp_snp_propagates_wrong_launch_digest() {
+    async fn test_gcp_snp_wrong_launch_digest_fails() {
         let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let params = VerifyParams {
             expected_launch_digest: Some([0x77; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+        let err = verify_evidence(&evidence, &params, &StubCertProvider)
             .await
-            .unwrap();
-        assert_eq!(r.platform, PlatformType::GcpSnp);
-        assert_eq!(r.launch_digest_match, Some(false));
-        // Even with wrong digest, signature still valid — policy decision in caller
-        assert!(r.signature_valid);
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::AttestationError::MeasurementMismatch("launch digest")
+        ));
     }
 }
