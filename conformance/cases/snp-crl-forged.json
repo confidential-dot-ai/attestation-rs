@@ -1,0 +1,16 @@
+{
+  "id": "snp-crl-forged",
+  "rule": {
+    "section": "11",
+    "statement": "step 6: a CRL whose signature does not verify against the ARK is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-crl-forged.json",
+  "policy": "policy/snp-crl-forged.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.forged.der"
+  },
+  "expect": {
+    "refusal": "collateral-invalid"
+  }
+}
