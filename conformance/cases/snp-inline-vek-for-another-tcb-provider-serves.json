@@ -1,0 +1,16 @@
+{
+  "id": "snp-inline-vek-for-another-tcb-provider-serves",
+  "rule": {
+    "section": "10.2",
+    "statement": "item 3: an inline VCEK for another TCB is ignored, and the VCEK the verifier's provider holds for the report's chip and TCB serves the appraisal"
+  },
+  "now": "2026-09-24T00:00:00Z",
+  "evidence": "evidence/snp-inline-vek-for-another-tcb-provider-serves.json",
+  "policy": "policy/snp-inline-vek-for-another-tcb-provider-serves.json",
+  "collateral": {
+    "snp_vcek/Genoa/b5f9a4c8280e63c97d288db6648577dc2b848884aa682d7a227ba40e50deb2b0d112b599d87aaccda78d06f4254b1e81c4d953ef3c699db39d4e06013e9fa4ce-0A001B1B": "collateral/genoa_vcek.der"
+  },
+  "expect": {
+    "appraisal": "expected/snp-inline-vek-for-another-tcb-provider-serves.json"
+  }
+}
