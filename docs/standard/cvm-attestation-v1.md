@@ -1599,6 +1599,86 @@ The CEL content type `cvm` with value 200 (Section 7.3) is outside the values th
 
 The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) and needs no registration.
 
+## 18. Implementation status
+
+This section records the status of known implementations at the time of writing, in the manner of RFC 7942.
+
+attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly; https://github.com/confidential-dot-ai/attestation-rs; contact mahmoud@confidential.ai; pre-release, tracking this draft; status as of 2026-10-01) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.9 (163 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7, 9 (except 9.6) and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
+
+Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
+
+No departure from Sections 4 to 14 is known for the platforms it implements. `conformance/UNCOVERED.md` lists the statements the corpus does not yet exercise.
+
+## 19. References
+
+### 19.1. Normative references
+
+- [RFC1952] Deutsch, P., "GZIP file format specification version 4.3", RFC 1952, May 1996.
+- [RFC2119] Bradner, S., "Key words for use in RFCs to Indicate Requirement Levels", BCP 14, RFC 2119, March 1997.
+- [RFC2585] Housley, R. and P. Hoffman, "Internet X.509 Public Key Infrastructure Operational Protocols: FTP and HTTP", RFC 2585, May 1999.
+- [RFC3339] Klyne, G. and C. Newman, "Date and Time on the Internet: Timestamps", RFC 3339, July 2002.
+- [RFC4648] Josefsson, S., "The Base16, Base32, and Base64 Data Encodings", RFC 4648, October 2006.
+- [RFC5280] Cooper, D., Santesson, S., Farrell, S., Boeyen, S., Housley, R., and W. Polk, "Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile", RFC 5280, May 2008.
+- [RFC6920] Farrell, S., Kutscher, D., Dannewitz, C., Ohlman, B., Keranen, A., and P. Hallam-Baker, "Naming Things with Hashes", RFC 6920, April 2013.
+- [RFC7515] Jones, M., Bradley, J., and N. Sakimura, "JSON Web Signature (JWS)", RFC 7515, May 2015.
+- [RFC7517] Jones, M., "JSON Web Key (JWK)", RFC 7517, May 2015.
+- [RFC7518] Jones, M., "JSON Web Algorithms (JWA)", RFC 7518, May 2015.
+- [RFC7519] Jones, M., Bradley, J., and N. Sakimura, "JSON Web Token (JWT)", RFC 7519, May 2015.
+- [RFC8017] Moriarty, K., Ed., Kaliski, B., Jonsson, J., and A. Rusch, "PKCS #1: RSA Cryptography Specifications Version 2.2", RFC 8017, November 2016.
+- [RFC8174] Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words", BCP 14, RFC 8174, May 2017.
+- [RFC8259] Bray, T., Ed., "The JavaScript Object Notation (JSON) Data Interchange Format", STD 90, RFC 8259, December 2017.
+- [RFC8392] Jones, M., Wahlstroem, E., Erdtman, S., and H. Tschofenig, "CBOR Web Token (CWT)", RFC 8392, May 2018.
+- [RFC8610] Birkholz, H., Vigano, C., and C. Bormann, "Concise Data Definition Language (CDDL): A Notational Convention to Express Concise Binary Object Representation (CBOR) and JSON Data Structures", RFC 8610, June 2019.
+- [RFC8785] Rundgren, A., Jordan, B., and S. Erdtman, "JSON Canonicalization Scheme (JCS)", RFC 8785, June 2020.
+- [RFC8949] Bormann, C. and P. Hoffman, "Concise Binary Object Representation (CBOR)", STD 94, RFC 8949, December 2020.
+- [RFC9052] Schaad, J., "CBOR Object Signing and Encryption (COSE): Structures and Process", STD 96, RFC 9052, August 2022.
+- [RFC9053] Schaad, J., "CBOR Object Signing and Encryption (COSE): Initial Algorithms", RFC 9053, August 2022.
+- [RFC9165] Bormann, C., "Additional Control Operators for the Concise Data Definition Language (CDDL)", RFC 9165, December 2021.
+- [RFC9334] Birkholz, H., Thaler, D., Richardson, M., Smith, N., and W. Pan, "Remote ATtestation procedureS (RATS) Architecture", RFC 9334, January 2023.
+- [RFC9711] Lundblade, L., Mandyam, G., O'Donoghue, J., and C. Wallace, "The Entity Attestation Token (EAT)", RFC 9711, April 2025.
+- [RFC9741] Bormann, C., "Concise Data Definition Language (CDDL): Additional Control Operators for the Conversion and Processing of Text", RFC 9741, March 2025.
+- [RFC9781] Birkholz, H., O'Donoghue, J., Cam-Winget, N., and C. Bormann, "A Concise Binary Object Representation (CBOR) Tag for Unprotected CBOR Web Token Claims Sets (UCCS)", RFC 9781, May 2025.
+- [RFC9782] Lundblade, L., Birkholz, H., and T. Fossati, "Entity Attestation Token (EAT) Media Types", RFC 9782, May 2025.
+- [RFC9999] Birkholz, H., Smith, N., Fossati, T., and H. Tschofenig, "Remote ATtestation procedureS (RATS) Conceptual Message Wrapper (CMW)", RFC 9999, July 2026.
+- [EAR] Fossati, T., Voit, E., Trofimov, S., and H. Birkholz, "EAT Attestation Results", Work in Progress, Internet-Draft, draft-ietf-rats-ear-04, 26 May 2026.
+- [AR4SI] Voit, E., Birkholz, H., Hardjono, T., Fossati, T., and V. Scarlata, "Attestation Results for Secure Interactions", Work in Progress, Internet-Draft, draft-ietf-rats-ar4si-10, 18 May 2026.
+- [CCA-TOKEN] Frost, S., Fossati, T., and G. Mandyam, "Arm's Confidential Compute Architecture Reference Attestation Token", Work in Progress, Internet-Draft, draft-ffm-rats-cca-token-04, 7 September 2026.
+- [CORIM] Birkholz, H., Fossati, T., Deshpande, Y., Smith, N., and W. Pan, "Concise Reference Integrity Manifest", Work in Progress, Internet-Draft, draft-ietf-rats-corim-11, 6 July 2026.
+- [TDX-CGPU] Kostal, G., et al., "EAT Attestation Result (EAR) profile for Intel Trust Domain Extensions (TDX) + Confidential GPU (C-GPU) composite attestation", Work in Progress, Internet-Draft, draft-kykdxy-rats-tdx-cgpu-ear-profile-02, 19 July 2026.
+- [CEL] Trusted Computing Group, "TCG Canonical Event Log Format", Version 1.1, Revision 11, 9 October 2025.
+- [PFP] Trusted Computing Group, "TCG PC Client Platform Firmware Profile Specification", Level 00 Version 1.06 Revision 52, 4 December 2023.
+- [TPM2] Trusted Computing Group, "Trusted Platform Module Library, Part 1: Architecture" and "Part 2: Structures", Family 2.0, Level 00 Revision 01.83, 25 January 2024.
+- [SNP-ABI] AMD, "SEV Secure Nested Paging Firmware ABI Specification", publication 56860, Revision 1.59, August 2026. Section 7.3, Table 27, and Appendix B.
+- [VCEK] AMD, "Versioned Chip Endorsement Key (VCEK) Certificate and KDS Interface Specification", publication 57230, Revision 1.05, September 2026. Section 1.5 and Table 11.
+- [VLEK] AMD, "Versioned Loaded Endorsement Key (VLEK) Certificate Definition", publication 58369, Revision 0.10, October 2023.
+- [TDX-DCAP] Intel, "Intel Trust Domain Extensions Data Center Attestation Primitives (Intel TDX DCAP): Quote Generation Library and Quote Verification Library", Revision 0.91, September 2026; and Intel's quote verification library, intel/confidential-computing.tee.dcap.qvl, at commit d12717e3.
+- [TDX-ABI] Intel, "Intel Trust Domain Extensions (Intel TDX) Module Architecture Application Binary Interface (ABI) Reference Specification", document 348551-008, May 2026. Section 3.4.1, Table 3.23.
+- [PCK] Intel, "Intel SGX PCK Certificate and Certificate Revocation List Profile Specification", Revision 1.5, 26 January 2022.
+- [PCS] Intel, "Intel Provisioning Certification Service for ECDSA Attestation", API version 4.
+- [RMM] Arm, "Realm Management Monitor specification", DEN0137, version 1.0-rel0, and version 2.0-bet3 (beta). Section B5.
+- [NRAS] NVIDIA, "NVIDIA Remote Attestation Service", API version 4 (Attest GPU V4, `POST /v4/attest/gpu`, and Attest Switch V4, `POST /v4/attest/switch`).
+- [UEFI] UEFI Forum, "Unified Extensible Firmware Interface (UEFI) Specification", Version 2.10, August 2022 (`EFI_CC_MEASUREMENT_PROTOCOL`, `CC_EVENT`); and "Advanced Configuration and Power Interface (ACPI) Specification", Version 6.5, August 2022, Section 5.2.34 (the CCEL table).
+- [TSM-REPORT] Veraison, `application/vnd.veraison.tsm-report+json`, a media type registered in the IANA Media Types registry, for the Linux configfs-tsm report.
+- [DSTACK] Dstack-TEE, "dstack", the guest agent's event log format (github.com/Dstack-TEE/dstack).
+- [COCO-AA] Confidential Containers, "guest-components", the attestation agent's event log entries (github.com/confidential-containers/guest-components).
+- [FIPS180-4] National Institute of Standards and Technology, "Secure Hash Standard (SHS)", FIPS PUB 180-4, August 2015.
+
+### 19.2. Informative references
+
+- [RFC4151] Kindberg, T. and S. Hawke, "The 'tag' URI Scheme", RFC 4151, October 2005.
+- [RFC6838] Freed, N., Klensin, J., and T. Hansen, "Media Type Specifications and Registration Procedures", BCP 13, RFC 6838, January 2013.
+- [RFC6839] Hansen, T. and A. Melnikov, "Additional Media Type Structured Syntax Suffixes", RFC 6839, January 2013.
+- [RFC7942] Sheffer, Y. and A. Farrel, "Improving Awareness of Running Code: The Implementation Status Section", BCP 205, RFC 7942, July 2016.
+- [RFC8126] Cotton, M., Leiba, B., and T. Narten, "Guidelines for Writing an IANA Considerations Section in RFCs", BCP 26, RFC 8126, June 2017.
+- [RFC9266] Whited, S., "Channel Bindings for TLS 1.3", RFC 9266, July 2022.
+- [SPDM] DMTF, "Security Protocol and Data Model (SPDM) Specification", DSP0274.
+- [GHCB] AMD, "SEV-ES Guest-Hypervisor Communication Block Standardization", publication 56421.
+- [IGVM] Microsoft, "Independent Guest Virtual Machine (IGVM) file format" (github.com/microsoft/igvm).
+- [ITA] Intel, "Intel Trust Authority", attestation token claims.
+- [TRUSTEE] Confidential Containers, "Trustee", attestation service and key broker service.
+- [LOCKDOWN] The Linux kernel, "Kernel lockdown" security module documentation.
+- [TSM] The Linux kernel, "Trusted Security Module" report and measurement-register interfaces.
+
 ## Appendix A. CBOR claim keys
 
 Profile claims use integer keys in the CWT private-use range (RFC 8392 section 9.1.1, keys below -65536). Standard claims keep their registered keys.
@@ -1762,3 +1842,970 @@ v2 digest     baf3bcd15a9ffbd5d96a054080db0d029d44a88cdb7ea9f9ca5953bf7a1d8d91f9
 ```
 
 The version 1 digest is `SHA-384(01000008 || 3a || name || 3a || payload)`; the version 2 digest is the SHA-384 of the preimage, which the event carries in hexadecimal.
+
+## Appendix C. CDDL module
+
+The wire definition of Sections 4, 12 and 13, as published in `schemas/cvm-profile-v1.cddl`; a test fails when this copy and the file differ. The module uses the subset of RFC 8610, RFC 9165 and RFC 9741 that the reference implementation's CDDL checker implements (Section 18), and the `JC<>` convention of RFC 9711 appendix D, so each rule states both encodings.
+
+```cddl
+; CVM attestation profile v1 (tag:confidential.ai,2026:cvm#1): the wire
+; definition of docs/standard/cvm-attestation-v1.md, normative for the
+; evidence envelope (section 4), the appraisal (section 12) and the verifier
+; policy (section 13). Three roots: cvm-evidence, cvm-appraisal, cvm-policy.
+;
+; JSON is the primary encoding. CBOR carries the same values with the claim
+; keys of Appendix A, through the JC<> generic of RFC 9711 appendix D; names
+; inside profile objects stay text in both encodings. Byte strings are
+; RFC 9741 .b64u text in JSON (strict: URL-safe alphabet, no padding, zero
+; trailing bits) and byte strings in CBOR. The policy is a verifier input and
+; JSON only.
+;
+; Rules prefixed eat., ear. and ar4si. are copied from RFC 9711,
+; draft-ietf-rats-ear-04 and draft-ietf-rats-ar4si-10 with their import
+; prefixes, unchanged. The CMW rules (report-record, endorsement,
+; raw-evidence, cmw-ind) are local definitions that follow RFC 9999
+; section 3. A rule is prose when CDDL cannot state it (uniqueness,
+; equality between two members, duplicate member names in the encoding);
+; section 4.7 states those rules.
+
+; ===================================================================
+; Evidence (section 4)
+; ===================================================================
+
+cvm-evidence = {
+  eat.profile-label ^ => cvm-profile-uri,
+  eat.nonce-label ^ => cvm-nonce,
+  cvm-version-label ^ => 1,
+  eat.submods-label ^ => cvm-submods,
+  * unknown-claim
+}
+
+cvm-profile-uri = "tag:confidential.ai,2026:cvm#1"
+
+; The relying party's challenge, 16 to 64 bytes (section 4.1).
+cvm-nonce = bytes-of<bytes .size (16..64)>
+
+; Unknown claims are ignored, whatever they hold (section 4.7). Every known
+; claim is written with a cut (^), so a known name with a wrong value fails
+; and is never taken for an unknown claim.
+unknown-claim = ( JC<text, (int / text)> => any )
+
+; cpu (exactly one), vtpm (only when the cpu binds through it) and one entry
+; per device; at most 66 submodules in all (sections 4.2, 4.7).
+cvm-submods = submod-shapes .within ({ 1*66 text => any })
+
+submod-shapes = {
+                  "cpu" ^ => cpu-azure,
+                  "vtpm" ^ => cvm-vtpm,
+                  device-entries,
+                }
+              / {
+                  "cpu" ^ => cpu-direct / cca-token,
+                  device-entries,
+                }
+
+device-entries = (
+  * gpu-name ^ => gpu-device,
+  * switch-name ^ => switch-device,
+)
+
+; <ueid> is printable ASCII without "/", 1 to 128 characters.
+gpu-name = text .regexp "gpu/[!-.0-~]{1,128}"
+switch-name = text .regexp "nvswitch/[!-.0-~]{1,128}"
+device-ueid = text .regexp "[!-.0-~]{1,128}"
+
+; --- cpu claims sets (section 4.3), one shape per platform and mode ---
+
+; Azure binds through the vTPM's extraData (section 5.4).
+cpu-azure = snp-azure / tdx-azure
+
+; Everywhere else the report binds the anchor directly.
+cpu-direct = snp-report-data<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-report-data<"dstack", snp-report-type>
+           / snp-commitment<("bare" / "gcp"), (snp-report-type / tsm-report-type)>
+           / snp-commitment<"dstack", snp-report-type>
+           / tdx-report-data<("bare" / "gcp"), (tdx-quote-type / tsm-report-type)>
+           / tdx-report-data<"dstack", tdx-quote-type>
+
+snp-azure = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", "azure", snp-generation>,
+  cvm-report-label ^ => report-record<snp-report-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+snp-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  no-snp-registers,
+  cpu-hints,
+  * unknown-claim
+}
+
+; snp-vmr registers bind only through the commitment (sections 6.5, 8).
+; Appraisal requires the log (log-required); the envelope may omit it.
+snp-commitment<H, R> = {
+  cvm-platform-label ^ => platform<"amd", "sev-snp", H, snp-generation>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"commitment">,
+  ? cvm-endorsements-label ^ => snp-endorsements,
+  cvm-registers-label ^ => [16*16 snp-register],   ; slots 0 to 15, each once
+  ? cvm-log-label ^ => cvm-log,
+  cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  cpu-hints,
+  * unknown-claim
+}
+
+no-snp-registers = (
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+  no-commitment-claims,
+)
+
+tdx-azure = {
+  cvm-platform-label ^ => platform<"intel", "tdx", "azure", fmspc>,
+  cvm-report-label ^ => report-record<tdx-quote-type>,
+  cvm-binding-label ^ => cpu-binding<"vtpm-extradata">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+tdx-report-data<H, R> = {
+  cvm-platform-label ^ => platform<"intel", "tdx", H, fmspc>,
+  cvm-report-label ^ => report-record<R>,
+  cvm-binding-label ^ => cpu-binding<"report-data">,
+  ? cvm-endorsements-label ^ => tdx-endorsements,
+  tdx-registers-and-log,
+  no-commitment-claims,
+  cpu-hints,
+  * unknown-claim
+}
+
+; A log needs registers to replay into (section 6.1).
+tdx-registers-and-log = (
+  cvm-registers-label ^ => [1*64 tdx-register],    ; each RTMR at most once
+  ? cvm-log-label ^ => cvm-log
+  //
+  ? cvm-registers-label ^ => absent,
+  ? cvm-log-label ^ => absent,
+)
+
+no-commitment-claims = (
+  ? cvm-chain-label ^ => absent,
+  ? eat.boot-seed-label ^ => absent,
+)
+
+cpu-hints = (
+  ? eat.debug-status-label ^ => eat.debug-status-type,
+  ? cvm-provenance-label ^ => any,                 ; reserved, ignored in v1
+)
+
+; Matches nothing: the member it types must be absent.
+absent = uint .lt 0
+
+; generation, when present, names what the verifier derives from the report
+; and must agree with it (section 3.4).
+platform<V, T, H, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  ? "generation" ^ => G,
+  "hosting" ^ => H,
+}
+
+snp-generation = "Milan" / "Genoa" / "Turin"
+
+snp-report-type = "application/vnd.confidential-ai.sev-snp-report"
+tdx-quote-type = "application/vnd.confidential-ai.tdx-quote"
+tsm-report-type = "application/vnd.veraison.tsm-report+json"   ; ingest only
+
+; A CMW record whose indicator is exactly 4, evidence (RFC 9999 section 3.1).
+report-record<T> = [ T, bytes-of<field-bytes>, 4 ]
+
+; The certificate pattern binds exactly an x509-tbs-sha256 key; the challenge
+; pattern binds no key or an spki-sha256 or raw key (section 5.3).
+cpu-binding<M> = {
+  "pattern" ^ => "challenge",
+  "mode" ^ => M,
+  ? "key" ^ => challenge-key
+  //
+  "pattern" ^ => "certificate",
+  "mode" ^ => M,
+  "key" ^ => certificate-key,
+}
+
+challenge-key = { "kind" ^ => "spki-sha256", "value" ^ => bytes-of<bytes .size 32> }
+              / { "kind" ^ => "raw", "value" ^ => bytes-of<bytes .size (0..65535)> }
+certificate-key = { "kind" ^ => "x509-tbs-sha256", "value" ^ => bytes-of<bytes .size 32> }
+key-binding = challenge-key / certificate-key
+
+; --- registers (section 6) ---
+
+tdx-register = {
+  "index" ^ => 0..3,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "tdx-rtmr",
+  "backing" ^ => "hardware",
+}
+
+snp-register = {
+  "index" ^ => 0..15,
+  "alg" ^ => "sha384",
+  "value" ^ => bytes-of<bytes .size 48>,
+  "source" ^ => "snp-vmr",
+  "backing" ^ => "virtualized" / "kernel-service" / "privileged-service",
+}
+
+vtpm-register<A, N> = {
+  "index" ^ => 0..23,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "vtpm-pcr",
+  "backing" ^ => "privileged-service",
+}
+
+; --- event log (section 7) ---
+
+cvm-log = {
+  "format" ^ => "tcg-cel-cbor" / "tcg-cel-json" / "tdx-ccel"
+              / "tpm2-event-log" / "dstack-json" / "aael",
+  "data" ^ => bytes-of<field-bytes>,
+}
+
+; --- endorsements (section 10) ---
+
+snp-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "snp.vek" ^ => endorsement<"application/pkix-cert">,
+  ? "snp.crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+tdx-endorsements = endorsement-collection<{
+  "__cmwc_t" ^ => endorsements-collection-type,
+  ? "tdx.tcb_info" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.qe_identity" ^ => endorsement<pcs-signed-type>,
+  ? "tdx.pck_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "tdx.root_crl" ^ => endorsement<"application/pkix-crl">,
+  ? "nras.jwks" ^ => endorsement<"application/jwk-set+json">,
+}>
+
+endorsements-collection-type = "tag:confidential.ai,2026:cvm-endorsements#1"
+
+; At least one entry beside __cmwc_t (RFC 9999 section 3.3).
+endorsement-collection<M> = M .within ({ "__cmwc_t" => any, + text => any })
+
+; {body, issuer_chain} as JSON, each a .b64u byte string (section 10.1).
+pcs-signed-type = "application/vnd.confidential-ai.pcs-signed+json"
+
+; Indicator 2 (endorsements) or 1 (reference values shipped inline).
+endorsement<T> = [ T, bytes-of<field-bytes>, 1 / 2 ]
+
+; --- vtpm submodule (section 4.4) ---
+
+; Registers are in the quoted bank, each equal to the quoted PCR of its
+; index and inside the quote's signed selection.
+cvm-vtpm = vtpm<"sha256", 32> / vtpm<"sha384", 48> / vtpm<"sha512", 64>
+
+vtpm<A, N> = {
+  cvm-tpm-quote-label ^ => {
+    "message" ^ => bytes-of<field-bytes>,
+    "signature" ^ => bytes-of<field-bytes>,
+    "pcrs" ^ => [24*24 bytes-of<bytes .size N>],
+    "bank" ^ => A,
+  },
+  cvm-tpm-ak-label ^ => tpm-ak,
+  cvm-registers-label ^ => [1*24 vtpm-register<A, N>],
+  ? cvm-log-label ^ => cvm-log,
+  * unknown-claim
+}
+
+tpm-ak = { "method" ^ => "hcl-report", "data" ^ => bytes-of<field-bytes> }
+
+; --- Arm CCA (section 4.6): the token as the RMM emits it ---
+
+cca-token = JC<[ "CBOR", text .b64u field-bytes ], field-bytes>
+
+; --- device submodules (section 4.5) ---
+
+; NVIDIA's device evidence as its SDK exchanges it with NRAS: evidence_b64
+; and cert_chain_b64 keep NVIDIA's standard base64 text and are passed to
+; NRAS verbatim. uuid equals the <ueid> of the submodule name.
+gpu-device = device<("HOPPER" / "BLACKWELL")>
+switch-device = device<"LS10">
+
+device<A> = {
+  "arch" ^ => A,
+  "uuid" ^ => device-ueid,
+  "evidence_b64" ^ => text .size (1..1048576),
+  "cert_chain_b64" ^ => text .size (1..1048576),
+  cvm-binding-label ^ => { "pattern" ^ => "challenge", "mode" ^ => "nras-nonce" },
+  * unknown-claim
+}
+
+; ===================================================================
+; Appraisal (section 12): an EAR draft-ietf-rats-ear-04 claims set
+; ===================================================================
+
+cvm-appraisal = {
+  eat.profile-label ^ => "tag:ietf.org,2026:rats/ear#04",
+  eat.iat-claim-label ^ => ~eat.time-int,
+  ear.verifier-id-label ^ => ar4si.verifier-id,
+  eat.nonce-label ^ => cvm-nonce,
+  ? ear.raw-evidence-label ^ => raw-evidence,
+  all-submods-bound-label ^ => "true" / "false",
+  eat.submods-label ^ => {
+    "cpu" ^ => appraisal<cpu-claims>,
+    ? "vtpm" ^ => appraisal<vtpm-claims>,
+    * gpu-name ^ => appraisal<device-claims>,
+    * switch-name ^ => appraisal<device-claims>,
+  },
+}
+
+; draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines this claim with a text
+; value and no CBOR key, so its key is text in both encodings. It is "false"
+; only for a device whose signed nonce match is false under a policy that
+; tolerates it; a binding that fails is otherwise a refusal (section 12.6).
+all-submods-bound-label = "ear_all_submods_bound"
+
+; The envelope as appraised and the endorsements used, as a CMW collection
+; in a record of type application/cmw+json (section 12.1).
+raw-evidence = [ "application/cmw+json", bytes-of<bytes>, ? cmw-ind ]
+
+; ear_status is the worst tier the vector reaches (section 12.4). The two
+; policy ids are the profile and the policy's ni name (section 12.5).
+appraisal<C> = {
+  ear.status-label ^ => ar4si.trustworthiness-tier,
+  ear.trustworthiness-vector-label ^ => ar4si.trustworthiness-vector,
+  ear.appraisal-policy-ids-label ^ => [ cvm-profile-uri, policy-ni-uri ],
+  ear.attester-claims-label ^ => C,
+  ear.verifier-claims-label ^ => verifier-claims,
+}
+
+; RFC 6920: the SHA-384 of the JCS serialization of the effective policy.
+policy-ni-uri = text .regexp "ni:///sha-384;[A-Za-z0-9_-]{64}"
+
+; --- attester claims (section 12.2) ---
+
+cpu-claims = snp-claims / tdx-claims / cca-claims
+
+snp-claims = {
+  cvm-platform-label ^ => verified-platform<"amd", "sev-snp", snp-generation>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  ? cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "snp-host-data", "value" ^ => bytes-of<bytes .size 32> },
+  cvm-owner-label ^ => {
+    "family_id" ^ => bytes-of<bytes .size 16>,
+    "image_id" ^ => bytes-of<bytes .size 16>,
+    "id_key_digest" ^ => bytes-of<bytes .size 48>,
+    "author_key_digest" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "smt" ^ => bool,
+    "single_socket" ^ => bool,
+    "vmpl" ^ => uint .le 255,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "reported" ^ => snp-tcb,
+    "committed" ^ => snp-tcb,
+    "current" ^ => snp-tcb,
+    "launch" ^ => snp-tcb,
+  },
+  cvm-identity-label ^ => { "chip_id" ^ => bytes-of<bytes .size 64> },
+  ? cvm-chain-label ^ => { "chain_len" ^ => uint .ge 1 },
+  ? eat.boot-seed-label ^ => bytes-of<bytes .size 32>,
+  "snp" ^ => trustee-snp,
+}
+
+tdx-claims = {
+  cvm-platform-label ^ => verified-platform<"intel", "tdx", fmspc>,
+  cvm-launch-measurement-label ^ => digest<"sha384", 48>,
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "tdx-mrconfigid", "value" ^ => bytes-of<bytes .size 48> },
+  cvm-owner-label ^ => {
+    "mr_owner" ^ => bytes-of<bytes .size 48>,
+    "mr_owner_config" ^ => bytes-of<bytes .size 48>,
+  },
+  cvm-policy-label ^ => {
+    "debug" ^ => bool,
+    "migratable" ^ => bool,
+    "sept_ve_disable" ^ => bool,
+    ? "service_td" ^ => bool,
+    "reserved_bits_zero" ^ => bool,
+  },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    "pck_tcb" ^ => bytes-of<bytes .size 16>,
+    "pcesvn" ^ => uint .le 65535,
+    "fmspc" ^ => fmspc,
+    ? "status" ^ => tdx-tcb-status,
+    ? "advisories" ^ => [+ text],
+  },
+  cvm-identity-label ^ => { "ppid" ^ => bytes-of<bytes .size 16> },
+  tdx-compat-claims,
+}
+
+fmspc = text .regexp "[0-9a-f]{12}"
+
+verified-platform<V, T, G> = {
+  "vendor" ^ => V,
+  "tee" ^ => T,
+  "generation" ^ => G,
+  "hosting" ^ => "bare" / "azure" / "gcp" / "dstack",   ; as reported (section 3.4)
+}
+
+freshness = {
+  "pattern" ^ => "challenge" / "certificate",
+  "mode" ^ => "report-data" / "commitment" / "vtpm-extradata" / "cca-challenge" / "nras-nonce",
+  ? "key" ^ => key-binding,
+  ? "not_before" ^ => rfc3339,
+  ? "not_after" ^ => rfc3339,
+}
+
+verified-register = verified-register-in<"sha256", 32>
+                  / verified-register-in<"sha384", 48>
+                  / verified-register-in<"sha512", 64>
+
+verified-register-in<A, N> = {
+  "index" ^ => uint .le 65535,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "tdx-rtmr" / "snp-vmr" / "vtpm-pcr" / "cca-rem",
+  "backing" ^ => backing,
+  "replayed" ^ => bool,
+  ? "owner" ^ => text .size (1..255),
+  ? "purpose" ^ => text .size (1..255),
+}
+
+digest<A, N> = { "alg" ^ => A, "value" ^ => bytes-of<bytes .size N> }
+
+snp-tcb = {
+  "bootloader" ^ => uint .le 255,
+  "tee" ^ => uint .le 255,
+  "snp" ^ => uint .le 255,
+  "microcode" ^ => uint .le 255,
+  ? "fmc" ^ => uint .le 255,
+}
+
+tdx-tcb-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+               / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+               / "OutOfDateConfigurationNeeded" / "Revoked"
+
+; The Confidential Containers Trustee names for an SNP report (section 12.7).
+trustee-snp = {
+  "policy_abi_major" ^ => uint .le 255,
+  "policy_abi_minor" ^ => uint .le 255,
+  "policy_smt_allowed" ^ => bool,
+  "policy_migrate_ma" ^ => bool,
+  "policy_debug_allowed" ^ => bool,
+  "policy_single_socket" ^ => bool,
+  "reported_tcb_bootloader" ^ => uint .le 255,
+  "reported_tcb_tee" ^ => uint .le 255,
+  "reported_tcb_snp" ^ => uint .le 255,
+  "reported_tcb_microcode" ^ => uint .le 255,
+  "platform_tsme_enabled" ^ => bool,
+  "platform_smt_enabled" ^ => bool,
+  "measurement" ^ => hex48,
+  "report_data" ^ => hex64,
+  "init_data" ^ => hex32,
+  "chip_id" ^ => hex64,
+}
+
+; The Intel Trust Authority names for a TD quote (section 12.6).
+tdx-compat-claims = (
+  "tdx_mrtd" ^ => hex48,
+  "tdx_rtmr0" ^ => hex48,
+  "tdx_rtmr1" ^ => hex48,
+  "tdx_rtmr2" ^ => hex48,
+  "tdx_rtmr3" ^ => hex48,
+  "tdx_mrconfigid" ^ => hex48,
+  "tdx_mrowner" ^ => hex48,
+  "tdx_mrownerconfig" ^ => hex48,
+  "tdx_td_attributes" ^ => hex8,
+  "tdx_tee_tcb_svn" ^ => hex16,
+  "tdx_xfam" ^ => hex8,
+  "tdx_mrseam" ^ => hex48,
+  "tdx_mrsignerseam" ^ => hex48,
+)
+
+hex8 = text .regexp "[0-9a-f]{16}"
+hex16 = text .regexp "[0-9a-f]{32}"
+hex32 = text .regexp "[0-9a-f]{64}"
+hex48 = text .regexp "[0-9a-f]{96}"
+hex64 = text .regexp "[0-9a-f]{128}"
+
+; Arm CCA (section 9.6): the RIM, the REMs and the RPV from the realm token;
+; the implementation, the instance, the lifecycle and the software components
+; from the platform token. Version 1 does not replay REMs.
+cca-claims = cca-claims-in<"sha256", 32>
+           / cca-claims-in<"sha384", 48>
+           / cca-claims-in<"sha512", 64>
+
+cca-claims-in<A, N> = {
+  cvm-platform-label ^ => verified-platform<"arm", "cca", cca-implementation-id>,
+  cvm-launch-measurement-label ^ => digest<A, N>,
+  cvm-registers-label ^ => [4*4 cca-register<A, N>],
+  cvm-freshness-label ^ => freshness,
+  cvm-host-data-label ^ => { "semantics" ^ => "cca-rpv", "value" ^ => bytes-of<bytes .size 64> },
+  cvm-policy-label ^ => { "debug" ^ => bool, "migratable" ^ => false },
+  eat.debug-status-label ^ => eat.ds-enabled / eat.disabled-since-boot,
+  cvm-tcb-label ^ => {
+    "lifecycle" ^ => uint .le 65535,
+    "sw_components" ^ => [+ cca-sw-component],
+  },
+  cvm-identity-label ^ => { "instance_id" ^ => bytes-of<bytes .size 33> },
+}
+
+cca-implementation-id = text .regexp "[0-9a-f]{64}"
+
+cca-register<A, N> = {
+  "index" ^ => 0..3,
+  "alg" ^ => A,
+  "value" ^ => bytes-of<bytes .size N>,
+  "source" ^ => "cca-rem",
+  "backing" ^ => "hardware",
+  "replayed" ^ => false,
+}
+
+; A platform software component (claim 2399), keys as text.
+cca-sw-component = {
+  ? "component_type" ^ => text,
+  "measurement_value" ^ => bytes-of<bytes .size (32..64)>,
+  ? "version" ^ => text,
+  "signer_id" ^ => bytes-of<bytes .size (32..64)>,
+  ? "hash_alg" ^ => text,
+}
+
+vtpm-claims = {
+  cvm-registers-label ^ => [+ verified-register],
+  cvm-freshness-label ^ => freshness,
+  cvm-tpm-ak-label ^ => tpm-ak,
+}
+
+; NRAS's signed device claims verbatim, with cvm_identity and cvm_tcb beside
+; them (section 9.7.3).
+device-claims = ear.claims-map-type
+
+; --- verifier claims (section 12.3) ---
+
+verifier-claims = ar4si.non-empty<{
+  ? cvm-collateral-label ^ => { + collateral-check => collateral-outcome },
+  ? cvm-reference-label ^ => reference-outcome,
+  ? cvm-backing-min-label ^ => { "required" ^ => backing, "weakest_seen" ^ => backing },
+  ? "ear_nvidia_evidence" ^ => {
+    ? "signature_verified" ^ => bool,
+    ? "parsed" ^ => bool,
+    ? "nonce_match" ^ => bool,
+  },
+}>
+
+collateral-check = "snp_crl" / "tdx_pck_crl" / "tdx_root_crl"
+                 / "tdx_tcb_info" / "tdx_qe_identity" / "nras_jwks" / "cca_corim"
+
+collateral-outcome = {
+  "status" ^ => "checked" / "skipped" / "not-applicable",
+  ? "reason" ^ => text,
+  ? "this_update" ^ => rfc3339,
+  ? "next_update" ^ => rfc3339,
+  ? "signed" ^ => bool,
+}
+
+reference-outcome = ar4si.non-empty<{
+  ? "launch_measurement" ^ => bool,
+  ? "registers" ^ => { + register-index => bool },
+}>
+
+register-index = JC<text .base10 (0..65535), 0..65535>
+
+rfc3339 = text .regexp "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
+
+; ===================================================================
+; Policy (section 13): a verifier input, JSON only. Every member is optional
+; and takes the default shown, and every default fails closed.
+; ===================================================================
+
+cvm-policy = {
+  ? "reference" ^ => reference-values,
+  ? "min_backing" ^ => backing .default "hardware",
+  ? "freshness" ^ => { ? "key" ^ => key-binding },
+  ? "commitment" ^ => {
+    ? "header16" ^ => "QVRTLU1SLTEBARAAAAAAAA",
+    ? "seed" ^ => "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn",
+  },
+  ? "tcb" ^ => tcb-policy,
+  ? "policy_bits" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "allow_migration" ^ => bool .default false,
+    ? "require_vmpl0" ^ => bool .default true,
+    ? "require_sept_ve_disable" ^ => bool .default true,
+    ? "require_zero_reserved_attributes" ^ => bool .default true,
+    ? "allow_service_td" ^ => bool .default false,
+  },
+  ? "identity" ^ => { "machines" ^ => [+ machine-entry] },
+  ? "owner" ^ => { "id_key_digests" ^ => [+ bytes-of<bytes .size 48>] },
+  ? "gpu" ^ => gpu-policy,
+}
+
+reference-values = {
+  ? "launch_measurement" ^ => [* policy-digest],
+  ? "registers" ^ => { * register-index => [+ policy-digest] },
+  ? "pcrs" ^ => { * pcr-index => [+ policy-digest] },
+  ? "slot_owners" ^ => { * register-index => text .size (1..255) },
+  ? "host_data" ^ => bytes-of<bytes .size (1..48)>,
+}
+
+pcr-index = text .base10 (0..23)
+
+policy-digest = digest<"sha256", 32> / digest<"sha384", 48> / digest<"sha512", 64>
+
+; A named floor must constrain something, and its tdx member names at least
+; one bound; default_floor and every machine's tcb_floor name one of the floors.
+tcb-policy = {
+  ? "floors" ^ => { * text => tcb-floor },
+  ? "default_floor" ^ => text,
+  ? "tdx_allowed_status" ^ => [+ allowed-tdx-status],   ; default ["UpToDate"]
+  ? "require_revocation" ^ => bool .default true,
+  ? "require_signed_collateral" ^ => bool .default true,
+}
+
+; Revoked can never be allowed.
+allowed-tdx-status = "UpToDate" / "SWHardeningNeeded" / "ConfigurationNeeded"
+                   / "ConfigurationAndSWHardeningNeeded" / "OutOfDate"
+                   / "OutOfDateConfigurationNeeded"
+
+tcb-floor = ar4si.non-empty<{
+  ? "snp" ^ => {
+    "min" ^ => snp-tcb,
+    ? "values" ^ => [1*4 snp-tcb-value],           ; each at most once
+  },
+  ? "tdx" ^ => ar4si.non-empty<{
+    ? "min_tee_tcb_svn" ^ => bytes-of<bytes .size 16>,
+    ? "min_tcb_evaluation_data_number" ^ => uint .le 4294967295,
+  }>,
+}>
+
+snp-tcb-value = "reported" / "current" / "committed" / "launch"
+
+machine-entry = {
+  "id" ^ => bytes-of<bytes .size (1..128)>,
+  ? "tcb_floor" ^ => text,
+}
+
+gpu-policy = {
+  ? "required" ^ => bool .default false,
+  ? "expected_archs" ^ => [+ ("HOPPER" / "BLACKWELL" / "LS10")],
+  ? "device_policy" ^ => {
+    ? "allow_debug" ^ => bool .default false,
+    ? "require_secboot" ^ => bool .default true,
+    ? "require_nonce_match" ^ => bool .default true,
+    ? "require_measres_success" ^ => bool .default true,
+  },
+}
+
+; ===================================================================
+; Shared
+; ===================================================================
+
+backing = "virtualized" / "kernel-service" / "privileged-service" / "hardware"
+
+; Every byte string field is at most 1 MiB (section 4.7).
+field-bytes = bytes .size (1..1048576)
+
+bytes-of<B> = JC<text .b64u B, B>
+
+; RFC 9999: non-zero, and only the five registered bits.
+cmw-ind = 1..31
+
+; Appendix A.
+cvm-version-label = JC<"cvm_version", -70000>
+cvm-platform-label = JC<"cvm_platform", -70001>
+cvm-report-label = JC<"cvm_report", -70002>
+cvm-binding-label = JC<"cvm_binding", -70003>
+cvm-endorsements-label = JC<"cvm_endorsements", -70004>
+cvm-registers-label = JC<"cvm_registers", -70005>
+cvm-log-label = JC<"cvm_log", -70006>
+cvm-chain-label = JC<"cvm_chain", -70007>
+cvm-provenance-label = JC<"cvm_provenance", -70008>
+cvm-tpm-quote-label = JC<"cvm_tpm_quote", -70010>
+cvm-tpm-ak-label = JC<"cvm_tpm_ak", -70011>
+cvm-launch-measurement-label = JC<"cvm_launch_measurement", -70020>
+cvm-freshness-label = JC<"cvm_freshness", -70021>
+cvm-host-data-label = JC<"cvm_host_data", -70022>
+cvm-owner-label = JC<"cvm_owner", -70023>
+cvm-policy-label = JC<"cvm_policy", -70024>
+cvm-tcb-label = JC<"cvm_tcb", -70025>
+cvm-identity-label = JC<"cvm_identity", -70026>
+cvm-collateral-label = JC<"cvm_collateral", -70030>
+cvm-reference-label = JC<"cvm_reference", -70031>
+cvm-backing-min-label = JC<"cvm_backing_min", -70032>
+
+; From RFC 9711 section 7.3 and appendix D.
+eat.JC<J, C> = eat.JSON-ONLY<J> / eat.CBOR-ONLY<C>
+eat.JSON-ONLY<J> = J .feature "json"
+eat.CBOR-ONLY<C> = C .feature "cbor"
+JC<J, C> = eat.JC<J, C>
+eat.time-int = #6.1(int)
+eat.nonce-label = eat.JC<"eat_nonce", 10>
+eat.debug-status-label = eat.JC<"dbgstat", 263>
+eat.profile-label = eat.JC<"eat_profile", 265>
+eat.submods-label = eat.JC<"submods", 266>
+eat.boot-seed-label = eat.JC<"bootseed", 268>
+eat.iat-claim-label = eat.JC<"iat", 6>
+eat.debug-status-type = eat.ds-enabled / eat.disabled / eat.disabled-since-boot
+                      / eat.disabled-permanently / eat.disabled-fully-and-permanently
+eat.ds-enabled = eat.JC<"enabled", 0>
+eat.disabled = eat.JC<"disabled", 1>
+eat.disabled-since-boot = eat.JC<"disabled-since-boot", 2>
+eat.disabled-permanently = eat.JC<"disabled-permanently", 3>
+eat.disabled-fully-and-permanently = eat.JC<"disabled-fully-and-permanently", 4>
+
+; From draft-ietf-rats-ear-04 appendix A.
+ear.verifier-id-label = eat.JC<"ear_verifier_id", 1004>
+ear.raw-evidence-label = eat.JC<"ear_raw_evidence", 1002>
+ear.status-label = eat.JC<"ear_status", 1000>
+ear.trustworthiness-vector-label = eat.JC<"ear_trustworthiness_vector", 1001>
+ear.appraisal-policy-ids-label = eat.JC<"ear_appraisal_policy_ids", 1003>
+ear.attester-claims-label = eat.JC<"ear_attester_claims", 1005>
+ear.verifier-claims-label = eat.JC<"ear_verifier_claims", 1006>
+ear.claims-map-type = eat.JC<ear.claims-map-type-json, ear.claims-map-type-cbor>
+ear.claims-map-type-json = {+ text => any}
+ear.claims-map-type-cbor = {+ (text / int) => any}
+
+; From draft-ietf-rats-ar4si-10 section 3.
+ar4si.trustworthiness-vector = ar4si.non-empty<{
+  ? ar4si.instance-identity-label => ar4si.trustworthiness-claim,
+  ? ar4si.configuration-label => ar4si.trustworthiness-claim,
+  ? ar4si.executables-label => ar4si.trustworthiness-claim,
+  ? ar4si.file-system-label => ar4si.trustworthiness-claim,
+  ? ar4si.hardware-label => ar4si.trustworthiness-claim,
+  ? ar4si.runtime-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.storage-opaque-label => ar4si.trustworthiness-claim,
+  ? ar4si.sourced-data-label => ar4si.trustworthiness-claim,
+}>
+ar4si.non-empty<M> = M .within ({+ any => any})
+ar4si.trustworthiness-claim = -128..127
+ar4si.instance-identity-label = eat.JC<"instance-identity", 0>
+ar4si.configuration-label = eat.JC<"configuration", 1>
+ar4si.executables-label = eat.JC<"executables", 2>
+ar4si.file-system-label = eat.JC<"file-system", 3>
+ar4si.hardware-label = eat.JC<"hardware", 4>
+ar4si.runtime-opaque-label = eat.JC<"runtime-opaque", 5>
+ar4si.storage-opaque-label = eat.JC<"storage-opaque", 6>
+ar4si.sourced-data-label = eat.JC<"sourced-data", 7>
+ar4si.trustworthiness-tier = eat.JC<"none", 0> / eat.JC<"affirming", 2>
+                           / eat.JC<"warning", 32> / eat.JC<"contraindicated", 96>
+ar4si.verifier-id = {
+  ar4si.developer-label => text,
+  ar4si.build-label => text,
+}
+ar4si.developer-label = eat.JC<"developer", 0>
+ar4si.build-label = eat.JC<"build", 1>
+```
+
+## Appendix D. Examples
+
+The examples abbreviate long byte strings with `...`. Each is complete in the conformance corpus under the path given, together with the policy and collateral that produce the appraisal.
+
+### D.1. SEV-SNP evidence and its appraisal
+
+Evidence from a Genoa guest bound in `report-data` mode, with its VCEK inline (`conformance/inputs/evidence/snp-hardware-affirmed.json`):
+
+```json
+{
+  "cvm_version": 1,
+  "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+  "eat_profile": "tag:confidential.ai,2026:cvm#1",
+  "submods": {
+    "cpu": {
+      "cvm_binding": {
+        "mode": "report-data",
+        "pattern": "challenge"
+      },
+      "cvm_endorsements": {
+        "__cmwc_t": "tag:confidential.ai,2026:cvm-endorsements#1",
+        "snp.vek": [
+          "application/pkix-cert",
+          "MIIFPzCCAvOgAwIBAgIBADBB...",
+          2
+        ]
+      },
+      "cvm_platform": {
+        "hosting": "bare",
+        "tee": "sev-snp",
+        "vendor": "amd"
+      },
+      "cvm_report": [
+        "application/vnd.confidential-ai.sev-snp-report",
+        "BQAAAAAAAAAAAAMAAAAAAAAA...",
+        4
+      ]
+    }
+  }
+}
+```
+
+The appraisal under a policy that requires revocation and holds the machine to a TCB floor (`conformance/inputs/expected/snp-hardware-affirmed.json`; the case `conformance/cases/snp-hardware-affirmed.json` names the policy and collateral). `iat`, `ear_verifier_id` and `ear_raw_evidence` vary between implementations, are absent from the expected file, and are removed before comparison (Section 14.3):
+
+```json
+{
+  "ear_all_submods_bound": "true",
+  "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+  "eat_profile": "tag:ietf.org,2026:rats/ear#04",
+  "submods": {
+    "cpu": {
+      "ear_appraisal_policy_ids": [
+        "tag:confidential.ai,2026:cvm#1",
+        "ni:///sha-384;JlevQJA5Dh..."
+      ],
+      "ear_attester_claims": {
+        "cvm_freshness": {
+          "mode": "report-data",
+          "pattern": "challenge"
+        },
+        "cvm_host_data": {
+          "semantics": "snp-host-data",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_identity": {
+          "chip_id": "tfmkyCgOY8l9KI22ZIV33CuE..."
+        },
+        "cvm_launch_measurement": {
+          "alg": "sha384",
+          "value": "2ZEro5bOQJwpR4Qdk6UHa2g5..."
+        },
+        "cvm_owner": {
+          "author_key_digest": "AAAAAAAAAAAAAAAAAAAAAAAA...",
+          "family_id": "AAAAAAAAAAAAAAAAAAAAAA",
+          "id_key_digest": "AAAAAAAAAAAAAAAAAAAAAAAA...",
+          "image_id": "AAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_platform": {
+          "generation": "Genoa",
+          "hosting": "bare",
+          "tee": "sev-snp",
+          "vendor": "amd"
+        },
+        "cvm_policy": {
+          "debug": false,
+          "migratable": false,
+          "single_socket": false,
+          "smt": true,
+          "vmpl": 0
+        },
+        "cvm_tcb": {
+          "committed": {
+            "bootloader": 10,
+            "microcode": 27,
+            "snp": 27,
+            "tee": 0
+          },
+          "current": {
+            "bootloader": 10,
+            "microcode": 27,
+            "snp": 27,
+            "tee": 0
+          },
+          "launch": {
+            "bootloader": 10,
+            "microcode": 27,
+            "snp": 27,
+            "tee": 0
+          },
+          "reported": {
+            "bootloader": 10,
+            "microcode": 27,
+            "snp": 27,
+            "tee": 0
+          }
+        },
+        "dbgstat": "disabled-since-boot",
+        "snp": {
+          "chip_id": "b5f9a4c8280e63c97d288db6...",
+          "init_data": "000000000000000000000000...",
+          "measurement": "d9912ba396ce409c2947841d...",
+          "platform_smt_enabled": true,
+          "platform_tsme_enabled": false,
+          "policy_abi_major": 0,
+          "policy_abi_minor": 0,
+          "policy_debug_allowed": false,
+          "policy_migrate_ma": false,
+          "policy_single_socket": false,
+          "policy_smt_allowed": true,
+          "report_data": "68656c6c6f2d617474657374...",
+          "reported_tcb_bootloader": 10,
+          "reported_tcb_microcode": 27,
+          "reported_tcb_snp": 27,
+          "reported_tcb_tee": 0
+        }
+      },
+      "ear_status": "affirming",
+      "ear_trustworthiness_vector": {
+        "configuration": 2,
+        "hardware": 2,
+        "runtime-opaque": 2
+      },
+      "ear_verifier_claims": {
+        "cvm_collateral": {
+          "snp_crl": {
+            "signed": true,
+            "status": "checked"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### D.2. Complete examples per platform
+
+| Platform | Corpus case |
+| --- | --- |
+| SEV-SNP, bare metal | `snp-hardware-affirmed`, `snp-genoa-report-data`, `snp-crl-checked` |
+| TDX, bare metal, CCEL | `tdx-ccel-replays-every-rtmr` |
+| TDX, CEL in CBOR and in JSON | `tdx-cel-cbor-replays`, `tdx-cel-json-replays` |
+| TDX with Intel collateral and a floor | `tdx-v4-quote-with-fixture-collateral`, `tdx-floor-met` |
+| dstack | `dstack-json-replays` |
+| Azure SEV-SNP | `azure-snp-through-vtpm`, `azure-snp-pcr8-pinned` |
+| Azure TDX | `azure-tdx-through-vtpm` |
+| NVIDIA device submodules | `gpu-device-unknown-claim-ignored` (the envelope shape; an appraisal case needs a recorded NRAS exchange) |
+| SEV-SNP `commitment` mode | the vectors of Appendix B.2 and B.3 (an appraisal case needs evidence from a register provider) |
+| Arm CCA | `cca-nested-token-not-implemented` (the envelope shape) |
+
+## Appendix E. Trust anchors
+
+The roots a verifier pins, with the values the reference implementation pins at the time of writing. A verifier obtains roots from the vendors and SHOULD compare them with these values; a vendor rotation changes them and is announced by the vendor.
+
+| Root | Pinned value |
+| --- | --- |
+| AMD ARK, Milan | certificate SHA-256 `69d063b45344d26a2e94e1f4210de49ef555308287d4c174445c95639a540bcd` |
+| AMD ASK, Milan | certificate SHA-256 `67d303bd3905fd38db8b20e0793699870e7fa612eaad5dec358293fd8c0bac1b` |
+| AMD ASVK, Milan | certificate SHA-256 `c5e081f59b7efab1fe2f8b505e159704e72f29cab7ef7cf628a05a42439082f5` |
+| AMD ARK, Genoa | certificate SHA-256 `4c6598d19c18719c5dfd4a7d335f674e5bfe1d8f800cea2cf270c10d103db2f1` |
+| AMD ASK, Genoa | certificate SHA-256 `5464738c1546aed5f2cecf1dc98c5c960a92e8913238a61711bc90ec6e828521` |
+| AMD ASVK, Genoa | certificate SHA-256 `197e610743a917d6b9bb982a5a9226ccc0a15b611be0619e626aca9151457372` |
+| AMD ARK, Turin | certificate SHA-256 `1f084161a44bb6d93778a904877d4819cafa5d05ef4193b2ded9dd9c73dd3f6a` |
+| AMD ASK, Turin | certificate SHA-256 `5b77ef5fe7a7a004fd9032668fba9d0fda22f88c4442069a479636a6ae3b3185` |
+| AMD ASVK, Turin | certificate SHA-256 `104e10a8bd060a3c20a434261a57d0588fd65a88915b4f65b08bdecaf8df1a3c` |
+| Intel SGX Root CA | P-256 public key, `x` `0ba9c4c0c0c86193a3fe23d6b02cda10a8bbd4e88e48b4458561a36e705525f5`, `y` `67918e2edc88e40d860bd0cc4ee26aacc988e505a953558c453f6b0904ae7394` |
+| NVIDIA NRAS token signing chain | `SubjectPublicKeyInfo` SHA-256 `fd32837f954e2c45db073105166dfe6985ae0480bb113fba63b091a75affe896`, the key of the "NVIDIA Attestation Service GPU Intermediate 004" certificate (valid until 2029-12-08), which the reference implementation pins as the top of the chain |
+| Arm CCA platform vendors | none in common: each vendor's CoRIM signing key (Section 9.6.4) |
+
+## Acknowledgments
+
+The author thanks Amean Asad and Yolan Romailler for the design discussions and reviews this document builds on.
