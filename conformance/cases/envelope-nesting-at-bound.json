@@ -1,0 +1,13 @@
+{
+  "id": "envelope-nesting-at-bound",
+  "rule": {
+    "section": "4.7",
+    "statement": "JSON input is nested at most 32 levels deep, the envelope at level 1: an ignored claim of 31 nested arrays appraises"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-nesting-at-bound.json",
+  "policy": "policy/envelope-nesting-at-bound.json",
+  "expect": {
+    "appraisal": "expected/envelope-nesting-at-bound.json"
+  }
+}
