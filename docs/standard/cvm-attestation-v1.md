@@ -3,8 +3,8 @@
 | | |
 | --- | --- |
 | Profile | `tag:confidential.ai,2026:cvm#1` |
-| Version | 1, draft of 2026-09-24 |
-| Conformance corpus | 1.8 |
+| Version | 1, draft of 2026-10-01 |
+| Conformance corpus | 1.9 |
 | Author | Mahmoud Shehata, Confidential AI (mahmoud@confidential.ai) |
 | Status | Draft for publication |
 
@@ -70,7 +70,7 @@ Out of scope for version 1: device assignment through TEE-IO (TDISP, TDX Connect
 ### 1.3. Design principles
 
 1. Three messages with three authorities. Evidence is what the attester sends. Policy is what the relying party requires. The appraisal is what the verifier established. A launch measurement in a result is always the value the verifier extracted from a signed report.
-2. Only signed or bound bytes decide. Every field of the evidence is classified as signed, bound or hint (Section 3.4). A hint selects a parser and the combinations Section 4.3 admits, and a hint that contradicts signed data is a refusal.
+2. Only signed or bound bytes decide. Every field of the evidence is classified as signed, bound, hint or reserved (Section 3.4). A hint selects a parser and the combinations Section 4.3 admits, and a hint that contradicts signed data is a refusal.
 3. Fail closed. A check that cannot be performed is a failure unless the policy explicitly waives it, and a waived check is visible in the result.
 4. Name the protection level. Every runtime register carries a `backing` that states what protects it, and the policy sets a minimum, so a guarantee cannot be silently downgraded from hardware to software.
 5. One nonce, one declared binding per attester, one derivation of the binding input for every platform.
@@ -941,7 +941,7 @@ For TDX the TD report inside the HCL report is authenticated only by a platform 
 2. The message is a `TPMS_ATTEST` with `magic` `TPM_GENERATED_VALUE` (0xFF544347) and `type` `TPM_ST_ATTEST_QUOTE` (0x8018); a failure is refused with `report-invalid`.
 3. `extraData` equals `anchor` in length and value (Section 5.4); a failure is refused with `binding-mismatch`.
 4. The quoted `pcrDigest` equals the SHA-256 of the concatenation of the selected PCR values, in selection order (PCR `8i + b` for bit `b` of selection byte `i`), taken from `cvm_tpm_quote.pcrs`; a failure is refused with `register-mismatch`.
-5. Each register of the `vtpm` submodule is a PCR inside the signed selection and equals its quoted value (Section 4.4); a failure is refused with `register-mismatch`.
+5. Each register of the `vtpm` submodule is a PCR inside the signed selection; one outside it is refused with `register-mismatch`. That a register equals its entry of `cvm_tpm_quote.pcrs` is a shape rule of Section 4.4 (`envelope-invalid`).
 
 #### 9.4.4. Registers, logs and claims
 
@@ -1116,7 +1116,7 @@ Inline endorsements are inputs the verifier authenticates before use. A verifier
 
 An inline artifact that fails its binding or its window is ignored as if absent: the verifier uses its own copy, and when it has none the check is unavailable (`collateral-unavailable`, or skipped under a waiver). An inline artifact whose signature, signing chain or encoding fails is refused with `collateral-invalid`, since no reading of it is authentic, and so is an artifact the verifier itself obtained that fails any check. A VEK is the exception, since Section 9.1.4 authenticates it as part of the report's chain: an inline VEK that cannot be parsed, names the other key type (VCEK or VLEK) than `SIGNING_KEY` does, or fails its binding or window is ignored as if absent, and a bound VEK whose chain fails is refused with `chain-invalid`, whichever source supplied it.
 
-Freshness of collateral is each artifact's own validity window evaluated at the evaluation time. An artifact inside its window is usable however long ago it was fetched, and an artifact outside it is refused however recently it arrived; the verifier's cache timers play no part.
+Freshness of collateral is each artifact's own validity window evaluated at the evaluation time. An artifact inside its window is usable however long ago it was fetched, and an artifact outside it is never used, however recently it arrived; the verifier's cache timers play no part.
 
 ### 10.3. Collateral keys
 
@@ -1266,7 +1266,7 @@ EAR-04 section 3 requires an EAR extension to be a map, and `ear_all_submods_bou
 
 ### 12.7. Composition with Confidential Containers Trustee
 
-For an SEV-SNP `cpu` submodule the verifier emits an `snp` object in `ear_attester_claims`, beside the `cvm_*` claims, carrying the names the Confidential Containers Trustee verifier emits, with Trustee's types: `policy_abi_major`, `policy_abi_minor` (integers), `policy_smt_allowed`, `policy_migrate_ma`, `policy_debug_allowed`, `policy_single_socket` (booleans), `reported_tcb_bootloader`, `reported_tcb_tee`, `reported_tcb_snp`, `reported_tcb_microcode` (integers), `platform_tsme_enabled`, `platform_smt_enabled` (booleans), and `measurement`, `report_data`, `init_data` (Trustee's name for `HOST_DATA`) and `chip_id` (lowercase hexadecimal text). A policy written against Trustee's annotated evidence reads this object unchanged. The object is compatibility output: the `cvm_*` claims are normative, the `snp` object repeats a subset of their content, and its keys stay text in both encodings.
+For an SEV-SNP `cpu` submodule the verifier emits an `snp` object in `ear_attester_claims`, beside the `cvm_*` claims, carrying the names the Confidential Containers Trustee verifier emits, with Trustee's types: `policy_abi_major`, `policy_abi_minor` (integers), `policy_smt_allowed`, `policy_migrate_ma`, `policy_debug_allowed`, `policy_single_socket` (booleans), `reported_tcb_bootloader`, `reported_tcb_tee`, `reported_tcb_snp`, `reported_tcb_microcode` (integers), `platform_tsme_enabled`, `platform_smt_enabled` (booleans), and `measurement`, `report_data`, `init_data` (Trustee's name for `HOST_DATA`) and `chip_id` (lowercase hexadecimal text). A policy written against Trustee's annotated evidence reads this object unchanged. The object is compatibility output: the `cvm_*` claims are normative, the `snp` object carries Trustee's view of the same report (part of it repeats `cvm_*` content, and members such as `report_data` and the policy ABI version appear only there), and its keys stay text in both encodings.
 
 ## 13. Verifier policy
 
@@ -1410,7 +1410,7 @@ A refusal names the rule family that failed:
 
 | Code | Sections | Meaning |
 | --- | --- | --- |
-| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.2, 6.4, 6.5, 8.1, 9.4.1, 10.1, 11 steps 1 and 2 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, nesting, version or consistency rule, including a hint that contradicts the signed report, a backing the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved key kind |
+| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.2, 6.4, 6.5, 8.1, 9.4.1, 10.1, 11 steps 1 and 2 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, nesting, version or consistency rule, including a hint that contradicts the signed report, a backing the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (a vTPM register and its entry of `cvm_tpm_quote.pcrs`, an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved key kind |
 | `policy-invalid` | 11 step 1, 13 | the policy fails its own validation |
 | `platform-unsupported` | 9, 11 step 2 | the TEE, hosting or report media type is one this verifier does not implement |
 | `report-invalid` | 9.1.2, 9.1.3, 9.2.2, 9.4.3, 11 step 2 | the hardware report cannot be parsed, breaks a layout rule of Section 9 (a reserved byte, the signature algorithm, the key selection, a body type or size), or its version is outside the supported range; a TPM quote that is not a quote |
@@ -1437,7 +1437,7 @@ A refusal names the rule family that failed:
 
 ### 14.5. Versioning and change control
 
-The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.8") and pins that version in its continuous integration.
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.9") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
@@ -1603,7 +1603,7 @@ The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) 
 
 This section records the status of known implementations at the time of writing, in the manner of RFC 7942.
 
-attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly; https://github.com/confidential-dot-ai/attestation-rs; contact mahmoud@confidential.ai; pre-release, tracking this draft; status as of 2026-09-23) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.8 (162 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7, 9 (except 9.6) and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
+attestation-rs (Confidential AI, Apache-2.0, Rust, native and WebAssembly; https://github.com/confidential-dot-ai/attestation-rs; contact mahmoud@confidential.ai; pre-release, tracking this draft; status as of 2026-10-01) is the reference implementation. It generates the expected results of the conformance corpus and passes corpus 1.9 (163 cases), natively and through its WebAssembly entry point. It implements Sections 4 to 7, 9 (except 9.6) and 10 to 14 for SEV-SNP (bare metal, GCP, dstack), TDX (bare metal, GCP, dstack), Azure SEV-SNP and TDX, and NVIDIA GPUs and NVSwitch; the `ats-mr-v1` verification of Section 8; the independent generator of the Appendix B vectors; and a CDDL checker for the subset of RFC 8610, RFC 9165 and RFC 9741 that Appendix C uses, with a test that holds the CDDL module, the published JSON Schemas and its parsers to one another on every corpus input.
 
 Not implemented at the time of writing: Arm CCA appraisal (refused with `platform-unsupported`); the SEV-SNP register provider of Section 8, which is a kernel component and exists only as this specification; the CBOR encoding of evidence; chain memory; parsing of the `id-pe-cmw` extension (the certificate pattern works when the relying party supplies the certificate's digest); emitting `ear_raw_evidence`. The library's `appraise` entry takes the envelope's own nonce; its service, CLI and WebAssembly entry points take the relying party's nonce and compare it with `eat_nonce`, as Section 4.1 requires of a verifier, so a program that calls the library directly makes that comparison itself.
 
