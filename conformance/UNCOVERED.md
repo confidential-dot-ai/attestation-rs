@@ -8,5 +8,6 @@ exercises its signature and not the rule.
 
 | Section | Statement | What closes it |
 | --- | --- | --- |
+| 5.1, 5.2, 5.3 | an appraisal bound through a key (`spki-sha256`, `x509-tbs-sha256`, `raw`), and the certificate pattern's `not_before` and `not_after` | a recording made with a key binding; every refusal these rules make has a case |
 | 11 | step 6: `revoked` | a CRL that revokes a certificate we hold, which no vendor has issued |
 | 4.1, 11 | step 1: an `eat_nonce` that differs from the relying party's nonce is refused with `binding-mismatch` | a relying-party nonce in the case format; the reference implementation enforces the rule in its service, CLI and WebAssembly entry points |
