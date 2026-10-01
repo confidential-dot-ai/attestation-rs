@@ -1,0 +1,13 @@
+{
+  "id": "policy-commitment-header-not-pinned",
+  "rule": {
+    "section": "13.1",
+    "statement": "commitment.header16 is the value section 8.1 pins"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-commitment-header-not-pinned.json",
+  "policy": "policy/policy-commitment-header-not-pinned.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

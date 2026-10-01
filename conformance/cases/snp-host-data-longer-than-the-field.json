@@ -1,0 +1,13 @@
+{
+  "id": "snp-host-data-longer-than-the-field",
+  "rule": {
+    "section": "13.4",
+    "statement": "reference.host_data longer than the platform's field is a pin no report meets"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-host-data-longer-than-the-field.json",
+  "policy": "policy/snp-host-data-longer-than-the-field.json",
+  "expect": {
+    "refusal": "reference-mismatch"
+  }
+}

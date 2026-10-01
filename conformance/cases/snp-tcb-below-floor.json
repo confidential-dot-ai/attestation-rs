@@ -1,0 +1,13 @@
+{
+  "id": "snp-tcb-below-floor",
+  "rule": {
+    "section": "13.2",
+    "statement": "a TCB floor bounds each value it names; reported below the floor is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-tcb-below-floor.json",
+  "policy": "policy/snp-tcb-below-floor.json",
+  "expect": {
+    "refusal": "tcb-not-allowed"
+  }
+}
