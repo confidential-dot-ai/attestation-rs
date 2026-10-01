@@ -1,0 +1,13 @@
+{
+  "id": "snp-signature-upper-bytes-nonzero",
+  "rule": {
+    "section": "9.1.4",
+    "statement": "step 3: the upper 24 bytes of R and S are zero; a report whose R carries a non-zero byte there is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-signature-upper-bytes-nonzero.json",
+  "policy": "policy/snp-signature-upper-bytes-nonzero.json",
+  "expect": {
+    "refusal": "signature-invalid"
+  }
+}
