@@ -1,0 +1,13 @@
+{
+  "id": "cca-nested-token-not-implemented",
+  "rule": {
+    "section": "9",
+    "statement": "Arm CCA is a platform this release does not appraise"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/cca-nested-token-not-implemented.json",
+  "policy": "policy/cca-nested-token-not-implemented.json",
+  "expect": {
+    "refusal": "platform-unsupported"
+  }
+}
