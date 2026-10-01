@@ -1,0 +1,13 @@
+{
+  "id": "envelope-nonce-too-short",
+  "rule": {
+    "section": "4.1",
+    "statement": "eat_nonce is 16 to 64 bytes: 15 is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-nonce-too-short.json",
+  "policy": "policy/envelope-nonce-too-short.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
