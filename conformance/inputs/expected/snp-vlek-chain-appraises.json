@@ -1,0 +1,106 @@
+{
+  "ear_all_submods_bound": "true",
+  "eat_nonce": "gZdwt-bqbfjdj9TdFGsHPAv0885bCXfsrEhuOgXtG9VOKnrB9dHKAufX1e-fc7hXT9k1njpIDXQaRHjop7wnyg",
+  "eat_profile": "tag:ietf.org,2026:rats/ear#04",
+  "submods": {
+    "cpu": {
+      "ear_appraisal_policy_ids": [
+        "tag:confidential.ai,2026:cvm#1",
+        "ni:///sha-384;6nXx2KV7iPMVQn5AJVaFun8RreT9jesUJH_hj54xCsupzd_T66zQ1R9Q1pVryMbs"
+      ],
+      "ear_attester_claims": {
+        "cvm_freshness": {
+          "mode": "report-data",
+          "pattern": "challenge"
+        },
+        "cvm_host_data": {
+          "semantics": "snp-host-data",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_identity": {
+          "chip_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_launch_measurement": {
+          "alg": "sha384",
+          "value": "iSLrvdAOwsVB82pueoKodzp6zLRR7We8lOdA2-ksk8Toya-Ff1zutaST3ypXDXvw"
+        },
+        "cvm_owner": {
+          "author_key_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "family_id": "AAAAAAAAAAAAAAAAAAAAAA",
+          "id_key_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "image_id": "AAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_platform": {
+          "generation": "Milan",
+          "hosting": "bare",
+          "tee": "sev-snp",
+          "vendor": "amd"
+        },
+        "cvm_policy": {
+          "debug": false,
+          "migratable": false,
+          "single_socket": false,
+          "smt": true,
+          "vmpl": 1
+        },
+        "cvm_tcb": {
+          "committed": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          },
+          "current": {
+            "bootloader": 4,
+            "microcode": 220,
+            "snp": 24,
+            "tee": 0
+          },
+          "launch": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          },
+          "reported": {
+            "bootloader": 4,
+            "microcode": 217,
+            "snp": 24,
+            "tee": 0
+          }
+        },
+        "dbgstat": "disabled-since-boot",
+        "snp": {
+          "chip_id": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "init_data": "0000000000000000000000000000000000000000000000000000000000000000",
+          "measurement": "8922ebbdd00ec2c541f36a6e7a82a8773a7accb451ed67bc94e740dbe92c93c4e8c9af857f5ceeb5a493df2a570d7bf0",
+          "platform_smt_enabled": true,
+          "platform_tsme_enabled": true,
+          "policy_abi_major": 0,
+          "policy_abi_minor": 0,
+          "policy_debug_allowed": false,
+          "policy_migrate_ma": false,
+          "policy_single_socket": false,
+          "policy_smt_allowed": true,
+          "report_data": "819770b7e6ea6df8dd8fd4dd146b073c0bf4f3ce5b0977ecac486e3a05ed1bd54e2a7ac1f5d1ca02e7d7d5ef9f73b8574fd9359e3a480d741a4478e8a7bc27ca",
+          "reported_tcb_bootloader": 4,
+          "reported_tcb_microcode": 217,
+          "reported_tcb_snp": 24,
+          "reported_tcb_tee": 0
+        }
+      },
+      "ear_status": "contraindicated",
+      "ear_trustworthiness_vector": {
+        "configuration": 96,
+        "runtime-opaque": 2
+      },
+      "ear_verifier_claims": {
+        "cvm_collateral": {
+          "snp_crl": {
+            "status": "skipped"
+          }
+        }
+      }
+    }
+  }
+}
