@@ -544,6 +544,114 @@ The verifier replays every register a log covers, from that register's starting 
 
 On an SNP `cpu` submodule in `commitment` mode the log is REQUIRED (refused with `log-required` when absent or in a format the mode does not admit), every record MUST have content type `cvm` (refused with `replay-mismatch` otherwise), `chain_len` MUST equal the number of records (refused with `log-required` otherwise), and Section 8 governs the replay from genesis.
 
+## 8. Software registers on SEV-SNP
+
+SEV-SNP provides a launch measurement and 64 bytes of report data that the requester chooses, and no runtime registers. This section defines `ats-mr-v1`: registers held by a register provider in the measured guest, committed into the report data of every report the guest can obtain, so that a verifier can replay a log against registers the hardware signature covers.
+
+The construction does not make the registers hardware registers. Its guarantee rests on three facts the verifier establishes together: the launch measurement pins the exact image, and with it the provider; that image admits no path to a signed report other than through the provider (Section 8.5); and the provider always commits its true register state (Section 8.4). Section 8.7 states the backing a verifier reports.
+
+### 8.1. Construction
+
+```
+seed:        seed = SHA-384("ats-mr-v1/seed")
+genesis(i):  R[i] = SHA-384(zeros48 || "ats-mr-v1/genesis" || seed || u8(i))       for i = 0 to 15
+extend:      R[i] = SHA-384(R[i] || d)                        d is the record digest of Section 7.3
+commit:      C    = SHA-384("ats-mr-v1/commit" || R[0] || R[1] || ... || R[15]
+                            || u64le(chain_len) || caller_data)
+report_data: header16 || C                                    64 bytes exactly
+```
+
+- Every `R[i]` is 48 bytes; they are concatenated in index order.
+- `seed` is a constant. Genesis values therefore need no firmware call and no report: a provider computes them at initialization and can accept its first extend before any report exists.
+- `header16` is 16 bytes: `magic` = the 8 ASCII bytes `ATS-MR-1`; `version` = `u8(1)`; `alg` = `u8(1)`, meaning SHA-384; `reg_count` = `u8(16)`; `flags` = `u8(0)`, every bit reserved; `reserved` = 4 zero bytes. In hexadecimal: `4154532d4d522d31 01 01 10 00 00000000`. The verifier compares all 16 bytes with this value and refuses any difference, so no byte of the header is available for a caller to choose.
+- `chain_len` counts every extension since genesis across all slots and is carried in `cvm_chain`.
+- `caller_data` is 64 bytes the requester supplies, `pad64(anchor)` under this profile. It is not carried in the evidence; the verifier derives it from the nonce and the key (Section 5.2).
+
+The verifier recomputes `C` from the registers established by replaying the log from genesis, `chain_len` and `pad64(anchor)`, and requires `header16 || C` to equal the report data. Vectors are in Appendix B.2.
+
+### 8.2. Boot record
+
+At initialization the provider draws `bootseed`, 32 bytes from the kernel's cryptographically secure random number generator, and extends into slot 3, as record 0 of the log (`seq` 0, `recnum` 0), a `cvm` event with `domain` `ats`, `operation` `boot`, `content_digest` `SHA-384(bootseed)` and no `content`. The seed itself travels in the `bootseed` claim, and the verifier checks the claim's digest against the record.
+
+A valid chain therefore has the boot record at record 0 in slot 3, and `chain_len` at least 1, which Section 4.3 makes a shape rule (`envelope-invalid`). A verifier MUST refuse with `replay-mismatch` a `commitment` log whose record 0 is not the boot record, or whose slot 3 is at its genesis value. Section 7.3 reserves domain `ats` in every log. A `bootseed` distinguishes the chains of one launch only for an honest kernel; Section 8.8 keys chain memory by the launch, which the kernel cannot choose.
+
+### 8.3. Workload slots
+
+Slots 4 to 15 are allocated at first use. The first record extended into a workload slot is its claim record: a `cvm` event with `domain` `ats`, `operation` `claim`, `content` the deterministic CBOR map `{0: owner (tstr), 1: purpose (tstr)}` with each string 1 to 255 bytes of UTF-8 (a verifier refuses content that is not deterministically encoded, carries another key, or has a string outside that length, with `replay-mismatch`), and `content_digest` `SHA-384(content)`.
+
+`owner` is the producer's identity as the provider authenticates it (Section 8.4). The provider refuses an extend into an unclaimed slot, a claim of a claimed slot, and an extend from any producer other than the slot's owner. A claim holds until the next boot. When all twelve workload slots are claimed, further claims are refused; a deployment with more than twelve producers groups them under shared owners, distinguished by `domain` and `operation`.
+
+The verifier MUST refuse a log in which a workload slot that left genesis does not begin with a claim record, or in which a claim record appears anywhere else, reports `owner` and `purpose` for each workload slot, and applies `reference.slot_owners` (Section 13.4). Slots 0 to 3 take no claim record; which producers may extend them is the provider's to restrict and document (Section 8.4 item 6).
+
+### 8.4. Register provider requirements
+
+A register provider conforming to this profile:
+
+1. Holds 16 registers of 48 bytes, initialized to their genesis values, in memory that guest userspace cannot write, and reads only through item 9.
+2. Implements extend as its only operation that changes a register. It implements no operation that sets, resets or truncates a register or the log.
+3. Accepts from a producer a slot and an event, given as its fields or as `event` bytes that the provider parses under Section 7.3. It refuses an event that a verifier would refuse and any event in domain `ats`: it builds the boot and claim records itself, taking a claim's `owner` from its authentication of the caller (item 6) and only `purpose` from the producer. It assigns `seq` from its global extension counter and `recnum` from the slot's counter, computes `d`, extends, and appends the record, all under one lock. A producer can supply neither counter nor a precomputed digest. A malformed record would otherwise make every later report of the launch unverifiable, since nothing truncates the log (item 2).
+4. Stores the log in memory it controls, appends only, and exposes it read-only. It refuses an extend after which the log, in the format the attester emits, would exceed the 1 MiB bound of Section 7.1, and refuses further extends when its storage is exhausted; it never drops or overwrites a record.
+5. Extends the boot record before it exposes any interface (Section 8.2).
+6. Authenticates each producer's identity for slot claims and refuses extends as Section 8.3 states. The authentication mechanism is the provider's (for example, the Linux credentials or the cgroup of the calling process), and the provider documents it, because `owner` is only as meaningful as that mechanism. Guest root can act as any owner, so against root `owner` shows only which slot a record entered.
+7. Computes, for every report request, `C` over the register values and `chain_len` at that moment, under the same lock as extend, and places `header16 || C` in the request's report data. The caller supplies only `caller_data`, exactly 64 bytes, which the provider never interprets.
+8. Returns with the report the register values, `chain_len` and the log prefix of exactly `chain_len` records captured under that lock, so the attester's evidence is consistent with the commitment.
+9. Exposes register values read-only, for example through the Linux TSM measurement-register interface.
+
+### 8.5. Report path exclusivity
+
+The provider's commitment is worth something only if no software in the guest can obtain a signed report without it. On SEV-SNP a guest obtains a report by the guest request protocol, which requires all of:
+
+- issuing the request through the GHCB (AMD publication 56421), a page only the kernel maps, whose address the kernel writes to the GHCB MSR (`WRMSR` faults outside ring 0) before a `VMGEXIT`; this is defense in depth, and the VMPCK below is the cryptographic control;
+- encrypting the request with a VM platform communication key (VMPCK), which the firmware places in the SNP secrets page;
+- a response only the AMD Secure Processor can produce, because the channel between the guest and the AMD Secure Processor is encrypted and integrity-protected with the VMPCK.
+
+The host has one interface that produces a report for a running guest (`SNP_HV_REPORT_REQ`, ABI revision 1.56 and later). The firmware zero-fills that report's `REPORT_DATA` and sets its `VMPL` to 0xFFFFFFFF, so it binds no anchor, and a verifier refuses any report whose `VMPL` is above 3 (Section 9.1.5).
+
+An image whose provider claims the guarantees of this section therefore MUST ensure that:
+
+1. The only ring-0 code is the launch-measured firmware and kernel, and code the kernel verified against keys inside the measured image (Section 8.6).
+2. The secrets page and every VMPCK are readable only by the kernel. A VMPCK disclosed to guest userspace can be handed to a colluding host, which can then obtain reports with report data of its choice; confidentiality of kernel memory is therefore as necessary as its integrity.
+3. Every kernel path that produces a report request, including the character-device interface, the configfs-tsm interface and any extended-report variant, passes through the provider's computation of Section 8.4 item 7.
+4. The kernel, its command line and its initial RAM disk are covered by the launch measurement (for example, by booting directly from a measured IGVM image), so no unmeasured boot configuration can alter items 1 to 3.
+
+A verifier establishes these properties transitively: by pinning a launch measurement whose reference value provider publishes the build configuration that implements them.
+
+### 8.6. Kernel restriction set
+
+The table lists at least the interfaces through which guest root, or an unprivileged user who reaches root, obtains ring-0 execution or reads or writes kernel memory, and the host influences ring-0 code, with the configuration that removes each. Build configuration uses Linux Kconfig names. A provider that claims `kernel-service` backing (Section 8.7) MUST run in an image that satisfies every row marked MUST; rows marked SHOULD reduce the kernel attack surface that the residual risk of Section 15.4 depends on.
+
+| Interface | Requirement | Build | Boot or runtime |
+| --- | --- | --- | --- |
+| loadable modules | MUST: no module loading, or loading only modules signed with a key generated for this build and discarded after it, whose public half is built into the measured kernel and is the only key module signatures verify against | `CONFIG_MODULES=n`, or `CONFIG_MODULE_SIG_FORCE=y` with an ephemeral `CONFIG_MODULE_SIG_KEY`, `CONFIG_SYSTEM_TRUSTED_KEYS=""`, `CONFIG_SECONDARY_TRUSTED_KEYRING=n`, `CONFIG_INTEGRITY_MACHINE_KEYRING=n` and `CONFIG_SYSTEM_EXTRA_CERTIFICATE=n` | |
+| kernel live patching | MUST be absent | `CONFIG_LIVEPATCH=n` | |
+| kexec | MUST be absent | `CONFIG_KEXEC=n`, `CONFIG_KEXEC_FILE=n` | |
+| physical and kernel memory devices | MUST be absent | `CONFIG_DEVMEM=n`, `CONFIG_DEVPORT=n`, `CONFIG_PROC_KCORE=n` | |
+| kernel lockdown | MUST be forced to confidentiality mode from early boot; this also closes hibernation, MSR writes, I/O port access, PCI BAR access through sysfs, ACPI table override and custom methods, kprobes, and kernel memory reads through tracing, perf and BPF | `CONFIG_SECURITY_LOCKDOWN_LSM=y`, `CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y`, `CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y` | lockdown reads `confidentiality` before the first workload starts |
+| BPF | MUST be absent | `CONFIG_BPF_SYSCALL=n` | |
+| hibernation | MUST be absent | `CONFIG_HIBERNATION=n` | |
+| kernel debuggers and dynamic probes | MUST be absent | `CONFIG_KGDB=n`, `CONFIG_KPROBES=n`, `CONFIG_DEBUG_FS=n` | |
+| ACPI table upgrade | MUST be absent | `CONFIG_ACPI_TABLE_UPGRADE=n`, `CONFIG_ACPI_CUSTOM_METHOD=n` | |
+| ACPI tables from the host | MUST be covered by the launch measurement, or checked against values in the measured image before the kernel interprets them: host-supplied AML runs in the kernel's interpreter and can read and write guest memory through a `SystemMemory` operation region | carried in the measured image, for example the IGVM image | |
+| kernel command line and initial RAM disk | MUST be covered by the launch measurement | built into the measured image | |
+| user namespaces | SHOULD be absent | `CONFIG_USER_NS=n` | |
+| io_uring, userfaultfd, perf events | SHOULD be absent or restricted | `CONFIG_IO_URING=n`, `CONFIG_USERFAULTFD=n` | `kernel.io_uring_disabled=2`, `vm.unprivileged_userfaultfd=0`, `kernel.perf_event_paranoid=2` |
+| memory safety hardening | SHOULD be enabled | `CONFIG_KFENCE=y`, `CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y`, `CONFIG_INIT_ON_FREE_DEFAULT_ON=y`, `CONFIG_RANDOM_KMALLOC_CACHES=y`, `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_LIST_HARDENED=y`, `CONFIG_BUG_ON_DATA_CORRUPTION=y` | |
+| exploit attempts | SHOULD stop the node | | `kernel.panic_on_oops=1` |
+
+Device DMA does not appear in the table: SEV-SNP's reverse map table keeps devices from writing private guest memory, and version 1 does not cover devices attested into the guest's trust boundary (Section 1.2). Drivers loaded as signed modules under the first row, such as a GPU driver, are ring-0 code and part of the attack surface; their versions are pinned by the launch measurement like the kernel's.
+
+Each row is a property of the image, checked at build time and, for runtime rows, by the measured init before any workload runs. The reference value provider publishes the build configuration beside the launch measurement, and a relying party that pins the launch measurement pins the restriction set with it.
+
+### 8.7. Backing assignment
+
+A version 1 verifier reports every `snp-vmr` register with backing `virtualized`, whatever the evidence claims. Promotion requires a way for a reference value to state that an image satisfies Sections 8.4 to 8.6; a later revision of this profile defines it, and verifiers will then report `kernel-service` for such an image. A register provider implemented in an SVSM at VMPL0, with the same format, will be reported as `privileged-service` under the same mechanism.
+
+A verifier MUST refuse `commitment` mode with `binding-mismatch` unless the policy pins the launch measurement (`reference.launch_measurement`). Without the pin, any SEV-SNP guest can compute `header16 || C` over registers, a log and owners it invents, and the appraisal would report them as replayed; this is the rule Section 9.4.4 states for `vtpm-extradata`. Policies that accept SEV-SNP software registers under version 1 therefore pin the launch measurement and set `min_backing` to `virtualized`.
+
+### 8.8. Chain memory
+
+The evidence cannot show on its own that a provider's history was rewritten after a kernel compromise. A verifier that keeps state MAY record, per `REPORT_ID` (the 32-byte identifier the AMD firmware generates at every launch and keeps for the guest's lifetime, report offset 0x140), the `bootseed`, the highest `chain_len` it appraised, and the register bank at that length. On a later appraisal with the same `REPORT_ID`, a different `bootseed` means the chain was restarted within one launch, and a log that is neither a prefix nor an extension of the recorded one is a fork: for a longer log, its first `n` records do not replay to the recorded bank at length `n`; for a shorter one, its bank differs from the recorded log's bank at its own length, which the verifier can check only when it recorded that bank. A shorter log that is a prefix is an earlier attestation appraised late. A verifier that detects a restart or a fork MUST refuse the appraisal with `replay-mismatch`. The ABI defines no guest reset short of a new launch; a deployment whose hypervisor reuses a guest context across a guest reboot sees that reboot reported as a restart. Chain memory is OPTIONAL in version 1 and a stateless verifier conforms.
+
 ## 9. Platform bindings
 
 Each binding below specifies what the attester collects, how the verifier authenticates it and derives the platform from it, how the security settings normalize, where the anchor is bound, which registers and logs apply, which collateral is used, and where each normalized claim comes from. A verifier that does not implement a platform refuses its evidence with `platform-unsupported`.
@@ -1275,6 +1383,73 @@ NRAS nonces derived from `nonce`:
 ```
 gpu     a5db775022742960966c4ad77b3d903d6645eee00575a557cd18963d31251325
 switch  84982aa6b0e69839ac5b84d62d2c16f30239baa2a99add9975d09aa439c47051
+```
+
+### B.2. ats-mr-v1 (Section 8.1)
+
+```
+seed          60cdcaeac3f15a96cb2a1b85d42c5a4d129fced65435044c9250fdffef98984cc3bd420972c3af58295e0f61ba21e4a7
+R[0] genesis  edfcbed49c915465118143bd6ba1980e0fa6ccfe02242bc31676a275e31cd0081c9d8b9ba9d6f4ee70b94b030b1e04fa
+R[3] genesis  befc3a5c2b1a1842ea1e7d330a9671c09afa59f2b2e775bd9b77b1a3a89d68e77ea5d2fafe5dfd3767f5ea515c30307a
+R[4] genesis  b6f9d6a7dac04da2c2a358d488d540898eef7f4de44438a833f1d241835ffe3d6cbf4c6a93ddb13e26ffff220490058a
+R[15] genesis ca7955a6100998d9c4771d94e785098d878b66d2956c54a5f47e847694bfd246a251bb1dcd929fd945fa37de37b1c3b2
+header16      4154532d4d522d31 01 01 10 00 00000000
+```
+
+Commit at genesis: all 16 registers at their genesis values, `chain_len = 0`, `caller_data = pad64(nonce)`:
+
+```
+C            22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21e98ba4dab9034d02ddb5d596415c4
+report_data  4154532d4d522d310101100000000000 22dadccfe3024c6dc4588664a00c9638ce36e10f153cf12a832a023c8f13b011a21e98ba4dab9034d02ddb5d596415c4
+```
+
+One extend with `seq` 0 into slot 3 of the event bytes `a3006373386301706d73746172742d636f6e7461696e65720258300102` (arbitrary bytes, deliberately not a well-formed event and not the boot record Section 8.2 requires at this position: the formulas hash bytes without parsing them, and B.3 gives well-formed records), then a commit with `chain_len = 1` and `caller_data = pad64(anchor)` for the `spki-sha256` key of B.1:
+
+```
+d            fd21b47ecf576057b92765553b8e264949fcd74aae46c8cd023a2c34cba68233f765919d4405fdb9b4e5bc25b86235f5
+R[3]         0553eb463cfb7cc8d4f0c5ae6d0e6023e6cef8d8624535567757d8b73d9dac8f83d682e26eae16f2a3f8aa23cd86df53
+C            7290cc8b8f2476f8565f33573a72c37eb834e96f0684823ea5705a4f78cb734d98171c605eb73c47bdec78526f903101
+report_data  4154532d4d522d310101100000000000 7290cc8b8f2476f8565f33573a72c37eb834e96f0684823ea5705a4f78cb734d98171c605eb73c47bdec78526f903101
+```
+
+### B.3. Boot and claim records (Sections 7.3, 8.2 and 8.3)
+
+The boot record with `bootseed` above, as record 0 of the log in slot 3 (`seq` 0, `recnum` 0). Its event is the map of three entries: 0 `ats`, 1 `boot`, 2 `SHA-384(bootseed)`, with no content entry:
+
+```
+event        a300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d
+d            74eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc
+R[3]         fa415452924a55dba8c716598ebfa8abe0808e94cffa6ed4abf28db4c0f18999ffd0f2c14ff2b5b6130a343c63155d69
+CEL record   a5 00 00 01 03 03 81 a2 00 0c 01 5830 <d> 09 18c8 0a a2 00 00 01 583f <event>
+             a5000001030381a2000c01583074eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc0918c80aa2000001583fa300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d
+```
+
+The claim record for slot 4 with owner `c8s` and purpose `workload`, as record 1 of the log: `seq` 1, and `recnum` 0 as the first record of slot 4. `R[3]` above is genesis(3) extended with the boot record alone, and `R[4]` below is genesis(4) extended with the claim record alone:
+
+```
+claim body   a200636338730168776f726b6c6f6164
+event        a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+d            24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c
+R[4]         e314c1b137729a35436b11d4c0b77c17058b210a33c1bbe36a7682f0b222930db389c7dc22868f7bebf75934156a6d34
+CEL record   a5 00 00 01 04 03 81 a2 00 0c 01 5830 <d> 09 18c8 0a a2 00 01 01 5852 <event>
+             a5000001040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c0918c80aa20001015852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+```
+
+The log of those two records as `tcg-cel-cbor` (the CDDL's array: `82`, then the two records) and as `tcg-cel-json`:
+
+```
+82a5000001030381a2000c01583074eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc0918c80aa2000001583fa300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2da5000001040381a2000c01583024be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c0918c80aa20001015852a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164
+```
+
+```
+[{"recnum":0,"pcr":3,"digests":[{"hashAlg":"sha384","digest":"74eac4e31aa02917318e64502f19cac2a9e697616db8d148ba354a1fd8dc18d09badf0d9423a1992bf546665ea9050cc"}],"content_type":"cvm","content":{"seq":0,"event":"a300636174730164626f6f740258300882b143067956839b834603cd65b929551eae6a4aefe361d53937d7f2fcfa43a0b4aaafb3aad845169ab0330f387d2d"}},{"recnum":0,"pcr":4,"digests":[{"hashAlg":"sha384","digest":"24be378097eefe891969c7403ac933f7f79868cb1f373d8590f1f01f8a859909b4f9caa21deb1b255007e1fea1fabe8c"}],"content_type":"cvm","content":{"seq":1,"event":"a400636174730165636c61696d025830f6e17ac51d9c616de63de2dfb5c51361c9695e04df0d04455c20b5c0400bfb486c8d8fcc541b2e30d99474866777ddba0350a200636338730168776f726b6c6f6164"}}]
+```
+
+The commitment a verifier recomputes over that log (Section 8.1): `R[3]` and `R[4]` as above, every other register at its genesis value, `chain_len = 2`, and `caller_data = pad64(anchor)` for the `spki-sha256` key of B.1:
+
+```
+C            5814f3414f422d63e4755996735dc8fa1cd369dca799a893685f65c8220c2df967441824bb8f400d360d06a29f1ced93
+report_data  4154532d4d522d310101100000000000 5814f3414f422d63e4755996735dc8fa1cd369dca799a893685f65c8220c2df967441824bb8f400d360d06a29f1ced93
 ```
 
 ### B.4. Policy identifier (Section 12.5)
