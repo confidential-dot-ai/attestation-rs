@@ -40,7 +40,7 @@ The profile registers `application/vnd.confidential-ai.sev-snp-report`, `applica
 
 ### CON-6. Claim keys are private-use and claim names unregistered (open)
 
-Today (Section 17.2) the profile's CBOR keys sit below -65536, the Private Use range of the CWT Claims registry, the `cvm_` JSON names are unregistered, and version 1 requests no registration. Private use protects against no collision: EAR draft-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation`.
+Today (Section 17.2) the profile's CBOR keys sit below -65536, the Private Use range of the CWT Claims registry, the `cvm_` JSON names are unregistered, and version 1 requests no registration. Private use gives no protection against collision: EAR draft-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation`.
 
 - Options: (a) stay private-use for version 1; (b) request registration now, CWT keys in the Specification Required range and the JWT claim names.
 - Recommendation: (b), before version 1 is final. This document qualifies as the required specification, and changing keys later is a wire change.

@@ -1,6 +1,6 @@
 # Decision register
 
-One file per layer of the review stack. Each entry records one choice the standard makes: what was chosen, why, what was rejected, and where the text and the corpus carry it. The register is a review aid. The standard governs, and an entry that disagrees with the text is a defect in the entry.
+One file per layer of the review stack, from layer 2 on. Layer 1 holds the map and this page and decides nothing. Each entry records one choice the standard makes: what was chosen, why, what was rejected, and where the text and the corpus carry it. The register is a review aid. The standard governs, and an entry that disagrees with the text is a defect in the entry.
 
 An entry has a stable identifier (a prefix for its layer and a number), a first paragraph that states the choice as the text makes it, and up to three bullets: `Why`, `Rejected`, and `Where` (sections, then the cases that exercise it, with the layer a case arrives in when that is a later one).
 

@@ -75,7 +75,7 @@ The experimental modules are named by the core (their binding modes, claims and 
 
 ## How the draft is reviewed
 
-The draft arrives as a stack of pull requests, one layer each, in the order of the table. A layer adds three things:
+The draft arrives as a stack of pull requests, one layer each, in the order of the table. Layer 1 adds this page and the format of the decision register. Every later layer adds three things:
 
 - its sections of `cvm-attestation-v1.md`, at their final positions. Section numbers are final from the first layer, so the file has gaps until the stack is complete, and a forward reference resolves in a later layer;
 - its file under [`decisions/`](decisions/README.md): one entry per choice the layer makes, with what was chosen, why, what was rejected, and where the text and the corpus carry it;

@@ -444,7 +444,7 @@ Each `(source, index)` appears at most once. `alg` is pinned per source: `sha384
 
 The launch measurement has its own claim, `cvm_launch_measurement`, and no register index denotes it.
 
-Two conventions in use are offset by one and are converted on ingest: the UEFI `CC_EVENT` `MrIndex` (0 is MRTD, 1 to 4 are RTMR 0 to 3), so CCEL records map `MrIndex - 1` to the RTMR ordinal; and measurement files that list MRTD at index 0 and RTMR 0 to 3 at indexes 1 to 4. The TCG CEL `pcr` field carries this profile's index.
+Two conventions in use are offset by one and are converted on ingest: the UEFI `CC_EVENT` `MrIndex` (0 is MRTD, 1 to 4 are RTMR 0 to 3), so CCEL records at `MrIndex` 1 to 4 map `MrIndex - 1` to the RTMR ordinal and a record at `MrIndex` 0 is skipped (Section 9.2.6); and measurement files that list MRTD at index 0 and RTMR 0 to 3 at indexes 1 to 4. The TCG CEL `pcr` field carries this profile's index.
 
 ### 6.3. Slot semantics
 
@@ -535,7 +535,7 @@ A `cvm` record is:
 d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)
 ```
 
-In CEL-CBOR a record is `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 9: 200, 10: {0: seq, 1: event}}`, with `event` stored as the exact bytes that were hashed; in CEL-JSON it is `{"recnum", "pcr", "digests", "content_type": "cvm", "content": {"seq", "event": hex}}`. The order across registers lives in the content because CEL keeps `recnum` per index (CEL section 4.2.2) and requires a record to carry what its digest covers (CEL section 4.2.1.2), and leaves how a digest derives from content to the content type (CEL section 4.2.5).
+In CEL-CBOR a record is `{0: recnum, 1: pcr, 3: [{0: 12, 1: d}], 9: 200, 10: {0: seq, 1: event}}`, with `event` stored as the exact bytes that were hashed; in CEL-JSON it is `{"recnum", "pcr", "digests", "content_type": "cvm", "content": {"seq", "event": hex}}`. The order across registers lives in the content because CEL keeps `recnum` per index (CEL section 4.2.2) and requires a record to carry what its digest covers (CEL section 4.2.1.2), and leaves how a digest derives from content to the content type (CEL section 4.2.5).
 
 Domain `ats` is reserved for this profile's own records. In any log, a `cvm` record in domain `ats` is refused with `replay-mismatch` unless it is the boot record of Section 8.2 (record 0, in slot 3, without `content`) or, in a `commitment` log, a claim record of Section 8.3.
 
@@ -549,7 +549,7 @@ The verifier replays every register a log covers, from that register's starting 
 - A register the log never extends is replayed exactly when it still holds its starting value, since the log then accounts for every extend into it.
 - Starting values: zero for an RTMR and a REM; for a PCR the PC Client starting value (PCRs 17 to 22 all ones; PCR 0 at the locality of a `StartupLocality` event, otherwise zero; every other PCR zero); for an `snp-vmr` slot its genesis value (Section 8.1).
 - `EV_NO_ACTION` records are skipped. A `tpm2-event-log` is replayed in the quoted bank, which version 1 requires to be SHA-256 (Section 9.4.3).
-- A `cvm` record is replayed by requiring `seq` to count the log's `cvm` records from 0 without a gap and `recnum` to count its slot's records from 0 without a gap, recomputing `d` from `seq`, the record's index and the stored `event` bytes, requiring it to equal the recorded digest, and extending it. A record that breaks any of these is refused with `replay-mismatch`. The verifier never re-encodes content.
+- A `cvm` record is replayed by requiring `seq` to count the log's `cvm` records from 0 without a gap and `recnum` to count its slot's records from 0 without a gap, recomputing `d` from `seq`, the record's `pcr` and the stored `event` bytes, requiring it to equal the recorded digest, and extending it. A record that breaks any of these is refused with `replay-mismatch`. The verifier never re-encodes content.
 - dstack runtime events are replayed with the digest rules of Section 9.3, from zero, as `R = SHA-384(R || digest)`.
 
 `replay_until_event`, under which the verified value would be the replay up to and including a named record, and a policy naming the slots that must replay, are not defined in version 1.
@@ -821,7 +821,7 @@ After the body: a 4-byte signature data length, then the quote signature (64 byt
 2. Quoting enclave. The PCK leaf's key verifies the QE report signature over the 384-byte QE report body. The QE report's `REPORTDATA` (offset 320) equals `SHA-256(attestation key || QE authentication data) || zeros32`.
 3. PCK chain. The chain is leaf, PCK Platform or Processor CA, and Intel SGX Root CA, whose key the verifier pins (Appendix E). Every certificate is inside its window at the evaluation time. The leaf is not on the PCK CRL of its issuing CA, and the intermediate is not on the Root CA CRL; each CRL is signed by its issuer and inside its window.
 4. QE Identity. The TCB signing certificate is the one certificate of the collateral's issuer chain below the pinned root: its subject names it an Intel SGX TCB Signing certificate, the root signs it, it is inside its window at the evaluation time, and it is not on the Root CA CRL; a failure is refused with `collateral-invalid`. The TD QE Identity has version 2 and `id` `TD_QE`, is signed by the TCB signing certificate, and is inside its `nextUpdate`. The QE report's `MRSIGNER` and `ISVPRODID` equal its values, and `MISCSELECT` and `ATTRIBUTES` equal them under their masks. Its TCB levels are ordered descending by `isvsvn`, then by `tcbDate`, and two levels equal under that order make it invalid; the QE's `ISVSVN` selects the first level whose `isvsvn` it meets. A QE matching no level, or a `Revoked` level, is refused with `tcb-not-allowed`.
-5. TCB Info. The TCB Info is signed by the TCB signing certificate, has `id` `TDX` and version 3, carries the FMSPC and PCE identifier of the PCK leaf's SGX extensions, and has a `nextUpdate` after the evaluation time. The verifier then evaluates the TCB following Intel's quote verification library at the revision of Section 19.1, with the deviations step 4 states:
+5. TCB Info. The TCB Info is signed by the TCB signing certificate, has `id` `TDX` and version 3, carries the FMSPC and PCE identifier of the PCK leaf's SGX extensions, and has a `nextUpdate` after the evaluation time. The verifier then evaluates the TCB following Intel's quote verification library at the revision of Section 19.1, with the deviations item 4 of this step states:
    1. TDX module identity. When `TEE_TCB_SVN[1]` is 0, `MRSIGNERSEAM` MUST equal the TCB Info's `tdxModule.mrsigner`, and `SEAMATTRIBUTES` MUST be zero and equal its `attributes`. When `TEE_TCB_SVN[1]` is greater than 0, the same checks use the `tdxModuleIdentities` entry whose `id` is `TDX_` followed by `TEE_TCB_SVN[1]` as two hexadecimal digits, compared without regard to case, and the module's status is that of the first of the entry's TCB levels, in descending `isvsvn` order, whose `isvsvn` is at most `TEE_TCB_SVN[0]`. A missing entry or level is refused with `tcb-not-allowed`.
    2. Platform level. The TCB levels are ordered descending by their SGX components, then PCESVN, then TDX components, compared lexicographically, and two levels equal under that order make the TCB Info invalid. The selected level is the first whose SGX components are each at most the PCK certificate's corresponding component, whose PCESVN is at most the certificate's PCESVN, and whose TDX components are each at most the corresponding byte of `TEE_TCB_SVN`, comparing from byte 2 when `TEE_TCB_SVN[1]` is greater than 0. No matching level is refused with `tcb-not-allowed`.
    3. Effective status. Start from the selected level's status. If the module status or the QE Identity level's status is `OutOfDate`, `UpToDate` and `SWHardeningNeeded` become `OutOfDate`, and `ConfigurationNeeded` and `ConfigurationAndSWHardeningNeeded` become `OutOfDateConfigurationNeeded`. If either is `Revoked`, the effective status is `Revoked`. The advisories are the selected level's, then the QE Identity level's, then the module's.
@@ -1103,7 +1103,7 @@ The device's identity is the signed `ueid`. The `<ueid>` in the submodule name i
 | `tdx.root_crl` | `application/pkix-crl` | Intel's SGX Root CA CRL, DER | `tdx` |
 | `nras.jwks` | `application/jwk-set+json` | NRAS's token signing keys (RFC 7517) | any; used only when the envelope carries device submodules |
 
-The `application/pkix-cert` and `application/pkix-crl` types are those of RFC 2585. In `application/vnd.confidential-ai.pcs-signed+json`, `body` is the exact bytes of Intel's PCS response body and `issuer_chain` the PEM issuer chain from the response header, both as base64url byte strings, so Intel's signature verifies over the bytes Intel produced. A label whose TEE is not the `cpu` submodule's TEE is refused.
+The `application/pkix-cert` and `application/pkix-crl` types are those of RFC 2585. In `application/vnd.confidential-ai.pcs-signed+json`, `body` is the exact bytes of Intel's PCS response body and `issuer_chain` the PEM issuer chain from the response header, both as base64url byte strings, so Intel's signature verifies over the bytes Intel produced. A label the table assigns to one TEE is refused when the `cpu` submodule's TEE differs from it; `nras.jwks` is accepted with any TEE.
 
 ### 10.2. Authority and precedence
 
@@ -1124,7 +1124,7 @@ A verifier that holds collateral outside the evidence identifies each artifact b
 
 | Key | Artifact |
 | --- | --- |
-| `snp_vcek/<generation>/<chip id hex>-<TCB hex>` | a VCEK: `<generation>` is `Milan`, `Genoa` or `Turin`; `<chip id hex>` is the report's 64-byte `CHIP_ID` in lowercase hexadecimal; `<TCB hex>` is the reported bootloader, TEE, SNP and microcode SPLs as two uppercase hexadecimal digits each, followed by the FMC SPL on Turin |
+| `snp_vcek/<generation>/<chip id hex>-<TCB hex>` | a VCEK: `<generation>` is `Milan`, `Genoa` or `Turin`; `<chip id hex>` is the report's 64-byte `CHIP_ID` in lowercase hexadecimal; `<TCB hex>` is the reported bootloader, TEE, SNP and microcode SPLs as two uppercase hexadecimal digits each, followed on Turin by the FMC SPL in the same form |
 | `snp_cert_chain/<generation>` | AMD's ASK and ARK for the generation |
 | `snp_crl/<generation>` | AMD's CRL for the generation |
 | `tdx_tcb_info/<fmspc>` | the TDX TCB Info for an FMSPC in lowercase hexadecimal, with its signing chain |
@@ -1284,7 +1284,7 @@ The policy is a verifier input, chosen by the relying party. It is a JSON object
 | `tcb.floors` | `{}` | named TCB floors, Section 13.2 |
 | `tcb.default_floor` | absent | the floor applied to machines without their own |
 | `tcb.tdx_allowed_status` | `["UpToDate"]` | the accepted Intel TCB statuses; `Revoked` can never be listed |
-| `tcb.require_revocation` | `true` | revocation MUST be checked. When false, an SEV-SNP CRL that cannot be obtained is skipped; on TDX the collateral checks run together, and are skipped only when no collateral is available and both waivers are set |
+| `tcb.require_revocation` | `true` | revocation MUST be checked. When false, an SEV-SNP CRL that cannot be obtained is skipped; on TDX the collateral checks run together, and are skipped only when no collateral is available and `require_revocation` and `require_signed_collateral` are both false |
 | `tcb.require_signed_collateral` | `true` | the vendor TCB assessment MUST be made from signed collateral. When false, and on TDX together with `require_revocation` false, a TDX appraisal without collateral skips the PCK and Root CA CRLs, the TCB Info and the QE Identity check of Section 9.2.3 step 4 (the binding of the attestation key to the PCK certificate, step 2, always runs); on Arm CCA it waives only the platform software reference values (Section 9.6.4). A production policy SHOULD NOT waive it |
 | `policy_bits.allow_debug` | `false` | admit a guest whose debug facility is enabled |
 | `policy_bits.allow_migration` | `false` | admit a migratable guest |
@@ -1533,7 +1533,7 @@ In the challenge pattern the relying party chooses the nonce, and it carries no 
 
 ### 17.1. Media types
 
-The following media types are registered in the vendor tree (RFC 6838 section 3.2) through IANA's registration form, which is submitted when this document is published. For all three: Author and change controller Confidential AI; person and email address to contact for further information, Mahmoud Shehata, mahmoud@confidential.ai; deprecated alias names, none; Macintosh file type code, none.
+The following media types are registered in the vendor tree (RFC 6838 section 3.2) through IANA's registration form, which is submitted when this document is published. For all three: Author and change controller, Confidential AI; person and email address to contact for further information, Mahmoud Shehata, mahmoud@confidential.ai; deprecated alias names, none; Macintosh file type code, none.
 
 `application/vnd.confidential-ai.sev-snp-report`
 
@@ -1585,7 +1585,7 @@ The following media types are registered in the vendor tree (RFC 6838 section 3.
 
 ### 17.2. CWT and EAT claims
 
-The profile's claims use CBOR keys in the Private Use range of the CWT Claims registry (RFC 8392 section 9.1.1, keys below -65536), listed in Appendix A, and JSON names in the `cvm_` namespace, which are Private Names under RFC 7519 section 4.3. Private use protects against no collision (RFC 8126 section 4.1): draft-ietf-rats-ear-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation` in attestation results. Both registries register under Specification Required, CWT keys from -65536 to -257 and JWT claim names alike, and this document is such a specification. Version 1 requests no registration; registering the `cvm_` claims in both registries would give them keys in the Specification Required range, and the private keys would then be replaced in a new profile version.
+The profile's claims use CBOR keys in the Private Use range of the CWT Claims registry (RFC 8392 section 9.1.1, keys below -65536), listed in Appendix A, and JSON names in the `cvm_` namespace, which are Private Names under RFC 7519 section 4.3. Private use gives no protection against collision (RFC 8126 section 4.1): draft-ietf-rats-ear-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation` in attestation results. Both registries register under Specification Required, CWT keys from -65536 to -257 and JWT claim names alike, and this document is such a specification. Version 1 requests no registration; registering the `cvm_` claims in both registries would give them keys in the Specification Required range, and the private keys would then be replaced in a new profile version.
 
 ### 17.3. CBOR tags
 
