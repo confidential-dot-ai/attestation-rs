@@ -31,8 +31,10 @@ fn parse_min_tcb(min_tcb_json: Option<String>) -> Result<Option<SnpTcb>, String>
 }
 
 /// Caller-supplied TDX DCAP collateral as `verify_tdx` takes it: the Intel
-/// PCS v4 bodies and issuer chains verbatim, the CRLs base64-encoded (DER or
-/// PEM inside), and the verification time in Unix seconds.
+/// PCS v4 JSON bodies verbatim (the signatures cover them), the issuer chains
+/// as URL-decoded PEM (PCS sends the headers percent-encoded), the CRLs
+/// base64-encoded (DER or PEM inside), and the verification time in Unix
+/// seconds.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TdxCollateralJson {
@@ -471,8 +473,9 @@ fn verify_az_snp_impl(
 /// only on caller-supplied collateral (`tdx_collateral_json`): the browser
 /// cannot fetch Intel PCS itself. Without it they are skipped and
 /// `collateral_verified` is `false`. With it, every item is verified
-/// against Intel's signatures and the verification time (see
-/// [`StaticTdxCollateral`]), a failure throws with a `TDX collateral:`
+/// against Intel's signatures, and TCB Info, QE Identity and the CRLs must be
+/// current at `at` (certificate validity uses the current time; see
+/// [`StaticTdxCollateral`]). A failure throws with a `TDX collateral:`
 /// prefix, and the result carries the evaluated `tcb_status`. A `Revoked`
 /// TCB fails closed; accepting the other statuses is the caller's policy.
 /// The measurement surfaces as `claims.launch_digest` = hex(MRTD); MRTD
@@ -485,8 +488,8 @@ fn verify_az_snp_impl(
 /// - `expected_rtmr3`: optional 48 raw bytes the TD's RTMR[3] must equal
 /// - `tdx_collateral_json`: optional collateral `{ tcb_info,
 ///   tcb_info_issuer_chain, qe_identity, qe_identity_issuer_chain, pck_crl,
-///   root_ca_crl, at }` — PCS bodies and PEM issuer chains verbatim, CRLs
-///   base64, `at` in Unix seconds
+///   root_ca_crl, at }` — PCS JSON bodies verbatim, issuer chains as
+///   URL-decoded PEM, CRLs base64, `at` in Unix seconds
 ///
 /// RTMR[3] is the runtime measurement register: unlike MRTD it is extended
 /// after launch, so it can carry deployment identity a launch measurement

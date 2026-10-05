@@ -6,7 +6,8 @@
 //! signature-checked by the core against their issuer chains (always
 //! supplied, so that check is never skipped), both CRLs are signature-checked
 //! against the quote's verified PCK chain, and every item must be current at
-//! the verification time.
+//! the verification time `at`. Certificate validity (the PCK chain and both
+//! issuer chains) is checked by the core against the current time, not `at`.
 
 use async_trait::async_trait;
 use x509_parser::time::ASN1Time;
@@ -38,7 +39,9 @@ pub struct StaticTdxCollateral {
     pub pck_crl: Vec<u8>,
     /// Intel SGX Root CA CRL (DER or PEM).
     pub root_ca_crl: Vec<u8>,
-    /// Verification time, Unix seconds. Every item must be current at it.
+    /// Verification time, Unix seconds. TCB Info, QE Identity and both CRLs
+    /// must be current at it; certificates are checked against the current
+    /// time regardless.
     pub at: i64,
 }
 
