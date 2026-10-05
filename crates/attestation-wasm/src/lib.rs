@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use wasm_bindgen::prelude::*;
 
 use attestation::collateral::{CertProvider, DefaultCertProvider};
@@ -12,6 +13,7 @@ use attestation::platforms::snp::verify::{
     check_vcek_not_revoked, enforce_min_tcb, parse_report, verify_report_signature,
     verify_vek_endorsement, MAX_REPORT_VERSION,
 };
+use attestation::platforms::tdx::collateral::StaticTdxCollateral;
 use attestation::platforms::tdx::evidence::TdxEvidence;
 use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
 use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
@@ -26,6 +28,40 @@ fn parse_min_tcb(min_tcb_json: Option<String>) -> Result<Option<SnpTcb>, String>
             .map(Some)
             .map_err(|e| format!("min_tcb deserialize: {e}")),
     }
+}
+
+/// Caller-supplied TDX DCAP collateral as `verify_tdx` takes it: the Intel
+/// PCS v4 bodies and issuer chains verbatim, the CRLs base64-encoded (DER or
+/// PEM inside), and the verification time in Unix seconds.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TdxCollateralJson {
+    tcb_info: String,
+    tcb_info_issuer_chain: String,
+    qe_identity: String,
+    qe_identity_issuer_chain: String,
+    pck_crl: String,
+    root_ca_crl: String,
+    at: i64,
+}
+
+fn parse_tdx_collateral(json: &str) -> Result<StaticTdxCollateral, String> {
+    let c: TdxCollateralJson =
+        serde_json::from_str(json).map_err(|e| format!("tdx collateral deserialize: {e}"))?;
+    let crl = |name: &str, b64: &str| {
+        BASE64
+            .decode(b64)
+            .map_err(|e| format!("tdx collateral {name} base64: {e}"))
+    };
+    Ok(StaticTdxCollateral {
+        pck_crl: crl("pck_crl", &c.pck_crl)?,
+        root_ca_crl: crl("root_ca_crl", &c.root_ca_crl)?,
+        tcb_info: c.tcb_info.into_bytes(),
+        tcb_info_issuer_chain: c.tcb_info_issuer_chain.into_bytes(),
+        qe_identity: c.qe_identity.into_bytes(),
+        qe_identity_issuer_chain: c.qe_identity_issuer_chain.into_bytes(),
+        at: c.at,
+    })
 }
 
 /// Cert provider for the generic offline entry point: VEK resolution and the
@@ -431,17 +467,26 @@ fn verify_az_snp_impl(
 ///    `platforms/tdx/ccel.rs`).
 /// 7. When `expected_rtmr3` is supplied, require the TD's RTMR[3] to match it.
 ///
-/// Like the other vTPM-less entry points, the DCAP **collateral** checks (PCK
-/// CRL, TCB status, TD-QE identity) need an async provider and are skipped in
-/// WASM, so `collateral_verified` is always `false`. The measurement surfaces
-/// as `claims.launch_digest` = hex(MRTD); MRTD pinning is the JS policy
-/// layer's job.
+/// The DCAP **collateral** checks (PCK CRL, TCB status, TD-QE identity) run
+/// only on caller-supplied collateral (`tdx_collateral_json`): the browser
+/// cannot fetch Intel PCS itself. Without it they are skipped and
+/// `collateral_verified` is `false`. With it, every item is verified
+/// against Intel's signatures and the verification time (see
+/// [`StaticTdxCollateral`]), a failure throws with a `TDX collateral:`
+/// prefix, and the result carries the evaluated `tcb_status`. A `Revoked`
+/// TCB fails closed; accepting the other statuses is the caller's policy.
+/// The measurement surfaces as `claims.launch_digest` = hex(MRTD); MRTD
+/// pinning is the JS policy layer's job.
 ///
 /// - `evidence_json`: tdx evidence JSON (`{ quote, cc_eventlog? }`, base64 std)
 /// - `expected_report_data`: optional raw bytes the TD quote `report_data`
 ///   must equal after zero-padding to 64 bytes
 /// - `expected_init_data_hash`: optional bytes to bind against MRCONFIGID
 /// - `expected_rtmr3`: optional 48 raw bytes the TD's RTMR[3] must equal
+/// - `tdx_collateral_json`: optional collateral `{ tcb_info,
+///   tcb_info_issuer_chain, qe_identity, qe_identity_issuer_chain, pck_crl,
+///   root_ca_crl, at }` — PCS bodies and PEM issuer chains verbatim, CRLs
+///   base64, `at` in Unix seconds
 ///
 /// RTMR[3] is the runtime measurement register: unlike MRTD it is extended
 /// after launch, so it can carry deployment identity a launch measurement
@@ -459,21 +504,23 @@ fn verify_az_snp_impl(
 ///
 /// Returns the verification result as JSON, or throws on any check failure.
 ///
-/// `async` for the same reason as [`verify_az_tdx`]: the shared core is
-/// `async` for its optional collateral provider; with a `None` provider it
-/// performs no actual awaiting. Callers `await` the returned Promise.
+/// `async` because the shared core is `async` for its collateral provider;
+/// the supplied-collateral provider performs no actual awaiting. Callers
+/// `await` the returned Promise.
 #[wasm_bindgen]
 pub async fn verify_tdx(
     evidence_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
     expected_rtmr3: Option<Vec<u8>>,
+    tdx_collateral_json: Option<String>,
 ) -> Result<String, JsError> {
     verify_tdx_impl(
         evidence_json,
         expected_report_data,
         expected_init_data_hash,
         expected_rtmr3,
+        tdx_collateral_json,
     )
     .await
     .map_err(|e| JsError::new(&e))
@@ -487,9 +534,14 @@ async fn verify_tdx_impl(
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
     expected_rtmr3: Option<Vec<u8>>,
+    tdx_collateral_json: Option<String>,
 ) -> Result<String, String> {
     let evidence: TdxEvidence =
         serde_json::from_str(&evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
+    let collateral = tdx_collateral_json
+        .as_deref()
+        .map(parse_tdx_collateral)
+        .transpose()?;
 
     // Reject a wrong-sized pin rather than truncating or dropping it: a pin
     // that silently does not apply is worse than no pin at all.
@@ -509,12 +561,21 @@ async fn verify_tdx_impl(
         ..VerifyParams::default()
     };
 
-    // None collateral provider: CRL/TCB/QE-identity checks are skipped (same
-    // trade-off the other WASM entry points document), collateral_verified
-    // stays false.
-    let result = verify_tdx_evidence(&evidence, &params, None)
+    // Evidence first, without collateral, so that any failure of the second
+    // pass is attributable to the collateral alone.
+    let mut result = verify_tdx_evidence(&evidence, &params, None)
         .await
         .map_err(|e| format!("tdx verify: {e}"))?;
+    if let Some(collateral) = &collateral {
+        result = verify_tdx_evidence(&evidence, &params, Some(collateral))
+            .await
+            .map_err(|e| format!("tdx verify: TDX collateral: {e}"))?;
+        if !result.collateral_verified || result.tcb_status.is_none() {
+            return Err(
+                "tdx verify: TDX collateral: supplied but no TCB status was evaluated".into(),
+            );
+        }
+    }
 
     // The core records the comparison without acting on it. Enforce here so a
     // supplied pin cannot be a no-op. `None` means the core never performed the
@@ -622,9 +683,15 @@ mod tests {
 
     #[tokio::test]
     async fn rtmr3_pin_matching_register_passes() {
-        let out = verify_tdx_impl(v5_evidence_json(), None, None, Some(v5_rtmr3().to_vec()))
-            .await
-            .expect("matching RTMR[3] pin must verify");
+        let out = verify_tdx_impl(
+            v5_evidence_json(),
+            None,
+            None,
+            Some(v5_rtmr3().to_vec()),
+            None,
+        )
+        .await
+        .expect("matching RTMR[3] pin must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             json["rtmr3_match"],
@@ -635,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn rtmr3_pin_mismatch_fails_closed() {
-        let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]))
+        let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]), None)
             .await
             .expect_err("wrong RTMR[3] pin must fail");
         assert!(
@@ -647,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn rtmr3_pin_wrong_length_rejected_before_verification() {
         for len in [0usize, 47, 49, 96] {
-            let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; len]))
+            let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; len]), None)
                 .await
                 .expect_err("wrong-length pin must be rejected");
             assert!(
@@ -794,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_pin_verifies_and_omits_rtmr3_match() {
-        let out = verify_tdx_impl(v5_evidence_json(), None, None, None)
+        let out = verify_tdx_impl(v5_evidence_json(), None, None, None, None)
             .await
             .expect("unpinned verification must still pass");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -802,5 +869,103 @@ mod tests {
             json.get("rtmr3_match").is_none(),
             "no pin ⇒ no rtmr3_match field, so \"never checked\" cannot read as \"held\""
         );
+    }
+
+    // --- bare-TDX supplied collateral ---
+
+    const C8S_QUOTE: &[u8] =
+        include_bytes!("../../attestation/test_data/tdx_quote_00a06d080000.dat");
+    const COLLATERAL_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../attestation/test_data/collateral/2026-10-05/"
+    );
+    /// 2026-10-06T00:00:00Z, inside every fixture item's validity window.
+    const COLLATERAL_AT: i64 = 1_791_244_800;
+
+    fn c8s_evidence_json() -> String {
+        serde_json::to_string(&TdxEvidence {
+            quote: BASE64.encode(C8S_QUOTE),
+            cc_eventlog: None,
+        })
+        .unwrap()
+    }
+
+    fn collateral_json(at: i64) -> serde_json::Value {
+        let read = |f: &str| std::fs::read(format!("{COLLATERAL_DIR}{f}")).unwrap();
+        let text = |f: &str| String::from_utf8(read(f)).unwrap();
+        serde_json::json!({
+            "tcb_info": text("tcb_info_00a06d080000.json"),
+            "tcb_info_issuer_chain": text("tcb_signing_chain.pem"),
+            "qe_identity": text("td_qe_identity.json"),
+            "qe_identity_issuer_chain": text("qe_identity_signing_chain.pem"),
+            "pck_crl": BASE64.encode(read("pck_crl_platform.der")),
+            "root_ca_crl": BASE64.encode(read("root_ca_crl.der")),
+            "at": at,
+        })
+    }
+
+    #[tokio::test]
+    async fn tdx_collateral_surfaces_the_tcb_status() {
+        let out = verify_tdx_impl(
+            c8s_evidence_json(),
+            None,
+            None,
+            None,
+            Some(collateral_json(COLLATERAL_AT).to_string()),
+        )
+        .await
+        .expect("current collateral must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["collateral_verified"], serde_json::json!(true));
+        assert_eq!(json["tcb_status"]["tcb_status"], "UpToDate");
+        assert_eq!(json["tcb_status"]["fmspc"], "00a06d080000");
+    }
+
+    #[tokio::test]
+    async fn tdx_without_collateral_reports_none_evaluated() {
+        let out = verify_tdx_impl(c8s_evidence_json(), None, None, None, None)
+            .await
+            .expect("evidence must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["collateral_verified"], serde_json::json!(false));
+        assert!(json["tcb_status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn tdx_collateral_failure_is_tagged() {
+        let err = verify_tdx_impl(
+            c8s_evidence_json(),
+            None,
+            None,
+            None,
+            Some(collateral_json(COLLATERAL_AT + 60 * 86_400).to_string()),
+        )
+        .await
+        .expect_err("stale collateral must fail");
+        assert!(err.starts_with("tdx verify: TDX collateral: "), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tdx_evidence_failure_is_not_tagged_as_collateral() {
+        let err = verify_tdx_impl(
+            c8s_evidence_json(),
+            Some(vec![0xFF; 64]),
+            None,
+            None,
+            Some(collateral_json(COLLATERAL_AT).to_string()),
+        )
+        .await
+        .expect_err("wrong report_data must fail");
+        assert!(!err.contains("TDX collateral"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tdx_malformed_collateral_rejected_before_verification() {
+        let mut c = collateral_json(COLLATERAL_AT);
+        c["extra"] = serde_json::json!(1);
+        let err = verify_tdx_impl(c8s_evidence_json(), None, None, None, Some(c.to_string()))
+            .await
+            .expect_err("unknown field must be rejected");
+        assert!(err.contains("tdx collateral deserialize"), "{err}");
     }
 }
