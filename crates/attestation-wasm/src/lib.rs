@@ -15,7 +15,10 @@ use attestation::platforms::snp::verify::{
 };
 use attestation::platforms::tdx::collateral::StaticTdxCollateral;
 use attestation::platforms::tdx::evidence::TdxEvidence;
-use attestation::platforms::tdx::verify::verify_evidence as verify_tdx_evidence;
+use attestation::platforms::tdx::verify::{
+    parse_tdx_quote, verify_collateral as verify_tdx_collateral,
+    verify_evidence as verify_tdx_evidence,
+};
 use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
 use attestation::utils::{constant_time_eq, pad_report_data};
 
@@ -564,20 +567,22 @@ async fn verify_tdx_impl(
         ..VerifyParams::default()
     };
 
-    // Evidence first, without collateral, so that any failure of the second
-    // pass is attributable to the collateral alone.
+    // Evidence fully first, then the collateral step alone, so a failure of
+    // the latter is attributable to the collateral.
     let mut result = verify_tdx_evidence(&evidence, &params, None)
         .await
         .map_err(|e| format!("tdx verify: {e}"))?;
     if let Some(collateral) = &collateral {
-        result = verify_tdx_evidence(&evidence, &params, Some(collateral))
+        // Re-decoding is parsing only; the evidence pass already accepted these bytes.
+        let quote_bytes = BASE64
+            .decode(&evidence.quote)
+            .map_err(|e| format!("tdx verify: quote base64: {e}"))?;
+        let quote = parse_tdx_quote(&quote_bytes).map_err(|e| format!("tdx verify: {e}"))?;
+        let status = verify_tdx_collateral(&quote_bytes, &quote, collateral)
             .await
             .map_err(|e| format!("tdx verify: TDX collateral: {e}"))?;
-        if !result.collateral_verified || result.tcb_status.is_none() {
-            return Err(
-                "tdx verify: TDX collateral: supplied but no TCB status was evaluated".into(),
-            );
-        }
+        result.tcb_status = Some(status);
+        result.collateral_verified = true;
     }
 
     // The core records the comparison without acting on it. Enforce here so a
@@ -664,7 +669,6 @@ pub async fn verify_az_tdx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use attestation::platforms::tdx::verify::parse_tdx_quote;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
 
@@ -960,6 +964,28 @@ mod tests {
         .await
         .expect_err("wrong report_data must fail");
         assert!(!err.contains("TDX collateral"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tdx_quote_signature_failure_is_not_tagged_as_collateral() {
+        let mut quote = C8S_QUOTE.to_vec();
+        quote[100] ^= 0x01; // inside the signed TD report body
+        let evidence = serde_json::to_string(&TdxEvidence {
+            quote: BASE64.encode(quote),
+            cc_eventlog: None,
+        })
+        .unwrap();
+        let err = verify_tdx_impl(
+            evidence,
+            None,
+            None,
+            None,
+            Some(collateral_json(COLLATERAL_AT).to_string()),
+        )
+        .await
+        .expect_err("tampered quote must fail");
+        assert!(!err.contains("TDX collateral"), "{err}");
+        assert!(err.contains("ECDSA P-256 DCAP"), "{err}");
     }
 
     #[tokio::test]

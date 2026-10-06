@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use crate::platforms::tdx::evidence::TdxEvidence;
     use crate::platforms::tdx::verify::verify_evidence;
-    use crate::types::{TdxTcbStatus, VerifyParams};
+    use crate::types::{DcapVerificationStatus, TdxTcbStatus, VerifyParams};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     // A c8s TDX node's quote (FMSPC 00a06d080000) and the Intel PCS v4
@@ -223,6 +223,31 @@ mod tests {
         let s = std::str::from_utf8(haystack).unwrap();
         assert!(s.contains(from), "fixture lacks {from:?}");
         s.replacen(from, to, 1).into_bytes()
+    }
+
+    // verify_evidence and the standalone collateral step must agree, since
+    // WASM uses the latter to attribute failures.
+    #[tokio::test]
+    async fn standalone_collateral_step_matches_verify_evidence() {
+        async fn step(
+            c: StaticTdxCollateral,
+        ) -> std::result::Result<DcapVerificationStatus, String> {
+            let quote = crate::platforms::tdx::verify::parse_tdx_quote(QUOTE).unwrap();
+            crate::platforms::tdx::verify::verify_collateral(QUOTE, &quote, &c)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        let ok = step(collateral()).await.expect("current collateral");
+        let full = verify(collateral()).await.unwrap().tcb_status;
+        assert_eq!(
+            serde_json::to_value(Some(ok)).unwrap(),
+            serde_json::to_value(full).unwrap()
+        );
+        let stale = || StaticTdxCollateral {
+            at: AT + 60 * 86_400,
+            ..collateral()
+        };
+        assert_eq!(step(stale()).await.unwrap_err(), rejection(stale()).await);
     }
 
     #[tokio::test]
