@@ -1,0 +1,13 @@
+{
+  "id": "snp-vmpl-nonzero-refused",
+  "rule": {
+    "section": "9.1.5",
+    "statement": "a report from VMPL 1 is refused under require_vmpl0, which is the default: the recording of snp-vlek-chain-appraises under a policy that keeps the requirement"
+  },
+  "now": "2025-06-01T00:00:00Z",
+  "evidence": "evidence/snp-vmpl-nonzero-refused.json",
+  "policy": "policy/snp-vmpl-nonzero-refused.json",
+  "expect": {
+    "refusal": "guest-policy"
+  }
+}

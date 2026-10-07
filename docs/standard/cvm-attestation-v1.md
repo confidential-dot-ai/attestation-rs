@@ -530,6 +530,116 @@ The verifier replays every register a log covers, from that register's starting 
 
 On an SNP `cpu` submodule in `commitment` mode the log is REQUIRED (refused with `log-required` when absent or in a format the mode does not admit), every record MUST have content type `cvm` (refused with `replay-mismatch` otherwise), `chain_len` MUST equal the number of records (refused with `log-required` otherwise), and Section 8 governs the replay from genesis.
 
+## 9. Platform bindings
+
+Each binding below specifies what the attester collects, how the verifier authenticates it and derives the platform from it, how the security settings normalize, where the anchor is bound, which registers and logs apply, which collateral is used, and where each normalized claim comes from. A verifier that does not implement a platform refuses its evidence with `platform-unsupported`.
+
+### 9.1. AMD SEV-SNP
+
+This binding covers SEV-SNP guests with hosting `bare`, `gcp` and `dstack`, with and without the register provider of Section 8, and supplies the hardware report for Azure SEV-SNP (Section 9.4).
+
+#### 9.1.1. Evidence
+
+The attester requests an attestation report through the guest kernel (the configfs-tsm report interface or the SEV guest device) with `REPORT_DATA` set to `pad64(anchor)`, or through the register provider in `commitment` mode (Section 8.4). It carries the report in `cvm_report` with type `application/vnd.confidential-ai.sev-snp-report`, and SHOULD carry the VEK the report names as `snp.vek` in `cvm_endorsements`, taken from the extended report's certificate table or from AMD KDS.
+
+#### 9.1.2. Report layout
+
+The `ATTESTATION_REPORT` (SNP-ABI) is exactly 1184 bytes; integers are little-endian. The fields this profile uses:
+
+| Offset | Length | Field | Use |
+| --- | --- | --- | --- |
+| 0x000 | 4 | `VERSION` | 3 to 6; 2 only with hosting `azure` |
+| 0x008 | 8 | `POLICY` | guest policy (Section 9.1.5) |
+| 0x010 | 16 | `FAMILY_ID` | `cvm_owner.family_id` |
+| 0x020 | 16 | `IMAGE_ID` | `cvm_owner.image_id` |
+| 0x030 | 4 | `VMPL` | `cvm_policy.vmpl`; a value above 3 marks a report the host requested and is always refused |
+| 0x034 | 4 | `SIGNATURE_ALGO` | MUST be 1 (ECDSA P-384 with SHA-384) |
+| 0x038 | 8 | `CURRENT_TCB` | `cvm_tcb.current` |
+| 0x040 | 8 | `PLATFORM_INFO` | bit 0 `SMT_EN`, bit 1 `TSME_EN` |
+| 0x048 | 4 | `KEY_INFO` | bit 0 `AUTHOR_KEY_EN`; bit 1 `MASK_CHIP_KEY`, MUST be 0; bits 4:2 `SIGNING_KEY`: 0 VCEK, 1 VLEK, every other value refused; bit 5 reserved, not checked; bits 31:6 MUST be zero |
+| 0x050 | 64 | `REPORT_DATA` | the binding (Section 9.1.6) |
+| 0x090 | 48 | `MEASUREMENT` | `cvm_launch_measurement`, `alg` `sha384` |
+| 0x0C0 | 32 | `HOST_DATA` | `cvm_host_data`, semantics `snp-host-data` |
+| 0x0E0 | 48 | `ID_KEY_DIGEST` | `cvm_owner.id_key_digest`; `owner.id_key_digests` |
+| 0x110 | 48 | `AUTHOR_KEY_DIGEST` | `cvm_owner.author_key_digest` |
+| 0x140 | 32 | `REPORT_ID` | chain memory (Section 8.8); not reported |
+| 0x180 | 8 | `REPORTED_TCB` | `cvm_tcb.reported`; VEK selection and cross-check |
+| 0x188 | 1 | `CPUID_FAM_ID` | generation, versions 3 and later |
+| 0x189 | 1 | `CPUID_MOD_ID` | generation, versions 3 and later |
+| 0x1A0 | 64 | `CHIP_ID` | `cvm_identity.chip_id`; VCEK cross-check |
+| 0x1E0 | 8 | `COMMITTED_TCB` | `cvm_tcb.committed` |
+| 0x1F0 | 8 | `LAUNCH_TCB` | `cvm_tcb.launch` |
+| 0x2A0 | 512 | `SIGNATURE` | `R` at 0x2A0 and `S` at 0x2E8, each 72 bytes |
+
+A violation of the `SIGNATURE_ALGO` or `KEY_INFO` rows is refused with `report-invalid`. A verifier also refuses with `report-invalid` a report with a non-zero byte in a reserved range: 0x04C to 0x04F; 0x18B to 0x19F (0x188 to 0x19F in version 2, which has no CPUID fields); 0x1EB; 0x1EF; and 0x1F8 to 0x29F in versions 2 to 4, or 0x208 to 0x29F in versions 5 and 6. In version 6 that last range spans the extended TCB fields at 0x220, 0x240 and 0x260, which ABI 1.59 defines for generations after Turin and which the generations of Section 9.1.3 leave zero. The ABI recommends checking every reserved field; the reserved bits inside `POLICY`, `PLATFORM_INFO` and the TCB values, `KEY_INFO` bit 5 and the signature field's bytes after `S` (0x330 to 0x49F, outside the signed range) are not checked by a verifier of this profile version, because the firmware refuses a guest policy with reserved bits set at launch and later ABI revisions assign bits in those fields.
+
+A TCB value (`TCB_VERSION`) is 8 bytes whose layout depends on the generation:
+
+| Generation | Byte 0 | Byte 1 | Byte 2 | Byte 3 | Bytes 4 to 5 | Byte 6 | Byte 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Milan, Genoa | `BOOT_LOADER` | `TEE` | reserved | reserved | reserved | `SNP` | `MICROCODE` |
+| Turin | `FMC` | `BOOT_LOADER` | `TEE` | `SNP` | reserved | reserved | `MICROCODE` |
+
+#### 9.1.3. Generation
+
+The generation is derived from signed data. For report versions 3 and later, from `CPUID_FAM_ID` and `CPUID_MOD_ID`:
+
+| Family | Model | Generation |
+| --- | --- | --- |
+| 0x19 | 0x00 to 0x0F | Milan |
+| 0x19 | 0x10 to 0x1F, and 0xA0 to 0xAF (Siena, which shares Genoa's roots) | Genoa |
+| 0x1A | 0x00 to 0x1F | Turin |
+
+A version 2 report carries no CPUID fields; the generation is the suffix (`-Milan`, `-Genoa`, `-Turin`) of the VEK issuer's common name, which Section 9.1.4 then authenticates through the generation's pinned root, so a version 2 report without an inline VEK is refused with `report-invalid`. Any other family or model is refused with `report-invalid`; this includes later generations, whose TCB layout this version does not define. The family and model ranges follow AMD's VCEK specification (publication 57230, section 1.5).
+
+#### 9.1.4. Authentication
+
+1. Roots. The verifier pins AMD's ARK, ASK and ASVK for each generation (Appendix E). An ARK is self-signed; the ARK signs the ASK and the ASVK; all three use RSA-4096 keys with RSASSA-PSS, SHA-384 and a 48-byte salt. ASK and ARK certificates supplied in the evidence are ignored.
+2. Endorsement key. When `SIGNING_KEY` is 0 the report is signed by a VCEK, and the VEK MUST be signed by the ASK; when it is 1, by a VLEK, and the VEK MUST be signed by the ASVK. Every certificate in the chain (RFC 5280) MUST be inside its validity window at the evaluation time. KDS serves VLEKs only to the cloud provider, so a report signed by a VLEK and carrying no inline VLEK bound to it (Section 10.2) is refused with `collateral-unavailable`, as is a report whose `CHIP_ID` is all zero and that carries no inline VEK.
+3. Report signature. The VEK's key is an ECDSA P-384 key. The signature covers bytes 0x000 to 0x29F of the report exactly as received. `R` and `S` are little-endian integers in the low 48 bytes of their 72-byte fields; the upper 24 bytes of each MUST be zero.
+4. Endorsement cross-check. The VEK's extensions MUST equal the report: `1.3.6.1.4.1.3704.1.3.1` (bootloader SPL), `.3.2` (TEE SPL), `.3.3` (SNP SPL) and `.3.8` (microcode SPL) equal the components of `REPORTED_TCB`, and on Turin `.3.9` (FMC SPL) is present and equals its FMC component, whatever that component's value, since without it the FMC is unendorsed (AMD 57230, Table 11); this holds for a VCEK and a VLEK alike. AMD's VLEK certificate definition (publication 58369, revision 0.10) predates Turin and lists no FMC extension, so a Turin VLEK issued without one is refused. A VCEK's `1.3.6.1.4.1.3704.1.4` (hardware ID) equals `CHIP_ID`: all 64 bytes on Milan and Genoa; on Turin the hardware ID's 8 bytes equal the first 8 bytes of `CHIP_ID` and the remaining 56 bytes of `CHIP_ID` are zero. The hardware ID extension's value is either a DER OCTET STRING whose content is the hardware ID (AMD 57230) or the hardware ID's bytes themselves, as Azure's VCEKs carry it; the two forms differ in length, and the length decides. A VLEK carries no hardware ID, so under a VLEK no endorsement covers `CHIP_ID`. A cross-check failure is refused with `chain-invalid`. Section 10.2 binds an inline VEK with this cross-check before it is used, so the refusal applies to a VEK the verifier obtained itself.
+5. Revocation. AMD's CRL for the generation is signed by the ARK and MUST be inside its window at the evaluation time; a CRL without `nextUpdate` has no defined window and is refused with `collateral-invalid`. The serial number of the ASK or ASVK in the chain MUST NOT appear in it. VCEK serial numbers are zero, so the CRL does not revoke an individual VCEK; a compromised chip is excluded through TCB floors and allowlists. The check is REQUIRED unless the policy sets `tcb.require_revocation` to false.
+6. Allowlist. With a machine allowlist, the report's `CHIP_ID` MUST be on it. A report endorsed by a VLEK, or whose `CHIP_ID` is all zero (the host masked it), identifies no machine and is refused with `machine-not-allowed` when an allowlist is present (Section 13.3).
+
+#### 9.1.5. Guest policy and normalized claims
+
+| Claim | Source |
+| --- | --- |
+| `cvm_platform` | vendor `amd`, TEE `sev-snp`, generation from Section 9.1.3, hosting as reported |
+| `cvm_policy.debug` | `POLICY` bit 19 (`DEBUG`); refused unless `allow_debug` |
+| `cvm_policy.migratable` | `POLICY` bit 18 (`MIGRATE_MA`); refused unless `allow_migration` |
+| `cvm_policy.smt` | `POLICY` bit 16 (`SMT`) |
+| `cvm_policy.single_socket` | `POLICY` bit 20 (`SINGLE_SOCKET`) |
+| `cvm_policy.vmpl` | `VMPL`; a value above 3 is refused whatever the policy says (Section 8.5), and a value other than 0 is refused under `require_vmpl0` |
+| `dbgstat` | `enabled` when bit 19 is set, `disabled-since-boot` otherwise |
+| `cvm_tcb` | `{reported, committed, current, launch}`, each `{bootloader, tee, snp, microcode, fmc?}` with `fmc` on Turin |
+| `cvm_identity` | `{chip_id}`: `CHIP_ID` |
+| `cvm_owner` | `{family_id, image_id, id_key_digest, author_key_digest}` |
+| `cvm_host_data` | `{semantics: "snp-host-data", value: HOST_DATA}` |
+| `snp` | the Trustee object (Section 12.7): `policy_abi_minor` bits 7:0 and `policy_abi_major` bits 15:8 of `POLICY`; `policy_smt_allowed` bit 16; `policy_migrate_ma` bit 18; `policy_debug_allowed` bit 19; `policy_single_socket` bit 20; `reported_tcb_*` from `REPORTED_TCB`; `platform_smt_enabled` and `platform_tsme_enabled` from `PLATFORM_INFO` bits 0 and 1; `measurement`, `report_data`, `init_data` (`HOST_DATA`) and `chip_id` in hexadecimal |
+
+The TCB floor of Section 13.2 applies to the four TCB values. AMD runs no TCB status service, so the floor is the only TCB assessment; `hardware` is 2 when the chain, the signature and the cross-check hold, revocation was checked, and a TCB floor applied and is met, and carries no claim otherwise.
+
+#### 9.1.6. Binding
+
+| Mode | Rule |
+| --- | --- |
+| `report-data` | `REPORT_DATA == pad64(anchor)` |
+| `commitment` | `REPORT_DATA == header16 \|\| C` (Section 8.1); the `cpu` submodule carries the 16 `snp-vmr` registers, the log, `cvm_chain` and `bootseed` |
+| `vtpm-extradata` | Azure only: Section 9.4 |
+
+#### 9.1.7. Collateral
+
+`snp.vek` and `snp.crl` (Section 10.1). AMD KDS serves them at:
+
+```
+https://kdsintf.amd.com/vcek/v1/{Milan|Genoa|Turin}/{hwid}?blSPL={bl}&teeSPL={tee}&snpSPL={snp}&ucodeSPL={ucode}[&fmcSPL={fmc}]
+https://kdsintf.amd.com/vcek/v1/{Milan|Genoa|Turin}/cert_chain
+https://kdsintf.amd.com/vcek/v1/{Milan|Genoa|Turin}/crl
+```
+
+`{hwid}` is `CHIP_ID` in lowercase hexadecimal (its first 8 bytes on Turin), the SPLs are the components of `REPORTED_TCB` in decimal, and `fmcSPL` is present exactly on Turin. A VLEK is issued to the cloud provider and carried inline; KDS serves its chain and CRL at `/vlek/v1/{product}/cert_chain` and `/vlek/v1/{product}/crl`, and the CRL is the same ARK-signed list as the VCEK path's.
+
 ## 10. Endorsements
 
 ### 10.1. Inline endorsements
