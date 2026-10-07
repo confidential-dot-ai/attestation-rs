@@ -1,5 +1,6 @@
 pub mod ccel;
 pub mod claims;
+pub mod collateral;
 pub mod dcap;
 pub mod evidence;
 pub mod verify;

@@ -1269,6 +1269,70 @@ pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> 
     Ok(())
 }
 
+/// ecdsa-with-SHA256, the only algorithm Intel signs SGX/TDX CRLs with.
+const OID_ECDSA_WITH_SHA256: &str = "1.2.840.10045.4.3.2";
+
+/// Verify an Intel CRL before its revocation entries are trusted: issued by
+/// `issuer_der` (name and ECDSA P-256 signature) and current at `at`
+/// (`thisUpdate <= at <= nextUpdate`, `nextUpdate` required). Accepts DER or
+/// PEM and returns the DER, so callers check revocation against the exact
+/// bytes that were verified.
+pub fn verify_crl(
+    crl: &[u8],
+    issuer_der: &[u8],
+    at: x509_parser::time::ASN1Time,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let crl_der = normalize_crl_to_der(crl)?;
+    let (rest, parsed) = CertificateRevocationList::from_der(&crl_der)
+        .map_err(|e| AttestationError::CertChainError(format!("{label} parse: {e}")))?;
+    if !rest.is_empty() {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} has {} trailing bytes",
+            rest.len()
+        )));
+    }
+    let (_, issuer) = X509Certificate::from_der(issuer_der)
+        .map_err(|e| AttestationError::CertChainError(format!("{label} issuer parse: {e}")))?;
+    if parsed.issuer().as_raw() != issuer.subject().as_raw() {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} is issued by {}, not {}",
+            parsed.issuer(),
+            issuer.subject()
+        )));
+    }
+
+    let alg = parsed.signature_algorithm.algorithm.to_id_string();
+    if alg != OID_ECDSA_WITH_SHA256 {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} signature algorithm {alg} is not ecdsa-with-SHA256"
+        )));
+    }
+    let key = extract_p256_pub_key(&issuer.public_key().subject_public_key.data, label)?;
+    let sig = Signature::from_der(parsed.signature_value.as_ref())
+        .map_err(|e| AttestationError::CertChainError(format!("{label} signature parse: {e}")))?;
+    key.verify(parsed.tbs_cert_list.as_ref(), &sig)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!("{label} signature verification: {e}"))
+        })?;
+
+    if parsed.last_update() > at {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} thisUpdate {} is after the verification time {at}",
+            parsed.last_update()
+        )));
+    }
+    match parsed.next_update() {
+        None => Err(AttestationError::CertChainError(format!(
+            "{label} has no nextUpdate; refusing a revocation list with no defined freshness"
+        ))),
+        Some(next) if next < at => Err(AttestationError::CertChainError(format!(
+            "{label} is stale: nextUpdate {next} is before the verification time {at}"
+        ))),
+        Some(_) => Ok(crl_der),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

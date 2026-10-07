@@ -5,7 +5,7 @@ use scroll::Pread;
 
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::types::{DcapVerificationStatus, PlatformType, VerificationResult, VerifyParams};
 
 use super::claims::extract_claims;
 use super::evidence::TdxEvidence;
@@ -378,42 +378,7 @@ pub async fn verify_evidence(
 
     // 3d. DCAP collateral checks (CRL, TCB, QE Identity) when provider is available
     let tcb_status = if let Some(provider) = collateral_provider {
-        let body_end = super::dcap::compute_body_end(&quote_bytes, quote.quote_version)?;
-        let auth = super::dcap::parse_auth_data(&quote_bytes, body_end)?;
-
-        // PCK CRL revocation check (leaf + intermediate CA)
-        provider
-            .check_pck_revocation(auth.pck_cert_chain_pem)
-            .await?;
-
-        // TCB status evaluation
-        let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
-        let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
-        let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
-        let status = super::dcap::evaluate_tcb_status(
-            &tcb_info_json,
-            &quote.body.tee_tcb_svn,
-            auth.pck_cert_chain_pem,
-            tcb_signing_chain.as_deref(),
-        )?;
-
-        // Reject Revoked TCB status
-        if status.tcb_status == crate::types::TdxTcbStatus::Revoked {
-            return Err(AttestationError::TcbMismatch(
-                "TDX TCB status is Revoked".into(),
-            ));
-        }
-
-        // QE Identity verification (TDX uses TD_QE, not SGX QE)
-        let qe_identity_json = provider.get_td_qe_identity().await?;
-        let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
-        super::dcap::verify_qe_identity(
-            auth.qe_report_body,
-            &qe_identity_json,
-            qe_signing_chain.as_deref(),
-        )?;
-
-        Some(status)
+        Some(verify_collateral(&quote_bytes, &quote, provider).await?)
     } else {
         log::warn!("TDX collateral provider not available; skipping CRL, TCB status, and QE Identity checks");
         None
@@ -497,6 +462,56 @@ pub async fn verify_evidence(
         rtmr3_match,
         launch_digest_match: None,
     })
+}
+
+/// Run the DCAP collateral checks of [`verify_evidence`] (PCK CRL revocation,
+/// TCB status, TD-QE identity) on an already parsed quote, rejecting a
+/// `Revoked` TCB.
+///
+/// The PCK chain and QE report are taken from the quote as authentic: call
+/// this only after [`verify_evidence`] has succeeded on the same `quote_bytes`.
+/// It exists so a caller can attribute failures to the collateral without
+/// verifying the evidence twice.
+pub async fn verify_collateral(
+    quote_bytes: &[u8],
+    quote: &TdxQuote,
+    provider: &dyn TdxCollateralProvider,
+) -> Result<DcapVerificationStatus> {
+    let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
+    let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
+
+    // PCK CRL revocation check (leaf + intermediate CA)
+    provider
+        .check_pck_revocation(auth.pck_cert_chain_pem)
+        .await?;
+
+    // TCB status evaluation
+    let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
+    let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
+    let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
+    let status = super::dcap::evaluate_tcb_status(
+        &tcb_info_json,
+        &quote.body.tee_tcb_svn,
+        auth.pck_cert_chain_pem,
+        tcb_signing_chain.as_deref(),
+    )?;
+
+    if status.tcb_status == crate::types::TdxTcbStatus::Revoked {
+        return Err(AttestationError::TcbMismatch(
+            "TDX TCB status is Revoked".into(),
+        ));
+    }
+
+    // QE Identity verification (TDX uses TD_QE, not SGX QE)
+    let qe_identity_json = provider.get_td_qe_identity().await?;
+    let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
+    super::dcap::verify_qe_identity(
+        auth.qe_report_body,
+        &qe_identity_json,
+        qe_signing_chain.as_deref(),
+    )?;
+
+    Ok(status)
 }
 
 #[cfg(test)]

@@ -241,6 +241,7 @@ dependencies = [
  "async-trait",
  "attestation",
  "base64 0.22.1",
+ "serde",
  "serde_json",
  "tokio",
  "wasm-bindgen",
