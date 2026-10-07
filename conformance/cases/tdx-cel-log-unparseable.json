@@ -1,0 +1,13 @@
+{
+  "id": "tdx-cel-log-unparseable",
+  "rule": {
+    "section": "7.1",
+    "statement": "a log that cannot be parsed whole under its format is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-cel-log-unparseable.json",
+  "policy": "policy/tdx-cel-log-unparseable.json",
+  "expect": {
+    "refusal": "log-invalid"
+  }
+}
