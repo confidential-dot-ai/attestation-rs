@@ -1,0 +1,13 @@
+{
+  "id": "snp-provenance-ignored",
+  "rule": {
+    "section": "4.3",
+    "statement": "cvm_provenance is reserved and a v1 verifier ignores it"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-provenance-ignored.json",
+  "policy": "policy/snp-provenance-ignored.json",
+  "expect": {
+    "appraisal": "expected/snp-provenance-ignored.json"
+  }
+}
