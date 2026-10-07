@@ -1,0 +1,13 @@
+{
+  "id": "snp-commitment-without-launch-measurement",
+  "rule": {
+    "section": "8.7",
+    "statement": "only a pinned launch measurement establishes the register provider, so the commitment binding without reference.launch_measurement is refused with binding-mismatch"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-commitment-without-launch-measurement.json",
+  "policy": "policy/snp-commitment-without-launch-measurement.json",
+  "expect": {
+    "refusal": "binding-mismatch"
+  }
+}
