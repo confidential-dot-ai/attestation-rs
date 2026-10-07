@@ -214,7 +214,7 @@ mod tests {
 
     async fn rejection(c: StaticTdxCollateral) -> String {
         match verify(c).await {
-            Ok(r) => panic!("collateral accepted: {:?}", r.tcb_status),
+            Ok(_) => panic!("collateral accepted"),
             Err(e) => e.to_string(),
         }
     }
