@@ -230,8 +230,17 @@ impl CertCache {
         let url = snp_vcek_url(processor_gen, chip_id, tcb)?;
 
         tracing::info!(%url, "fetching VCEK from AMD KDS");
-        let resp = self.http_client.get(&url).send().await?;
+        let resp = self.http_client.get(self.upstream_url(&url)).send().await?;
         let cert = resp.error_for_status()?.bytes().await?.to_vec();
+
+        // The store keeps a VCEK forever and a refresh leaves VCEKs alone, so
+        // a bad KDS body kept here would never go away. Keep only one that
+        // chains to the bundled AMD root.
+        let (ark, ask) = attestation::platforms::snp::certs::get_bundled_certs(processor_gen);
+        attestation::platforms::snp::verify::verify_cert_chain(ark, ask, &cert).map_err(|e| {
+            anyhow::anyhow!("KDS VCEK does not chain to the {product} AMD root: {e}")
+        })?;
+
         if let Some(store) = &self.store {
             store.put_vcek(product, &chip_id_hex, &tcb_str, &cert);
         }
@@ -799,6 +808,83 @@ mod tests {
             .await
             .expect("a stored VCEK must be served while the network is unreachable");
         assert_eq!(cert, b"stored-vcek");
+    }
+
+    /// Serves `body` with 200 OK on every path.
+    async fn fixed_endpoint(body: &'static [u8]) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                // Read the request first: closing with it unread resets the
+                // connection and the client may never see the response.
+                let (rd, mut sock) = sock.into_split();
+                let mut lines = BufReader::new(rd).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.is_empty() {
+                        break;
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn cache_with_store_at(dir: &std::path::Path, upstream: String) -> CertCache {
+        CertCache::with_client_and_upstream(
+            &cfg_with_store(Some(dir)),
+            Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            Some(upstream),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_kds_vcek_that_does_not_chain_to_amd_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_with_store_at(dir.path(), fixed_endpoint(b"not a certificate").await);
+
+        assert!(cache
+            .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &test_tcb())
+            .await
+            .is_err());
+        cache.vcek_cache.run_pending_tasks().await;
+        assert_eq!(cache.vcek_entry_count(), 0);
+        let store = crate::certs::store::CollateralStore::new(dir.path());
+        assert!(store
+            .get_vcek("Genoa", &hex::encode(TEST_CHIP), &vcek_tcb_key(&test_tcb()))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_kds_vcek_that_chains_to_amd_is_cached_and_stored() {
+        const VCEK_GENOA: &[u8] =
+            include_bytes!("../../../attestation/test_data/snp/live-vcek-genoa.der");
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_with_store_at(dir.path(), fixed_endpoint(VCEK_GENOA).await);
+
+        let cert = cache
+            .get_vcek(ProcessorGeneration::Genoa, &TEST_CHIP, &test_tcb())
+            .await
+            .unwrap();
+        assert_eq!(cert, VCEK_GENOA);
+        cache.vcek_cache.run_pending_tasks().await;
+        assert_eq!(cache.vcek_entry_count(), 1);
+        let store = crate::certs::store::CollateralStore::new(dir.path());
+        assert_eq!(
+            store.get_vcek("Genoa", &hex::encode(TEST_CHIP), &vcek_tcb_key(&test_tcb())),
+            Some(VCEK_GENOA.to_vec())
+        );
     }
 
     #[tokio::test]
