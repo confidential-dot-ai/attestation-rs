@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::certs::cache::CertCache;
+use crate::certs::cache::{
+    CertCache, QE_IDENTITY_SIGNING_CHAIN, TCB_SIGNING_CHAIN, TD_QE_IDENTITY_SIGNING_CHAIN,
+};
 
 /// A TdxCollateralProvider backed by the service's moka cache.
 pub struct CachedTdxProvider {
@@ -72,6 +74,21 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             })
     }
 
+    // The library verifies TCB Info and QE Identity signatures only when
+    // handed the chain; Ok(None) makes it skip. The cache captures the chain
+    // with each body, so these hand it over or fail.
+    async fn get_tcb_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        self.signing_chain(TCB_SIGNING_CHAIN).await
+    }
+
+    async fn get_qe_identity_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        self.signing_chain(QE_IDENTITY_SIGNING_CHAIN).await
+    }
+
+    async fn get_td_qe_identity_signing_chain(&self) -> attestation::Result<Option<Vec<u8>>> {
+        self.signing_chain(TD_QE_IDENTITY_SIGNING_CHAIN).await
+    }
+
     async fn check_pck_revocation(&self, pck_pem: &[u8]) -> attestation::Result<()> {
         let ca_type = attestation::determine_ca_type(pck_pem)?;
         let pck_crl = self
@@ -90,6 +107,16 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
         attestation::check_intermediate_ca_revocation(pck_pem, &root_crl)?;
         Ok(())
     }
+}
 
-    // get_tcb_signing_chain and get_qe_identity_signing_chain use default Ok(None)
+impl CachedTdxProvider {
+    async fn signing_chain(&self, kind: &str) -> attestation::Result<Option<Vec<u8>>> {
+        self.cache
+            .get_tdx_signing_chain(kind)
+            .await
+            .map(Some)
+            .map_err(|e| {
+                attestation::AttestationError::CertFetchError(format!("cached TDX {kind}: {e}"))
+            })
+    }
 }
