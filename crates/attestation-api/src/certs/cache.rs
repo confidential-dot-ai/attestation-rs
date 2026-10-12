@@ -25,6 +25,21 @@ pub(crate) const TCB_SIGNING_CHAIN: &str = "tcb_signing_chain";
 pub(crate) const QE_IDENTITY_SIGNING_CHAIN: &str = "qe_identity_signing_chain";
 pub(crate) const TD_QE_IDENTITY_SIGNING_CHAIN: &str = "td_qe_identity_signing_chain";
 
+/// The signing-chain entry that must be cached beside a collateral body, for
+/// the collateral types Intel signs.
+fn signing_chain_key(collateral_type: &str) -> Option<&'static str> {
+    match collateral_type {
+        "tcb_info" => Some(TCB_SIGNING_CHAIN),
+        "qe_identity" => Some(QE_IDENTITY_SIGNING_CHAIN),
+        "td_qe_identity" => Some(TD_QE_IDENTITY_SIGNING_CHAIN),
+        _ => None,
+    }
+}
+
+fn chain_cache_key(chain_key: &str) -> TdxCollateralKey {
+    (chain_key.to_string(), "default".to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CrlEntry {
     pub data: Vec<u8>,
@@ -261,7 +276,14 @@ impl CertCache {
         let key = (collateral_type.to_string(), identifier.to_string());
 
         if let Some(data) = self.tdx_cache.get(&key).await {
-            return Ok(data);
+            // A signed body counts as cached only while its chain is cached
+            // too. Otherwise the pair stays split until the body expires and
+            // every verification fails, so refetch both instead.
+            let paired = signing_chain_key(collateral_type)
+                .is_none_or(|chain_key| self.tdx_cache.contains_key(&chain_cache_key(chain_key)));
+            if paired {
+                return Ok(data);
+            }
         }
 
         use attestation::collateral::{
@@ -333,7 +355,7 @@ impl CertCache {
 
         if let Some((chain_key, chain)) = chain {
             self.tdx_cache
-                .insert((chain_key.to_string(), "default".to_string()), chain)
+                .insert(chain_cache_key(chain_key), chain)
                 .await;
         }
         self.tdx_cache.insert(key, data.clone()).await;
@@ -341,14 +363,12 @@ impl CertCache {
     }
 
     /// The Intel signing chain captured with the last fetch of the matching
-    /// collateral (one of the `*_SIGNING_CHAIN` keys). It is inserted together
-    /// with that body, so a miss means the body expired or was evicted in
-    /// between: refuse, so the library never evaluates unsigned TCB Info or QE
-    /// Identity, and let the retry refetch both.
+    /// collateral (one of the `*_SIGNING_CHAIN` keys). A miss means it expired
+    /// or was evicted apart from its body: refuse, so the library never
+    /// evaluates unsigned TCB Info or QE Identity. The retry's read of the body
+    /// then finds no chain beside it and refetches both.
     pub async fn get_tdx_signing_chain(&self, kind: &str) -> anyhow::Result<Vec<u8>> {
-        self.tdx_cache
-            .get(&(kind.to_string(), "default".to_string()))
-            .await
+        self.tdx_cache.get(&chain_cache_key(kind)).await
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "{kind} is not cached alongside its collateral; retry the verification to refetch both"
@@ -1209,6 +1229,38 @@ mod tests {
             .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
             .await
             .is_err());
+    }
+
+    // Body and chain are separate cache entries and can be evicted apart.
+    // A body held without its chain is refetched with it, instead of failing
+    // every verification until the body's TTL runs out.
+    #[tokio::test]
+    async fn a_body_held_without_its_chain_is_refetched_with_it() {
+        let cache = cache_at(fake_pcs(FakePcs::synthetic(true)).await);
+        cache
+            .get_tdx_collateral("tcb_info", "00806f050000")
+            .await
+            .unwrap();
+        cache
+            .tdx_cache
+            .invalidate(&chain_cache_key(TCB_SIGNING_CHAIN))
+            .await;
+        assert!(cache
+            .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
+            .await
+            .is_err());
+
+        cache
+            .get_tdx_collateral("tcb_info", "00806f050000")
+            .await
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_tdx_signing_chain(TCB_SIGNING_CHAIN)
+                .await
+                .unwrap(),
+            TEST_CHAIN_PEM.as_bytes()
+        );
     }
 
     #[tokio::test]
