@@ -49,6 +49,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # Async traits
 async-trait = { workspace = true }
+# Bounded concurrency for collateral refreshes
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # PEM parsing
 pem = { workspace = true }
