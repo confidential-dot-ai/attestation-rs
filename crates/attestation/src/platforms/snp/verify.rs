@@ -43,8 +43,9 @@ pub struct SnpParams {
     /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
     /// 32-byte init-data hash checked against PCR[8].
     pub host_data: Option<Vec<u8>>,
-    /// Expected launch digest (`report.measurement`).
-    pub launch_digest: Option<[u8; 48]>,
+    /// Allowed launch digests (`report.measurement`): the measurement must
+    /// equal one of them. Must not be empty.
+    pub launch_digest: Option<Vec<[u8; 48]>>,
     /// Accept a guest whose policy allows debug. Default: false.
     pub allow_debug: bool,
     /// Minimum reported TCB; each component must be at least this.
@@ -65,7 +66,7 @@ impl SnpParams {
                 "host_data exceeds 32 bytes".into(),
             ));
         }
-        Ok(())
+        crate::utils::check_allowed_set("launch_digest", self.launch_digest.as_deref())
     }
 }
 
@@ -115,10 +116,10 @@ pub fn evaluate_report(report: &AttestationReport, params: &SnpParams) -> SnpRes
         claims: extract_claims(report),
         report_data_match: None,
         host_data_match: None,
-        launch_digest_match: params
-            .launch_digest
-            .as_ref()
-            .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected)),
+        launch_digest_match: crate::utils::match_any(
+            &report.measurement[..],
+            params.launch_digest.as_deref(),
+        ),
         debug: report.policy.debug_allowed(),
         allow_debug: params.allow_debug,
         vmpl: report.vmpl,
@@ -1197,7 +1198,7 @@ mod tests {
         expected.copy_from_slice(&report.measurement[..]);
 
         let params = SnpParams {
-            launch_digest: Some(expected),
+            launch_digest: Some(vec![[0xAA; 48], expected]),
             ..Default::default()
         };
         let r = verify(&params).await.unwrap();
@@ -1454,7 +1455,7 @@ mod tests {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let ctx = Context::offline().with_cert_provider(StubCertProvider);
         let params = SnpParams {
-            launch_digest: Some([0xAA; 48]),
+            launch_digest: Some(vec![[0xAA; 48]]),
             ..Default::default()
         };
         let r = Snp::verify(&evidence, &params, &ctx).await.unwrap();

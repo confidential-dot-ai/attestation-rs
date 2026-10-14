@@ -385,6 +385,46 @@ async fn verify_does_not_issue_a_token_when_verification_did_not_pass() {
 }
 
 #[tokio::test]
+async fn verify_accepts_mrtd_in_allowed_set() {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    // A real GCP TDX quote; it verifies offline (no collateral fetch).
+    const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
+    const MRTD: &str = "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5";
+    let mut state = test_state();
+    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+
+    for (allowed, passed) in [
+        (vec![[0xAA; 48].to_vec(), hex::decode(MRTD).unwrap()], true),
+        (vec![[0xAA; 48].to_vec(), [0xBB; 48].to_vec()], false),
+    ] {
+        let allowed: Vec<String> = allowed.iter().map(|v| BASE64.encode(v)).collect();
+        let body = serde_json::json!({
+            "platform": "tdx",
+            "evidence": { "quote": BASE64.encode(QUOTE) },
+            "policies": { "tdx": { "mrtd": allowed } },
+        });
+        let resp = build_api_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["result"]["mrtd_match"], passed);
+        assert_eq!(json["passed"], passed);
+    }
+}
+
+#[tokio::test]
 async fn verify_rejects_full_envelope_evidence() {
     let state = test_state();
     let app = build_api_router(state);

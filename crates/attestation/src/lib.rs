@@ -609,7 +609,7 @@ mod tests {
             .verify(
                 &tdx_envelope(),
                 &tdx_policies(TdxParams {
-                    mrtd: Some(mrtd),
+                    mrtd: Some(vec![mrtd]),
                     ..Default::default()
                 }),
             )
@@ -622,7 +622,7 @@ mod tests {
             .verify(
                 &tdx_envelope(),
                 &tdx_policies(TdxParams {
-                    mrtd: Some([0; 48]),
+                    mrtd: Some(vec![[0; 48]]),
                     ..Default::default()
                 }),
             )

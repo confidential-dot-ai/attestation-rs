@@ -593,7 +593,7 @@ async fn evaluate_tdx_impl(
     let params = TdxParams {
         report_data: expected_report_data,
         init_data: expected_init_data_hash,
-        rtmr: [None, None, None, expected_rtmr3],
+        rtmr: [None, None, None, expected_rtmr3.map(|v| vec![v])],
         ..Default::default()
     };
 

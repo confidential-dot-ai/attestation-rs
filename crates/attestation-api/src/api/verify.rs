@@ -55,13 +55,13 @@ pub struct PoliciesInput {
 pub struct TdxParamsInput {
     pub report_data: Option<String>,
     pub init_data: Option<String>,
-    /// 48 bytes.
-    pub mrtd: Option<String>,
-    /// 48 bytes each.
-    pub rtmr0: Option<String>,
-    pub rtmr1: Option<String>,
-    pub rtmr2: Option<String>,
-    pub rtmr3: Option<String>,
+    /// 48 bytes, or an array of allowed values.
+    pub mrtd: Option<OneOrMany>,
+    /// 48 bytes each, or arrays of allowed values.
+    pub rtmr0: Option<OneOrMany>,
+    pub rtmr1: Option<OneOrMany>,
+    pub rtmr2: Option<OneOrMany>,
+    pub rtmr3: Option<OneOrMany>,
     #[serde(default)]
     pub allow_debug: bool,
     /// A status outside the default (`Revoked`, `NoMatchingLevel`) is refused
@@ -83,8 +83,8 @@ fn default_tcb_statuses() -> Vec<attestation::TdxTcbStatus> {
 pub struct SnpParamsInput {
     pub report_data: Option<String>,
     pub host_data: Option<String>,
-    /// 48 bytes.
-    pub launch_digest: Option<String>,
+    /// 48 bytes, or an array of allowed values.
+    pub launch_digest: Option<OneOrMany>,
     #[serde(default)]
     pub allow_debug: bool,
     pub min_tcb: Option<attestation::SnpTcb>,
@@ -94,6 +94,14 @@ pub struct SnpParamsInput {
     /// az-snp only: expected vTPM PCRs by index, 32 bytes each.
     #[serde(default, deserialize_with = "unique_pcrs")]
     pub pcrs: Option<BTreeMap<u8, String>>,
+}
+
+/// A single base64 value, or an array of allowed values.
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
 }
 
 /// NVIDIA GPU params. See `attestation::NvidiaGpuParams`.
@@ -286,12 +294,12 @@ impl TdxParamsInput {
         let params = attestation::TdxParams {
             report_data: decode(&self.report_data, "report_data")?,
             init_data: decode(&self.init_data, "init_data")?,
-            mrtd: decode_digest(&self.mrtd, "mrtd")?,
+            mrtd: decode_digests(&self.mrtd, "mrtd")?,
             rtmr: [
-                decode_digest(&self.rtmr0, "rtmr0")?,
-                decode_digest(&self.rtmr1, "rtmr1")?,
-                decode_digest(&self.rtmr2, "rtmr2")?,
-                decode_digest(&self.rtmr3, "rtmr3")?,
+                decode_digests(&self.rtmr0, "rtmr0")?,
+                decode_digests(&self.rtmr1, "rtmr1")?,
+                decode_digests(&self.rtmr2, "rtmr2")?,
+                decode_digests(&self.rtmr3, "rtmr3")?,
             ],
             allow_debug: self.allow_debug,
             accepted_tcb_statuses: self.accepted_tcb_statuses.clone(),
@@ -314,7 +322,7 @@ impl SnpParamsInput {
         let params = attestation::SnpParams {
             report_data: decode(&self.report_data, "report_data")?,
             host_data: decode(&self.host_data, "host_data")?,
-            launch_digest: decode_digest(&self.launch_digest, "launch_digest")?,
+            launch_digest: decode_digests(&self.launch_digest, "launch_digest")?,
             allow_debug: self.allow_debug,
             min_tcb: self.min_tcb,
             max_vmpl: self.max_vmpl,
@@ -351,6 +359,29 @@ fn decode_digest(value: &Option<String>, name: &str) -> Result<Option<[u8; 48]>,
         ApiError::BadRequest(format!("{name} must be 48 bytes, got {}", b.len()))
     })?;
     Ok(Some(digest))
+}
+
+/// Decodes a measurement parameter that takes one value or a set of allowed
+/// values. An empty set is refused (it could never match).
+fn decode_digests(
+    value: &Option<OneOrMany>,
+    name: &str,
+) -> Result<Option<Vec<[u8; 48]>>, ApiError> {
+    let values = match value {
+        None => return Ok(None),
+        Some(OneOrMany::One(v)) => std::slice::from_ref(v),
+        Some(OneOrMany::Many(vs)) => vs.as_slice(),
+    };
+    if values.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "{name}: the allowed set is empty"
+        )));
+    }
+    let mut digests = Vec::with_capacity(values.len());
+    for v in values {
+        digests.extend(decode_digest(&Some(v.clone()), name)?);
+    }
+    Ok(Some(digests))
 }
 
 fn canonical_platform(platform: Option<&str>) -> Result<&'static str, ApiError> {
@@ -471,6 +502,14 @@ mod tests {
         assert!(matches!(short, ApiError::BadRequest(_)));
         let junk = decode_digest(&Some("!!not-base64".to_string()), "rtmr1").unwrap_err();
         assert!(matches!(junk, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn an_empty_allowed_set_is_refused() {
+        let input: PoliciesInput =
+            serde_json::from_value(json!({ "tdx": { "mrtd": [] } })).unwrap();
+        let err = build_policies(&input, &AttestationConfig::default()).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[test]

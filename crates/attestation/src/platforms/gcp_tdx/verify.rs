@@ -101,7 +101,7 @@ mod tests {
         let params = GcpTdxParams {
             tdx: TdxParams {
                 allow_debug: true, // v4 fixture has the debug bit set
-                mrtd: Some(quote.body.mr_td),
+                mrtd: Some(vec![quote.body.mr_td]),
                 ..Default::default()
             },
         };
@@ -117,7 +117,7 @@ mod tests {
         let params = GcpTdxParams {
             tdx: TdxParams {
                 allow_debug: true,
-                mrtd: Some([0x55; 48]),
+                mrtd: Some(vec![[0x55; 48]]),
                 ..Default::default()
             },
         };

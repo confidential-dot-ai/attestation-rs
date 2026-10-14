@@ -358,10 +358,11 @@ pub struct TdxParams {
     /// Expected init data: MRCONFIGID (at most 48 bytes, zero-padded). On
     /// Azure (vTPM) a 32-byte hash checked against PCR[8].
     pub init_data: Option<Vec<u8>>,
-    /// Expected MRTD.
-    pub mrtd: Option<[u8; 48]>,
-    /// Expected RTMR[0..4].
-    pub rtmr: [Option<[u8; 48]>; 4],
+    /// Allowed MRTD values: the MRTD must equal one of them. Cloud firmware
+    /// varies by host build, memory size and machine type. Must not be empty.
+    pub mrtd: Option<Vec<[u8; 48]>>,
+    /// Allowed RTMR[0..4] values, as for `mrtd`.
+    pub rtmr: [Option<Vec<[u8; 48]>>; 4],
     /// Accept a TD with the debug attribute set. Default: false.
     pub allow_debug: bool,
     /// TCB statuses the caller accepts when DCAP collateral is evaluated.
@@ -376,7 +377,7 @@ impl Default for TdxParams {
             report_data: None,
             init_data: None,
             mrtd: None,
-            rtmr: [None; 4],
+            rtmr: [None, None, None, None],
             allow_debug: false,
             accepted_tcb_statuses: vec![
                 TdxTcbStatus::UpToDate,
@@ -406,6 +407,10 @@ impl TdxParams {
             return Err(AttestationError::InvalidParams(
                 "accepted_tcb_statuses is empty".into(),
             ));
+        }
+        crate::utils::check_allowed_set("mrtd", self.mrtd.as_deref())?;
+        for (i, rtmr) in self.rtmr.iter().enumerate() {
+            crate::utils::check_allowed_set(&format!("rtmr{i}"), rtmr.as_deref())?;
         }
         Ok(())
     }
@@ -551,10 +556,8 @@ pub(crate) fn verify_quote(
     super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, ctx.now())?;
 
     let body = &quote.body;
-    let compare = |expected: &Option<[u8; 48]>, actual: &[u8; 48]| {
-        expected
-            .as_ref()
-            .map(|e| crate::utils::constant_time_eq(actual, e))
+    let compare = |allowed: &Option<Vec<[u8; 48]>>, actual: &[u8; 48]| {
+        crate::utils::match_any(actual, allowed.as_deref())
     };
     let result = TdxResult {
         claims: extract_claims(&quote),
@@ -1198,7 +1201,7 @@ mod tests {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = TdxParams {
             allow_debug: true,
-            mrtd: Some(quote.body.mr_td),
+            mrtd: Some(vec![quote.body.mr_td]),
             ..Default::default()
         };
         let r = verify(&evidence, &params, false).await.unwrap();
@@ -1211,7 +1214,7 @@ mod tests {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = TdxParams {
             allow_debug: true,
-            mrtd: Some([0xAA; 48]),
+            mrtd: Some(vec![[0xAA; 48]]),
             ..Default::default()
         };
         let r = verify(&evidence, &params, false).await.unwrap();
@@ -1226,7 +1229,7 @@ mod tests {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = TdxParams {
             allow_debug: true,
-            rtmr: [Some(quote.body.rtmr_0), None, None, None],
+            rtmr: [Some(vec![quote.body.rtmr_0]), None, None, None],
             ..Default::default()
         };
         let r = verify(&evidence, &params, false).await.unwrap();
@@ -1241,10 +1244,10 @@ mod tests {
             allow_debug: true,
             // rtmr0 matches, rtmr1 does not, rtmr2 is not asked, rtmr3 matches
             rtmr: [
-                Some(quote.body.rtmr_0),
-                Some([0xFF; 48]),
+                Some(vec![quote.body.rtmr_0]),
+                Some(vec![[0xFF; 48]]),
                 None,
-                Some(quote.body.rtmr_3),
+                Some(vec![quote.body.rtmr_3]),
             ],
             ..Default::default()
         };
@@ -1292,6 +1295,28 @@ mod tests {
         let err = verify(&make_tdx_evidence(V4_QUOTE), &params, false)
             .await
             .expect_err("an empty accepted set cannot be satisfied");
+        assert!(matches!(err, AttestationError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn test_mrtd_allowlist() {
+        let mrtd = parse_tdx_quote(V4_QUOTE).unwrap().body.mr_td;
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let verify_with = |allowed: Vec<[u8; 48]>| {
+            let params = TdxParams {
+                allow_debug: true,
+                mrtd: Some(allowed),
+                ..Default::default()
+            };
+            let evidence = evidence.clone();
+            async move { verify(&evidence, &params, false).await }
+        };
+
+        let r = verify_with(vec![[0xAA; 48], mrtd]).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(true));
+        let r = verify_with(vec![[0xAA; 48], [0xBB; 48]]).await.unwrap();
+        assert_eq!(r.mrtd_match, Some(false));
+        let err = verify_with(vec![]).await.unwrap_err();
         assert!(matches!(err, AttestationError::InvalidParams(_)));
     }
 }

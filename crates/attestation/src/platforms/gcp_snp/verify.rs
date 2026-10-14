@@ -135,7 +135,7 @@ mod tests {
         let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let params = GcpSnpParams {
             snp: SnpParams {
-                launch_digest: Some(expected),
+                launch_digest: Some(vec![expected]),
                 ..Default::default()
             },
         };
@@ -149,7 +149,7 @@ mod tests {
         let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let params = GcpSnpParams {
             snp: SnpParams {
-                launch_digest: Some([0x77; 48]),
+                launch_digest: Some(vec![[0x77; 48]]),
                 ..Default::default()
             },
         };

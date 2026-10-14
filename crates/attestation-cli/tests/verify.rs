@@ -54,6 +54,23 @@ fn matching_launch_digest_exits_zero() {
 }
 
 #[test]
+fn launch_digest_in_allowed_set_exits_zero() {
+    let digest = stdout_json(&verify(&["--platform", "snp"]))["claims"]["launch_digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let other = "aa".repeat(48);
+    let out = verify(&[
+        "--expected-launch-digest",
+        &other,
+        "--expected-launch-digest",
+        &digest,
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout_json(&out)["launch_digest_match"], true);
+}
+
+#[test]
 fn launch_digest_mismatch_prints_result_and_exits_one() {
     let out = verify(&["--expected-launch-digest", &"aa".repeat(48)]);
     assert_eq!(out.status.code(), Some(1));

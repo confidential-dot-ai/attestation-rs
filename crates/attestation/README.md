@@ -55,7 +55,7 @@ async fn main() {
     let policies = Policies {
         tdx: Some(TdxParams {
             report_data: Some(nonce.to_vec()),
-            mrtd: Some(expected_mrtd),
+            mrtd: Some(vec![expected_mrtd]), // any of the allowed values
             ..Default::default()
         }),
         ..Default::default()
