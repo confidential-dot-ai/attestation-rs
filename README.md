@@ -159,6 +159,21 @@ for the processor generation and checks the VEK's issuing ASK/ASVK against it
 stale, is `CollateralUnavailable`; `Context::offline()` skips the check
 (`crl_ok: null`).
 
+For GCP (`gcp-tdx`, `gcp-snp`), `GcpTdxParams::endorsement` /
+`GcpSnpParams::endorsement` take Google's signed launch endorsement for the
+firmware (`VMLaunchEndorsement`, published in the public `gce_tcb_integrity`
+bucket). An endorsement that does not verify against the bundled
+GCE-cc-tcb-root is invalid params. `endorsement_match` is `false` when it does not
+list the evidence's MRTD or launch measurement (SNP: or the guest policy is
+wider than the endorsed one). It shows the firmware is a Google OVMF build, not
+that the host is GCP. The CLI reads it from a file, or downloads it by the
+evidence's measurement once the evidence has verified:
+
+```bash
+attestation-cli verify --evidence evidence.json --gcp-endorsement endorsement.binarypb
+attestation-cli verify --evidence evidence.json --fetch-gcp-endorsement
+```
+
 The CLI exposes matching flags (`--expected-mrtd`, `--expected-rtmrN` and
 `--expected-launch-digest` are repeatable: any of the given values):
 

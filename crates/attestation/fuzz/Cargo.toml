@@ -1,0 +1,23 @@
+[package]
+name = "attestation-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+attestation = { path = "..", default-features = false, features = ["gcp-tdx", "gcp-snp"] }
+
+# Not part of the repository workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "gcp_endorsement"
+path = "fuzz_targets/gcp_endorsement.rs"
+test = false
+doc = false
+bench = false

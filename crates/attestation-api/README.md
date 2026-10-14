@@ -131,7 +131,9 @@ Params per platform: `tdx`, `az-tdx`, `gcp-tdx` take `report_data`,
 allowed values);
 `snp`, `az-snp`, `gcp-snp` take `report_data`, `host_data`, `launch_digest`,
 `allow_debug`, `min_tcb`, `max_vmpl`; `az-tdx` and `az-snp` also take `pcrs`
-(`{ "<index>": "<32 bytes>" }`, index 0-23, each index once); `nvidia_gpu` takes `user_nonce`,
+(`{ "<index>": "<32 bytes>" }`, index 0-23, each index once); `gcp-tdx` and
+`gcp-snp` also take `endorsement` (Google's launch endorsement, base64);
+`nvidia_gpu` takes `user_nonce`,
 `required`, `expected_archs`. A field the platform does not have is a `400`.
 
 The server sets floors: `allow_debug: true`, `max_vmpl` above 0, and a TCB

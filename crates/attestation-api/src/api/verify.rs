@@ -71,6 +71,9 @@ pub struct TdxParamsInput {
     /// az-tdx only: expected vTPM PCRs by index, 32 bytes each.
     #[serde(default, deserialize_with = "unique_pcrs")]
     pub pcrs: Option<BTreeMap<u8, String>>,
+    /// gcp-tdx only: Google's launch endorsement (serialized
+    /// `VMLaunchEndorsement`).
+    pub endorsement: Option<String>,
 }
 
 fn default_tcb_statuses() -> Vec<attestation::TdxTcbStatus> {
@@ -94,6 +97,9 @@ pub struct SnpParamsInput {
     /// az-snp only: expected vTPM PCRs by index, 32 bytes each.
     #[serde(default, deserialize_with = "unique_pcrs")]
     pub pcrs: Option<BTreeMap<u8, String>>,
+    /// gcp-snp only: Google's launch endorsement (serialized
+    /// `VMLaunchEndorsement`).
+    pub endorsement: Option<String>,
 }
 
 /// A single base64 value, or an array of allowed values.
@@ -190,14 +196,16 @@ fn build_policies(
     // Which `Policies` fields exist depends on attestation's features.
     #[allow(clippy::needless_update)]
     let policies = attestation::Policies {
-        tdx: without_pcrs(tdx(&input.tdx)?, "tdx")?,
-        snp: without_pcrs(snp(&input.snp)?, "snp")?,
-        az_tdx: tdx(&input.az_tdx)?.map(|(tdx, pcrs)| attestation::AzTdxParams { tdx, pcrs }),
-        az_snp: snp(&input.az_snp)?.map(|(snp, pcrs)| attestation::AzSnpParams { snp, pcrs }),
-        gcp_tdx: without_pcrs(tdx(&input.gcp_tdx)?, "gcp-tdx")?
-            .map(|tdx| attestation::GcpTdxParams { tdx }),
-        gcp_snp: without_pcrs(snp(&input.gcp_snp)?, "gcp-snp")?
-            .map(|snp| attestation::GcpSnpParams { snp }),
+        tdx: plain(tdx(&input.tdx)?, "tdx")?,
+        snp: plain(snp(&input.snp)?, "snp")?,
+        az_tdx: azure(tdx(&input.az_tdx)?, "az-tdx")?
+            .map(|(tdx, pcrs)| attestation::AzTdxParams { tdx, pcrs }),
+        az_snp: azure(snp(&input.az_snp)?, "az-snp")?
+            .map(|(snp, pcrs)| attestation::AzSnpParams { snp, pcrs }),
+        gcp_tdx: gcp(tdx(&input.gcp_tdx)?, "gcp-tdx")?
+            .map(|(tdx, endorsement)| attestation::GcpTdxParams { tdx, endorsement }),
+        gcp_snp: gcp(snp(&input.gcp_snp)?, "gcp-snp")?
+            .map(|(snp, endorsement)| attestation::GcpSnpParams { snp, endorsement }),
         gpu: input
             .nvidia_gpu
             .as_ref()
@@ -209,15 +217,54 @@ fn build_policies(
 }
 
 type Pcrs = BTreeMap<u8, [u8; 32]>;
+type Endorsement = Vec<u8>;
 
-/// PCR pins exist only on the Azure vTPM platforms.
-fn without_pcrs<T>(params: Option<(T, Pcrs)>, platform: &str) -> Result<Option<T>, ApiError> {
-    match params {
-        Some((_, pcrs)) if !pcrs.is_empty() => Err(ApiError::BadRequest(format!(
-            "pcrs does not apply to {platform}"
-        ))),
-        other => Ok(other.map(|(params, _)| params)),
-    }
+/// Params that exist only on some platforms: vTPM PCR pins (az-*) and the
+/// GCP launch endorsement (gcp-*).
+#[derive(Default)]
+struct Extras {
+    pcrs: Pcrs,
+    endorsement: Option<Endorsement>,
+}
+
+fn refuse(name: &str, platform: &str) -> ApiError {
+    ApiError::BadRequest(format!("{name} does not apply to {platform}"))
+}
+
+fn plain<T>(params: Option<(T, Extras)>, platform: &str) -> Result<Option<T>, ApiError> {
+    azure(params, platform)?
+        .map(|(params, pcrs)| {
+            if pcrs.is_empty() {
+                Ok(params)
+            } else {
+                Err(refuse("pcrs", platform))
+            }
+        })
+        .transpose()
+}
+
+fn azure<T>(params: Option<(T, Extras)>, platform: &str) -> Result<Option<(T, Pcrs)>, ApiError> {
+    params
+        .map(|(params, extras)| match extras.endorsement {
+            Some(_) => Err(refuse("endorsement", platform)),
+            None => Ok((params, extras.pcrs)),
+        })
+        .transpose()
+}
+
+fn gcp<T>(
+    params: Option<(T, Extras)>,
+    platform: &str,
+) -> Result<Option<(T, Option<Endorsement>)>, ApiError> {
+    params
+        .map(|(params, extras)| {
+            if extras.pcrs.is_empty() {
+                Ok((params, extras.endorsement))
+            } else {
+                Err(refuse("pcrs", platform))
+            }
+        })
+        .transpose()
 }
 
 fn decode_pcrs(pcrs: &Option<BTreeMap<u8, String>>) -> Result<Pcrs, ApiError> {
@@ -277,7 +324,7 @@ impl TdxParamsInput {
     fn to_params(
         &self,
         config: &AttestationConfig,
-    ) -> Result<(attestation::TdxParams, Pcrs), ApiError> {
+    ) -> Result<(attestation::TdxParams, Extras), ApiError> {
         check_allow_debug(self.allow_debug, config)?;
         if !config.allow_revoked_or_unlisted_tcb {
             let valid = default_tcb_statuses();
@@ -304,7 +351,13 @@ impl TdxParamsInput {
             allow_debug: self.allow_debug,
             accepted_tcb_statuses: self.accepted_tcb_statuses.clone(),
         };
-        Ok((params, decode_pcrs(&self.pcrs)?))
+        Ok((
+            params,
+            Extras {
+                pcrs: decode_pcrs(&self.pcrs)?,
+                endorsement: decode(&self.endorsement, "endorsement")?,
+            },
+        ))
     }
 }
 
@@ -312,7 +365,7 @@ impl SnpParamsInput {
     fn to_params(
         &self,
         config: &AttestationConfig,
-    ) -> Result<(attestation::SnpParams, Pcrs), ApiError> {
+    ) -> Result<(attestation::SnpParams, Extras), ApiError> {
         check_allow_debug(self.allow_debug, config)?;
         if self.max_vmpl > 0 && !config.allow_nonzero_vmpl {
             return Err(ApiError::BadRequest(
@@ -327,7 +380,13 @@ impl SnpParamsInput {
             min_tcb: self.min_tcb,
             max_vmpl: self.max_vmpl,
         };
-        Ok((params, decode_pcrs(&self.pcrs)?))
+        Ok((
+            params,
+            Extras {
+                pcrs: decode_pcrs(&self.pcrs)?,
+                endorsement: decode(&self.endorsement, "endorsement")?,
+            },
+        ))
     }
 }
 
