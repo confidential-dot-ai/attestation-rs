@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
@@ -16,13 +18,16 @@ use super::evidence::AzSnpEvidence;
 #[derive(Debug, Clone, Default)]
 pub struct AzSnpParams {
     pub snp: SnpParams,
+    /// Expected vTPM PCR values (SHA-256 bank) by index. Empty means no check.
+    pub pcrs: BTreeMap<u8, [u8; 32]>,
 }
 
 impl AzSnpParams {
     /// Reject params that cannot be applied, before any I/O.
     pub fn validate(&self) -> Result<()> {
         self.snp.validate()?;
-        tpm_common::check_init_data_len(self.snp.host_data.as_deref())
+        tpm_common::check_init_data_len(self.snp.host_data.as_deref())?;
+        tpm_common::check_pcr_pin_indexes(&self.pcrs)
     }
 }
 
@@ -33,12 +38,15 @@ impl AzSnpParams {
 pub struct AzSnpResult {
     #[serde(flatten)]
     pub snp: SnpResult,
+    /// Every pinned PCR matched (`None` if no PCR was pinned). A PCR outside
+    /// the quote's signed PCR selection does not match.
+    pub pcrs_match: Option<bool>,
 }
 
 impl AzSnpResult {
     /// True when the evidence satisfied every rule in the params.
     pub fn passed(&self) -> bool {
-        self.snp.passed()
+        self.snp.passed() && self.pcrs_match != Some(false)
     }
 }
 
@@ -123,6 +131,7 @@ pub fn verify_report(
     now: i64,
 ) -> Result<VerifiedReport> {
     params.validate()?;
+    let pcrs = &params.pcrs;
     let params = &params.snp;
     if evidence.version != 1 {
         return Err(AttestationError::EvidenceDeserialize(format!(
@@ -181,6 +190,7 @@ pub fn verify_report(
     }
     let report_data_match = tpm_common::check_report_data(&tpm_msg, params.report_data.as_deref())?;
     tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
+    let pcrs_match = tpm_common::check_pcrs(&tpm_msg, &tpm_pcrs, pcrs)?;
 
     // HCL binding
     tpm_common::verify_hcl_var_data_binding(snp_report.report_data.as_ref(), &hcl.var_data)?;
@@ -243,7 +253,7 @@ pub fn verify_report(
     snp.claims = tpm_common::tpm_claims(snp.claims, &tpm_pcrs, &tpm_msg);
 
     Ok(VerifiedReport {
-        result: AzSnpResult { snp },
+        result: AzSnpResult { snp, pcrs_match },
         matched_gen,
         vcek_der,
         report_version: snp_report.version,
@@ -460,6 +470,7 @@ mod tests {
                 report_data: Some(nonce.to_vec()),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 

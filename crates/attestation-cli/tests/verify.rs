@@ -73,6 +73,19 @@ fn evidence_for_a_platform_not_accepted_exits_one() {
 fn usage_errors_exit_two() {
     for args in [
         &["--platform", "snp", "--expected-mrtd", &"aa".repeat(48)][..],
+        &[
+            "--platform",
+            "snp",
+            "--expected-pcr",
+            &format!("4={}", "aa".repeat(32)),
+        ],
+        &["--expected-pcr", &format!("24={}", "aa".repeat(32))],
+        &[
+            "--expected-pcr",
+            &format!("4={}", "aa".repeat(32)),
+            "--expected-pcr",
+            &format!("4={}", "bb".repeat(32)),
+        ],
         &["--platform", "snp", "--expected-report-data", "zz"],
         &[
             "--platform",

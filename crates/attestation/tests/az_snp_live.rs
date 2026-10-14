@@ -218,6 +218,7 @@ async fn test_az_snp_verify_with_expected_nonce() {
             report_data: Some(nonce.to_vec()),
             ..Default::default()
         },
+        ..Default::default()
     };
 
     let result = AzSnp::verify(&evidence, &params, &Context::new())

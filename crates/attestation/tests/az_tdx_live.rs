@@ -24,6 +24,7 @@ fn nonce_params(nonce: &[u8]) -> AzTdxParams {
             report_data: Some(nonce.to_vec()),
             ..Default::default()
         },
+        ..Default::default()
     }
 }
 
