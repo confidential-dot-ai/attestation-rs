@@ -12,7 +12,7 @@
 //   node example.mjs
 //
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -25,8 +25,13 @@ console.log('=== Step 1: Generating live SNP attestation evidence ===\n');
 const nonce = 'wasm-verify-' + Date.now();
 console.log(`Nonce: "${nonce}"`);
 
-const cliOutput = execSync(
-  `cargo run --manifest-path ${workspaceRoot}/Cargo.toml -p attestation-cli --features attest --quiet -- attest --platform snp --report-data "${nonce}"`,
+const cliOutput = execFileSync(
+  'cargo',
+  [
+    'run', '--manifest-path', join(workspaceRoot, 'Cargo.toml'),
+    '-p', 'attestation-cli', '--features', 'attest', '--quiet', '--',
+    'attest', '--platform', 'snp', '--report-data', nonce,
+  ],
   { encoding: 'utf-8', timeout: 30000 }
 );
 
