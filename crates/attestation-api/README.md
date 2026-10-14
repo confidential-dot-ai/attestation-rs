@@ -117,7 +117,9 @@ curl -X POST http://127.0.0.1:8400/verify \
 ```
 
 Params per platform: `tdx`, `az-tdx`, `gcp-tdx` take `report_data`,
-`init_data`, `mrtd`, `rtmr0`..`rtmr3`, `allow_debug`, `accepted_tcb_statuses`;
+`init_data`, `mrtd`, `rtmr0`..`rtmr3`, `allow_debug`, `accepted_tcb_statuses`
+(`mrtd`, `rtmr0`..`rtmr3` and `launch_digest` take one value or an array of
+allowed values);
 `snp`, `az-snp`, `gcp-snp` take `report_data`, `host_data`, `launch_digest`,
 `allow_debug`, `min_tcb`, `max_vmpl`; `az-tdx` and `az-snp` also take `pcrs`
 (`{ "<index>": "<32 bytes>" }`, index 0-23, each index once); `nvidia_gpu` takes `user_nonce`,

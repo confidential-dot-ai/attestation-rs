@@ -123,8 +123,8 @@ use attestation::{Policies, TdxParams};
 let policies = Policies {
     tdx: Some(TdxParams {
         report_data: Some(nonce.to_vec()),
-        mrtd: Some(mrtd_bytes),                  // [u8; 48]
-        rtmr: [None, Some(rtmr1_bytes), None, None],
+        mrtd: Some(vec![mrtd_a, mrtd_b]),        // any of; [u8; 48] each
+        rtmr: [None, Some(vec![rtmr1]), None, None],
         ..Default::default()
     }),
     ..Default::default()
@@ -147,7 +147,13 @@ is a value: mismatches are `*_match: Some(false)`, and debug, VMPL, minimum TCB
 and TCB status are fields. `passed()` is true only when every rule held. Pins,
 `report_data` and init data are compared in constant time.
 
-The CLI exposes matching flags:
+`mrtd`, each `rtmr` and `launch_digest` take a set of allowed values, because
+firmware the cloud provider owns varies (the Azure paravisor build, the GCP
+firmware per memory size or machine type). The measurement must equal one of
+them; an empty set is invalid params (`Err`).
+
+The CLI exposes matching flags (`--expected-mrtd`, `--expected-rtmrN` and
+`--expected-launch-digest` are repeatable: any of the given values):
 
 ```bash
 attestation-cli verify \
