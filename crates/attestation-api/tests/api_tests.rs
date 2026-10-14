@@ -166,6 +166,56 @@ async fn verify_rejects_expected_measurement_of_wrong_length() {
         .contains("expected_launch_digest must be 48 bytes"));
 }
 
+// A real GCP TDX quote verifies offline (no collateral fetch), so a pin
+// mismatch reaches the measurement check. It is reported in the result.
+#[tokio::test]
+async fn verify_reports_failed_expected_measurement_as_issue() {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
+    let mut state = test_state();
+    state.verifier = Arc::new(attestation::Verifier::offline());
+
+    for (params, check, problem) in [
+        (
+            serde_json::json!({ "expected_mrtd": BASE64.encode([0xAA; 48]) }),
+            "mrtd",
+            "mismatch",
+        ),
+        (
+            serde_json::json!({ "expected_launch_digest": BASE64.encode([0xAA; 48]) }),
+            "launch_digest",
+            "unanswerable",
+        ),
+    ] {
+        let body = serde_json::json!({
+            "platform": "tdx",
+            "evidence": { "quote": BASE64.encode(QUOTE) },
+            "params": params,
+        });
+        let resp = build_api_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["passed"], false);
+        let issues = json["result"]["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["check"], check);
+        assert_eq!(issues[0]["problem"], problem);
+    }
+}
+
 #[tokio::test]
 async fn verify_rejects_full_envelope_evidence() {
     let state = test_state();

@@ -96,6 +96,85 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Compares a measured value against the caller's expected value (constant
+/// time). A mismatch adds an [`Issue`](crate::types::Issue) to `issues`.
+/// Returns `None` when no value was supplied.
+#[cfg(any(feature = "snp", feature = "tdx"))]
+pub(crate) fn compare(
+    issues: &mut Vec<crate::types::Issue>,
+    check: crate::types::Check,
+    actual: &[u8],
+    expected: Option<&[u8]>,
+) -> Option<bool> {
+    let expected = expected?;
+    let matched = constant_time_eq(actual, expected);
+    if !matched {
+        issues.push(crate::types::Issue::mismatch(check, [expected], actual));
+    }
+    Some(matched)
+}
+
+/// Adds an `Unanswerable` issue for every value in `params` the platform
+/// could not compare (its `*_match` is `None`), e.g. an RTMR pin on SEV-SNP
+/// evidence. Each platform verifier calls this last.
+#[cfg(any(feature = "snp", feature = "tdx"))]
+pub(crate) fn add_unanswered_issues(
+    params: &crate::types::VerifyParams,
+    result: &mut crate::types::VerificationResult,
+) {
+    use crate::types::{Check, Issue, Problem};
+    let checks = [
+        (
+            Check::LaunchDigest,
+            params.expected_launch_digest.is_some(),
+            result.launch_digest_match,
+        ),
+        (
+            Check::Mrtd,
+            params.expected_mrtd.is_some(),
+            result.mrtd_match,
+        ),
+        (
+            Check::Rtmr(0),
+            params.expected_rtmr0.is_some(),
+            result.rtmr0_match,
+        ),
+        (
+            Check::Rtmr(1),
+            params.expected_rtmr1.is_some(),
+            result.rtmr1_match,
+        ),
+        (
+            Check::Rtmr(2),
+            params.expected_rtmr2.is_some(),
+            result.rtmr2_match,
+        ),
+        (
+            Check::Rtmr(3),
+            params.expected_rtmr3.is_some(),
+            result.rtmr3_match,
+        ),
+        (
+            Check::ReportData,
+            params.expected_report_data.is_some(),
+            result.report_data_match,
+        ),
+        (
+            Check::InitData,
+            params.expected_init_data_hash.is_some(),
+            result.init_data_match,
+        ),
+    ];
+    for (check, supplied, matched) in checks {
+        if supplied && matched.is_none() {
+            result.issues.push(Issue {
+                check,
+                problem: Problem::Unanswerable,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

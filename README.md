@@ -111,8 +111,13 @@ KDS, verify in WASM), build with `--target nodejs` and run
 
 `VerifyParams` carries optional reference values that the verifier compares
 against the measurement registers in the quote. When the operator supplies a
-value, the corresponding `VerificationResult` field is `Some(true)`/`Some(false)`;
-when omitted the result is `None` (no check requested).
+value, the corresponding `VerificationResult` field is `Some(true)` or
+`Some(false)`; when omitted it is `None` (no check requested).
+
+A value that does not match, or that the evidence cannot answer (e.g. an RTMR
+pin on SEV-SNP evidence), does not fail verification. It is listed in
+`result.issues`, and `result.passed()` is `false`. The caller decides what to
+do. Errors (bad signature, broken chain, debug policy, ...) still return `Err`.
 
 ```rust
 use attestation::types::VerifyParams;
@@ -130,15 +135,24 @@ let params = VerifyParams {
 };
 
 let result = attestation::verify(&evidence_json, &params).await?;
-assert_eq!(result.mrtd_match, Some(true));
-assert_eq!(result.rtmr1_match, Some(true));
-assert_eq!(result.rtmr2_match, Some(true));
+if !result.passed() {
+    for issue in &result.issues {
+        eprintln!("{issue}");
+    }
+}
+```
+
+An issue serializes as, for example:
+
+```json
+{ "check": "mrtd", "problem": "mismatch", "expected": ["c1ee…"], "actual": "a2e6…" }
+{ "check": "rtmr0", "problem": "unanswerable" }
 ```
 
 All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
 short-circuit — every populated reference is checked. `VerificationResult`
-carries `#[must_use]` so dropping the result without inspecting the policy
-outcomes is a compile-time warning.
+carries `#[must_use]` so dropping the result without inspecting it is a
+compile-time warning.
 
 The CLI exposes matching flags:
 
@@ -148,11 +162,15 @@ attestation-cli verify \
   --expected-mrtd $MRTD \
   --expected-rtmr1 $RTMR1 \
   --expected-rtmr2 $RTMR2
-# exit 0 on full match; exit 1 on any explicit --expected-* mismatch.
+# exit 0 on full match; exit 1 if there is any issue.
 ```
 
-A failing `--expected-*` check forces the process to exit non-zero, so a
-CI gate using these flags fails closed on a wrong workload.
+The CLI prints the result JSON to stdout and one line per issue to stderr,
+and exits non-zero on any issue, so a CI gate using these flags fails on a
+wrong workload. The API's `POST /verify` returns `200` with the result
+(including `issues`) and `passed`; it issues a token only when `passed` is
+`true`. The WASM entry points return the result with `issues` and `passed`
+instead of throwing for these checks.
 
 ## Documentation
 

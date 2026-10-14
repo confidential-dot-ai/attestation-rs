@@ -5,7 +5,7 @@ use scroll::Pread;
 
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
-use crate::types::{DcapVerificationStatus, PlatformType, VerificationResult, VerifyParams};
+use crate::types::{Check, DcapVerificationStatus, PlatformType, VerificationResult, VerifyParams};
 
 use super::claims::extract_claims;
 use super::evidence::TdxEvidence;
@@ -406,29 +406,6 @@ pub async fn verify_evidence(
         None
     };
 
-    // Optional MRTD / RTMR comparisons against caller-supplied references.
-    // Constant-time; mismatch surfaces in the result and does not fail verify.
-    let mrtd_match = params
-        .expected_mrtd
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.mr_td, expected));
-    let rtmr0_match = params
-        .expected_rtmr0
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_0, expected));
-    let rtmr1_match = params
-        .expected_rtmr1
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_1, expected));
-    let rtmr2_match = params
-        .expected_rtmr2
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_2, expected));
-    let rtmr3_match = params
-        .expected_rtmr3
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&quote.body.rtmr_3, expected));
-
     // 6. Eventlog integrity check (if present)
     if let Some(ref eventlog_b64) = evidence.cc_eventlog {
         crate::utils::check_field_size("cc_eventlog", eventlog_b64.len())?;
@@ -447,7 +424,7 @@ pub async fn verify_evidence(
     // 7. Extract claims
     let claims = extract_claims(&quote);
 
-    Ok(VerificationResult {
+    let mut result = VerificationResult {
         signature_valid: sig_valid,
         platform: PlatformType::Tdx,
         claims,
@@ -455,13 +432,57 @@ pub async fn verify_evidence(
         init_data_match,
         collateral_verified: tcb_status.is_some(),
         tcb_status,
-        mrtd_match,
-        rtmr0_match,
-        rtmr1_match,
-        rtmr2_match,
-        rtmr3_match,
+        mrtd_match: None,
+        rtmr0_match: None,
+        rtmr1_match: None,
+        rtmr2_match: None,
+        rtmr3_match: None,
         launch_digest_match: None,
-    })
+        issues: Vec::new(),
+    };
+    compare_measurements(&quote.body, params, &mut result);
+    crate::utils::add_unanswered_issues(params, &mut result);
+    Ok(result)
+}
+
+/// Compares the MRTD and RTMRs in `body` with the caller's expected values,
+/// setting the `*_match` fields of `result` and adding an issue per mismatch.
+pub(crate) fn compare_measurements(
+    body: &TdxReportBody,
+    params: &VerifyParams,
+    result: &mut VerificationResult,
+) {
+    use crate::utils::compare;
+    let issues = &mut result.issues;
+    result.mrtd_match = compare(issues, Check::Mrtd, &body.mr_td, opt(&params.expected_mrtd));
+    result.rtmr0_match = compare(
+        issues,
+        Check::Rtmr(0),
+        &body.rtmr_0,
+        opt(&params.expected_rtmr0),
+    );
+    result.rtmr1_match = compare(
+        issues,
+        Check::Rtmr(1),
+        &body.rtmr_1,
+        opt(&params.expected_rtmr1),
+    );
+    result.rtmr2_match = compare(
+        issues,
+        Check::Rtmr(2),
+        &body.rtmr_2,
+        opt(&params.expected_rtmr2),
+    );
+    result.rtmr3_match = compare(
+        issues,
+        Check::Rtmr(3),
+        &body.rtmr_3,
+        opt(&params.expected_rtmr3),
+    );
+}
+
+fn opt(value: &Option<[u8; 48]>) -> Option<&[u8]> {
+    value.as_ref().map(|v| &v[..])
 }
 
 /// Run the DCAP collateral checks of [`verify_evidence`] (PCK CRL revocation,
@@ -517,6 +538,7 @@ pub async fn verify_collateral(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Issue, Problem};
 
     // Load real test fixtures at compile time
     const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
@@ -1063,21 +1085,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_wrong_mrtd_is_some_false() {
-        // Wrong MRTD must record Some(false) without failing verification.
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = VerifyParams {
-            allow_debug: true,
-            expected_mrtd: Some([0xAA; 48]),
-            ..Default::default()
-        };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.mrtd_match, Some(false));
-        // Crucially the rest of the result is still populated — sig is valid.
-        assert!(r.signature_valid);
-    }
-
-    #[tokio::test]
     async fn test_verify_evidence_partial_rtmr_check() {
         // Caller pins only rtmr0; the other rtmrN_match fields stay None.
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
@@ -1094,21 +1101,108 @@ mod tests {
         assert_eq!(r.rtmr3_match, None);
     }
 
+    // A real GCP TDX quote (c3-standard, confos boot image).
+    const GCP_BOOT_QUOTE: &[u8] = include_bytes!("../../../test_data/gcp_tdx/boot-quote.dat");
+
+    type Register = (Check, fn(&mut VerifyParams, [u8; 48]), [u8; 48]);
+
+    /// Each TDX measurement pin with its check, a setter, and the value the
+    /// GCP quote carries for it.
+    fn gcp_registers() -> Vec<Register> {
+        let b = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body;
+        vec![
+            (Check::Mrtd, |p, v| p.expected_mrtd = Some(v), b.mr_td),
+            (Check::Rtmr(0), |p, v| p.expected_rtmr0 = Some(v), b.rtmr_0),
+            (Check::Rtmr(1), |p, v| p.expected_rtmr1 = Some(v), b.rtmr_1),
+            (Check::Rtmr(2), |p, v| p.expected_rtmr2 = Some(v), b.rtmr_2),
+            (Check::Rtmr(3), |p, v| p.expected_rtmr3 = Some(v), b.rtmr_3),
+        ]
+    }
+
+    #[test]
+    fn gcp_boot_quote_is_the_recorded_one() {
+        let b = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body;
+        assert_eq!(hex::encode(b.mr_td), "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5");
+        assert_eq!(hex::encode(b.rtmr_1), "6ffd14ab2c7f7df6f9277aa98e122be523c502a98f1ce437dfabb271fd1604ceffed1cbef78b94d6c088fc74bb26d4e9");
+        assert_eq!(hex::encode(b.rtmr_2), "fc61ed293360d1291195c8c21cd4cb3b00774df5a0b828e0aa9b6050a42bf356013c1117619b2d9dd5e0442edc73a136");
+    }
+
     #[tokio::test]
-    async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
-        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
-        let evidence = make_tdx_evidence(V4_QUOTE);
+    async fn test_verify_evidence_measurement_pin_match_passes() {
+        let evidence = make_tdx_evidence(GCP_BOOT_QUOTE);
+        for (check, set, actual) in gcp_registers() {
+            let mut params = VerifyParams::default();
+            set(&mut params, actual);
+            let r = verify_evidence(&evidence, &params, None).await.unwrap();
+            let matched = [
+                r.mrtd_match,
+                r.rtmr0_match,
+                r.rtmr1_match,
+                r.rtmr2_match,
+                r.rtmr3_match,
+            ];
+            assert_eq!(
+                matched.iter().filter(|m| **m == Some(true)).count(),
+                1,
+                "{check}: exactly the pinned register reports Some(true), got {matched:?}"
+            );
+            assert!(matched.iter().all(|m| *m != Some(false)));
+            assert!(r.passed(), "{check}: {:?}", r.issues);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_measurement_pin_mismatch_is_an_issue() {
+        let evidence = make_tdx_evidence(GCP_BOOT_QUOTE);
+        for (check, set, actual) in gcp_registers() {
+            let mut wrong = actual;
+            wrong[47] ^= 1;
+            let mut params = VerifyParams::default();
+            set(&mut params, wrong);
+            let r = verify_evidence(&evidence, &params, None).await.unwrap();
+            assert_eq!(
+                r.issues,
+                vec![Issue::mismatch(check, [&wrong[..]], &actual)],
+                "{check}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_one_mismatch_among_matches() {
+        let b = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body;
         let params = VerifyParams {
-            allow_debug: true,
-            expected_rtmr0: Some(quote.body.rtmr_0), // match
-            expected_rtmr1: Some([0xFF; 48]),        // mismatch
-            expected_rtmr3: Some(quote.body.rtmr_3), // match (rtmr2 left None → skipped)
+            expected_mrtd: Some(b.mr_td),
+            expected_rtmr1: Some([0xFF; 48]),
+            expected_rtmr2: Some(b.rtmr_2),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.rtmr0_match, Some(true));
-        assert_eq!(r.rtmr1_match, Some(false));
-        assert_eq!(r.rtmr2_match, None);
-        assert_eq!(r.rtmr3_match, Some(true));
+        let r = verify_evidence(&make_tdx_evidence(GCP_BOOT_QUOTE), &params, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (r.mrtd_match, r.rtmr1_match, r.rtmr2_match),
+            (Some(true), Some(false), Some(true))
+        );
+        let checks: Vec<_> = r.issues.iter().map(|i| i.check).collect();
+        assert_eq!(checks, [Check::Rtmr(1)]);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_launch_digest_pin_on_tdx_is_unanswerable() {
+        let params = VerifyParams {
+            expected_launch_digest: Some([0; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&make_tdx_evidence(GCP_BOOT_QUOTE), &params, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            r.issues,
+            vec![Issue {
+                check: Check::LaunchDigest,
+                problem: Problem::Unanswerable,
+            }]
+        );
     }
 }

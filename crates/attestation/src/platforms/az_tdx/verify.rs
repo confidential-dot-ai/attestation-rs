@@ -128,29 +128,6 @@ pub async fn verify_evidence(
         params.expected_init_data_hash.as_deref(),
     )?;
 
-    // Optional MRTD / RTMR compares. Mismatches surface in the result and
-    // do not fail verification.
-    let mrtd_match = params
-        .expected_mrtd
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.mr_td, expected));
-    let rtmr0_match = params
-        .expected_rtmr0
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_0, expected));
-    let rtmr1_match = params
-        .expected_rtmr1
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_1, expected));
-    let rtmr2_match = params
-        .expected_rtmr2
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_2, expected));
-    let rtmr3_match = params
-        .expected_rtmr3
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&tdx_quote.body.rtmr_3, expected));
-
     // Result
     let tdx_claims = extract_claims(&tdx_quote);
     let collateral_verified = tcb_status.is_some();
@@ -164,17 +141,76 @@ pub async fn verify_evidence(
         collateral_verified,
     );
     result.tcb_status = tcb_status;
-    result.mrtd_match = mrtd_match;
-    result.rtmr0_match = rtmr0_match;
-    result.rtmr1_match = rtmr1_match;
-    result.rtmr2_match = rtmr2_match;
-    result.rtmr3_match = rtmr3_match;
+    tdx_verify::compare_measurements(&tdx_quote.body, params, &mut result);
+    crate::utils::add_unanswered_issues(params, &mut result);
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Check, Issue, Problem};
+
+    // Real az-tdx evidence from an Azure DCesv6 confidential VM (confos image).
+    const CONFOS_EVIDENCE: &str =
+        include_str!("../../../test_data/az_tdx/confos-boot-evidence.json");
+
+    #[tokio::test]
+    async fn test_confos_measurement_pins() {
+        let evidence: AzTdxEvidence = serde_json::from_str(CONFOS_EVIDENCE).unwrap();
+        let td_quote = decode_base64url(&evidence.td_quote).unwrap();
+        let b = tdx_verify::parse_tdx_quote(&td_quote).unwrap().body;
+        type Pin = (Check, fn(&mut VerifyParams, [u8; 48]), [u8; 48]);
+        let pins: [Pin; 5] = [
+            (Check::Mrtd, |p, v| p.expected_mrtd = Some(v), b.mr_td),
+            (Check::Rtmr(0), |p, v| p.expected_rtmr0 = Some(v), b.rtmr_0),
+            (Check::Rtmr(1), |p, v| p.expected_rtmr1 = Some(v), b.rtmr_1),
+            (Check::Rtmr(2), |p, v| p.expected_rtmr2 = Some(v), b.rtmr_2),
+            (Check::Rtmr(3), |p, v| p.expected_rtmr3 = Some(v), b.rtmr_3),
+        ];
+        for (check, set, actual) in pins {
+            let mut params = VerifyParams::default();
+            set(&mut params, actual);
+            let r = verify_evidence(&evidence, &params, None).await.unwrap();
+            let matched = [
+                r.mrtd_match,
+                r.rtmr0_match,
+                r.rtmr1_match,
+                r.rtmr2_match,
+                r.rtmr3_match,
+            ];
+            assert_eq!(
+                matched.iter().filter(|m| **m == Some(true)).count(),
+                1,
+                "{check}"
+            );
+            assert!(r.passed(), "{check}: {:?}", r.issues);
+
+            let mut wrong = actual;
+            wrong[0] ^= 1;
+            let mut params = VerifyParams::default();
+            set(&mut params, wrong);
+            let r = verify_evidence(&evidence, &params, None).await.unwrap();
+            assert_eq!(
+                r.issues,
+                vec![Issue::mismatch(check, [&wrong[..]], &actual)],
+                "{check}"
+            );
+        }
+
+        let params = VerifyParams {
+            expected_launch_digest: Some([0; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, None).await.unwrap();
+        assert_eq!(
+            r.issues,
+            vec![Issue {
+                check: Check::LaunchDigest,
+                problem: Problem::Unanswerable,
+            }]
+        );
+    }
     use crate::platforms::tpm_common::TpmQuote;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL, Engine};
 

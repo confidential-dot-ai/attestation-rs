@@ -126,5 +126,7 @@ mod tests {
         assert_eq!(r.launch_digest_match, Some(false));
         // Even with wrong digest, signature still valid — policy decision in caller
         assert!(r.signature_valid);
+        let checks: Vec<_> = r.issues.iter().map(|i| i.check).collect();
+        assert_eq!(checks, [crate::types::Check::LaunchDigest]);
     }
 }

@@ -1,7 +1,7 @@
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
 use crate::platforms::tpm_common;
-use crate::types::{PlatformType, ProcessorGeneration, VerificationResult, VerifyParams};
+use crate::types::{Check, PlatformType, ProcessorGeneration, VerificationResult, VerifyParams};
 use crate::utils::decode_base64url;
 
 use super::evidence::AzSnpEvidence;
@@ -215,13 +215,6 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         params.expected_init_data_hash.as_deref(),
     )?;
 
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&snp_report.measurement[..], expected));
-
     let snp_claims = crate::platforms::snp::claims::extract_claims(&snp_report);
     let mut result = tpm_common::build_tpm_verification_result(
         snp_claims,
@@ -234,7 +227,13 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         // the synchronous core has not checked revocation.
         false,
     );
-    result.launch_digest_match = launch_digest_match;
+    result.launch_digest_match = crate::utils::compare(
+        &mut result.issues,
+        Check::LaunchDigest,
+        &snp_report.measurement[..],
+        params.expected_launch_digest.as_ref().map(|d| &d[..]),
+    );
+    crate::utils::add_unanswered_issues(params, &mut result);
     Ok(VerifiedReport {
         result,
         matched_gen,
@@ -247,6 +246,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
 mod tests {
     use super::*;
     use crate::platforms::tpm_common::TpmQuote;
+    use crate::types::{Issue, Problem};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL, Engine};
 
     fn build_dummy_tpm_quote() -> TpmQuote {
@@ -488,5 +488,50 @@ mod tests {
             ..Default::default()
         };
         assert!(verify_report(&evidence, &wrong).is_err());
+    }
+
+    #[test]
+    fn test_verify_report_launch_digest_pin() {
+        let evidence = load_az_snp_evidence(MILAN_V3_FIXTURE);
+        let measurement = verify_report(&evidence, &VerifyParams::default())
+            .unwrap()
+            .result
+            .claims
+            .launch_digest;
+        let actual: [u8; 48] = hex::decode(measurement).unwrap().try_into().unwrap();
+
+        let params = VerifyParams {
+            expected_launch_digest: Some(actual),
+            ..Default::default()
+        };
+        let r = verify_report(&evidence, &params).unwrap().result;
+        assert_eq!(r.launch_digest_match, Some(true));
+        assert!(r.passed());
+
+        let mut wrong = actual;
+        wrong[0] ^= 1;
+        let params = VerifyParams {
+            expected_launch_digest: Some(wrong),
+            ..Default::default()
+        };
+        let r = verify_report(&evidence, &params).unwrap().result;
+        assert_eq!(r.launch_digest_match, Some(false));
+        assert_eq!(
+            r.issues,
+            vec![Issue::mismatch(Check::LaunchDigest, [&wrong[..]], &actual)]
+        );
+
+        let params = VerifyParams {
+            expected_rtmr0: Some([0; 48]),
+            ..Default::default()
+        };
+        let r = verify_report(&evidence, &params).unwrap().result;
+        assert_eq!(
+            r.issues,
+            vec![Issue {
+                check: Check::Rtmr(0),
+                problem: Problem::Unanswerable,
+            }]
+        );
     }
 }

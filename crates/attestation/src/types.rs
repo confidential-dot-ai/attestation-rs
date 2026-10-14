@@ -82,11 +82,12 @@ pub struct VerifyParams {
     pub allow_debug: bool,
     /// If set, enforce minimum TCB version for SNP (each component must be >=).
     pub min_tcb: Option<SnpTcb>,
-    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
-    /// mismatch does not fail verification. TDX-only.
+    /// Expected MRTD (TDX). A value that does not match, or that the evidence
+    /// cannot answer (SEV-SNP has no MRTD), adds an [`Issue`] to
+    /// [`VerificationResult::issues`]. The same applies to every `expected_*`
+    /// measurement below.
     pub expected_mrtd: Option<[u8; 48]>,
-    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
-    /// does not fail verification. TDX-only.
+    /// Expected RTMR[0]. TDX-only.
     pub expected_rtmr0: Option<[u8; 48]>,
     /// Expected RTMR[1]. TDX-only.
     pub expected_rtmr1: Option<[u8; 48]>,
@@ -94,9 +95,7 @@ pub struct VerifyParams {
     pub expected_rtmr2: Option<[u8; 48]>,
     /// Expected RTMR[3]. TDX-only.
     pub expected_rtmr3: Option<[u8; 48]>,
-    /// Expected SNP launch digest (`report.measurement`). Result in
-    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
-    /// verification. SNP-only.
+    /// Expected SNP launch digest (`report.measurement`). SNP-only.
     pub expected_launch_digest: Option<[u8; 48]>,
     /// NVIDIA GPU verification parameters, applied when an envelope carries a
     /// `gpu` bundle. Grouped behind a single feature gate (see
@@ -169,6 +168,11 @@ impl Default for NvidiaGpuDevicePolicy {
 }
 
 /// Result of verification — the caller decides pass/fail based on this.
+///
+/// Errors (bad signature, broken certificate chain, debug policy, TCB, ...)
+/// are returned as `Err`. A result is returned when the evidence itself is
+/// authentic; checks of caller-supplied reference values that did not pass are
+/// listed in [`issues`](Self::issues). Use [`passed`](Self::passed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct VerificationResult {
@@ -195,26 +199,153 @@ pub struct VerificationResult {
     /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcb_status: Option<DcapVerificationStatus>,
-    /// MRTD compare result. `None` if no expected value was supplied.
-    /// Always `None` for SNP.
+    /// MRTD compare result: `Some(true)`/`Some(false)` when `expected_mrtd`
+    /// was supplied and the evidence has an MRTD, `None` otherwise. A
+    /// `Some(false)` always comes with an [`Issue`]. The same holds for the
+    /// other `*_match` fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mrtd_match: Option<bool>,
-    /// RTMR[0] compare result. Always `None` for SNP.
+    /// RTMR[0] compare result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr0_match: Option<bool>,
-    /// RTMR[1] compare result. Always `None` for SNP.
+    /// RTMR[1] compare result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr1_match: Option<bool>,
-    /// RTMR[2] compare result. Always `None` for SNP.
+    /// RTMR[2] compare result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr2_match: Option<bool>,
-    /// RTMR[3] compare result. Always `None` for SNP.
+    /// RTMR[3] compare result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtmr3_match: Option<bool>,
-    /// SNP launch digest compare result. `None` if no expected value was
-    /// supplied. Always `None` for TDX.
+    /// SNP launch digest compare result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_digest_match: Option<bool>,
+    /// Requested checks that did not pass. Empty when every value the caller
+    /// supplied matched.
+    #[serde(default)]
+    pub issues: Vec<Issue>,
+}
+
+impl VerificationResult {
+    /// Whether every requested check passed (no [`issues`](Self::issues)).
+    pub fn passed(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+/// A requested check that did not pass.
+///
+/// Serialized flat, with hex values, e.g.
+/// `{"check": "mrtd", "problem": "mismatch", "expected": ["c1ee…"], "actual": "a2e6…"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issue {
+    pub check: Check,
+    #[serde(flatten)]
+    pub problem: Problem,
+}
+
+impl Issue {
+    /// A [`Problem::Mismatch`] with the values hex-encoded.
+    pub fn mismatch<'a>(
+        check: Check,
+        expected: impl IntoIterator<Item = &'a [u8]>,
+        actual: &[u8],
+    ) -> Self {
+        Self {
+            check,
+            problem: Problem::Mismatch {
+                expected: expected.into_iter().map(hex::encode).collect(),
+                actual: hex::encode(actual),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for Issue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let check = self.check;
+        match &self.problem {
+            Problem::Mismatch { expected, actual } => match expected.as_slice() {
+                [one] => write!(f, "{check}: got {actual}, expected {one}"),
+                many => write!(
+                    f,
+                    "{check}: got {actual}, expected one of [{}]",
+                    many.join(", ")
+                ),
+            },
+            Problem::Unanswerable => write!(f, "{check}: could not be checked"),
+        }
+    }
+}
+
+/// The check an [`Issue`] is about. Serialized as a string: `launch_digest`,
+/// `mrtd`, `rtmr0`..`rtmr3`, `report_data`, `init_data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Check {
+    LaunchDigest,
+    Mrtd,
+    Rtmr(u8),
+    ReportData,
+    InitData,
+}
+
+impl std::fmt::Display for Check {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Check::LaunchDigest => f.write_str("launch_digest"),
+            Check::Mrtd => f.write_str("mrtd"),
+            Check::Rtmr(i) => write!(f, "rtmr{i}"),
+            Check::ReportData => f.write_str("report_data"),
+            Check::InitData => f.write_str("init_data"),
+        }
+    }
+}
+
+impl std::str::FromStr for Check {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "launch_digest" => Check::LaunchDigest,
+            "mrtd" => Check::Mrtd,
+            "report_data" => Check::ReportData,
+            "init_data" => Check::InitData,
+            _ => match s.strip_prefix("rtmr").map(str::parse) {
+                Some(Ok(i)) => Check::Rtmr(i),
+                _ => return Err(format!("unknown check {s:?}")),
+            },
+        })
+    }
+}
+
+impl Serialize for Check {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Check {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What went wrong with a [`Check`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "problem", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Problem {
+    /// The evidence's value is not one of the `expected` values (hex).
+    Mismatch {
+        expected: Vec<String>,
+        actual: String,
+    },
+    /// A value was supplied for something this evidence does not carry, e.g.
+    /// an RTMR on SEV-SNP evidence.
+    Unanswerable,
 }
 
 /// Normalized claims extracted from evidence.
@@ -351,6 +482,26 @@ pub struct SnpTcb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issues_round_trip_through_json() {
+        let issues = vec![
+            Issue::mismatch(Check::Rtmr(1), [&[0xAA][..], &[0xBB][..]], &[0xCC]),
+            Issue {
+                check: Check::LaunchDigest,
+                problem: Problem::Unanswerable,
+            },
+        ];
+        let json = serde_json::to_value(&issues).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                { "check": "rtmr1", "problem": "mismatch", "expected": ["aa", "bb"], "actual": "cc" },
+                { "check": "launch_digest", "problem": "unanswerable" },
+            ])
+        );
+        assert_eq!(serde_json::from_value::<Vec<Issue>>(json).unwrap(), issues);
+    }
 
     #[test]
     fn test_processor_generation_from_cpuid() {

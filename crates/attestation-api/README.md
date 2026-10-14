@@ -110,6 +110,11 @@ curl -X POST http://127.0.0.1:8400/verify \
   }'
 ```
 
+The response is `200` with `result`, `passed` and, when requested, `token`.
+A supplied `expected_*` value that does not match is listed in
+`result.issues` and makes `passed` `false`; no token is issued then. Errors
+such as a bad signature still return an error status.
+
 ## Key Features
 
 - **Certificate caching** — Multi-layer async cache (Moka) with configurable TTLs and background refresh

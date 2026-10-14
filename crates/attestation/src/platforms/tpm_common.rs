@@ -755,6 +755,7 @@ pub fn build_tpm_verification_result(
         rtmr2_match: None,
         rtmr3_match: None,
         launch_digest_match: None,
+        issues: Vec::new(),
     }
 }
 

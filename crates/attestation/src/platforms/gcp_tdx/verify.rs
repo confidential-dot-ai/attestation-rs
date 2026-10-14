@@ -88,5 +88,7 @@ mod tests {
         let r = verify_evidence(&evidence, &params, None).await.unwrap();
         assert_eq!(r.platform, PlatformType::GcpTdx);
         assert_eq!(r.mrtd_match, Some(false));
+        let checks: Vec<_> = r.issues.iter().map(|i| i.check).collect();
+        assert_eq!(checks, [crate::types::Check::Mrtd]);
     }
 }

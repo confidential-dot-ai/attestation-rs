@@ -10,7 +10,9 @@ use sev::parser::ByteParser;
 
 use crate::collateral::CertProvider;
 use crate::error::{AttestationError, Result};
-use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams};
+use crate::types::{
+    Check, PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams,
+};
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -157,17 +159,18 @@ pub async fn verify_evidence(
         None
     };
 
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected));
+    let mut issues = Vec::new();
+    let launch_digest_match = crate::utils::compare(
+        &mut issues,
+        Check::LaunchDigest,
+        &report.measurement[..],
+        params.expected_launch_digest.as_ref().map(|d| &d[..]),
+    );
 
     // 11. Extract claims
     let claims = extract_claims(&report);
 
-    Ok(VerificationResult {
+    let mut result = VerificationResult {
         signature_valid: true,
         platform: PlatformType::Snp,
         claims,
@@ -181,7 +184,10 @@ pub async fn verify_evidence(
         rtmr2_match: None,
         rtmr3_match: None,
         launch_digest_match,
-    })
+        issues,
+    };
+    crate::utils::add_unanswered_issues(params, &mut result);
+    Ok(result)
 }
 
 /// Enforce minimum TCB version requirements.
@@ -673,6 +679,7 @@ pub fn parse_report(report_bytes: &[u8]) -> Result<AttestationReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Issue, Problem};
     use der::Decode;
 
     // Load real test fixtures at compile time
@@ -1357,18 +1364,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
-        // Wrong digest must record Some(false) without failing verification.
+    async fn test_verify_evidence_wrong_launch_digest_is_an_issue() {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let provider = StubCertProvider;
         let params = VerifyParams {
             expected_launch_digest: Some([0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider)
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
             .await
             .unwrap();
         assert_eq!(r.launch_digest_match, Some(false));
-        assert!(r.signature_valid, "wrong digest should NOT fail signature");
+        assert!(r.signature_valid);
+        assert!(!r.passed());
+        assert_eq!(
+            r.issues,
+            vec![Issue {
+                check: Check::LaunchDigest,
+                problem: Problem::Mismatch {
+                    expected: vec!["aa".repeat(48)],
+                    actual: r.claims.launch_digest.clone(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_tdx_pins_on_snp_are_unanswerable() {
+        // SNP evidence has no MRTD or RTMRs: such a pin can never pass.
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let params = VerifyParams {
+            expected_mrtd: Some([0; 48]),
+            expected_rtmr0: Some([0; 48]),
+            expected_rtmr1: Some([0; 48]),
+            expected_rtmr2: Some([0; 48]),
+            expected_rtmr3: Some([0; 48]),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
+        let unanswerable = |check| Issue {
+            check,
+            problem: Problem::Unanswerable,
+        };
+        assert_eq!(
+            r.issues,
+            vec![
+                unanswerable(Check::Mrtd),
+                unanswerable(Check::Rtmr(0)),
+                unanswerable(Check::Rtmr(1)),
+                unanswerable(Check::Rtmr(2)),
+                unanswerable(Check::Rtmr(3)),
+            ]
+        );
+    }
+
+    // No platform reports `None` for a supplied report_data / init_data value
+    // today (they fail with ReportDataMismatch / InitDataMismatch first), so
+    // the unanswered case is checked on the shared helper directly.
+    #[tokio::test]
+    async fn test_unanswered_binding_pins_are_issues() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let mut result = verify_evidence(&evidence, &VerifyParams::default(), &StubCertProvider)
+            .await
+            .unwrap();
+        assert!(result.passed());
+        let params = VerifyParams {
+            expected_report_data: Some(vec![1]),
+            expected_init_data_hash: Some(vec![1]),
+            ..Default::default()
+        };
+        crate::utils::add_unanswered_issues(&params, &mut result);
+        let checks: Vec<_> = result.issues.iter().map(|i| i.check).collect();
+        assert_eq!(checks, [Check::ReportData, Check::InitData]);
+    }
+
+    #[tokio::test]
+    async fn test_verify_evidence_report_data_and_init_data_pins() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+
+        let params = VerifyParams {
+            expected_report_data: Some(report.report_data.to_vec()),
+            expected_init_data_hash: Some(report.host_data.to_vec()),
+            ..Default::default()
+        };
+        let r = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap();
+        assert_eq!(r.report_data_match, Some(true));
+        assert_eq!(r.init_data_match, Some(true));
+
+        let mut wrong = report.report_data.to_vec();
+        wrong[0] ^= 1;
+        let params = VerifyParams {
+            expected_report_data: Some(wrong),
+            ..Default::default()
+        };
+        let err = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttestationError::ReportDataMismatch));
+
+        let mut wrong = report.host_data.to_vec();
+        wrong[0] ^= 1;
+        let params = VerifyParams {
+            expected_init_data_hash: Some(wrong),
+            ..Default::default()
+        };
+        let err = verify_evidence(&evidence, &params, &StubCertProvider)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttestationError::InitDataMismatch));
     }
 }

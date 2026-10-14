@@ -19,7 +19,9 @@ use attestation::platforms::tdx::verify::{
     parse_tdx_quote, verify_collateral as verify_tdx_collateral,
     verify_evidence as verify_tdx_evidence,
 };
-use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
+use attestation::types::{
+    Check, Issue, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams,
+};
 use attestation::utils::{constant_time_eq, pad_report_data};
 
 /// Parse the optional minimum-TCB policy JSON (the [`SnpTcb`] shape:
@@ -67,6 +69,17 @@ fn parse_tdx_collateral(json: &str) -> Result<StaticTdxCollateral, String> {
         qe_identity_issuer_chain: c.qe_identity_issuer_chain.into_bytes(),
         at: c.at,
     })
+}
+
+/// Serializes a result for JS, adding `passed` (`true` when `issues` is empty).
+fn result_json(result: &VerificationResult) -> Result<serde_json::Value, String> {
+    let mut json = serde_json::to_value(result).map_err(|e| format!("json serialize: {e}"))?;
+    json["passed"] = serde_json::json!(result.passed());
+    Ok(json)
+}
+
+fn pretty(json: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string_pretty(json).map_err(|e| format!("json serialize: {e}"))
 }
 
 /// Cert provider for the generic offline entry point: VEK resolution and the
@@ -156,8 +169,9 @@ impl CertProvider for StaticSnpCollateral {
 /// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON)
 /// - `snp_crl_der`: optional DER AMD KDS CRL for the report's generation
 ///
-/// Returns the [`attestation::types::VerificationResult`] as JSON, or throws
-/// on any check failure.
+/// Returns the [`attestation::types::VerificationResult`] as JSON with
+/// `passed` added, or throws on an error. A supplied value that does not
+/// match is listed in `issues` (and `passed` is `false`) rather than thrown.
 #[wasm_bindgen]
 pub async fn verify(
     envelope_json: String,
@@ -183,7 +197,9 @@ pub async fn verify(
         .await
         .map_err(|e| JsError::new(&format!("verify: {e}")))?;
 
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    result_json(&result)
+        .and_then(|json| pretty(&json))
+        .map_err(|e| JsError::new(&e))
 }
 
 /// Verify live SNP evidence in WASM.
@@ -211,9 +227,8 @@ pub async fn verify(
 ///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
 /// - `generation`: processor generation ("milan", "genoa", "turin")
-/// - `expected_report_data`: optional raw bytes to check against report_data
-///   in the report (comparison reported as `report_data_match`, not fatal —
-///   the policy layer decides)
+/// - `expected_report_data`: optional raw bytes the report's report_data must
+///   equal (zero-padded); a mismatch is a `report_data` issue
 /// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON); a
 ///   reported TCB below any component fails closed
 /// - `crl_der`: optional DER AMD KDS CRL for this generation
@@ -333,11 +348,23 @@ fn verify_snp_impl(
         enforce_min_tcb(&report.reported_tcb, min).map_err(|e| format!("minimum TCB: {e}"))?;
     }
 
-    // Check report_data binding
-    let report_data_match = expected_report_data.map(|expected| {
-        let padded = pad_report_data(&expected, 64).unwrap_or_default();
-        constant_time_eq(&report.report_data[..], &padded)
-    });
+    // report_data binding (zero-padded, constant-time). A mismatch is an issue.
+    let mut issues = Vec::new();
+    let report_data_match = match expected_report_data {
+        None => None,
+        Some(expected) => {
+            let padded = pad_report_data(&expected, 64).map_err(|e| format!("report data: {e}"))?;
+            let matched = constant_time_eq(&report.report_data[..], &padded);
+            if !matched {
+                issues.push(Issue::mismatch(
+                    Check::ReportData,
+                    [&padded[..]],
+                    &report.report_data[..],
+                ));
+            }
+            Some(matched)
+        }
+    };
 
     // Extract claims
     let claims = extract_claims(&report);
@@ -349,6 +376,8 @@ fn verify_snp_impl(
         "report_data_match": report_data_match,
         "collateral_verified": collateral_verified,
         "claims": claims,
+        "passed": issues.is_empty(),
+        "issues": issues,
     });
 
     serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
@@ -446,10 +475,10 @@ fn verify_az_snp_impl(
 
     // Serialize the VerificationResult, then graft on report_version, matching the
     // shape verify_snp returns so the JS policy layer reads it uniformly.
-    let mut result = serde_json::to_value(&result).map_err(|e| format!("json serialize: {e}"))?;
+    let mut result = result_json(&result)?;
     result["report_version"] = serde_json::json!(report_version);
 
-    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
+    pretty(&result)
 }
 
 /// Verify bare-metal Intel TDX (tdx) DCAP attestation evidence in WASM.
@@ -502,13 +531,9 @@ fn verify_az_snp_impl(
 /// from the CCEL by construction (see `platforms/tdx/ccel.rs`), which is why
 /// it must be supplied rather than derived.
 ///
-/// Unlike [`VerifyParams::expected_rtmr3`], which only *reports* the
-/// comparison via `rtmr3_match`, this entry point **fails closed**: a
-/// mismatch throws, matching how `expected_report_data` behaves here. A
-/// browser policy layer that forwarded the pin but forgot to inspect
-/// `rtmr3_match` would otherwise silently accept any node.
+/// A mismatch is an `rtmr3` issue in the result (`passed` is `false`).
 ///
-/// Returns the verification result as JSON, or throws on any check failure.
+/// Returns the verification result as JSON, or throws on an error.
 ///
 /// `async` because the shared core is `async` for its collateral provider;
 /// the supplied-collateral provider performs no actual awaiting. Callers
@@ -558,8 +583,6 @@ async fn verify_tdx_impl(
                 .map_err(|_| format!("expected_rtmr3 is {} bytes, want 48", bytes.len()))?,
         ),
     };
-    let rtmr3_pinned = expected_rtmr3.is_some();
-
     let params = VerifyParams {
         expected_report_data,
         expected_init_data_hash,
@@ -585,17 +608,7 @@ async fn verify_tdx_impl(
         result.collateral_verified = true;
     }
 
-    // The core records the comparison without acting on it. Enforce here so a
-    // supplied pin cannot be a no-op. `None` means the core never performed the
-    // comparison at all — treat that as a failure, not an absence.
-    if rtmr3_pinned && result.rtmr3_match != Some(true) {
-        return Err("tdx verify: RTMR[3] does not match expected_rtmr3 \
-             (the guest was not launched with the pinned operator key, \
-             or it measured workloads the pin does not account for)"
-            .to_string());
-    }
-
-    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
+    pretty(&result_json(&result)?)
 }
 
 /// Verify Azure TDX (az-tdx) vTPM attestation evidence in WASM.
@@ -618,7 +631,7 @@ async fn verify_tdx_impl(
 /// TD-QE identity) need an async provider and are skipped in WASM, so
 /// `collateral_verified` is always `false`. The measurement surfaces as
 /// `claims.launch_digest` = hex(MRTD); MRTD/RTMR pinning is the JS policy
-/// layer's job (a mismatch is reported, not fatal, in the core).
+/// layer's job (this entry point takes no MRTD/RTMR pins).
 ///
 /// - `evidence_json`: az-tdx evidence JSON (`{ version, tpm_quote, hcl_report, td_quote }`)
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
@@ -626,7 +639,7 @@ async fn verify_tdx_impl(
 ///
 /// Unlike [`verify_tdx`], this entry point has **no `expected_rtmr3`
 /// parameter and enforces no RTMR[3] pin** — do not assume parity. The az-tdx
-/// core computes `rtmr3_match` the same way, so extending this entry point is
+/// core checks `expected_rtmr3` the same way, so extending this entry point is
 /// a known follow-up; until then an az-tdx caller cannot pin deployment
 /// identity here.
 ///
@@ -657,15 +670,14 @@ pub async fn verify_az_tdx(
         .await
         .map_err(|e| JsError::new(&format!("az-tdx verify: {e}")))?;
 
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+    result_json(&result)
+        .and_then(|json| pretty(&json))
+        .map_err(|e| JsError::new(&e))
 }
 
-// Native tests for the RTMR[3] enforcement gate. They run on the host target
-// (`cargo test -p attestation-wasm`), not under wasm — which is exactly why
-// the gate lives in verify_tdx_impl rather than inside the #[wasm_bindgen]
-// wrapper: JsError exposes no readable message off-wasm, and the fail-closed
-// property ("only Some(true) passes") deserves CI coverage rather than
-// by-inspection assurance.
+// Native tests of the entry points. They run on the host target
+// (`cargo test -p attestation-wasm`), not under wasm: JsError exposes no
+// readable message off-wasm, so the bodies live in the `*_impl` functions.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,14 +720,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rtmr3_pin_mismatch_fails_closed() {
-        let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]), None)
+    async fn rtmr3_pin_mismatch_is_an_issue() {
+        let out = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]), None)
             .await
-            .expect_err("wrong RTMR[3] pin must fail");
-        assert!(
-            err.contains("RTMR[3] does not match expected_rtmr3"),
-            "failure must name the pin, got: {err}"
-        );
+            .expect("a wrong RTMR[3] pin is reported, not thrown");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["rtmr3_match"], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
+        assert_eq!(json["issues"][0]["check"], "rtmr3");
+        assert_eq!(json["issues"][0]["problem"], "mismatch");
     }
 
     #[tokio::test]
@@ -772,6 +785,31 @@ mod tests {
             serde_json::json!(false),
             "no CRL supplied ⇒ revocation was not checked, and the result must say so"
         );
+    }
+
+    #[test]
+    fn snp_report_data_pin() {
+        let report_data = parse_report(SNP_REPORT_V5).unwrap().report_data.to_vec();
+        let out = verify_snp_impl(
+            &snp_evidence_json(),
+            "genoa",
+            Some(report_data.clone()),
+            None,
+            None,
+        )
+        .expect("matching report_data must verify");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["report_data_match"], serde_json::json!(true));
+        assert_eq!(json["passed"], serde_json::json!(true));
+
+        let mut wrong = report_data;
+        wrong[0] ^= 1;
+        let out = verify_snp_impl(&snp_evidence_json(), "genoa", Some(wrong), None, None)
+            .expect("a wrong report_data is reported, not thrown");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["report_data_match"], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
+        assert_eq!(json["issues"][0]["check"], "report_data");
     }
 
     #[test]

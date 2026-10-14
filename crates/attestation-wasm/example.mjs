@@ -95,6 +95,7 @@ const wrongNonce = new TextEncoder().encode('wrong-nonce');
 const mismatchJson = wasm.verify_snp(JSON.stringify(evidence), 'genoa', wrongNonce);
 const mismatch = JSON.parse(mismatchJson);
 console.log(`report_data_match with wrong nonce: ${mismatch.report_data_match}`);
+console.log(`issues: ${JSON.stringify(mismatch.issues)}`);
 
 // --- Step 5: Verify without report_data check ---
 console.log('\n=== Step 5: Verifying without report_data check ===\n');
@@ -124,7 +125,7 @@ if (result.report_data_match !== true) {
   console.error('\nFAILED: report_data did not match nonce');
   process.exit(1);
 }
-if (mismatch.report_data_match !== false) {
+if (mismatch.report_data_match !== false || mismatch.passed !== false) {
   console.error('\nFAILED: wrong nonce was not rejected');
   process.exit(1);
 }

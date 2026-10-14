@@ -84,6 +84,7 @@ fn token_issuer_produces_valid_jwt() {
         rtmr2_match: None,
         rtmr3_match: None,
         launch_digest_match: None,
+        issues: Vec::new(),
     };
 
     let token = issuer.issue(&result).unwrap();

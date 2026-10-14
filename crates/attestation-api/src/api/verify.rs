@@ -69,6 +69,9 @@ pub struct MinTcbInput {
 #[derive(Serialize)]
 pub struct VerifyResponse {
     pub result: attestation::VerificationResult,
+    /// `result.passed()`: no issues in `result.issues`.
+    pub passed: bool,
+    /// Issued only for a result that passed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -142,9 +145,9 @@ pub async fn handler(
     };
 
     let result = state.verifier.verify(&evidence_json, &params).await?;
-    enforce_expected_measurements(&params, &result)?;
 
-    let token = if req.issue_token {
+    let passed = result.passed();
+    let token = if req.issue_token && passed {
         let issuer = state
             .token_issuer
             .as_ref()
@@ -154,7 +157,11 @@ pub async fn handler(
         None
     };
 
-    Ok(Json(VerifyResponse { result, token }))
+    Ok(Json(VerifyResponse {
+        result,
+        passed,
+        token,
+    }))
 }
 
 /// Decodes a base64 measurement parameter, which must be exactly 48 bytes.
@@ -169,60 +176,6 @@ fn decode_digest(value: Option<String>, name: &str) -> Result<Option<[u8; 48]>, 
         ApiError::BadRequest(format!("{name} must be 48 bytes, got {}", b.len()))
     })?;
     Ok(Some(digest))
-}
-
-/// Refuses a result that does not affirmatively satisfy every expected
-/// measurement the caller supplied. The library records a mismatch as
-/// `Some(false)` and an expectation the platform cannot answer (an RTMR pin
-/// against SEV-SNP evidence, which has no RTMRs) as `None`; both are refusals
-/// here, so a pin never reads as a pass on evidence that could not be checked
-/// against it. Callers that supply no expectation are unaffected.
-fn enforce_expected_measurements(
-    params: &attestation::VerifyParams,
-    result: &attestation::VerificationResult,
-) -> Result<(), ApiError> {
-    check_expected(
-        "expected_launch_digest",
-        params.expected_launch_digest.is_some(),
-        result.launch_digest_match,
-    )?;
-    check_expected(
-        "expected_mrtd",
-        params.expected_mrtd.is_some(),
-        result.mrtd_match,
-    )?;
-    check_expected(
-        "expected_rtmr0",
-        params.expected_rtmr0.is_some(),
-        result.rtmr0_match,
-    )?;
-    check_expected(
-        "expected_rtmr1",
-        params.expected_rtmr1.is_some(),
-        result.rtmr1_match,
-    )?;
-    check_expected(
-        "expected_rtmr2",
-        params.expected_rtmr2.is_some(),
-        result.rtmr2_match,
-    )?;
-    check_expected(
-        "expected_rtmr3",
-        params.expected_rtmr3.is_some(),
-        result.rtmr3_match,
-    )
-}
-
-fn check_expected(name: &str, supplied: bool, matched: Option<bool>) -> Result<(), ApiError> {
-    match (supplied, matched) {
-        (false, _) | (true, Some(true)) => Ok(()),
-        (true, Some(false)) => Err(ApiError::MeasurementMismatch(format!(
-            "{name} does not match the verified evidence"
-        ))),
-        (true, None) => Err(ApiError::MeasurementMismatch(format!(
-            "{name} cannot be checked: the verified evidence carries no such measurement"
-        ))),
-    }
 }
 
 fn build_evidence_envelope(
@@ -266,7 +219,7 @@ fn is_attestation_envelope(evidence: &Value) -> bool {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{build_evidence_envelope, check_expected, decode_digest};
+    use super::{build_evidence_envelope, decode_digest};
     use crate::error::ApiError;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -352,23 +305,6 @@ mod tests {
         let junk = decode_digest(Some("!!not-base64".to_string()), "expected_rtmr1").unwrap_err();
         assert!(
             matches!(junk, ApiError::BadRequest(m) if m.contains("invalid base64 expected_rtmr1"))
-        );
-    }
-
-    #[test]
-    fn check_expected_passes_only_an_affirmative_match() {
-        assert!(check_expected("expected_rtmr0", false, None).is_ok());
-        assert!(check_expected("expected_rtmr0", false, Some(false)).is_ok());
-        assert!(check_expected("expected_rtmr0", true, Some(true)).is_ok());
-        let mismatch = check_expected("expected_rtmr0", true, Some(false)).unwrap_err();
-        assert!(
-            matches!(mismatch, ApiError::MeasurementMismatch(m) if m.contains("does not match"))
-        );
-        // An RTMR pin against SEV-SNP evidence: the verifier reports no
-        // verdict, and that must refuse rather than pass.
-        let inapplicable = check_expected("expected_rtmr0", true, None).unwrap_err();
-        assert!(
-            matches!(inapplicable, ApiError::MeasurementMismatch(m) if m.contains("carries no such measurement"))
         );
     }
 
