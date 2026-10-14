@@ -108,29 +108,32 @@ struct VerifyArgs {
     #[arg(long)]
     expected_init_data: Option<String>,
 
-    /// Expected MRTD (hex-encoded, 48 bytes). TDX-only.
+    /// Allowed MRTD (hex-encoded, 48 bytes). TDX-only. Repeatable: the MRTD
+    /// must equal one of the given values.
     #[arg(long)]
-    expected_mrtd: Option<String>,
+    expected_mrtd: Vec<String>,
 
-    /// Expected RTMR[0] (hex-encoded, 48 bytes). TDX-only.
+    /// Allowed RTMR[0] (hex-encoded, 48 bytes). TDX-only. Repeatable, as for
+    /// --expected-mrtd.
     #[arg(long)]
-    expected_rtmr0: Option<String>,
+    expected_rtmr0: Vec<String>,
 
-    /// Expected RTMR[1] (hex-encoded, 48 bytes). TDX-only.
+    /// Allowed RTMR[1], as for --expected-rtmr0.
     #[arg(long)]
-    expected_rtmr1: Option<String>,
+    expected_rtmr1: Vec<String>,
 
-    /// Expected RTMR[2] (hex-encoded, 48 bytes). TDX-only.
+    /// Allowed RTMR[2], as for --expected-rtmr0.
     #[arg(long)]
-    expected_rtmr2: Option<String>,
+    expected_rtmr2: Vec<String>,
 
-    /// Expected RTMR[3] (hex-encoded, 48 bytes). TDX-only.
+    /// Allowed RTMR[3], as for --expected-rtmr0.
     #[arg(long)]
-    expected_rtmr3: Option<String>,
+    expected_rtmr3: Vec<String>,
 
-    /// Expected SNP launch digest (hex-encoded, 48 bytes). SNP-only.
+    /// Allowed SNP launch digest (hex-encoded, 48 bytes). SNP-only.
+    /// Repeatable, as for --expected-mrtd.
     #[arg(long)]
-    expected_launch_digest: Option<String>,
+    expected_launch_digest: Vec<String>,
 
     /// Expected vTPM PCR as INDEX=HEX (SHA-256 bank, 32 bytes). Repeatable.
     /// Azure vTPM only (az-snp, az-tdx).
@@ -374,11 +377,11 @@ fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
         &args.expected_rtmr3,
     ]
     .iter()
-    .any(|r| r.is_some());
-    if args.expected_mrtd.is_some() || rtmr_pinned {
+    .any(|r| !r.is_empty());
+    if !args.expected_mrtd.is_empty() || rtmr_pinned {
         pins.push(("--expected-mrtd and --expected-rtmrN", &TDX_PLATFORMS));
     }
-    if args.expected_launch_digest.is_some() {
+    if !args.expected_launch_digest.is_empty() {
         pins.push(("--expected-launch-digest", &SNP_PLATFORMS));
     }
     if !args.expected_pcr.is_empty() {
@@ -425,21 +428,17 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         .expected_init_data
         .as_deref()
         .map(|h| parse_hex(h, "expected-init-data"));
-    let mrtd = args
-        .expected_mrtd
-        .as_deref()
-        .map(|h| parse_digest(h, "expected-mrtd"));
+    let digests = |values: &[String], flag: &str| -> Option<Vec<[u8; 48]>> {
+        (!values.is_empty()).then(|| values.iter().map(|h| parse_digest(h, flag)).collect())
+    };
+    let mrtd = digests(&args.expected_mrtd, "expected-mrtd");
     let rtmr = [
-        (&args.expected_rtmr0, "expected-rtmr0"),
-        (&args.expected_rtmr1, "expected-rtmr1"),
-        (&args.expected_rtmr2, "expected-rtmr2"),
-        (&args.expected_rtmr3, "expected-rtmr3"),
-    ]
-    .map(|(v, flag)| v.as_deref().map(|h| parse_digest(h, flag)));
-    let launch_digest = args
-        .expected_launch_digest
-        .as_deref()
-        .map(|h| parse_digest(h, "expected-launch-digest"));
+        digests(&args.expected_rtmr0, "expected-rtmr0"),
+        digests(&args.expected_rtmr1, "expected-rtmr1"),
+        digests(&args.expected_rtmr2, "expected-rtmr2"),
+        digests(&args.expected_rtmr3, "expected-rtmr3"),
+    ];
+    let launch_digest = digests(&args.expected_launch_digest, "expected-launch-digest");
     let mut pcrs = std::collections::BTreeMap::<u8, [u8; 32]>::new();
     for pin in &args.expected_pcr {
         let (index, value) = parse_pcr_pin(pin)
@@ -495,14 +494,14 @@ fn build_policies(args: &VerifyArgs) -> Policies {
     let tdx = || TdxParams {
         report_data: report_data.clone(),
         init_data: init_data.clone(),
-        mrtd,
-        rtmr,
+        mrtd: mrtd.clone(),
+        rtmr: rtmr.clone(),
         ..Default::default()
     };
     let snp = || SnpParams {
         report_data: report_data.clone(),
         host_data: init_data.clone(),
-        launch_digest,
+        launch_digest: launch_digest.clone(),
         ..Default::default()
     };
     for platform in platforms {

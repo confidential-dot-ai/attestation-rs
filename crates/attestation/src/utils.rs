@@ -94,6 +94,28 @@ pub fn asn1_time(unix_seconds: i64) -> crate::error::Result<x509_parser::time::A
     })
 }
 
+/// Compare `actual` with a set of allowed values: `None` when no set was
+/// given, otherwise whether `actual` equals one of them. Every value is
+/// compared in constant time. An empty set never matches; params validation
+/// refuses it ([`check_allowed_set`]).
+pub fn match_any(actual: &[u8], allowed: Option<&[[u8; 48]]>) -> Option<bool> {
+    allowed.map(|allowed| {
+        allowed.iter().fold(false, |found, value| {
+            found | constant_time_eq(actual, value)
+        })
+    })
+}
+
+/// An allowed set, when given, must not be empty: it could never match.
+pub fn check_allowed_set(name: &str, allowed: Option<&[[u8; 48]]>) -> crate::error::Result<()> {
+    if allowed.is_some_and(<[_]>::is_empty) {
+        return Err(crate::error::AttestationError::InvalidParams(format!(
+            "{name}: the allowed set is empty"
+        )));
+    }
+    Ok(())
+}
+
 /// Compare two byte slices in constant time.
 ///
 /// **Timing note:** The length check early-return leaks whether the lengths
