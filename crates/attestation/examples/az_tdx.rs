@@ -14,7 +14,7 @@ async fn main() {
     use std::env;
     use std::time::Instant;
 
-    use attestation::{PlatformType, VerifyParams};
+    use attestation::{AzTdxParams, PlatformType, Policies, TdxParams};
 
     let nonce: Vec<u8> = env::args()
         .nth(1)
@@ -41,20 +41,32 @@ async fn main() {
 
     eprintln!("Verifying...");
     let t1 = Instant::now();
-    let params = VerifyParams::default();
-    let result = attestation::verify(&evidence_json, &params)
+    let policies = Policies {
+        az_tdx: Some(AzTdxParams {
+            tdx: TdxParams {
+                report_data: Some(nonce.clone()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    let verified = attestation::verify(&evidence_json, &policies)
         .await
         .expect("verification failed");
     eprintln!("[verify]  {:?}", t1.elapsed());
 
     eprintln!("[total]   {:?}", t0.elapsed());
-    eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Passed: {}", verified.passed());
+    eprintln!(
+        "Launch digest: {}",
+        verified.platform.claims().launch_digest
+    );
 
-    if let Some(tcb_status) = &result.tcb_status {
-        eprintln!("TCB status: {:?}", tcb_status.tcb_status);
-        eprintln!("FMSPC: {}", tcb_status.fmspc);
+    if let attestation::PlatformResult::AzTdx(result) = &verified.platform {
+        if let Some(tcb_status) = &result.tdx.tcb_status {
+            eprintln!("TCB status: {:?}", tcb_status.tcb_status);
+            eprintln!("FMSPC: {}", tcb_status.fmspc);
+        }
     }
 
     println!("{}", String::from_utf8_lossy(&evidence_json));

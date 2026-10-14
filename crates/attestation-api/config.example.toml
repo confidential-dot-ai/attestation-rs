@@ -29,3 +29,6 @@ key_path = ""                     # Empty = ephemeral EC key
 [attestation]
 enabled = true                    # Set to false to disable the /attest endpoint
 platforms = ["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"]
+allow_debug = false               # Accept /verify policies with allow_debug = true
+allow_revoked_or_unlisted_tcb = false  # Accept "Revoked" or "NoMatchingLevel" in accepted_tcb_statuses
+allow_nonzero_vmpl = false        # Accept max_vmpl above 0

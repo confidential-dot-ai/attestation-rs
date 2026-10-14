@@ -50,7 +50,7 @@ struct Cli {
     #[arg(long)]
     concurrency: Option<u64>,
 
-    /// Send `params.allow_debug = true` on verify requests so debug-mode TEEs
+    /// Send `allow_debug = true` in the verify policy so debug-mode TEEs
     /// are accepted. Only enable when load-testing against a debug VM.
     #[arg(long)]
     allow_debug: bool,
@@ -215,10 +215,15 @@ async fn get_verify_payload(
         .await
         .map_err(|e| format!("parse attest response: {e}"))?;
 
-    let mut verify_body = json!({ "evidence": json });
-    if allow_debug {
-        verify_body["params"] = json!({ "allow_debug": true });
-    }
+    // Accept the platform the service attested on, with no pins.
+    let platform = json["platform"]
+        .as_str()
+        .ok_or("attest response has no platform")?;
+    let verify_body = json!({
+        "platform": platform,
+        "evidence": json["evidence"],
+        "policies": { platform: { "allow_debug": allow_debug } },
+    });
 
     serde_json::to_string(&verify_body).map_err(|e| format!("serialize: {e}"))
 }

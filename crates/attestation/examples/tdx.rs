@@ -11,7 +11,7 @@ fn main() {
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
-    use attestation::{PlatformType, VerifyParams};
+    use attestation::{Context, Platform, PlatformType, Tdx, TdxParams};
 
     let nonce = b"example-tdx-nonce";
 
@@ -27,13 +27,18 @@ async fn main() {
     eprintln!("Evidence: {} bytes", evidence_json.len());
 
     eprintln!("Verifying...");
-    let params = VerifyParams::default();
-    let result = attestation::verify(&evidence_json, &params)
+    let envelope: attestation::AttestationEvidence =
+        serde_json::from_slice(&evidence_json).expect("envelope");
+    let evidence = serde_json::from_value(envelope.evidence).expect("TDX evidence");
+    let params = TdxParams {
+        report_data: Some(nonce.to_vec()),
+        ..Default::default()
+    };
+    let result = Tdx::verify(&evidence, &params, &Context::new())
         .await
         .expect("verification failed");
 
-    eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
+    eprintln!("Passed: {}", result.passed());
     eprintln!("Launch digest: {}", result.claims.launch_digest);
 
     if let Some(tcb_status) = &result.tcb_status {

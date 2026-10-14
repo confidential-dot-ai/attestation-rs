@@ -16,8 +16,10 @@ use super::dcap;
 use crate::collateral::TdxCollateralProvider;
 use crate::error::{AttestationError, Result};
 
+/// Supplied collateral that is not current or not for this quote cannot be
+/// used; like a failed fetch, it is not a verdict on the quote.
 fn reject(msg: impl std::fmt::Display) -> AttestationError {
-    AttestationError::CertChainError(msg.to_string())
+    AttestationError::CollateralUnavailable(msg.to_string())
 }
 
 /// Intel PCS v4 collateral for one TDX quote, as fetched by the caller.
@@ -148,7 +150,7 @@ impl TdxCollateralProvider for StaticTdxCollateral {
     // The core calls this after verify_dcap_chain has verified the same PCK
     // chain to the pinned Intel root, so its CA certificates are authentic
     // issuers to check the CRLs against.
-    async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {
+    async fn pck_revoked(&self, pck_cert_chain_pem: &[u8]) -> Result<bool> {
         let certs = dcap::parse_pem_to_der(pck_cert_chain_pem)?;
         if certs.len() < 3 {
             return Err(reject(format!(
@@ -159,17 +161,19 @@ impl TdxCollateralProvider for StaticTdxCollateral {
         let at = self.at()?;
         let pck_crl = dcap::verify_crl(&self.pck_crl, &certs[1], at, "PCK CRL")?;
         let root_crl = dcap::verify_crl(&self.root_ca_crl, &certs[2], at, "Root CA CRL")?;
-        dcap::check_cert_revocation_from_der(&certs, &pck_crl)?;
-        dcap::check_intermediate_ca_revocation_from_der(&certs, &root_crl)
+        Ok(dcap::cert_revoked_from_der(&certs, &pck_crl)?
+            || dcap::intermediate_ca_revoked_from_der(&certs, &root_crl)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::Context;
+    use crate::platform::Platform;
     use crate::platforms::tdx::evidence::TdxEvidence;
-    use crate::platforms::tdx::verify::verify_evidence;
-    use crate::types::{DcapVerificationStatus, TdxTcbStatus, VerifyParams};
+    use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
+    use crate::types::{DcapVerificationStatus, TdxTcbStatus};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     // A c8s TDX node's quote (FMSPC 00a06d080000) and the Intel PCS v4
@@ -204,12 +208,13 @@ mod tests {
         }
     }
 
-    async fn verify(c: StaticTdxCollateral) -> Result<crate::types::VerificationResult> {
+    async fn verify(c: StaticTdxCollateral) -> Result<TdxResult> {
         let evidence = TdxEvidence {
             quote: BASE64.encode(QUOTE),
             cc_eventlog: None,
         };
-        verify_evidence(&evidence, &VerifyParams::default(), Some(&c)).await
+        let ctx = Context::offline().with_tdx_provider(c);
+        Tdx::verify(&evidence, &TdxParams::default(), &ctx).await
     }
 
     async fn rejection(c: StaticTdxCollateral) -> String {
@@ -225,16 +230,18 @@ mod tests {
         s.replacen(from, to, 1).into_bytes()
     }
 
-    // verify_evidence and the standalone collateral step must agree, since
+    // Tdx::verify and the standalone collateral step must agree, since
     // WASM uses the latter to attribute failures.
     #[tokio::test]
-    async fn standalone_collateral_step_matches_verify_evidence() {
+    async fn standalone_collateral_step_matches_tdx_verify() {
         async fn step(
             c: StaticTdxCollateral,
         ) -> std::result::Result<DcapVerificationStatus, String> {
             let quote = crate::platforms::tdx::verify::parse_tdx_quote(QUOTE).unwrap();
-            crate::platforms::tdx::verify::verify_collateral(QUOTE, &quote, &c)
+            let now = chrono::Utc::now().timestamp();
+            crate::platforms::tdx::verify::verify_collateral(QUOTE, &quote, &c, now)
                 .await
+                .map(|collateral| collateral.tcb)
                 .map_err(|e| e.to_string())
         }
         let ok = step(collateral()).await.expect("current collateral");
@@ -253,10 +260,35 @@ mod tests {
     #[tokio::test]
     async fn current_collateral_grades_the_quote() {
         let r = verify(collateral()).await.expect("verify");
-        assert!(r.collateral_verified);
+        assert_eq!(r.crl_ok, Some(true));
         let status = r.tcb_status.expect("tcb_status");
         assert_eq!(status.fmspc, "00a06d080000");
         assert_eq!(status.tcb_status, TdxTcbStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn unusable_collateral_is_collateral_unavailable() {
+        for c in [
+            StaticTdxCollateral {
+                pck_crl: b"<html>503</html>".to_vec(),
+                ..collateral()
+            },
+            StaticTdxCollateral {
+                tcb_info: b"<html>503</html>".to_vec(),
+                ..collateral()
+            },
+            StaticTdxCollateral {
+                qe_identity: b"{}".to_vec(),
+                ..collateral()
+            },
+            StaticTdxCollateral {
+                at: AT + 60 * 86_400,
+                ..collateral()
+            },
+        ] {
+            let err = verify(c).await.expect_err("unusable collateral");
+            assert!(err.is_retryable(), "{err}");
+        }
     }
 
     #[tokio::test]

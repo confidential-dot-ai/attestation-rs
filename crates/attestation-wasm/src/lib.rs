@@ -1,26 +1,48 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use wasm_bindgen::prelude::*;
 
-use attestation::collateral::{CertProvider, DefaultCertProvider};
-use attestation::error::Result as AttestationResult;
+use attestation::collateral::CertProvider;
+use attestation::error::{AttestationError, Result as AttestationResult};
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
 use attestation::platforms::az_snp::verify::{verify_report, VerifiedReport};
 use attestation::platforms::az_tdx::evidence::AzTdxEvidence;
-use attestation::platforms::az_tdx::verify::verify_evidence as verify_az_tdx_evidence;
 use attestation::platforms::snp::certs::get_ark;
-use attestation::platforms::snp::claims::extract_claims;
 use attestation::platforms::snp::verify::{
-    check_vcek_not_revoked, enforce_min_tcb, parse_report, verify_report_signature,
-    verify_vek_endorsement, MAX_REPORT_VERSION,
+    check_report_bindings, check_vcek_not_revoked, evaluate_report, parse_report,
+    verify_report_signature, verify_vek_endorsement, MAX_REPORT_VERSION,
 };
 use attestation::platforms::tdx::collateral::StaticTdxCollateral;
 use attestation::platforms::tdx::evidence::TdxEvidence;
 use attestation::platforms::tdx::verify::{
     parse_tdx_quote, verify_collateral as verify_tdx_collateral,
-    verify_evidence as verify_tdx_evidence,
 };
-use attestation::types::{ProcessorGeneration, SnpTcb, VerifyParams};
-use attestation::utils::{constant_time_eq, pad_report_data};
+use attestation::types::{PlatformType, ProcessorGeneration, SnpTcb};
+use attestation::{
+    AzSnpParams, AzTdx, AzTdxParams, Context, GcpSnpParams, GcpTdxParams, Platform, Policies,
+    SnpParams, Tdx, TdxParams,
+};
+
+/// Serialize a result for JS: the result's fields plus `platform` and
+/// `passed`, so every entry point returns the same top-level keys.
+fn result_json(
+    result: &impl serde::Serialize,
+    platform: &str,
+    passed: bool,
+) -> Result<serde_json::Value, String> {
+    let mut json = serde_json::to_value(result).map_err(|e| format!("json serialize: {e}"))?;
+    json["platform"] = platform.into();
+    json["passed"] = passed.into();
+    Ok(json)
+}
+
+fn to_string(json: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string_pretty(json).map_err(|e| format!("json serialize: {e}"))
+}
+
+/// Current time in Unix seconds (the browser clock on wasm).
+fn now() -> i64 {
+    Context::offline().now()
+}
 
 /// Parse the optional minimum-TCB policy JSON (the [`SnpTcb`] shape:
 /// `{ "bootloader": u8, "tee": u8, "snp": u8, "microcode": u8, "fmc"?: u8 }`).
@@ -33,7 +55,7 @@ fn parse_min_tcb(min_tcb_json: Option<String>) -> Result<Option<SnpTcb>, String>
     }
 }
 
-/// Caller-supplied TDX DCAP collateral as `verify_tdx` takes it: the Intel
+/// Caller-supplied TDX DCAP collateral as `evaluate_tdx` takes it: the Intel
 /// PCS v4 JSON bodies verbatim (the signatures cover them), the issuer chains
 /// as URL-decoded PEM (PCS sends the headers percent-encoded), the CRLs
 /// base64-encoded (DER or PEM inside), and the verification time in Unix
@@ -69,35 +91,34 @@ fn parse_tdx_collateral(json: &str) -> Result<StaticTdxCollateral, String> {
     })
 }
 
-/// Cert provider for the generic offline entry point: VEK resolution and the
-/// ARK/ASK chain behave exactly like [`DefaultCertProvider`] on wasm (inline
-/// VEK required, bundled roots), but the SNP CRL is the caller-supplied DER
-/// blob instead of a network fetch. The core verifies the CRL's signature
-/// against the bundled ARK and its freshness before trusting it, so the bytes
-/// themselves need no transport trust.
+/// Cert provider for the generic entry point: no fetches (the VEK must be
+/// inline), and the SNP CRL is the caller-supplied DER blob. The core verifies
+/// the CRL's signature against the bundled ARK and its freshness before
+/// trusting it, so the bytes need no transport trust.
 struct StaticSnpCollateral {
-    inner: DefaultCertProvider,
     crl_der: Option<Vec<u8>>,
+}
+
+fn not_fetched(what: &str) -> AttestationError {
+    AttestationError::CollateralUnavailable(format!("the browser verifier does not fetch {what}"))
 }
 
 #[async_trait::async_trait]
 impl CertProvider for StaticSnpCollateral {
     async fn get_snp_vcek(
         &self,
-        processor_gen: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        reported_tcb: &SnpTcb,
+        _processor_gen: ProcessorGeneration,
+        _chip_id: &[u8; 64],
+        _reported_tcb: &SnpTcb,
     ) -> AttestationResult<Vec<u8>> {
-        self.inner
-            .get_snp_vcek(processor_gen, chip_id, reported_tcb)
-            .await
+        Err(not_fetched("the VEK (the evidence carries none)"))
     }
 
     async fn get_snp_cert_chain(
         &self,
-        processor_gen: ProcessorGeneration,
+        _processor_gen: ProcessorGeneration,
     ) -> AttestationResult<(Vec<u8>, Vec<u8>)> {
-        self.inner.get_snp_cert_chain(processor_gen).await
+        Err(not_fetched("the AMD cert chain"))
     }
 
     async fn get_snp_crl(
@@ -108,126 +129,164 @@ impl CertProvider for StaticSnpCollateral {
     }
 }
 
-/// Verify attestation evidence from a self-describing envelope — the generic,
-/// platform-dispatching entry point and the preferred API for JS embedders.
+/// Evaluate attestation evidence from a self-describing envelope — the
+/// generic, platform-dispatching entry point.
 ///
 /// `envelope_json` is the core [`attestation::AttestationEvidence`] envelope:
-/// `{ "platform": "<tag>", "evidence": { ... } }`, where `platform` is one of
-/// the compiled-in platform tags (`snp`, `tdx`, `az-snp`, `az-tdx`, `gcp-snp`,
-/// `gcp-tdx` with default features) and `evidence` is that platform's evidence
-/// payload, verbatim. Dispatch happens in the Rust core
-/// (`Verifier::verify_platform`), so JS callers need no per-platform routing —
-/// but they MUST assert the platform themselves by comparing the result's
-/// `platform` field against the one they expect, never trusting a
-/// server-chosen tag to pick the verification path.
+/// `{ "platform": "<tag>", "evidence": { ... } }`. `platforms` lists the
+/// platform tags the caller accepts (`snp`, `tdx`, `az-snp`, `az-tdx`,
+/// `gcp-snp`, `gcp-tdx`); evidence for any other platform throws, so the
+/// envelope's tag (an attester claim) cannot pick a platform the caller did
+/// not allow. An empty list throws.
 ///
-/// Runs in offline mode ([`attestation::Verifier::offline`]): quote signatures
-/// and cert chains verify against the bundled AMD/Intel roots (SNP evidence
-/// must carry its VEK inline, as c8s evidence does), and the SNP processor
-/// generation is auto-detected from the report's CPUID fields (v3+ reports).
-/// Debug guests are always rejected (`allow_debug` is never exposed to the
-/// browser; fail closed).
+/// Runs offline ([`attestation::Context::offline`]): quote signatures and cert
+/// chains verify against the bundled AMD/Intel roots (SNP evidence must carry
+/// its VEK inline), and the SNP processor generation is auto-detected from
+/// the report's CPUID fields (v3+ reports). Debug guests never pass
+/// (`allow_debug` is never exposed to the browser).
 ///
-/// Collateral: the TDX network-backed checks (PCK CRL, TCB status, QE
-/// identity) need an async provider and are skipped. For SNP, the caller may
-/// staple the AMD KDS CRL as `snp_crl_der` — its signature is verified against
-/// the bundled ARK and its thisUpdate/nextUpdate window against the current
-/// time before it is trusted, then the VEK is checked against it and
-/// `collateral_verified` becomes `true`. Without it, revocation is skipped and
-/// `collateral_verified` stays `false` — the caller's policy layer decides
-/// whether that qualifies as verified.
+/// Collateral: the TDX checks that need Intel PCS (PCK CRL, TCB status, QE
+/// identity) are skipped; use [`evaluate_tdx`] to supply that collateral. For
+/// SNP, the caller may staple the AMD KDS CRL as `snp_crl_der`; its signature
+/// and thisUpdate/nextUpdate window are verified before the VEK is checked
+/// against it. Without it, revocation is skipped.
 ///
 /// `min_tcb_json`, when supplied, is the minimum SNP TCB policy as
 /// [`SnpTcb`] JSON (`{ "bootloader": u8, "tee": u8, "snp": u8,
-/// "microcode": u8, "fmc"?: u8 }`); a report whose reported TCB is below any
-/// component fails closed. SNP platforms only — it is ignored by the TDX
-/// verifiers, so TDX callers must not rely on it.
+/// "microcode": u8, "fmc"?: u8 }`), reported as `min_tcb_met`. SNP platforms
+/// only.
 ///
-/// The freshness semantics of `expected_report_data` are per-platform, handled
-/// inside each core verifier: for bare-metal platforms it is checked against
-/// the hardware quote's `report_data` (zero-padded, constant-time); for the
-/// Azure vTPM platforms it is checked against the vTPM quote's `extraData`.
-/// Either way a supplied-but-mismatched anchor fails closed.
+/// `expected_report_data` is checked against the hardware quote's
+/// `report_data` on bare-metal platforms and against the vTPM quote's
+/// `extraData` on Azure. A mismatch is `report_data_match: false` and
+/// `passed: false`.
 ///
 /// - `envelope_json`: `{ platform, evidence }` envelope JSON
+/// - `platforms`: accepted platform tags, at least one
 /// - `expected_report_data`: optional freshness anchor bytes
 /// - `expected_init_data_hash`: optional init-data binding (SNP HOST_DATA /
 ///   TDX MRCONFIGID / vTPM PCR[8])
 /// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON)
 /// - `snp_crl_der`: optional DER AMD KDS CRL for the report's generation
 ///
-/// Returns the [`attestation::types::VerificationResult`] as JSON, or throws
-/// on any check failure.
+/// Returns the [`attestation::Verified`] result as JSON with `passed`. Throws
+/// only when the evidence cannot be evaluated (malformed, not genuine,
+/// platform not accepted, invalid params, bad collateral); mismatches and
+/// policy flags are values in the result, so the caller must read `passed`.
 #[wasm_bindgen]
-pub async fn verify(
+pub async fn evaluate(
     envelope_json: String,
+    platforms: Vec<String>,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
     min_tcb_json: Option<String>,
     snp_crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    let min_tcb = parse_min_tcb(min_tcb_json).map_err(|e| JsError::new(&e))?;
-    let params = VerifyParams {
+    evaluate_impl(
+        envelope_json,
+        platforms,
         expected_report_data,
         expected_init_data_hash,
-        min_tcb,
-        ..VerifyParams::default()
-    };
-
-    let result = attestation::Verifier::offline()
-        .with_cert_provider(StaticSnpCollateral {
-            inner: DefaultCertProvider::new(),
-            crl_der: snp_crl_der,
-        })
-        .verify(envelope_json.as_bytes(), &params)
-        .await
-        .map_err(|e| JsError::new(&format!("verify: {e}")))?;
-
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+        min_tcb_json,
+        snp_crl_der,
+    )
+    .await
+    .map_err(|e| JsError::new(&e))
 }
 
-/// Verify live SNP evidence in WASM.
+async fn evaluate_impl(
+    envelope_json: String,
+    platforms: Vec<String>,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+    min_tcb_json: Option<String>,
+    snp_crl_der: Option<Vec<u8>>,
+) -> Result<String, String> {
+    if platforms.is_empty() {
+        return Err("platforms: name at least one accepted platform".into());
+    }
+    let min_tcb = parse_min_tcb(min_tcb_json)?;
+    let tdx = TdxParams {
+        report_data: expected_report_data.clone(),
+        init_data: expected_init_data_hash.clone(),
+        ..Default::default()
+    };
+    let snp = SnpParams {
+        report_data: expected_report_data,
+        host_data: expected_init_data_hash,
+        min_tcb,
+        ..Default::default()
+    };
+    let mut policies = Policies::default();
+    for tag in &platforms {
+        let platform: PlatformType = serde_json::from_value(tag.as_str().into())
+            .map_err(|_| format!("platforms: unknown platform {tag:?}"))?;
+        match platform {
+            PlatformType::Tdx => policies.tdx = Some(tdx.clone()),
+            PlatformType::AzTdx => policies.az_tdx = Some(AzTdxParams { tdx: tdx.clone() }),
+            PlatformType::GcpTdx => policies.gcp_tdx = Some(GcpTdxParams { tdx: tdx.clone() }),
+            PlatformType::Snp => policies.snp = Some(snp.clone()),
+            PlatformType::AzSnp => policies.az_snp = Some(AzSnpParams { snp: snp.clone() }),
+            PlatformType::GcpSnp => policies.gcp_snp = Some(GcpSnpParams { snp: snp.clone() }),
+            PlatformType::Dstack => return Err(format!("platforms: {tag} is not compiled in")),
+        }
+    }
+
+    let ctx = Context::offline().with_cert_provider(StaticSnpCollateral {
+        crl_der: snp_crl_der,
+    });
+    let verified = attestation::Verifier::new(ctx)
+        .verify(envelope_json.as_bytes(), &policies)
+        .await
+        .map_err(|e| format!("verify: {e}"))?;
+
+    let mut json = serde_json::to_value(&verified).map_err(|e| format!("json serialize: {e}"))?;
+    json["passed"] = verified.passed().into();
+    to_string(&json)
+}
+
+/// Evaluate live SNP evidence in WASM.
 ///
 /// Enforces the same endorsement-key and platform-security policy as the
 /// native SNP verifier (`platforms/snp/verify.rs`), minus only VEK fetching
 /// (the VEK must be inline). The one intentional difference from the generic
-/// [`verify`] entry point is the explicit `generation` argument: v2 reports
+/// [`evaluate`] entry point is the explicit `generation` argument: v2 reports
 /// (Azure HCL evidence unwrapped to a bare report) carry no CPUID fields to
 /// auto-detect from, so the caller declares the generation and the VEK chain
 /// check authenticates it — a wrong declaration fails its own chain.
 ///
 /// Checks, in native order: ARK → ASK/ASVK → VEK chain against the bundled
-/// roots (VLEK auto-detected), VEK validity period, optional CRL revocation,
-/// report signature, VMPL == 0, debug-policy rejection (no opt-in here; fail
-/// closed), VEK chip-id/TCB OID cross-validation against the report, and the
-/// optional minimum-TCB floor.
+/// roots (VLEK auto-detected), VEK validity period, VEK chip-id/TCB OID
+/// cross-validation against the report, the report signature, and optional
+/// CRL revocation; a failure there throws. Then the policy, reported as
+/// values: VMPL must be 0 and debug off (no opt-in here), the optional
+/// minimum-TCB floor, and the optional `report_data` anchor. `passed` is true
+/// only when all of them hold.
 ///
 /// Collateral: when `crl_der` carries the AMD KDS CRL for this generation,
 /// its signature is verified against the bundled ARK and its
 /// thisUpdate/nextUpdate window against the current time, then the VEK is
-/// checked against it and the result's `collateral_verified` is `true`.
-/// Without it, revocation is skipped and `collateral_verified` is `false` —
-/// surfaced, never silently upgraded.
+/// checked against it. Without it, revocation is skipped.
 ///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
 /// - `generation`: processor generation ("milan", "genoa", "turin")
 /// - `expected_report_data`: optional raw bytes to check against report_data
-///   in the report (comparison reported as `report_data_match`, not fatal —
-///   the policy layer decides)
-/// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON); a
-///   reported TCB below any component fails closed
+///   in the report (reported as `report_data_match`)
+/// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON),
+///   reported as `min_tcb_met`
 /// - `crl_der`: optional DER AMD KDS CRL for this generation
 ///
-/// Returns verification result as JSON.
+/// Returns the result as JSON with `passed`. Throws only when the evidence
+/// cannot be evaluated (including an `expected_report_data` over 64 bytes).
 #[wasm_bindgen]
-pub fn verify_snp(
+pub fn evaluate_snp(
     evidence_json: &str,
     generation: &str,
     expected_report_data: Option<Vec<u8>>,
     min_tcb_json: Option<String>,
     crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    verify_snp_impl(
+    evaluate_snp_impl(
         evidence_json,
         generation,
         expected_report_data,
@@ -240,7 +299,7 @@ pub fn verify_snp(
 // The whole entry point behind the wasm-bindgen boundary, so every enforcement
 // gate is exercisable by native tests (JsError carries no readable message off
 // the wasm target). Behavior-identical to the wrapper.
-fn verify_snp_impl(
+fn evaluate_snp_impl(
     evidence_json: &str,
     generation: &str,
     expected_report_data: Option<Vec<u8>>,
@@ -253,13 +312,17 @@ fn verify_snp_impl(
         "turin" | "Turin" => ProcessorGeneration::Turin,
         _ => return Err(format!("unknown generation: {generation}")),
     };
-    let min_tcb = parse_min_tcb(min_tcb_json)?;
+    let params = SnpParams {
+        report_data: expected_report_data,
+        min_tcb: parse_min_tcb(min_tcb_json)?,
+        ..Default::default()
+    };
+    params.validate().map_err(|e| e.to_string())?;
 
     let evidence: attestation::platforms::snp::evidence::SnpEvidence =
         serde_json::from_str(evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
 
-    use base64::Engine;
-    let report_bytes = base64::engine::general_purpose::STANDARD
+    let report_bytes = BASE64
         .decode(&evidence.attestation_report)
         .map_err(|e| format!("base64 decode report: {e}"))?;
 
@@ -277,7 +340,7 @@ fn verify_snp_impl(
 
     // Get VCEK from evidence
     let vek_der = match &evidence.cert_chain {
-        Some(chain) => base64::engine::general_purpose::STANDARD
+        Some(chain) => BASE64
             .decode(&chain.vcek)
             .map_err(|e| format!("base64 decode vcek: {e}"))?,
         None => return Err("evidence missing cert_chain.vcek".to_string()),
@@ -287,76 +350,39 @@ fn verify_snp_impl(
     // period, and VEK chip-id/TCB OID cross-validation against the report —
     // the checks whose absence let an expired or wrong-platform VEK vouch for
     // a report here while the native verifier rejected it.
-    verify_vek_endorsement(&report, &vek_der, gen).map_err(|e| format!("VEK endorsement: {e}"))?;
-
-    // CRL revocation check — caller-supplied collateral, ARK-signature- and
-    // freshness-verified before it is trusted (AMD CRLs are signed by the
-    // ARK, not the ASK/ASVK intermediate).
-    let collateral_verified = match crl_der {
-        Some(crl) => {
-            check_vcek_not_revoked(&vek_der, &crl, get_ark(gen))
-                .map_err(|e| format!("CRL check: {e}"))?;
-            true
-        }
-        None => false,
-    };
+    let now = now();
+    verify_vek_endorsement(&report, &vek_der, gen, now)
+        .map_err(|e| format!("VEK endorsement: {e}"))?;
 
     // Verify report signature
     verify_report_signature(&report_bytes, &vek_der)
         .map_err(|e| format!("report signature: {e}"))?;
 
-    // Guest-policy enforcement — mirrors the native `verify_report` path
-    // (`platforms/snp/verify.rs`: VMPL==0 and debug-policy rejection). Without
-    // these, a malicious host can launch the *correctly-measured* image as a
-    // debug-enabled or non-VMPL-0 SNP guest: the launch_digest still matches a
-    // pinned allowlist, the VCEK chain and report signature are genuine, and
-    // report_data still binds the session key — yet the hypervisor can read the
-    // guest's memory (debug) or a lower-privilege VMPL can, so it extracts the
-    // session key and reads the "confidential" channel. The browser entry has no
-    // `allow_debug` opt-in: it fails closed. (SEV-SNP guest policy lives in the
-    // report, not the launch measurement, so a measurement pin cannot catch this.)
-    if report.vmpl != 0 {
-        return Err(format!(
-            "VMPL check failed: report VMPL is {} (expected 0)",
-            report.vmpl
-        ));
-    }
-    if report.policy.debug_allowed() {
-        return Err(
-            "SNP guest policy permits debug (host can read guest memory); rejecting (fail closed)"
-                .to_string(),
-        );
+    // CRL revocation check, once the report is known to be genuine —
+    // caller-supplied collateral, ARK-signature- and freshness-verified
+    // before it is trusted (AMD CRLs are signed by the
+    // ARK, not the ASK/ASVK intermediate).
+    if let Some(crl) = crl_der {
+        check_vcek_not_revoked(&vek_der, &crl, get_ark(gen), now)
+            .map_err(|e| format!("CRL check: {e}"))?;
     }
 
-    // Minimum-TCB floor
-    if let Some(ref min) = min_tcb {
-        enforce_min_tcb(&report.reported_tcb, min).map_err(|e| format!("minimum TCB: {e}"))?;
-    }
+    // Guest policy, as values. VMPL must be 0 and debug off: a malicious host
+    // can launch the *correctly-measured* image as a debug-enabled or
+    // non-VMPL-0 SNP guest and read its memory, and a measurement pin cannot
+    // catch that (SEV-SNP guest policy lives in the report, not the launch
+    // measurement). The browser entry has no `allow_debug` opt-in.
+    let mut result = evaluate_report(&report, &params);
+    check_report_bindings(&mut result, &report, &params).map_err(|e| e.to_string())?;
 
-    // Check report_data binding
-    let report_data_match = expected_report_data.map(|expected| {
-        let padded = pad_report_data(&expected, 64).unwrap_or_default();
-        constant_time_eq(&report.report_data[..], &padded)
-    });
-
-    // Extract claims
-    let claims = extract_claims(&report);
-
-    let result = serde_json::json!({
-        "signature_valid": true,
-        "platform": "snp",
-        "report_version": report.version,
-        "report_data_match": report_data_match,
-        "collateral_verified": collateral_verified,
-        "claims": claims,
-    });
-
-    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
+    let mut json = result_json(&result, "snp", result.passed())?;
+    json["report_version"] = report.version.into();
+    to_string(&json)
 }
 
-/// Verify Azure SEV-SNP (az-snp) vTPM attestation evidence in WASM.
+/// Evaluate Azure SEV-SNP (az-snp) vTPM attestation evidence in WASM.
 ///
-/// Unlike [`verify_snp`], which only checks the bare SNP hardware report, this
+/// Unlike [`evaluate_snp`], which only checks the bare SNP hardware report, this
 /// verifies the full az-snp evidence: the HCL-wrapped SNP report **and** the
 /// vTPM quote that binds freshness. The freshness anchor for az-snp lives in
 /// the TPM quote's `extraData` (qualifyingData), not in the SNP `report_data`
@@ -365,16 +391,16 @@ fn verify_snp_impl(
 /// Verification (mirrors the native async path):
 /// 1. Verify the TPM quote signature with the AK extracted from HCL var_data.
 /// 2. Check the quote's `extraData` equals `expected_report_data` (freshness),
-///    failing closed when an anchor is supplied and does not match.
-/// 3. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
+///    reported as `report_data_match`.
+/// 3. Verify the PCR digest, and optionally compare PCR[8] with
+///    `expected_init_data_hash` (`host_data_match`).
 /// 4. Bind the AK to the TEE: `snp.report_data[..32] == SHA-256(var_data)`.
 /// 5. Validate the VCEK chain (auto-detecting the generation from CPUID) and the
-///    SNP report signature, then enforce VMPL/debug/TCB policy and the optional
-///    minimum-TCB floor.
+///    SNP report signature, then evaluate VMPL/debug and the optional
+///    minimum-TCB floor as values.
 /// 6. When `crl_der` carries the AMD KDS CRL for the matched generation, verify
-///    its ARK signature and freshness, then check the VCEK against it —
-///    `collateral_verified` becomes `true`. Without it, revocation is skipped
-///    and `collateral_verified` stays `false`.
+///    its ARK signature and freshness, then check the VCEK against it. Without
+///    it, revocation is skipped.
 ///
 /// - `evidence_json`: az-snp evidence JSON (`{ version, tpm_quote, hcl_report, vcek }`)
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
@@ -382,16 +408,17 @@ fn verify_snp_impl(
 /// - `min_tcb_json`: optional minimum SNP TCB policy ([`SnpTcb`] JSON)
 /// - `crl_der`: optional DER AMD KDS CRL for the report's generation
 ///
-/// Returns the verification result as JSON, or throws on any check failure.
+/// Returns the verification result as JSON with `passed`. Throws only when
+/// the evidence cannot be verified; mismatches and policy flags are values.
 #[wasm_bindgen]
-pub fn verify_az_snp(
+pub fn evaluate_az_snp(
     evidence_json: &str,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
     min_tcb_json: Option<String>,
     crl_der: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    verify_az_snp_impl(
+    evaluate_az_snp_impl(
         evidence_json,
         expected_report_data,
         expected_init_data_hash,
@@ -401,8 +428,8 @@ pub fn verify_az_snp(
     .map_err(|e| JsError::new(&e))
 }
 
-// Off-wasm-testable body, same rationale as verify_snp_impl / verify_tdx_impl.
-fn verify_az_snp_impl(
+// Off-wasm-testable body, same rationale as evaluate_snp_impl / evaluate_tdx_impl.
+fn evaluate_az_snp_impl(
     evidence_json: &str,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
@@ -413,48 +440,39 @@ fn verify_az_snp_impl(
         serde_json::from_str(evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
     let min_tcb = parse_min_tcb(min_tcb_json)?;
 
-    // Run the full az-snp verification core, freshness included. When an anchor is
-    // supplied, the core binds the TPM quote's extraData (qualifyingData) to it and
-    // fails closed on a mismatch — defense in depth, rather than downgrading the
-    // freshness check to a non-throwing bool for the JS policy layer to interpret.
-    // The core still populates report_data_match (Some(true) when an anchor was
-    // supplied and matched, None otherwise) for the result shape.
-    let params = VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
-        min_tcb,
-        ..VerifyParams::default()
+    let params = AzSnpParams {
+        snp: SnpParams {
+            report_data: expected_report_data,
+            host_data: expected_init_data_hash,
+            min_tcb,
+            ..Default::default()
+        },
     };
-
+    let now = now();
     let VerifiedReport {
-        mut result,
+        result,
         matched_gen,
         vcek_der,
         report_version,
-    } = verify_report(&evidence, &params).map_err(|e| format!("az-snp verify: {e}"))?;
+    } = verify_report(&evidence, &params, now).map_err(|e| format!("az-snp verify: {e}"))?;
 
     // CRL revocation check — caller-supplied collateral, exactly the check the
-    // native async wrapper (`az_snp::verify::verify_evidence`) runs with a
-    // provider-fetched CRL. AMD CRLs are signed by the ARK, not the ASK/ASVK
-    // intermediate, and the CRL's signature and freshness are verified before
-    // it is trusted.
+    // native async path (`AzSnp::verify`) runs with a provider-fetched CRL.
+    // AMD CRLs are signed by the ARK, not the ASK/ASVK intermediate, and the
+    // CRL's signature and freshness are verified before it is trusted.
     if let Some(crl) = crl_der {
-        check_vcek_not_revoked(&vcek_der, &crl, get_ark(matched_gen))
+        check_vcek_not_revoked(&vcek_der, &crl, get_ark(matched_gen), now)
             .map_err(|e| format!("CRL check: {e}"))?;
-        result.collateral_verified = true;
     }
 
-    // Serialize the VerificationResult, then graft on report_version, matching the
-    // shape verify_snp returns so the JS policy layer reads it uniformly.
-    let mut result = serde_json::to_value(&result).map_err(|e| format!("json serialize: {e}"))?;
-    result["report_version"] = serde_json::json!(report_version);
-
-    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
+    let mut json = result_json(&result, "az-snp", result.passed())?;
+    json["report_version"] = report_version.into();
+    to_string(&json)
 }
 
-/// Verify bare-metal Intel TDX (tdx) DCAP attestation evidence in WASM.
+/// Evaluate bare-metal Intel TDX (tdx) DCAP attestation evidence in WASM.
 ///
-/// This is the direct-DCAP counterpart of [`verify_az_tdx`]: no vTPM in the
+/// This is the direct-DCAP counterpart of [`evaluate_az_tdx`]: no vTPM in the
 /// path, so the freshness anchor lives directly in the TD quote's 64-byte
 /// `report_data` (zero-padded), as produced by attesters that bind
 /// `SHA-384(anchor)` — e.g. a serving-cert SPKI + nonce, or a session
@@ -462,25 +480,29 @@ fn verify_az_snp_impl(
 /// 1. Parse the TD quote (v4/v5) and verify its ECDSA P-256 signature.
 /// 2. Verify the full DCAP chain: PCK cert chain to the pinned Intel SGX Root
 ///    CA, QE report signature, and QE report binding.
-/// 3. Enforce the TD debug-attribute policy (reject debug TDs — no opt-in here).
-/// 4. Bind `report_data` to `expected_report_data` (padded, constant-time),
-///    failing closed when an anchor is supplied and does not match.
-/// 5. Optionally bind MRCONFIGID to `expected_init_data_hash`.
+/// 3. Report the TD debug attribute (`debug`; debug TDs never pass — no
+///    opt-in here).
+/// 4. Compare `report_data` with `expected_report_data` (padded,
+///    constant-time): `report_data_match`.
+/// 5. Optionally compare MRCONFIGID with `expected_init_data_hash`:
+///    `init_data_match`.
 /// 6. When the evidence carries a `cc_eventlog`, replay it against the RTMRs:
 ///    RTMR[0-2] divergence fails closed; RTMR[3] divergence only warns, because
 ///    runtime extends after the log was captured are expected there (see
 ///    `platforms/tdx/ccel.rs`).
-/// 7. When `expected_rtmr3` is supplied, require the TD's RTMR[3] to match it.
+/// 7. When `expected_rtmr3` is supplied, compare the TD's RTMR[3] with it:
+///    `rtmr_match[3]`.
 ///
 /// The DCAP **collateral** checks (PCK CRL, TCB status, TD-QE identity) run
 /// only on caller-supplied collateral (`tdx_collateral_json`): the browser
-/// cannot fetch Intel PCS itself. Without it they are skipped and
-/// `collateral_verified` is `false`. With it, every item is verified
+/// cannot fetch Intel PCS itself. Without it they are skipped (`tcb_status`
+/// and `crl_ok` are `null`). With it, every item is verified
 /// against Intel's signatures, and TCB Info, QE Identity and the CRLs must be
 /// current at `at` (certificate validity uses the current time; see
 /// [`StaticTdxCollateral`]). A failure throws with a `TDX collateral:`
-/// prefix, and the result carries the evaluated `tcb_status`. A `Revoked`
-/// TCB fails closed; accepting the other statuses is the caller's policy.
+/// prefix, and the result carries the evaluated `tcb_status` and `crl_ok`. A
+/// `Revoked` or `NoMatchingLevel` TCB and a revoked PCK certificate do not
+/// pass; accepting the other statuses is the caller's policy.
 /// The measurement surfaces as `claims.launch_digest` = hex(MRTD); MRTD
 /// pinning is the JS policy layer's job.
 ///
@@ -502,26 +524,24 @@ fn verify_az_snp_impl(
 /// from the CCEL by construction (see `platforms/tdx/ccel.rs`), which is why
 /// it must be supplied rather than derived.
 ///
-/// Unlike [`VerifyParams::expected_rtmr3`], which only *reports* the
-/// comparison via `rtmr3_match`, this entry point **fails closed**: a
-/// mismatch throws, matching how `expected_report_data` behaves here. A
-/// browser policy layer that forwarded the pin but forgot to inspect
-/// `rtmr3_match` would otherwise silently accept any node.
+/// A mismatch is `rtmr_match[3]: false` and `passed: false`: a browser policy
+/// layer must read `passed`, not rely on a throw.
 ///
-/// Returns the verification result as JSON, or throws on any check failure.
+/// Returns the verification result as JSON with `passed`. Throws only when
+/// the evidence or the collateral cannot be verified.
 ///
 /// `async` because the shared core is `async` for its collateral provider;
 /// the supplied-collateral provider performs no actual awaiting. Callers
 /// `await` the returned Promise.
 #[wasm_bindgen]
-pub async fn verify_tdx(
+pub async fn evaluate_tdx(
     evidence_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
     expected_rtmr3: Option<Vec<u8>>,
     tdx_collateral_json: Option<String>,
 ) -> Result<String, JsError> {
-    verify_tdx_impl(
+    evaluate_tdx_impl(
         evidence_json,
         expected_report_data,
         expected_init_data_hash,
@@ -535,7 +555,7 @@ pub async fn verify_tdx(
 // The whole entry point behind the wasm-bindgen boundary, so the enforcement
 // gate is exercisable by native tests (JsError carries no readable message off
 // the wasm target). Behavior-identical to the wrapper.
-async fn verify_tdx_impl(
+async fn evaluate_tdx_impl(
     evidence_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
@@ -558,18 +578,18 @@ async fn verify_tdx_impl(
                 .map_err(|_| format!("expected_rtmr3 is {} bytes, want 48", bytes.len()))?,
         ),
     };
-    let rtmr3_pinned = expected_rtmr3.is_some();
 
-    let params = VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
-        expected_rtmr3,
-        ..VerifyParams::default()
+    let params = TdxParams {
+        report_data: expected_report_data,
+        init_data: expected_init_data_hash,
+        rtmr: [None, None, None, expected_rtmr3],
+        ..Default::default()
     };
 
     // Evidence fully first, then the collateral step alone, so a failure of
     // the latter is attributable to the collateral.
-    let mut result = verify_tdx_evidence(&evidence, &params, None)
+    let ctx = Context::offline();
+    let mut result = Tdx::verify(&evidence, &params, &ctx)
         .await
         .map_err(|e| format!("tdx verify: {e}"))?;
     if let Some(collateral) = &collateral {
@@ -578,27 +598,16 @@ async fn verify_tdx_impl(
             .decode(&evidence.quote)
             .map_err(|e| format!("tdx verify: quote base64: {e}"))?;
         let quote = parse_tdx_quote(&quote_bytes).map_err(|e| format!("tdx verify: {e}"))?;
-        let status = verify_tdx_collateral(&quote_bytes, &quote, collateral)
+        let checked = verify_tdx_collateral(&quote_bytes, &quote, collateral, ctx.now())
             .await
             .map_err(|e| format!("tdx verify: TDX collateral: {e}"))?;
-        result.tcb_status = Some(status);
-        result.collateral_verified = true;
+        result.set_collateral(checked, &params);
     }
 
-    // The core records the comparison without acting on it. Enforce here so a
-    // supplied pin cannot be a no-op. `None` means the core never performed the
-    // comparison at all — treat that as a failure, not an absence.
-    if rtmr3_pinned && result.rtmr3_match != Some(true) {
-        return Err("tdx verify: RTMR[3] does not match expected_rtmr3 \
-             (the guest was not launched with the pinned operator key, \
-             or it measured workloads the pin does not account for)"
-            .to_string());
-    }
-
-    serde_json::to_string_pretty(&result).map_err(|e| format!("json serialize: {e}"))
+    to_string(&result_json(&result, "tdx", result.passed())?)
 }
 
-/// Verify Azure TDX (az-tdx) vTPM attestation evidence in WASM.
+/// Evaluate Azure TDX (az-tdx) vTPM attestation evidence in WASM.
 ///
 /// The Azure TDX shape mirrors az-snp: the freshness anchor lives in the vTPM
 /// quote's `extraData` (qualifyingData), while the Intel-signed TD quote's
@@ -607,16 +616,17 @@ async fn verify_tdx_impl(
 /// 1. Parse the HCL report and require `report_type == TDX`.
 /// 2. Verify the vTPM quote signature with the AK extracted from HCL var_data.
 /// 3. Check the quote's `extraData` equals `expected_report_data` (freshness),
-///    failing closed when an anchor is supplied and does not match.
-/// 4. Verify the PCR digest, and optionally bind PCR[8] to `expected_init_data_hash`.
+///    reported as `report_data_match`.
+/// 4. Verify the PCR digest, and optionally compare PCR[8] with
+///    `expected_init_data_hash` (`init_data_match`).
 /// 5. Parse the TD quote, verify its ECDSA signature, and verify the DCAP chain
 ///    to the pinned Intel SGX Root CA.
-/// 6. Enforce the TD debug-attribute policy (reject debug TDs — no opt-in here).
+/// 6. Report the TD debug attribute (debug TDs never pass — no opt-in here).
 /// 7. Bind the AK to the TEE: `td_report.report_data[..32] == SHA-256(var_data)`.
 ///
-/// Like [`verify_az_snp`], the DCAP **collateral** checks (PCK CRL, TCB status,
-/// TD-QE identity) need an async provider and are skipped in WASM, so
-/// `collateral_verified` is always `false`. The measurement surfaces as
+/// Like [`evaluate_az_snp`], the DCAP **collateral** checks (PCK CRL, TCB
+/// status, TD-QE identity) need an async provider and are skipped in WASM, so
+/// `tcb_status` and `crl_ok` are always `null`. The measurement surfaces as
 /// `claims.launch_digest` = hex(MRTD); MRTD/RTMR pinning is the JS policy
 /// layer's job (a mismatch is reported, not fatal, in the core).
 ///
@@ -624,48 +634,59 @@ async fn verify_tdx_impl(
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
 /// - `expected_init_data_hash`: optional 32-byte hash to bind against PCR[8]
 ///
-/// Unlike [`verify_tdx`], this entry point has **no `expected_rtmr3`
+/// Unlike [`evaluate_tdx`], this entry point has **no `expected_rtmr3`
 /// parameter and enforces no RTMR[3] pin** — do not assume parity. The az-tdx
-/// core computes `rtmr3_match` the same way, so extending this entry point is
+/// core computes `rtmr_match[3]` the same way, so extending this entry point is
 /// a known follow-up; until then an az-tdx caller cannot pin deployment
 /// identity here.
 ///
-/// Returns the verification result as JSON, or throws on any check failure.
+/// Returns the verification result as JSON with `passed`. Throws only when
+/// the evidence cannot be verified; mismatches and policy flags are values.
 ///
-/// This is `async` (unlike `verify_az_snp`, whose core is sync) because the
+/// This is `async` (unlike `evaluate_az_snp`, whose core is sync) because the
 /// shared az-tdx core is `async` for its optional collateral provider; with a
 /// `None` provider it performs no actual awaiting. Callers `await` the returned
 /// Promise.
 #[wasm_bindgen]
-pub async fn verify_az_tdx(
+pub async fn evaluate_az_tdx(
     evidence_json: String,
     expected_report_data: Option<Vec<u8>>,
     expected_init_data_hash: Option<Vec<u8>>,
 ) -> Result<String, JsError> {
-    let evidence: AzTdxEvidence = serde_json::from_str(&evidence_json)
-        .map_err(|e| JsError::new(&format!("evidence deserialize: {e}")))?;
-
-    let params = VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
-        ..VerifyParams::default()
-    };
-
-    // None collateral provider: CRL/TCB/QE-identity checks are skipped (same
-    // trade-off verify_az_snp documents), collateral_verified stays false.
-    let result = verify_az_tdx_evidence(&evidence, &params, None)
+    evaluate_az_tdx_impl(evidence_json, expected_report_data, expected_init_data_hash)
         .await
-        .map_err(|e| JsError::new(&format!("az-tdx verify: {e}")))?;
-
-    serde_json::to_string_pretty(&result).map_err(|e| JsError::new(&format!("json serialize: {e}")))
+        .map_err(|e| JsError::new(&e))
 }
 
-// Native tests for the RTMR[3] enforcement gate. They run on the host target
-// (`cargo test -p attestation-wasm`), not under wasm — which is exactly why
-// the gate lives in verify_tdx_impl rather than inside the #[wasm_bindgen]
-// wrapper: JsError exposes no readable message off-wasm, and the fail-closed
-// property ("only Some(true) passes") deserves CI coverage rather than
-// by-inspection assurance.
+async fn evaluate_az_tdx_impl(
+    evidence_json: String,
+    expected_report_data: Option<Vec<u8>>,
+    expected_init_data_hash: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let evidence: AzTdxEvidence =
+        serde_json::from_str(&evidence_json).map_err(|e| format!("evidence deserialize: {e}"))?;
+
+    let params = AzTdxParams {
+        tdx: TdxParams {
+            report_data: expected_report_data,
+            init_data: expected_init_data_hash,
+            ..Default::default()
+        },
+    };
+
+    // Offline context: CRL/TCB/QE-identity checks are skipped (same trade-off
+    // evaluate_az_snp documents).
+    let result = AzTdx::verify(&evidence, &params, &Context::offline())
+        .await
+        .map_err(|e| format!("az-tdx verify: {e}"))?;
+
+    to_string(&result_json(&result, "az-tdx", result.passed())?)
+}
+
+// Native tests for the entry points. They run on the host target
+// (`cargo test -p attestation-wasm`), not under wasm — which is why each
+// entry point's body lives in an `_impl` function: JsError exposes no
+// readable message off-wasm.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn rtmr3_pin_matching_register_passes() {
-        let out = verify_tdx_impl(
+        let out = evaluate_tdx_impl(
             v5_evidence_json(),
             None,
             None,
@@ -701,29 +722,30 @@ mod tests {
         .expect("matching RTMR[3] pin must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
-            json["rtmr3_match"],
+            json["rtmr_match"][3],
             serde_json::json!(true),
             "result must record the comparison"
         );
+        assert_eq!(json["passed"], serde_json::json!(true));
     }
 
     #[tokio::test]
-    async fn rtmr3_pin_mismatch_fails_closed() {
-        let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]), None)
+    async fn rtmr3_pin_mismatch_does_not_pass() {
+        let out = evaluate_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; 48]), None)
             .await
-            .expect_err("wrong RTMR[3] pin must fail");
-        assert!(
-            err.contains("RTMR[3] does not match expected_rtmr3"),
-            "failure must name the pin, got: {err}"
-        );
+            .expect("a pin mismatch is a value, not a throw");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["rtmr_match"][3], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
     }
 
     #[tokio::test]
     async fn rtmr3_pin_wrong_length_rejected_before_verification() {
         for len in [0usize, 47, 49, 96] {
-            let err = verify_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; len]), None)
-                .await
-                .expect_err("wrong-length pin must be rejected");
+            let err =
+                evaluate_tdx_impl(v5_evidence_json(), None, None, Some(vec![0xAA; len]), None)
+                    .await
+                    .expect_err("wrong-length pin must be rejected");
             assert!(
                 err.contains("want 48"),
                 "length {len}: error must name the size contract, got: {err}"
@@ -762,28 +784,29 @@ mod tests {
 
     #[test]
     fn snp_valid_evidence_passes_without_collateral() {
-        let out = verify_snp_impl(&snp_evidence_json(), "genoa", None, None, None)
+        let out = evaluate_snp_impl(&snp_evidence_json(), "genoa", None, None, None)
             .expect("live genoa fixture must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(json["signature_valid"], serde_json::json!(true));
+        assert_eq!(json["passed"], serde_json::json!(true));
         assert_eq!(json["report_version"], serde_json::json!(5));
-        assert_eq!(
-            json["collateral_verified"],
-            serde_json::json!(false),
-            "no CRL supplied ⇒ revocation was not checked, and the result must say so"
-        );
+    }
+
+    #[test]
+    fn snp_oversize_report_data_throws() {
+        evaluate_snp_impl(&snp_evidence_json(), "genoa", Some(vec![0; 65]), None, None)
+            .expect_err("report_data over 64 bytes is invalid params, not a mismatch");
     }
 
     #[test]
     fn snp_wrong_generation_fails_chain() {
-        let err = verify_snp_impl(&snp_evidence_json(), "milan", None, None, None)
+        let err = evaluate_snp_impl(&snp_evidence_json(), "milan", None, None, None)
             .expect_err("declared generation must be authenticated by the VEK chain");
         assert!(err.contains("VEK endorsement"), "got: {err}");
     }
 
     #[test]
     fn snp_min_tcb_at_floor_passes() {
-        verify_snp_impl(
+        evaluate_snp_impl(
             &snp_evidence_json(),
             "genoa",
             None,
@@ -794,22 +817,24 @@ mod tests {
     }
 
     #[test]
-    fn snp_min_tcb_below_floor_fails_closed() {
-        let err = verify_snp_impl(
+    fn snp_min_tcb_below_floor_does_not_pass() {
+        let out = evaluate_snp_impl(
             &snp_evidence_json(),
             "genoa",
             None,
             Some(reported_tcb_json(1)),
             None,
         )
-        .expect_err("below-floor TCB must fail closed");
-        assert!(err.contains("below minimum"), "got: {err}");
+        .expect("a TCB below the floor is a value, not a throw");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["min_tcb_met"], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
     }
 
     #[test]
     fn snp_malformed_min_tcb_rejected_before_verification() {
         for bad in ["not json", "{}", r#"{"bootloader": 3}"#] {
-            let err = verify_snp_impl(
+            let err = evaluate_snp_impl(
                 &snp_evidence_json(),
                 "genoa",
                 None,
@@ -823,7 +848,7 @@ mod tests {
 
     #[test]
     fn snp_garbage_crl_rejected() {
-        let err = verify_snp_impl(
+        let err = evaluate_snp_impl(
             &snp_evidence_json(),
             "genoa",
             None,
@@ -837,44 +862,36 @@ mod tests {
     // --- az-snp entry point: min-TCB floor and CRL pass-through ---
 
     #[test]
-    fn az_snp_min_tcb_below_floor_fails_closed() {
+    fn az_snp_min_tcb_below_floor_does_not_pass() {
         let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
         let evidence = evidence["evidence"].to_string();
         // A floor above any real Milan microcode SPL.
         let floor = r#"{"bootloader":0,"tee":0,"snp":0,"microcode":255}"#;
-        let err = verify_az_snp_impl(&evidence, None, None, Some(floor.to_string()), None)
-            .expect_err("below-floor TCB must fail closed on az-snp too");
-        assert!(err.contains("below minimum"), "got: {err}");
+        let out = evaluate_az_snp_impl(&evidence, None, None, Some(floor.to_string()), None)
+            .expect("a TCB below the floor is a value on az-snp too");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["min_tcb_met"], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
     }
 
     #[test]
     fn az_snp_garbage_crl_rejected() {
         let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
         let evidence = evidence["evidence"].to_string();
-        let err = verify_az_snp_impl(&evidence, None, None, None, Some(vec![0xAB; 64]))
+        let err = evaluate_az_snp_impl(&evidence, None, None, None, Some(vec![0xAB; 64]))
             .expect_err("unparseable CRL must fail closed");
         assert!(err.contains("CRL check"), "got: {err}");
     }
 
-    #[test]
-    fn az_snp_no_collateral_surfaces_false() {
-        let evidence: serde_json::Value = serde_json::from_str(AZ_SNP_MILAN_V3).unwrap();
-        let evidence = evidence["evidence"].to_string();
-        let out = verify_az_snp_impl(&evidence, None, None, None, None)
-            .expect("milan v3 fixture must verify");
-        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(json["collateral_verified"], serde_json::json!(false));
-    }
-
     #[tokio::test]
-    async fn no_pin_verifies_and_omits_rtmr3_match() {
-        let out = verify_tdx_impl(v5_evidence_json(), None, None, None, None)
+    async fn no_pin_leaves_rtmr3_match_null() {
+        let out = evaluate_tdx_impl(v5_evidence_json(), None, None, None, None)
             .await
             .expect("unpinned verification must still pass");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(
-            json.get("rtmr3_match").is_none(),
-            "no pin ⇒ no rtmr3_match field, so \"never checked\" cannot read as \"held\""
+            json["rtmr_match"][3].is_null(),
+            "no pin ⇒ null, so \"never checked\" cannot read as \"held\""
         );
     }
 
@@ -913,7 +930,7 @@ mod tests {
 
     #[tokio::test]
     async fn tdx_collateral_surfaces_the_tcb_status() {
-        let out = verify_tdx_impl(
+        let out = evaluate_tdx_impl(
             c8s_evidence_json(),
             None,
             None,
@@ -923,24 +940,24 @@ mod tests {
         .await
         .expect("current collateral must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(json["collateral_verified"], serde_json::json!(true));
+        assert_eq!(json["crl_ok"], serde_json::json!(true));
         assert_eq!(json["tcb_status"]["tcb_status"], "UpToDate");
         assert_eq!(json["tcb_status"]["fmspc"], "00a06d080000");
     }
 
     #[tokio::test]
     async fn tdx_without_collateral_reports_none_evaluated() {
-        let out = verify_tdx_impl(c8s_evidence_json(), None, None, None, None)
+        let out = evaluate_tdx_impl(c8s_evidence_json(), None, None, None, None)
             .await
             .expect("evidence must verify");
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(json["collateral_verified"], serde_json::json!(false));
+        assert!(json["crl_ok"].is_null());
         assert!(json["tcb_status"].is_null());
     }
 
     #[tokio::test]
     async fn tdx_collateral_failure_is_tagged() {
-        let err = verify_tdx_impl(
+        let err = evaluate_tdx_impl(
             c8s_evidence_json(),
             None,
             None,
@@ -953,8 +970,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tdx_evidence_failure_is_not_tagged_as_collateral() {
-        let err = verify_tdx_impl(
+    async fn tdx_wrong_report_data_does_not_pass() {
+        let out = evaluate_tdx_impl(
             c8s_evidence_json(),
             Some(vec![0xFF; 64]),
             None,
@@ -962,8 +979,10 @@ mod tests {
             Some(collateral_json(COLLATERAL_AT).to_string()),
         )
         .await
-        .expect_err("wrong report_data must fail");
-        assert!(!err.contains("TDX collateral"), "{err}");
+        .expect("a report_data mismatch is a value, not a throw");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["report_data_match"], serde_json::json!(false));
+        assert_eq!(json["passed"], serde_json::json!(false));
     }
 
     #[tokio::test]
@@ -975,7 +994,7 @@ mod tests {
             cc_eventlog: None,
         })
         .unwrap();
-        let err = verify_tdx_impl(
+        let err = evaluate_tdx_impl(
             evidence,
             None,
             None,
@@ -992,9 +1011,41 @@ mod tests {
     async fn tdx_malformed_collateral_rejected_before_verification() {
         let mut c = collateral_json(COLLATERAL_AT);
         c["extra"] = serde_json::json!(1);
-        let err = verify_tdx_impl(c8s_evidence_json(), None, None, None, Some(c.to_string()))
+        let err = evaluate_tdx_impl(c8s_evidence_json(), None, None, None, Some(c.to_string()))
             .await
             .expect_err("unknown field must be rejected");
         assert!(err.contains("tdx collateral deserialize"), "{err}");
+    }
+
+    fn tdx_envelope() -> String {
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": { "quote": BASE64.encode(V5_QUOTE) },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn evaluate_accepts_only_the_listed_platforms() {
+        let accepted = |platforms: &[&str]| {
+            evaluate_impl(
+                tdx_envelope(),
+                platforms.iter().map(|p| p.to_string()).collect(),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let out = accepted(&["tdx"]).await.expect("tdx accepted");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["platform"], "tdx");
+        assert_eq!(json["passed"], true);
+
+        accepted(&["snp", "az-tdx"])
+            .await
+            .expect_err("tdx evidence when only snp and az-tdx are accepted");
+        accepted(&[]).await.expect_err("no accepted platform");
+        accepted(&["sgx"]).await.expect_err("unknown platform tag");
     }
 }

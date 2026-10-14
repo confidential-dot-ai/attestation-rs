@@ -1,4 +1,5 @@
-use attestation_api::token::issuer::TokenIssuer;
+use attestation_api::api::verify::PoliciesInput;
+use attestation_api::token::issuer::{PassedVerification, TokenIssuer};
 
 #[test]
 fn config_parse_explicit_values() {
@@ -56,37 +57,33 @@ fn token_issuer_produces_valid_jwt() {
     )
     .unwrap();
 
-    let result = attestation::VerificationResult {
-        platform: attestation::PlatformType::Snp,
-        signature_valid: true,
-        claims: attestation::Claims {
-            launch_digest: String::new(),
-            report_data: vec![],
-            signed_data: vec![],
-            init_data: vec![],
-            tcb: attestation::TcbInfo::Snp {
-                bootloader: 0,
-                tee: 0,
-                snp: 0,
-                microcode: 0,
-                fmc: None,
-            },
-            platform_data: serde_json::json!({}),
-            nvidia_gpu: None,
+    let mut verified_json = serde_json::json!({
+        "platform": "snp",
+        "claims": {
+            "launch_digest": "",
+            "report_data": "",
+            "signed_data": "",
+            "init_data": "",
+            "tcb": { "type": "Snp", "bootloader": 0, "tee": 0, "snp": 0, "microcode": 0 },
+            "platform_data": {},
         },
-        report_data_match: Some(true),
-        init_data_match: None,
-        collateral_verified: false,
-        tcb_status: None,
-        mrtd_match: None,
-        rtmr0_match: None,
-        rtmr1_match: None,
-        rtmr2_match: None,
-        rtmr3_match: None,
-        launch_digest_match: None,
-    };
+        "report_data_match": true,
+        "host_data_match": null,
+        "launch_digest_match": null,
+        "debug": false,
+        "allow_debug": false,
+        "vmpl": 0,
+        "max_vmpl": 0,
+        "reported_tcb": { "bootloader": 0, "tee": 0, "snp": 0, "microcode": 0 },
+        "min_tcb_met": null,
+    });
+    let verified: attestation::Verified = serde_json::from_value(verified_json.clone()).unwrap();
+    let passed = PassedVerification::new(&verified).expect("verification passed");
+    let token = issuer.issue(&passed, &PoliciesInput::default()).unwrap();
 
-    let token = issuer.issue(&result).unwrap();
+    verified_json["report_data_match"] = false.into();
+    let failed: attestation::Verified = serde_json::from_value(verified_json).unwrap();
+    assert!(PassedVerification::new(&failed).is_none());
 
     // Decode JWT parts and verify structure + signature
     let parts: Vec<&str> = token.split('.').collect();
@@ -105,9 +102,8 @@ fn token_issuer_produces_valid_jwt() {
     let claims: serde_json::Value =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
     assert_eq!(claims["iss"], "test-issuer");
-    assert_eq!(claims["signature_valid"], true);
-    assert_eq!(claims["report_data_match"], true);
-    assert_eq!(claims["collateral_verified"], false);
+    assert_eq!(claims["platform"], "snp");
+    assert_eq!(claims["result"]["report_data_match"], true);
     assert!(claims["exp"].as_u64().unwrap() > claims["iat"].as_u64().unwrap());
 
     // Verify kid in header matches JWKS

@@ -5,11 +5,16 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
 
-#[cfg(all(feature = "attest", target_os = "linux"))]
-use clap::ValueEnum;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use attestation::types::VerifyParams;
+use attestation::{PlatformType, Policies, SnpParams, TdxParams};
+
+const EXIT_CODES: &str = "\
+Exit codes:
+  0  passed: genuine, and every rule in the flags held
+  1  did not pass, or the evidence is not genuine
+  2  usage error or invalid params
+  3  collateral unavailable (AMD KDS, Intel PCS, NRAS); retrying may help";
 
 #[derive(Parser)]
 #[command(
@@ -28,6 +33,7 @@ enum Commands {
     #[cfg(all(feature = "attest", target_os = "linux"))]
     Attest(AttestArgs),
     /// Verify attestation evidence.
+    #[command(after_help = EXIT_CODES)]
     Verify(VerifyArgs),
     /// Detect the current TEE platform (Linux only).
     #[cfg(all(feature = "attest", target_os = "linux"))]
@@ -78,11 +84,25 @@ struct VerifyArgs {
     #[arg(short, long)]
     evidence: Option<PathBuf>,
 
+    /// Platform to accept; repeat to accept several. Without it, the
+    /// platform-specific flags decide (--expected-mrtd/--expected-rtmrN: the
+    /// TDX platforms, --expected-launch-digest: the SNP platforms). Evidence
+    /// for any other platform is refused.
+    #[arg(short, long)]
+    platform: Vec<PlatformArg>,
+
+    /// Verify without network access: checks that need fetched collateral
+    /// are skipped, and evidence that cannot be verified without a fetch
+    /// exits 3.
+    #[arg(long)]
+    offline: bool,
+
     /// Expected report data (hex-encoded) for nonce binding verification.
     #[arg(long)]
     expected_report_data: Option<String>,
 
-    /// Expected init data hash (hex-encoded) for init data binding verification.
+    /// Expected init data hash (hex-encoded): TDX MRCONFIGID, SNP HOST_DATA,
+    /// or the vTPM PCR[8] init-data hash on Azure.
     #[arg(long)]
     expected_init_data: Option<String>,
 
@@ -129,8 +149,7 @@ struct VerifyArgs {
     nvidia_gpu_expected_archs: Option<Vec<String>>,
 }
 
-#[cfg(all(feature = "attest", target_os = "linux"))]
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum PlatformArg {
     Snp,
     Tdx,
@@ -140,9 +159,8 @@ enum PlatformArg {
     GcpTdx,
 }
 
-#[cfg(all(feature = "attest", target_os = "linux"))]
 impl PlatformArg {
-    fn to_platform_type(&self) -> attestation::PlatformType {
+    fn to_platform_type(self) -> attestation::PlatformType {
         match self {
             PlatformArg::Snp => attestation::PlatformType::Snp,
             PlatformArg::Tdx => attestation::PlatformType::Tdx,
@@ -302,182 +320,248 @@ async fn cmd_attest(args: AttestArgs) {
     }
 }
 
-async fn cmd_verify(args: VerifyArgs) {
-    let evidence_json = match read_evidence(&args) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
-    };
+/// Print `msg` and exit 2, the exit code clap uses for usage errors.
+fn usage_error(msg: &str) -> ! {
+    eprintln!("Error: {msg}");
+    process::exit(2);
+}
 
-    let mut params = VerifyParams::default();
+fn parse_hex(hex_str: &str, flag: &str) -> Vec<u8> {
+    hex::decode(hex_str).unwrap_or_else(|e| usage_error(&format!("invalid hex for --{flag}: {e}")))
+}
 
-    if let Some(hex_str) = &args.expected_report_data {
-        match hex::decode(hex_str) {
-            Ok(data) => params.expected_report_data = Some(data),
-            Err(e) => {
-                eprintln!("Error: invalid hex for --expected-report-data: {e}");
-                process::exit(1);
-            }
-        }
-    }
+fn parse_digest(hex_str: &str, flag: &str) -> [u8; 48] {
+    let bytes = parse_hex(hex_str, flag);
+    <[u8; 48]>::try_from(bytes.as_slice()).unwrap_or_else(|_| {
+        usage_error(&format!(
+            "--{flag} must be 48 bytes (96 hex chars), got {} bytes",
+            bytes.len()
+        ))
+    })
+}
 
-    if let Some(hex_str) = &args.expected_init_data {
-        match hex::decode(hex_str) {
-            Ok(data) => params.expected_init_data_hash = Some(data),
-            Err(e) => {
-                eprintln!("Error: invalid hex for --expected-init-data: {e}");
-                process::exit(1);
-            }
-        }
-    }
+const TDX_PLATFORMS: [PlatformType; 3] =
+    [PlatformType::Tdx, PlatformType::AzTdx, PlatformType::GcpTdx];
+const SNP_PLATFORMS: [PlatformType; 3] =
+    [PlatformType::Snp, PlatformType::AzSnp, PlatformType::GcpSnp];
 
-    let parse_digest = |hex_str: &str, name: &str| -> [u8; 48] {
-        let bytes = match hex::decode(hex_str) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("Error: invalid hex for --{name}: {e}");
-                process::exit(1);
-            }
-        };
-        match <[u8; 48]>::try_from(bytes.as_slice()) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!(
-                    "Error: --{name} must be 48 bytes (96 hex chars), got {} bytes",
-                    bytes.len()
-                );
-                process::exit(1);
-            }
-        }
-    };
+/// The platforms to accept: `--platform`, or else the platforms the
+/// platform-specific flags apply to. Never the evidence's own tag, which is
+/// an attester claim.
+fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
+    if !args.platform.is_empty() {
+        return args.platform.iter().map(|p| p.to_platform_type()).collect();
+    }
+    let tdx_pins = args.expected_mrtd.is_some()
+        || [
+            &args.expected_rtmr0,
+            &args.expected_rtmr1,
+            &args.expected_rtmr2,
+            &args.expected_rtmr3,
+        ]
+        .iter()
+        .any(|r| r.is_some());
+    match (tdx_pins, args.expected_launch_digest.is_some()) {
+        (true, false) => TDX_PLATFORMS.to_vec(),
+        (false, true) => SNP_PLATFORMS.to_vec(),
+        (true, true) => usage_error(
+            "--expected-launch-digest (SNP) and --expected-mrtd/--expected-rtmrN (TDX) \
+             do not apply to the same evidence",
+        ),
+        (false, false) => usage_error(
+            "say which platform the evidence must come from with --platform \
+             (or pin --expected-mrtd or --expected-launch-digest)",
+        ),
+    }
+}
 
-    if let Some(hex_str) = &args.expected_mrtd {
-        params.expected_mrtd = Some(parse_digest(hex_str, "expected-mrtd"));
-    }
-    if let Some(hex_str) = &args.expected_launch_digest {
-        params.expected_launch_digest = Some(parse_digest(hex_str, "expected-launch-digest"));
-    }
-    if let Some(h) = &args.expected_rtmr0 {
-        params.expected_rtmr0 = Some(parse_digest(h, "expected-rtmr0"));
-    }
-    if let Some(h) = &args.expected_rtmr1 {
-        params.expected_rtmr1 = Some(parse_digest(h, "expected-rtmr1"));
-    }
-    if let Some(h) = &args.expected_rtmr2 {
-        params.expected_rtmr2 = Some(parse_digest(h, "expected-rtmr2"));
-    }
-    if let Some(h) = &args.expected_rtmr3 {
-        params.expected_rtmr3 = Some(parse_digest(h, "expected-rtmr3"));
-    }
+/// Build one policy per accepted platform from the flags. A pin an accepted
+/// platform cannot answer (`--expected-mrtd` with `--platform snp`) is a usage
+/// error.
+fn build_policies(args: &VerifyArgs) -> Policies {
+    let platforms = accepted_platforms(args);
+    let report_data = args
+        .expected_report_data
+        .as_deref()
+        .map(|h| parse_hex(h, "expected-report-data"));
+    let init_data = args
+        .expected_init_data
+        .as_deref()
+        .map(|h| parse_hex(h, "expected-init-data"));
+    let mrtd = args
+        .expected_mrtd
+        .as_deref()
+        .map(|h| parse_digest(h, "expected-mrtd"));
+    let rtmr = [
+        (&args.expected_rtmr0, "expected-rtmr0"),
+        (&args.expected_rtmr1, "expected-rtmr1"),
+        (&args.expected_rtmr2, "expected-rtmr2"),
+        (&args.expected_rtmr3, "expected-rtmr3"),
+    ]
+    .map(|(v, flag)| v.as_deref().map(|h| parse_digest(h, flag)));
+    let launch_digest = args
+        .expected_launch_digest
+        .as_deref()
+        .map(|h| parse_digest(h, "expected-launch-digest"));
+
+    #[allow(unused_mut)]
+    let mut policies = Policies::default();
 
     #[cfg(feature = "nvidia-gpu")]
-    {
-        if let Some(hex_str) = &args.nvidia_gpu_user_nonce {
-            let nonce = match hex::decode(hex_str) {
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("Error: invalid hex for --nvidia-gpu-user-nonce: {e}");
-                    process::exit(1);
-                }
-            };
-            // The GPU nonce binding requires expected_report_data == user_nonce;
+    let report_data = {
+        let mut report_data = report_data;
+        let gpu_flags_given = args.nvidia_gpu_user_nonce.is_some()
+            || args.nvidia_gpu_required
+            || args.nvidia_gpu_expected_archs.is_some();
+        if gpu_flags_given {
+            let user_nonce = args
+                .nvidia_gpu_user_nonce
+                .as_deref()
+                .map(|h| parse_hex(h, "nvidia-gpu-user-nonce"));
+            // The GPU nonce binding requires report_data == user_nonce;
             // default the former to the nonce when the caller did not pin it.
-            if params.expected_report_data.is_none() {
-                params.expected_report_data = Some(nonce.clone());
+            if report_data.is_none() {
+                report_data.clone_from(&user_nonce);
             }
-            params.nvidia_gpu.user_nonce = Some(nonce);
-        }
-        params.nvidia_gpu.required = args.nvidia_gpu_required;
-        if let Some(archs) = &args.nvidia_gpu_expected_archs {
-            let mut parsed = Vec::with_capacity(archs.len());
-            for a in archs {
-                let arch = match a.to_ascii_uppercase().as_str() {
-                    "HOPPER" => attestation::NvidiaGpuArch::Hopper,
-                    "BLACKWELL" => attestation::NvidiaGpuArch::Blackwell,
-                    "LS10" => attestation::NvidiaGpuArch::Ls10,
-                    other => {
-                        eprintln!(
-                            "Error: unknown arch for --nvidia-gpu-expected-archs: {other} \
+            let expected_archs = args.nvidia_gpu_expected_archs.as_ref().map(|archs| {
+                archs
+                    .iter()
+                    .map(|a| match a.to_ascii_uppercase().as_str() {
+                        "HOPPER" => attestation::NvidiaGpuArch::Hopper,
+                        "BLACKWELL" => attestation::NvidiaGpuArch::Blackwell,
+                        "LS10" => attestation::NvidiaGpuArch::Ls10,
+                        other => usage_error(&format!(
+                            "unknown arch for --nvidia-gpu-expected-archs: {other} \
                              (want HOPPER, BLACKWELL, or LS10)"
-                        );
-                        process::exit(1);
-                    }
-                };
-                parsed.push(arch);
-            }
-            params.nvidia_gpu.expected_archs = Some(parsed);
+                        )),
+                    })
+                    .collect()
+            });
+            policies.gpu = Some(attestation::NvidiaGpuParams {
+                user_nonce,
+                required: args.nvidia_gpu_required,
+                expected_archs,
+                ..Default::default()
+            });
+        }
+        report_data
+    };
+
+    for platform in &platforms {
+        let tdx_family = TDX_PLATFORMS.contains(platform);
+        if tdx_family && launch_digest.is_some() {
+            usage_error(&format!(
+                "--expected-launch-digest does not apply to {platform} evidence"
+            ));
+        }
+        if !tdx_family && (mrtd.is_some() || rtmr.iter().any(Option::is_some)) {
+            usage_error(&format!(
+                "--expected-mrtd and --expected-rtmrN do not apply to {platform} evidence"
+            ));
         }
     }
+
+    let tdx = || TdxParams {
+        report_data: report_data.clone(),
+        init_data: init_data.clone(),
+        mrtd,
+        rtmr,
+        ..Default::default()
+    };
+    let snp = || SnpParams {
+        report_data: report_data.clone(),
+        host_data: init_data.clone(),
+        launch_digest,
+        ..Default::default()
+    };
+    for platform in platforms {
+        match platform {
+            PlatformType::Tdx => policies.tdx = Some(tdx()),
+            PlatformType::AzTdx => policies.az_tdx = Some(attestation::AzTdxParams { tdx: tdx() }),
+            PlatformType::GcpTdx => {
+                policies.gcp_tdx = Some(attestation::GcpTdxParams { tdx: tdx() })
+            }
+            PlatformType::Snp => policies.snp = Some(snp()),
+            PlatformType::AzSnp => policies.az_snp = Some(attestation::AzSnpParams { snp: snp() }),
+            PlatformType::GcpSnp => {
+                policies.gcp_snp = Some(attestation::GcpSnpParams { snp: snp() })
+            }
+            // Not a --platform value.
+            PlatformType::Dstack => {}
+        }
+    }
+    policies
+}
+
+async fn cmd_verify(args: VerifyArgs) {
+    let evidence_json = read_evidence(&args).unwrap_or_else(|e| usage_error(&e));
+    let policies = build_policies(&args);
+    let ctx = if args.offline {
+        attestation::Context::offline()
+    } else {
+        attestation::Context::new()
+    };
 
     eprintln!("Verifying evidence...");
 
     let t0 = Instant::now();
-    let result = match attestation::verify(&evidence_json, &params).await {
+    let verified = match attestation::Verifier::new(ctx)
+        .verify(&evidence_json, &policies)
+        .await
+    {
         Ok(r) => r,
+        Err(e) if e.is_invalid_params() => usage_error(&e.to_string()),
+        Err(e) if e.is_retryable() => {
+            eprintln!("Verification could not complete: {e}");
+            process::exit(3);
+        }
         Err(e) => {
             eprintln!("Verification failed: {e}");
             process::exit(1);
         }
     };
     let elapsed = t0.elapsed();
+    let passed = verified.passed();
+
+    let mut json = serde_json::to_value(&verified).expect("failed to serialize result");
+    json["passed"] = passed.into();
 
     // Human-readable summary to stderr
     eprintln!("Verified in {elapsed:?}");
-    eprintln!("  Signature valid: {}", result.signature_valid);
-    eprintln!("  Platform: {}", result.platform);
-    eprintln!("  Launch digest: {}", result.claims.launch_digest);
-    if let Some(m) = result.report_data_match {
-        eprintln!("  Report data match: {m}");
-    }
-    if let Some(m) = result.init_data_match {
-        eprintln!("  Init data match: {m}");
-    }
-    if let Some(m) = result.mrtd_match {
-        eprintln!("  MRTD match: {m}");
-    }
-    if let Some(m) = result.launch_digest_match {
-        eprintln!("  Launch digest match: {m}");
-    }
-    for (i, m) in [
-        result.rtmr0_match,
-        result.rtmr1_match,
-        result.rtmr2_match,
-        result.rtmr3_match,
-    ]
-    .iter()
-    .enumerate()
-    {
-        if let Some(b) = m {
-            eprintln!("  RTMR[{i}] match: {b}");
+    eprintln!("  Platform: {}", verified.platform.platform());
+    eprintln!(
+        "  Launch digest: {}",
+        verified.platform.claims().launch_digest
+    );
+    if let Some(fields) = json.as_object() {
+        for (name, value) in fields {
+            let is_rule =
+                name.ends_with("_match") || name.ends_with("_met") || name.ends_with("_accepted");
+            if is_rule && !value.is_null() {
+                eprintln!("  {name}: {value}");
+            }
         }
     }
     #[cfg(feature = "nvidia-gpu")]
-    if let Some(gpu) = &result.claims.nvidia_gpu {
+    if let Some(gpu) = &verified.gpu {
         eprintln!(
-            "  NVIDIA GPU: overall_ok={} nonce_binding_ok={} devices={}",
-            gpu.overall_ok,
-            gpu.nonce_binding_ok,
-            gpu.devices.len()
+            "  NVIDIA GPU: overall_ok={} passed={} devices={}",
+            gpu.claims.overall_ok,
+            gpu.passed(),
+            gpu.claims.devices.len()
         );
     }
+    eprintln!("  Passed: {passed}");
 
     // Structured JSON to stdout
-    let json = serde_json::to_string_pretty(&result).expect("failed to serialize result");
-    println!("{json}");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json).expect("failed to serialize result")
+    );
 
-    // Exit non-zero on signature failure or any explicit policy mismatch
-    // so CI/deploy gates fail closed when a pinned reference drifts.
-    let policy_failed = matches!(result.report_data_match, Some(false))
-        || matches!(result.init_data_match, Some(false))
-        || matches!(result.mrtd_match, Some(false))
-        || matches!(result.launch_digest_match, Some(false))
-        || matches!(result.rtmr0_match, Some(false))
-        || matches!(result.rtmr1_match, Some(false))
-        || matches!(result.rtmr2_match, Some(false))
-        || matches!(result.rtmr3_match, Some(false));
-    if !result.signature_valid || policy_failed {
+    // Exit non-zero when any rule failed, so CI/deploy gates fail closed when
+    // a pinned reference drifts.
+    if !passed {
         process::exit(1);
     }
 }

@@ -61,14 +61,16 @@ impl NrasProvider for CachedNrasProvider {
     async fn jwks(&self, arch: NvidiaGpuArch) -> attestation::Result<Jwks> {
         let url = self.jwks_url_for(arch);
         self.cache.get_jwks(url, false).await.map_err(|e| {
-            attestation::AttestationError::JwksFetch(format!("cached JWKS fetch: {e}"))
+            attestation::AttestationError::CollateralUnavailable(format!("cached JWKS fetch: {e}"))
         })
     }
 
     async fn jwks_force(&self, arch: NvidiaGpuArch) -> attestation::Result<Jwks> {
         let url = self.jwks_url_for(arch);
         self.cache.get_jwks(url, true).await.map_err(|e| {
-            attestation::AttestationError::JwksFetch(format!("cached JWKS force-refresh: {e}"))
+            attestation::AttestationError::CollateralUnavailable(format!(
+                "cached JWKS force-refresh: {e}"
+            ))
         })
     }
 }

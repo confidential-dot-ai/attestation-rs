@@ -14,7 +14,7 @@ async fn main() {
     use std::env;
     use std::time::Instant;
 
-    use attestation::{PlatformType, VerifyParams};
+    use attestation::{AzSnpParams, PlatformType, Policies, SnpParams};
 
     let nonce: Vec<u8> = env::args()
         .nth(1)
@@ -41,16 +41,26 @@ async fn main() {
 
     eprintln!("Verifying...");
     let t1 = Instant::now();
-    let params = VerifyParams::default();
-    let result = attestation::verify(&evidence_json, &params)
+    let policies = Policies {
+        az_snp: Some(AzSnpParams {
+            snp: SnpParams {
+                report_data: Some(nonce.clone()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    let verified = attestation::verify(&evidence_json, &policies)
         .await
         .expect("verification failed");
     eprintln!("[verify]  {:?}", t1.elapsed());
 
     eprintln!("[total]   {:?}", t0.elapsed());
-    eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Passed: {}", verified.passed());
+    eprintln!(
+        "Launch digest: {}",
+        verified.platform.claims().launch_digest
+    );
 
     println!("{}", String::from_utf8_lossy(&evidence_json));
 }

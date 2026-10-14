@@ -226,7 +226,7 @@ pub fn verify_qe_report_signature(
 ///   - Leaf is signed by Intermediate
 ///
 /// Returns the PCK leaf's ECDSA P-256 public key for QE report signature verification.
-pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
+pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("PEM data is not valid UTF-8: {e}"))
     })?;
@@ -274,7 +274,7 @@ pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
         (&der_certs[1], "PCK Platform CA"),
         (&der_certs[2], "Intel SGX Root CA"),
     ] {
-        verify_cert_validity_period(der, label)?;
+        verify_cert_validity_period(der, label, now)?;
     }
 
     extract_p256_pub_key(&leaf_cert.pub_key_bytes, "PCK leaf")
@@ -292,7 +292,7 @@ pub fn verify_pck_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
 ///   - Root CA self-signs correctly
 ///   - Signing cert is signed by Root CA
 ///   - Both certificates are within their validity periods
-pub fn verify_signing_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
+pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
     })?;
@@ -335,7 +335,7 @@ pub fn verify_signing_cert_chain(pem_data: &[u8]) -> Result<VerifyingKey> {
         (&der_certs[0], "TCB Signing"),
         (&der_certs[1], "Intel SGX Root CA"),
     ] {
-        verify_cert_validity_period(der, label)?;
+        verify_cert_validity_period(der, label, now)?;
     }
 
     extract_p256_pub_key(&signing_cert.pub_key_bytes, "TCB Signing")
@@ -405,14 +405,14 @@ fn verify_cert_signature(cert: &CertData, issuer_key: &VerifyingKey, label: &str
     })
 }
 
-/// Verify a certificate's validity period (NotBefore/NotAfter) against the current time.
-fn verify_cert_validity_period(der: &[u8], label: &str) -> Result<()> {
+/// Verify a certificate's validity period (NotBefore/NotAfter) at `now` (Unix seconds).
+fn verify_cert_validity_period(der: &[u8], label: &str, now: i64) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(der).map_err(|e| {
         AttestationError::CertChainError(format!("{label} x509 parse for validity: {e}"))
     })?;
 
     let validity = cert.validity();
-    let now = x509_parser::time::ASN1Time::now();
+    let now = crate::utils::asn1_time(now)?;
 
     if now < validity.not_before {
         return Err(AttestationError::CertChainError(format!(
@@ -492,26 +492,15 @@ pub fn compute_body_end(quote_bytes: &[u8], quote_version: QuoteVersion) -> Resu
 /// 2. Validate PCK certificate chain to Intel Root CA
 /// 3. Verify QE report signature with PCK leaf key
 /// 4. Verify QE report binding (attestation key bound into QE report)
-/// 5. Check PCK certificate against CRL (if provided)
 ///
-/// `pck_crl_der`: optional DER-encoded CRL from Intel PCS. When provided,
-/// the PCK leaf certificate is checked for revocation.
-pub fn verify_dcap_chain(
-    quote_bytes: &[u8],
-    quote_version: QuoteVersion,
-    pck_crl_der: Option<&[u8]>,
-) -> Result<()> {
+/// Revocation is collateral, checked separately
+/// ([`TdxCollateralProvider::pck_revoked`](crate::collateral::TdxCollateralProvider::pck_revoked)).
+pub fn verify_dcap_chain(quote_bytes: &[u8], quote_version: QuoteVersion, now: i64) -> Result<()> {
     let body_end = compute_body_end(quote_bytes, quote_version)?;
     let auth = parse_auth_data(quote_bytes, body_end)?;
-    let pck_pub_key = verify_pck_cert_chain(auth.pck_cert_chain_pem)?;
+    let pck_pub_key = verify_pck_cert_chain(auth.pck_cert_chain_pem, now)?;
     verify_qe_report_signature(&auth, &pck_pub_key)?;
-    verify_qe_report_binding(&auth)?;
-
-    if let Some(crl_der) = pck_crl_der {
-        check_cert_revocation(auth.pck_cert_chain_pem, crl_der)?;
-    }
-
-    Ok(())
+    verify_qe_report_binding(&auth)
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +765,11 @@ fn extract_integer_value(obj: &x509_parser::der_parser::ber::BerObject) -> Resul
 /// The signature covers the raw JSON string of the `tcbInfo` field.
 /// `signing_certs_pem`: PEM-encoded signing certificate chain from the
 /// `TCB-Info-Issuer-Chain` response header, rooted to Intel SGX Root CA.
-pub fn verify_tcb_info_signature(tcb_info_json: &[u8], signing_certs_pem: &[u8]) -> Result<()> {
+pub fn verify_tcb_info_signature(
+    tcb_info_json: &[u8],
+    signing_certs_pem: &[u8],
+    now: i64,
+) -> Result<()> {
     let envelope: TcbInfoSignedEnvelope<'_> = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info envelope parse: {e}")))?;
 
@@ -787,7 +780,7 @@ pub fn verify_tcb_info_signature(tcb_info_json: &[u8], signing_certs_pem: &[u8])
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info signature parse: {e}")))?;
 
     // Verify the signing cert chain roots to Intel SGX Root CA (2-cert chain)
-    let signing_key = verify_signing_cert_chain(signing_certs_pem)?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem, now)?;
 
     // RawValue preserves the exact bytes Intel signed — no re-serialization.
     signing_key
@@ -815,9 +808,10 @@ pub fn evaluate_tcb_status(
     tee_tcb_svn: &[u8; 16],
     pck_pem: &[u8],
     signing_certs_pem: Option<&[u8]>,
+    now: i64,
 ) -> Result<DcapVerificationStatus> {
     if let Some(certs_pem) = signing_certs_pem {
-        verify_tcb_info_signature(tcb_info_json, certs_pem)?;
+        verify_tcb_info_signature(tcb_info_json, certs_pem, now)?;
     } else {
         log::warn!("TCB Info signing chain not available; skipping signature verification on TCB collateral");
     }
@@ -833,7 +827,7 @@ pub fn evaluate_tcb_status(
         .and_then(|ts| {
             // Intel PCS uses ISO 8601: "2024-03-07T00:00:00Z"
             // Try common formats
-            chrono_parse_is_past(ts)
+            chrono_parse_is_past(ts, now)
         })
         .unwrap_or(false);
     if collateral_expired {
@@ -853,20 +847,17 @@ pub fn evaluate_tcb_status(
     //   (the level applies to all TDX TCB values).
 
     // Pass 1: find the first SGX-matching level index.
-    let sgx_match_idx = wrapper
-        .tcb_info
-        .tcb_levels
-        .iter()
-        .position(|level| {
-            let sgx_comps: Vec<u8> = level.tcb.sgxtcbcomponents.iter().map(|c| c.svn).collect();
-            sgx_comps.len() >= 16
-                && pck_compsvn
-                    .iter()
-                    .zip(sgx_comps.iter())
-                    .all(|(&pck, &lvl)| pck >= lvl)
-                && pck_pcesvn >= level.tcb.pcesvn
-        })
-        .ok_or_else(|| AttestationError::TcbMismatch("no matching SGX TCB level found".into()))?;
+    let Some(sgx_match_idx) = wrapper.tcb_info.tcb_levels.iter().position(|level| {
+        let sgx_comps: Vec<u8> = level.tcb.sgxtcbcomponents.iter().map(|c| c.svn).collect();
+        sgx_comps.len() >= 16
+            && pck_compsvn
+                .iter()
+                .zip(sgx_comps.iter())
+                .all(|(&pck, &lvl)| pck >= lvl)
+            && pck_pcesvn >= level.tcb.pcesvn
+    }) else {
+        return Ok(no_matching_level(fmspc, collateral_expired));
+    };
 
     // Pass 2: find the first TDX-matching level at or after the SGX match.
     let tee_tcb_svn_nonzero = tee_tcb_svn.iter().any(|&v| v != 0);
@@ -881,6 +872,7 @@ pub fn evaluate_tcb_status(
             fmspc,
             advisory_ids: level.advisory_ids.clone(),
             collateral_expired,
+            qe_tcb_status: None,
         });
     }
 
@@ -900,20 +892,32 @@ pub fn evaluate_tcb_status(
                 fmspc,
                 advisory_ids: level.advisory_ids.clone(),
                 collateral_expired,
+                qe_tcb_status: None,
             });
         }
     }
 
-    Err(AttestationError::TcbMismatch(
-        "no matching TDX TCB level found".into(),
-    ))
+    Ok(no_matching_level(fmspc, collateral_expired))
 }
 
-/// Check if an ISO 8601 timestamp (e.g. "2024-03-07T00:00:00Z") is in the past.
-/// Returns `None` if the timestamp cannot be parsed.
-fn chrono_parse_is_past(ts: &str) -> Option<bool> {
+/// The status of a TCB below every listed level: a genuine fact about the
+/// machine, left to the caller's accepted statuses.
+fn no_matching_level(fmspc: String, collateral_expired: bool) -> DcapVerificationStatus {
+    log::warn!("TDX TCB is below every level in the TCB Info");
+    DcapVerificationStatus {
+        tcb_status: TdxTcbStatus::NoMatchingLevel,
+        fmspc,
+        advisory_ids: Vec::new(),
+        collateral_expired,
+        qe_tcb_status: None,
+    }
+}
+
+/// Check if an ISO 8601 timestamp (e.g. "2024-03-07T00:00:00Z") is before
+/// `now` (Unix seconds). Returns `None` if the timestamp cannot be parsed.
+fn chrono_parse_is_past(ts: &str, now: i64) -> Option<bool> {
     let dt = chrono::DateTime::parse_from_rfc3339(ts.trim()).ok()?;
-    Some(chrono::Utc::now() > dt)
+    Some(now > dt.timestamp())
 }
 
 /// Parse a TCB status string from Intel PCS into our enum.
@@ -926,8 +930,8 @@ fn parse_tcb_status(s: &str) -> Result<TdxTcbStatus> {
         "OutOfDate" => Ok(TdxTcbStatus::OutOfDate),
         "OutOfDateConfigurationNeeded" => Ok(TdxTcbStatus::OutOfDateConfigurationNeeded),
         "Revoked" => Ok(TdxTcbStatus::Revoked),
-        _ => Err(AttestationError::TcbMismatch(format!(
-            "unknown TCB status: {s}"
+        _ => Err(AttestationError::CollateralUnavailable(format!(
+            "unknown TCB status in Intel collateral: {s}"
         ))),
     }
 }
@@ -1014,30 +1018,25 @@ const QE_MRSIGNER_OFFSET: usize = 128;
 const QE_ISVPRODID_OFFSET: usize = 256;
 const QE_ISVSVN_OFFSET: usize = 258;
 
-/// Verify the Quoting Enclave identity against Intel's published QE Identity.
-///
-/// Checks that the QE report fields (MRSIGNER, ISVPRODID, ISVSVN,
-/// MISCSELECT, ATTRIBUTES) match the values published by Intel.
-///
-/// `qe_report_body`: 384-byte QE report body from the quote auth data.
-/// `qe_identity_json`: raw JSON response from Intel PCS QE Identity endpoint.
-/// `signing_certs_pem`: optional PEM-encoded signing certificate chain from the
-/// `SGX-Enclave-Identity-Issuer-Chain` response header. When provided,
-/// the Intel signature is verified before use.
-pub fn verify_qe_identity(
-    qe_report_body: &[u8],
+/// Intel's published QE Identity, signature-checked and decoded.
+pub struct QeIdentity {
+    mrsigner: Vec<u8>,
+    isvprodid: u16,
+    miscselect: [u8; 4],
+    miscselect_mask: [u8; 4],
+    attributes: [u8; 16],
+    attributes_mask: [u8; 16],
+    tcb_levels: Vec<QeIdentityTcbLevel>,
+}
+
+/// Parse Intel's QE Identity and, when `signing_certs_pem` (the
+/// `SGX-Enclave-Identity-Issuer-Chain` response header) is given, verify its
+/// signature first. Errors here are about the collateral, not the quote.
+pub fn parse_qe_identity(
     qe_identity_json: &[u8],
     signing_certs_pem: Option<&[u8]>,
-) -> Result<()> {
-    if qe_report_body.len() < QE_REPORT_BODY_SIZE {
-        return Err(AttestationError::QuoteParseFailed(format!(
-            "QE report body too short: {} bytes, expected {}",
-            qe_report_body.len(),
-            QE_REPORT_BODY_SIZE
-        )));
-    }
-
-    // Parse the envelope and optionally verify signature
+    now: i64,
+) -> Result<QeIdentity> {
     let envelope: QeIdentityEnvelope<'_> =
         serde_json::from_slice(qe_identity_json).map_err(|e| {
             AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
@@ -1052,7 +1051,7 @@ pub fn verify_qe_identity(
             AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
         })?;
 
-        let signing_key = verify_signing_cert_chain(certs_pem)?;
+        let signing_key = verify_signing_cert_chain(certs_pem, now)?;
 
         // RawValue preserves the exact bytes Intel signed — no re-serialization.
         signing_key
@@ -1066,11 +1065,47 @@ pub fn verify_qe_identity(
         log::warn!("QE Identity signing chain not available; skipping signature verification on QE Identity collateral");
     }
 
-    // Parse the identity fields from the raw JSON
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
         .map_err(|e| AttestationError::CertChainError(format!("QE Identity fields parse: {e}")))?;
+    fn bytes<const N: usize>(hex_value: &str, name: &str) -> Result<[u8; N]> {
+        hex::decode(hex_value)
+            .ok()
+            .and_then(|b| <[u8; N]>::try_from(b).ok())
+            .ok_or_else(|| {
+                AttestationError::CertChainError(format!("QE Identity {name} is not {N} hex bytes"))
+            })
+    }
+    Ok(QeIdentity {
+        mrsigner: hex::decode(&identity.mrsigner).map_err(|e| {
+            AttestationError::CertChainError(format!("QE Identity MRSIGNER hex decode: {e}"))
+        })?,
+        isvprodid: identity.isvprodid,
+        miscselect: bytes(&identity.miscselect, "MISCSELECT")?,
+        miscselect_mask: bytes(&identity.miscselect_mask, "MISCSELECT_MASK")?,
+        attributes: bytes(&identity.attributes, "ATTRIBUTES")?,
+        attributes_mask: bytes(&identity.attributes_mask, "ATTRIBUTES_MASK")?,
+        tcb_levels: identity.tcb_levels,
+    })
+}
 
-    // Extract QE report fields at known offsets
+/// Check the quote's Quoting Enclave against Intel's QE Identity and return
+/// the QE's TCB status.
+///
+/// MRSIGNER, ISVPRODID, MISCSELECT and ATTRIBUTES must match: a mismatch
+/// means the quote was not produced by Intel's QE (`Err`). The ISVSVN only
+/// grades the QE: its TCB status (`NoMatchingLevel` when below every level)
+/// is a value for the caller's accepted statuses.
+///
+/// `qe_report_body`: 384-byte QE report body from the quote auth data.
+pub fn check_qe_report(qe_report_body: &[u8], identity: &QeIdentity) -> Result<TdxTcbStatus> {
+    if qe_report_body.len() < QE_REPORT_BODY_SIZE {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "QE report body too short: {} bytes, expected {}",
+            qe_report_body.len(),
+            QE_REPORT_BODY_SIZE
+        )));
+    }
+
     let qe_miscselect = &qe_report_body[QE_MISCSELECT_OFFSET..QE_MISCSELECT_OFFSET + 4];
     let qe_attributes = &qe_report_body[QE_ATTRIBUTES_OFFSET..QE_ATTRIBUTES_OFFSET + 16];
     let qe_mrsigner = &qe_report_body[QE_MRSIGNER_OFFSET..QE_MRSIGNER_OFFSET + 32];
@@ -1083,92 +1118,72 @@ pub fn verify_qe_identity(
         qe_report_body[QE_ISVSVN_OFFSET + 1],
     ]);
 
-    // Check MRSIGNER (exact match)
-    let expected_mrsigner = hex::decode(&identity.mrsigner).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MRSIGNER hex decode: {e}"))
-    })?;
-    if !crate::utils::constant_time_eq(qe_mrsigner, &expected_mrsigner) {
+    if !crate::utils::constant_time_eq(qe_mrsigner, &identity.mrsigner) {
         return Err(AttestationError::CertChainError(
             "QE MRSIGNER does not match Intel QE Identity".into(),
         ));
     }
-
-    // Check ISVPRODID (exact match)
     if qe_isvprodid != identity.isvprodid {
         return Err(AttestationError::CertChainError(format!(
             "QE ISVPRODID {} does not match expected {}",
             qe_isvprodid, identity.isvprodid
         )));
     }
-
-    // Check MISCSELECT (masked comparison)
-    let expected_miscselect = hex::decode(&identity.miscselect).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MISCSELECT hex decode: {e}"))
-    })?;
-    let miscselect_mask = hex::decode(&identity.miscselect_mask).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity MISCSELECT_MASK hex decode: {e}"))
-    })?;
-    if expected_miscselect.len() != 4 || miscselect_mask.len() != 4 {
-        return Err(AttestationError::CertChainError(format!(
-            "QE Identity MISCSELECT/mask unexpected length: {}/{}",
-            expected_miscselect.len(),
-            miscselect_mask.len()
-        )));
+    let masked_eq = |actual: &[u8], expected: &[u8], mask: &[u8]| {
+        actual
+            .iter()
+            .zip(expected)
+            .zip(mask)
+            .all(|((a, e), m)| a & m == e & m)
+    };
+    if !masked_eq(
+        qe_miscselect,
+        &identity.miscselect,
+        &identity.miscselect_mask,
+    ) {
+        return Err(AttestationError::CertChainError(
+            "QE MISCSELECT does not match Intel QE Identity (masked)".into(),
+        ));
     }
-    for i in 0..4 {
-        if (qe_miscselect[i] & miscselect_mask[i]) != (expected_miscselect[i] & miscselect_mask[i])
-        {
-            return Err(AttestationError::CertChainError(
-                "QE MISCSELECT does not match Intel QE Identity (masked)".into(),
-            ));
+    if !masked_eq(
+        qe_attributes,
+        &identity.attributes,
+        &identity.attributes_mask,
+    ) {
+        return Err(AttestationError::CertChainError(
+            "QE ATTRIBUTES does not match Intel QE Identity (masked)".into(),
+        ));
+    }
+
+    // The first level whose ISVSVN the QE meets grades it.
+    match identity
+        .tcb_levels
+        .iter()
+        .find(|level| qe_isvsvn >= level.tcb.isvsvn)
+    {
+        Some(level) => parse_tcb_status(&level.tcb_status),
+        None => {
+            log::warn!("QE ISVSVN {qe_isvsvn} is below every level in the QE Identity");
+            Ok(TdxTcbStatus::NoMatchingLevel)
         }
     }
+}
 
-    // Check ATTRIBUTES (masked comparison)
-    let expected_attributes = hex::decode(&identity.attributes).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity ATTRIBUTES hex decode: {e}"))
-    })?;
-    let attributes_mask = hex::decode(&identity.attributes_mask).map_err(|e| {
-        AttestationError::CertChainError(format!("QE Identity ATTRIBUTES_MASK hex decode: {e}"))
-    })?;
-    if expected_attributes.len() != 16 || attributes_mask.len() != 16 {
-        return Err(AttestationError::CertChainError(format!(
-            "QE Identity ATTRIBUTES/mask unexpected length: {}/{}",
-            expected_attributes.len(),
-            attributes_mask.len()
-        )));
+/// The platform TCB status adjusted for the QE's TCB status, as Intel's QVL
+/// combines them: a revoked or unlisted QE wins, and an out-of-date QE makes
+/// the platform out of date.
+pub fn combine_tcb_status(platform: TdxTcbStatus, qe: TdxTcbStatus) -> TdxTcbStatus {
+    use TdxTcbStatus::*;
+    match (platform, qe) {
+        (Revoked | NoMatchingLevel, _) => platform,
+        (_, Revoked | NoMatchingLevel) => qe,
+        (UpToDate | SWHardeningNeeded, OutOfDate | OutOfDateConfigurationNeeded) => OutOfDate,
+        (
+            ConfigurationNeeded | ConfigurationAndSWHardeningNeeded,
+            OutOfDate | OutOfDateConfigurationNeeded,
+        ) => OutOfDateConfigurationNeeded,
+        _ => platform,
     }
-    for i in 0..16 {
-        if (qe_attributes[i] & attributes_mask[i]) != (expected_attributes[i] & attributes_mask[i])
-        {
-            return Err(AttestationError::CertChainError(
-                "QE ATTRIBUTES does not match Intel QE Identity (masked)".into(),
-            ));
-        }
-    }
-
-    // Check ISVSVN (>= highest matching TCB level)
-    // Find the first TCB level where the QE ISVSVN is >= the level's ISVSVN
-    let mut svn_ok = false;
-    for level in &identity.tcb_levels {
-        if qe_isvsvn >= level.tcb.isvsvn {
-            // Reject revoked QE TCB levels
-            if level.tcb_status == "Revoked" {
-                return Err(AttestationError::CertChainError(
-                    "QE TCB status is Revoked".into(),
-                ));
-            }
-            svn_ok = true;
-            break;
-        }
-    }
-    if !svn_ok {
-        return Err(AttestationError::CertChainError(format!(
-            "QE ISVSVN {qe_isvsvn} does not meet any published TCB level"
-        )));
-    }
-
-    Ok(())
 }
 
 /// Normalize CRL data to DER format.
@@ -1185,22 +1200,21 @@ fn normalize_crl_to_der(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Check whether the Intermediate CA (Platform or Processor CA) has been
-/// revoked by the Root CA CRL.
+/// True when the Intermediate CA (Platform or Processor CA) is listed in the
+/// Root CA CRL.
 ///
 /// `pck_pem`: PCK cert chain PEM data (leaf, intermediate, root).
 /// `root_ca_crl_der`: DER-encoded Root CA CRL from Intel PCS.
-pub fn check_intermediate_ca_revocation(pck_pem: &[u8], root_ca_crl_der: &[u8]) -> Result<()> {
+pub fn intermediate_ca_revoked(pck_pem: &[u8], root_ca_crl_der: &[u8]) -> Result<bool> {
     let der_certs = parse_pem_to_der(pck_pem)?;
-    check_intermediate_ca_revocation_from_der(&der_certs, root_ca_crl_der)
+    intermediate_ca_revoked_from_der(&der_certs, root_ca_crl_der)
 }
 
-/// Check intermediate CA revocation from pre-parsed DER certificate chain.
-/// See [`check_intermediate_ca_revocation`] for details.
-pub fn check_intermediate_ca_revocation_from_der(
+/// [`intermediate_ca_revoked`] on a pre-parsed DER certificate chain.
+pub fn intermediate_ca_revoked_from_der(
     der_certs: &[Vec<u8>],
     root_ca_crl_der: &[u8],
-) -> Result<()> {
+) -> Result<bool> {
     if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(
             "need at least 2 certs to check intermediate CA revocation".into(),
@@ -1217,30 +1231,23 @@ pub fn check_intermediate_ca_revocation_from_der(
     let (_, crl) = CertificateRevocationList::from_der(&root_crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("Root CA CRL parse: {e}")))?;
 
-    // Check if intermediate serial is in the revoked list
-    for revoked in crl.iter_revoked_certificates() {
-        if revoked.raw_serial() == intermediate_serial {
-            return Err(AttestationError::CertChainError(
-                "Intermediate CA certificate has been revoked by Root CA CRL".into(),
-            ));
-        }
-    }
-
-    Ok(())
+    let revoked = crl
+        .iter_revoked_certificates()
+        .any(|revoked| revoked.raw_serial() == intermediate_serial);
+    Ok(revoked)
 }
 
-/// Check whether the PCK leaf certificate has been revoked by a CRL.
+/// True when the PCK leaf certificate is listed in the CRL.
 ///
 /// `pck_pem`: PCK cert chain PEM data.
 /// `crl_der`: DER-encoded CRL (from Intel PCS PCK CRL endpoint).
-pub fn check_cert_revocation(pck_pem: &[u8], crl_der: &[u8]) -> Result<()> {
+pub fn cert_revoked(pck_pem: &[u8], crl_der: &[u8]) -> Result<bool> {
     let der_certs = parse_pem_to_der(pck_pem)?;
-    check_cert_revocation_from_der(&der_certs, crl_der)
+    cert_revoked_from_der(&der_certs, crl_der)
 }
 
-/// Check PCK leaf revocation from pre-parsed DER certificate chain.
-/// See [`check_cert_revocation`] for details.
-pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<()> {
+/// [`cert_revoked`] on a pre-parsed DER certificate chain.
+pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bool> {
     if der_certs.is_empty() {
         return Err(AttestationError::CertChainError(
             "no certificates found".into(),
@@ -1257,16 +1264,10 @@ pub fn check_cert_revocation_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> 
     let (_, crl) = CertificateRevocationList::from_der(&crl_der_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("CRL DER parse: {e}")))?;
 
-    // Check if leaf serial is in the revoked list
-    for revoked in crl.iter_revoked_certificates() {
-        if revoked.raw_serial() == leaf_serial {
-            return Err(AttestationError::CertChainError(
-                "PCK certificate has been revoked".into(),
-            ));
-        }
-    }
-
-    Ok(())
+    let revoked = crl
+        .iter_revoked_certificates()
+        .any(|revoked| revoked.raw_serial() == leaf_serial);
+    Ok(revoked)
 }
 
 /// ecdsa-with-SHA256, the only algorithm Intel signs SGX/TDX CRLs with.
@@ -1337,6 +1338,10 @@ pub fn verify_crl(
 mod tests {
     use super::*;
 
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
     const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
     const V5_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_5.dat");
 
@@ -1395,7 +1400,7 @@ mod tests {
     fn test_pck_cert_chain_validation_v4() {
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).unwrap();
-        let result = verify_pck_cert_chain(auth.pck_cert_chain_pem);
+        let result = verify_pck_cert_chain(auth.pck_cert_chain_pem, now());
         assert!(
             result.is_ok(),
             "v4 PCK cert chain should validate: {:?}",
@@ -1407,7 +1412,7 @@ mod tests {
     fn test_qe_report_signature_v4() {
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).unwrap();
-        let pck_key = verify_pck_cert_chain(auth.pck_cert_chain_pem).unwrap();
+        let pck_key = verify_pck_cert_chain(auth.pck_cert_chain_pem, now()).unwrap();
         let result = verify_qe_report_signature(&auth, &pck_key);
         assert!(
             result.is_ok(),
@@ -1437,7 +1442,7 @@ mod tests {
         let mut tampered = V4_QUOTE.to_vec();
         let body_end = body_end_v4();
         let auth_orig = parse_auth_data(V4_QUOTE, body_end).unwrap();
-        let pck_key = verify_pck_cert_chain(auth_orig.pck_cert_chain_pem).unwrap();
+        let pck_key = verify_pck_cert_chain(auth_orig.pck_cert_chain_pem, now()).unwrap();
 
         // QE report signature is inside the cert data, after the QE report body
         // Find the cert data start: body_end + 4 + 64 + 64 + 6
@@ -1535,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_intermediate_ca_revocation_needs_two_certs() {
+    fn test_intermediate_ca_revoked_needs_two_certs() {
         // A single-cert PEM should fail
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).unwrap();
@@ -1547,7 +1552,7 @@ mod tests {
         let single_cert_pem = &pem_str[..first_cert_end];
 
         let bogus_crl = vec![0x30, 0x00];
-        let result = check_intermediate_ca_revocation(single_cert_pem.as_bytes(), &bogus_crl);
+        let result = intermediate_ca_revoked(single_cert_pem.as_bytes(), &bogus_crl);
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(err.contains("at least 2 certs"), "error: {err}");
@@ -1556,12 +1561,18 @@ mod tests {
     #[test]
     fn test_chrono_parse_is_past() {
         // A date in the far past should return true (expired)
-        assert_eq!(chrono_parse_is_past("2020-01-01T00:00:00Z"), Some(true));
+        assert_eq!(
+            chrono_parse_is_past("2020-01-01T00:00:00Z", now()),
+            Some(true)
+        );
         // A date in the far future should return false (not expired)
-        assert_eq!(chrono_parse_is_past("2099-12-31T23:59:59Z"), Some(false));
+        assert_eq!(
+            chrono_parse_is_past("2099-12-31T23:59:59Z", now()),
+            Some(false)
+        );
         // Invalid format should return None
-        assert_eq!(chrono_parse_is_past("invalid"), None);
-        assert_eq!(chrono_parse_is_past(""), None);
+        assert_eq!(chrono_parse_is_past("invalid", now()), None);
+        assert_eq!(chrono_parse_is_past("", now()), None);
     }
 
     #[test]
@@ -1586,7 +1597,7 @@ mod tests {
         let two_cert_pem = &pem_str[..second_end];
 
         // This should fail because the 2nd cert (intermediate) is not the Root CA
-        let result = verify_signing_cert_chain(two_cert_pem.as_bytes());
+        let result = verify_signing_cert_chain(two_cert_pem.as_bytes(), now());
         assert!(
             result.is_err(),
             "intermediate CA should not be accepted as Intel Root CA"
@@ -1607,5 +1618,58 @@ mod tests {
         let pem = format!("-----BEGIN X509 CRL-----\n{b64}\n-----END X509 CRL-----\n");
         let result = normalize_crl_to_der(pem.as_bytes()).unwrap();
         assert_eq!(result, der_bytes);
+    }
+
+    /// The quote's QE report and Intel's TD-QE identity with its TCB levels
+    /// replaced (unsigned: the signature is not what these tests check).
+    fn qe_status_with_levels(levels: serde_json::Value) -> Result<TdxTcbStatus> {
+        const QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+        const IDENTITY: &[u8] =
+            include_bytes!("../../../test_data/collateral/2026-10-05/td_qe_identity.json");
+        let quote = super::super::verify::parse_tdx_quote(QUOTE).unwrap();
+        let auth =
+            parse_auth_data(QUOTE, compute_body_end(QUOTE, quote.quote_version).unwrap()).unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(IDENTITY).unwrap();
+        json["enclaveIdentity"]["tcbLevels"] = levels;
+        let identity = parse_qe_identity(&serde_json::to_vec(&json).unwrap(), None, 0).unwrap();
+        check_qe_report(auth.qe_report_body, &identity)
+    }
+
+    #[test]
+    fn qe_tcb_status_is_a_value() {
+        let level = |isvsvn: u16, status: &str| serde_json::json!({ "tcb": { "isvsvn": isvsvn }, "tcbStatus": status });
+        assert_eq!(
+            qe_status_with_levels(serde_json::json!([level(4, "UpToDate")])).unwrap(),
+            TdxTcbStatus::UpToDate
+        );
+        assert_eq!(
+            qe_status_with_levels(serde_json::json!([level(4, "Revoked")])).unwrap(),
+            TdxTcbStatus::Revoked
+        );
+        assert_eq!(
+            qe_status_with_levels(serde_json::json!([level(999, "UpToDate")])).unwrap(),
+            TdxTcbStatus::NoMatchingLevel
+        );
+        assert!(matches!(
+            qe_status_with_levels(serde_json::json!([level(4, "SomethingNew")])),
+            Err(AttestationError::CollateralUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn qe_tcb_status_combines_with_the_platform() {
+        use TdxTcbStatus::*;
+        assert_eq!(combine_tcb_status(UpToDate, UpToDate), UpToDate);
+        assert_eq!(combine_tcb_status(UpToDate, OutOfDate), OutOfDate);
+        assert_eq!(
+            combine_tcb_status(ConfigurationNeeded, OutOfDate),
+            OutOfDateConfigurationNeeded
+        );
+        assert_eq!(combine_tcb_status(UpToDate, Revoked), Revoked);
+        assert_eq!(
+            combine_tcb_status(OutOfDate, NoMatchingLevel),
+            NoMatchingLevel
+        );
+        assert_eq!(combine_tcb_status(Revoked, OutOfDate), Revoked);
     }
 }

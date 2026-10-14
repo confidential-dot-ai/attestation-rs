@@ -11,7 +11,7 @@ fn main() {
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
-    use attestation::{PlatformType, VerifyParams};
+    use attestation::{PlatformType, Policies, SnpParams};
 
     let nonce = b"example-snp-nonce";
 
@@ -27,13 +27,21 @@ async fn main() {
     eprintln!("Evidence: {} bytes", evidence_json.len());
 
     eprintln!("Verifying...");
-    let params = VerifyParams::default();
-    let result = attestation::verify(&evidence_json, &params)
+    let policies = Policies {
+        snp: Some(SnpParams {
+            report_data: Some(nonce.to_vec()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let verified = attestation::verify(&evidence_json, &policies)
         .await
         .expect("verification failed");
 
-    eprintln!("Signature valid: {}", result.signature_valid);
-    eprintln!("Platform: {}", result.platform);
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
+    eprintln!("Passed: {}", verified.passed());
+    eprintln!(
+        "Launch digest: {}",
+        verified.platform.claims().launch_digest
+    );
     println!("{}", String::from_utf8_lossy(&evidence_json));
 }

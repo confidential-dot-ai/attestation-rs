@@ -79,8 +79,19 @@ pub fn is_pem(data: &[u8]) -> bool {
 /// need to distinguish PEM from raw DER.
 pub fn decode_pem_to_der(data: &[u8]) -> crate::error::Result<Vec<u8>> {
     let parsed = pem::parse(data)
-        .map_err(|e| crate::error::AttestationError::CertFetchError(format!("PEM decode: {e}")))?;
+        .map_err(|e| crate::error::AttestationError::CertChainError(format!("PEM decode: {e}")))?;
     Ok(parsed.contents().to_vec())
+}
+
+/// Convert a Unix timestamp to the `x509_parser` time type used for
+/// certificate and CRL validity checks.
+#[cfg(any(feature = "snp", feature = "tdx"))]
+pub fn asn1_time(unix_seconds: i64) -> crate::error::Result<x509_parser::time::ASN1Time> {
+    x509_parser::time::ASN1Time::from_timestamp(unix_seconds).map_err(|e| {
+        crate::error::AttestationError::InvalidParams(format!(
+            "evaluation time {unix_seconds} out of range: {e}"
+        ))
+    })
 }
 
 /// Compare two byte slices in constant time.

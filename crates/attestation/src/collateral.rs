@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use base64::Engine;
 
 use crate::error::Result;
+#[cfg(feature = "tdx")]
+use crate::platforms::tdx::dcap;
 use crate::types::{ProcessorGeneration, SnpTcb};
 
 // ── AMD KDS (Key Distribution Service) ──
@@ -213,23 +215,27 @@ impl DefaultCertProvider {
 async fn read_response_with_limit(response: reqwest::Response) -> Result<Vec<u8>> {
     if let Some(len) = response.content_length() {
         if len as usize > MAX_RESPONSE_SIZE {
-            return Err(crate::error::AttestationError::CertFetchError(format!(
+            return Err(crate::error::AttestationError::CollateralUnavailable(
+                format!(
                 "response too large: Content-Length {len} exceeds {MAX_RESPONSE_SIZE} byte limit",
-            )));
+            ),
+            ));
         }
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| crate::error::AttestationError::CertFetchError(format!("read body: {e}")))?
+        .map_err(|e| {
+            crate::error::AttestationError::CollateralUnavailable(format!("read body: {e}"))
+        })?
         .to_vec();
 
     if bytes.len() > MAX_RESPONSE_SIZE {
         let len = bytes.len();
-        return Err(crate::error::AttestationError::CertFetchError(format!(
-            "response body too large: {len} bytes exceeds {MAX_RESPONSE_SIZE} byte limit",
-        )));
+        return Err(crate::error::AttestationError::CollateralUnavailable(
+            format!("response body too large: {len} bytes exceeds {MAX_RESPONSE_SIZE} byte limit",),
+        ));
     }
 
     Ok(bytes)
@@ -242,9 +248,13 @@ async fn send_get(client: &reqwest::Client, url: &str) -> Result<reqwest::Respon
         .get(url)
         .send()
         .await
-        .map_err(|e| crate::error::AttestationError::CertFetchError(format!("HTTP request: {e}")))?
+        .map_err(|e| {
+            crate::error::AttestationError::CollateralUnavailable(format!("HTTP request: {e}"))
+        })?
         .error_for_status()
-        .map_err(|e| crate::error::AttestationError::CertFetchError(format!("HTTP status: {e}")))
+        .map_err(|e| {
+            crate::error::AttestationError::CollateralUnavailable(format!("HTTP status: {e}"))
+        })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -286,7 +296,9 @@ impl CertProvider for DefaultCertProvider {
         // The cert chain response is PEM with two certificates (ARK + ASK)
         // Parse them into DER
         let pem_str = String::from_utf8(pem_data).map_err(|e| {
-            crate::error::AttestationError::CertFetchError(format!("cert chain not UTF-8: {e}"))
+            crate::error::AttestationError::CollateralUnavailable(format!(
+                "cert chain not UTF-8: {e}"
+            ))
         })?;
 
         let mut certs = Vec::new();
@@ -302,7 +314,9 @@ impl CertProvider for DefaultCertProvider {
                 let der = base64::engine::general_purpose::STANDARD
                     .decode(current.trim())
                     .map_err(|e| {
-                        crate::error::AttestationError::CertFetchError(format!("cert base64: {e}"))
+                        crate::error::AttestationError::CollateralUnavailable(format!(
+                            "cert base64: {e}"
+                        ))
                     })?;
                 certs.push(der);
             } else if in_cert {
@@ -311,10 +325,9 @@ impl CertProvider for DefaultCertProvider {
         }
 
         if certs.len() < 2 {
-            return Err(crate::error::AttestationError::CertFetchError(format!(
-                "expected 2 certs in chain, got {}",
-                certs.len()
-            )));
+            return Err(crate::error::AttestationError::CollateralUnavailable(
+                format!("expected 2 certs in chain, got {}", certs.len()),
+            ));
         }
 
         // First cert is typically VCEK/ASK, second is ARK
@@ -341,7 +354,7 @@ impl CertProvider for DefaultCertProvider {
             return Ok(cached);
         }
 
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "VCEK fetch requires a custom CertProvider implementation in WASM".to_string(),
         ))
     }
@@ -358,7 +371,7 @@ impl CertProvider for DefaultCertProvider {
         #[cfg(not(feature = "snp"))]
         {
             let _ = processor_gen;
-            Err(crate::error::AttestationError::CertFetchError(
+            Err(crate::error::AttestationError::CollateralUnavailable(
                 "SNP cert chain requires the `snp` feature in WASM".to_string(),
             ))
         }
@@ -428,29 +441,26 @@ pub trait TdxCollateralProvider: Send + Sync {
         Ok(None)
     }
 
-    /// Check PCK cert chain against CRLs (leaf + intermediate CA revocation).
+    /// True when the PCK leaf or its intermediate CA is listed in Intel's
+    /// CRLs. A revoked certificate is a value, not an error: the quote is
+    /// still genuine.
     ///
-    /// Default implementation fetches CRL data via `get_pck_crl` + `get_root_ca_crl`
-    /// and checks both the PCK leaf and Intermediate CA certificates.
+    /// Default implementation fetches CRL data via `get_pck_crl` + `get_root_ca_crl`.
     /// Override to use pre-cached CRL data in a service context.
     ///
     /// The default body requires the `tdx` cargo feature (for the DCAP parsers).
     /// Without `tdx`, the trait can still be implemented by users, but the
     /// default implementation returns an error.
-    async fn check_pck_revocation(&self, pck_cert_chain_pem: &[u8]) -> Result<()> {
+    async fn pck_revoked(&self, pck_cert_chain_pem: &[u8]) -> Result<bool> {
         #[cfg(feature = "tdx")]
         {
             // Preparse PEM once to avoid redundant parsing across multiple checks
-            let der_certs = crate::platforms::tdx::dcap::parse_pem_to_der(pck_cert_chain_pem)?;
-            let ca_type = crate::platforms::tdx::dcap::determine_ca_type_from_der(&der_certs)?;
+            let der_certs = dcap::parse_pem_to_der(pck_cert_chain_pem)?;
+            let ca_type = dcap::determine_ca_type_from_der(&der_certs)?;
             let pck_crl_der = self.get_pck_crl(&ca_type).await?;
-            crate::platforms::tdx::dcap::check_cert_revocation_from_der(&der_certs, &pck_crl_der)?;
             let root_crl_der = self.get_root_ca_crl().await?;
-            crate::platforms::tdx::dcap::check_intermediate_ca_revocation_from_der(
-                &der_certs,
-                &root_crl_der,
-            )?;
-            Ok(())
+            Ok(dcap::cert_revoked_from_der(&der_certs, &pck_crl_der)?
+                || dcap::intermediate_ca_revoked_from_der(&der_certs, &root_crl_der)?)
         }
         #[cfg(not(feature = "tdx"))]
         {
@@ -681,7 +691,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }
@@ -691,7 +701,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }
@@ -701,7 +711,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }
@@ -711,7 +721,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }
@@ -721,7 +731,7 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
         if let Some(cached) = self.get_cached(&url) {
             return Ok(cached);
         }
-        Err(crate::error::AttestationError::CertFetchError(
+        Err(crate::error::AttestationError::CollateralUnavailable(
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }

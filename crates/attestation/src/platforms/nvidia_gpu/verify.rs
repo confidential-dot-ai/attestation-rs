@@ -7,53 +7,74 @@ use crate::error::{AttestationError, Result};
 use crate::platforms::nvidia_gpu::provider::{Jwks, NrasEvidenceEntry, NrasProvider, NrasRequest};
 use crate::platforms::nvidia_gpu::{gpu_nonce, switch_nonce};
 use crate::types::{
-    NvidiaGpuArch, NvidiaGpuClaims, NvidiaGpuDeviceClaims, NvidiaGpuEvidenceBundle, VerifyParams,
+    NvidiaGpuArch, NvidiaGpuClaims, NvidiaGpuDeviceClaims, NvidiaGpuEvidenceBundle,
+    NvidiaGpuParams, NvidiaGpuResult,
 };
 
 /// Verify a GPU bundle end-to-end:
 /// - Group devices by arch (NRAS requires one arch per request).
-/// - Derive the SPDM nonce from `params.nvidia_gpu.user_nonce` per `bundle.binding`.
-/// - POST evidence to NRAS, JWS-verify the response, check `eat_nonce` and
-///   `x-nvidia-overall-att-result`.
+/// - Derive the SPDM nonce from `params.user_nonce` per `bundle.binding`.
+/// - POST evidence to NRAS, JWS-verify the response, check `eat_nonce`.
+/// - Evaluate the params' rules (arch allowlist, device policy, device count)
+///   and NRAS's `x-nvidia-overall-att-result` into the result.
 ///
-/// Returns aggregated [`NvidiaGpuClaims`]. Caller is responsible for asserting any
-/// `claims.platform_data` ↔ `claims.gpu` semantic coupling (e.g. the same
-/// `user_nonce` was used).
+/// `now` is the evaluation time (Unix seconds) for token and certificate
+/// validity. Caller is responsible for asserting the CPU ↔ GPU coupling (the
+/// same `user_nonce` was used as the CPU report data).
 pub async fn verify_bundle(
     bundle: &NvidiaGpuEvidenceBundle,
-    params: &VerifyParams,
+    params: &NvidiaGpuParams,
     provider: &dyn NrasProvider,
-) -> Result<NvidiaGpuClaims> {
+    now: i64,
+) -> Result<NvidiaGpuResult> {
     let user_nonce = check_preconditions(bundle, params)?;
 
-    let mut aggregated = NvidiaGpuClaims {
+    let mut claims = NvidiaGpuClaims {
         overall_ok: true,
         eat_nonce: None,
-        nonce_binding_ok: true,
         devices: Vec::with_capacity(bundle.devices.len()),
         overall_raw: serde_json::Value::Null,
     };
+    let mut device_policy_met = true;
 
     for (arch, devices) in group_by_arch(bundle) {
-        let group = verify_arch_group(arch, &devices, user_nonce, bundle, params, provider).await?;
-        fold_arch_group(&mut aggregated, group);
+        let group =
+            verify_arch_group(arch, &devices, user_nonce, bundle, params, provider, now).await?;
+        device_policy_met &= group.device_policy_met;
+        fold_arch_group(&mut claims, group);
     }
 
-    final_checks(&aggregated, bundle.devices.len())?;
-    log::info!(
-        "NVIDIA GPU attestation passed: {} device(s), nonce_binding_ok=true",
-        aggregated.devices.len()
-    );
-    Ok(aggregated)
+    if !claims.overall_ok {
+        log::warn!("NVIDIA GPU attestation: NRAS overall result is false");
+    }
+    let device_count_match = claims.devices.len() == bundle.devices.len();
+    if !device_count_match {
+        log::warn!(
+            "NVIDIA GPU attestation: device count mismatch (expected {}, got {})",
+            bundle.devices.len(),
+            claims.devices.len()
+        );
+    }
+    let archs_allowed = params
+        .expected_archs
+        .as_ref()
+        .map(|allowed| bundle.devices.iter().all(|d| allowed.contains(&d.arch)));
+
+    Ok(NvidiaGpuResult {
+        claims,
+        archs_allowed,
+        device_count_match,
+        device_policy_met,
+    })
 }
 
 const MAX_GPU_DEVICES: usize = 32;
 
 /// Validate bundle and params before any network or crypto work. Returns the
 /// validated `user_nonce` slice on success.
-fn check_preconditions<'a>(
+pub(crate) fn check_preconditions<'a>(
     bundle: &NvidiaGpuEvidenceBundle,
-    params: &'a VerifyParams,
+    params: &'a NvidiaGpuParams,
 ) -> Result<&'a [u8]> {
     if bundle.devices.is_empty() {
         return Err(AttestationError::NvidiaGpuBundleEmpty);
@@ -65,7 +86,6 @@ fn check_preconditions<'a>(
         ));
     }
     let user_nonce = params
-        .nvidia_gpu
         .user_nonce
         .as_deref()
         .ok_or(AttestationError::NvidiaGpuUserNonceMissing)?;
@@ -74,22 +94,11 @@ fn check_preconditions<'a>(
     // Enforce allowed binding algorithms. Default: only Concat { Sha256 }.
     let default_allowed = [crate::types::NvidiaGpuBinding::default()];
     let allowed = params
-        .nvidia_gpu
         .allowed_bindings
         .as_deref()
         .unwrap_or(&default_allowed);
     if !allowed.contains(&bundle.binding) {
         return Err(AttestationError::NvidiaGpuBindingNotAllowed);
-    }
-
-    if let Some(whitelist) = &params.nvidia_gpu.expected_archs {
-        for dev in &bundle.devices {
-            if !whitelist.contains(&dev.arch) {
-                return Err(AttestationError::NvidiaGpuArchNotAllowed(
-                    dev.arch.to_string(),
-                ));
-            }
-        }
     }
 
     Ok(user_nonce)
@@ -114,9 +123,9 @@ fn group_by_arch(
 struct ArchGroupResult {
     overall_ok: bool,
     eat_nonce: Option<String>,
-    nonce_binding_ok: bool,
     overall_raw: serde_json::Value,
     devices: Vec<crate::types::NvidiaGpuDeviceClaims>,
+    device_policy_met: bool,
 }
 
 /// Build the NRAS request, attest, JWS-verify the overall + each submodule,
@@ -126,8 +135,9 @@ async fn verify_arch_group(
     devices: &[&crate::types::NvidiaGpuDeviceEvidence],
     user_nonce: &[u8],
     bundle: &NvidiaGpuEvidenceBundle,
-    params: &VerifyParams,
+    params: &NvidiaGpuParams,
     provider: &dyn NrasProvider,
+    now: i64,
 ) -> Result<ArchGroupResult> {
     let nonce_bytes = match arch {
         NvidiaGpuArch::Ls10 => switch_nonce(user_nonce, &bundle.binding),
@@ -153,7 +163,7 @@ async fn verify_arch_group(
     let mut jwks = provider.jwks(arch).await?;
 
     let overall_claims =
-        verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider).await?;
+        verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider, now).await?;
     let overall_ok = overall_claims
         .get("x-nvidia-overall-att-result")
         .and_then(|v| v.as_bool())
@@ -169,15 +179,20 @@ async fn verify_arch_group(
     let nonce_binding_ok = eat_nonce
         .as_deref()
         .and_then(|n| hex::decode(n).ok())
-        .map(|decoded| {
+        .is_some_and(|decoded| {
             use subtle::ConstantTimeEq;
             decoded.ct_eq(&nonce_bytes).into()
-        })
-        .unwrap_or(false);
+        });
+    if !nonce_binding_ok {
+        log::warn!("NVIDIA GPU attestation: nonce binding mismatch");
+        return Err(AttestationError::NvidiaGpuBindingMismatch);
+    }
 
     let mut device_claims = Vec::with_capacity(submodule_jwts.len());
+    let mut device_policy_met = true;
     for (name, sub_jwt) in submodule_jwts {
-        let sub_claims = verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider).await?;
+        let sub_claims =
+            verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider, now).await?;
         // Bind this submodule to the session: its `eat_nonce` must equal the
         // SPDM nonce we derived. The overall token's `eat_nonce` alone does not
         // cover the submodule JWTs (NRAS's RFC 9711 `submods` DIGEST is computed
@@ -188,19 +203,20 @@ async fn verify_arch_group(
         // is rejected here.
         check_submodule_nonce(&name, &sub_claims, &nonce_bytes)?;
         let mut dc = device_claims_from_submodule(&sub_claims);
+        check_device_report_nonce(&name, &dc)?;
         if dc.arch.is_none() {
             dc.arch = Some(arch);
         }
-        apply_device_policy(&name, &dc, &params.nvidia_gpu.device_policy)?;
+        device_policy_met &= device_policy_holds(&name, &dc, &params.device_policy);
         device_claims.push(dc);
     }
 
     Ok(ArchGroupResult {
         overall_ok,
         eat_nonce,
-        nonce_binding_ok,
         overall_raw: overall_claims,
         devices: device_claims,
+        device_policy_met,
     })
 }
 
@@ -208,37 +224,11 @@ async fn verify_arch_group(
 /// each iteration — fine for v1, where multiple arches in one bundle is rare.
 fn fold_arch_group(aggregated: &mut NvidiaGpuClaims, group: ArchGroupResult) {
     aggregated.overall_ok &= group.overall_ok;
-    aggregated.nonce_binding_ok &= group.nonce_binding_ok;
     if aggregated.eat_nonce.is_none() {
         aggregated.eat_nonce = group.eat_nonce;
     }
     aggregated.overall_raw = group.overall_raw;
     aggregated.devices.extend(group.devices);
-}
-
-/// Post-aggregation invariants: every device produced claims, overall passed,
-/// and the eat_nonce bound to our derived SPDM nonce.
-fn final_checks(aggregated: &NvidiaGpuClaims, expected_devices: usize) -> Result<()> {
-    if aggregated.devices.len() != expected_devices {
-        log::warn!(
-            "NVIDIA GPU attestation: device count mismatch (expected {}, got {})",
-            expected_devices,
-            aggregated.devices.len()
-        );
-        return Err(AttestationError::NvidiaGpuDeviceCountMismatch {
-            expected: expected_devices,
-            got: aggregated.devices.len(),
-        });
-    }
-    if !aggregated.overall_ok {
-        log::warn!("NVIDIA GPU attestation: NRAS overall result is false");
-        return Err(AttestationError::NrasOverallFailed);
-    }
-    if !aggregated.nonce_binding_ok {
-        log::warn!("NVIDIA GPU attestation: nonce binding mismatch");
-        return Err(AttestationError::NvidiaGpuBindingMismatch);
-    }
-    Ok(())
 }
 
 /// Verify a JWS, transparently refetching the JWKS once on `kid` miss.
@@ -254,11 +244,12 @@ async fn verify_jws_with_kid_rotation(
     jwks: &mut Jwks,
     arch: NvidiaGpuArch,
     provider: &dyn NrasProvider,
+    now: i64,
 ) -> Result<serde_json::Value> {
-    match verify_jws_es384(token, jwks) {
+    match verify_jws_es384(token, jwks, now) {
         Err(AttestationError::JwksKidNotFound(_)) => {
             *jwks = provider.jwks_force(arch).await?;
-            verify_jws_es384(token, jwks)
+            verify_jws_es384(token, jwks, now)
         }
         other => other,
     }
@@ -332,9 +323,9 @@ fn split_eat_response(v: &serde_json::Value) -> Result<(String, Vec<(String, Str
     )))
 }
 
-/// Verify an ES384-signed compact JWS against a JWKS, returning the decoded
-/// claims body.
-pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
+/// Verify an ES384-signed compact JWS against a JWKS at `now` (Unix seconds),
+/// returning the decoded claims body.
+pub fn verify_jws_es384(token: &str, jwks: &Jwks, now: i64) -> Result<serde_json::Value> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(AttestationError::JwsVerification(
@@ -369,7 +360,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
         .find(|k| k.kid == kid)
         .ok_or_else(|| AttestationError::JwksKidNotFound(kid.to_string()))?;
 
-    let verifying_key = es384_verifying_key_from_jwks_entry(key)?;
+    let verifying_key = es384_verifying_key_from_jwks_entry(key, now)?;
 
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let sig_bytes = URL_SAFE_NO_PAD
@@ -390,7 +381,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
     let claims: serde_json::Value = serde_json::from_slice(&payload)
         .map_err(|e| AttestationError::JwsVerification(format!("payload json: {e}")))?;
 
-    enforce_time_claims(&claims)?;
+    enforce_time_claims(&claims, now)?;
 
     Ok(claims)
 }
@@ -406,12 +397,8 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks) -> Result<serde_json::Value> {
 /// parse via `as_f64`. We `floor` `exp` and `ceil` `nbf` so a fractional second
 /// never widens the validity window past the whole-second boundary.
 ///
-/// Runs on all targets including wasm32: `chrono::Utc::now()` works on wasm via
-/// the `wasmbind` feature (see Cargo.toml), unlike `SystemTime`, which traps on
-/// wasm32-unknown-unknown.
-fn enforce_time_claims(claims: &serde_json::Value) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-
+/// `now` is the evaluation time in Unix seconds.
+fn enforce_time_claims(claims: &serde_json::Value, now: i64) -> Result<()> {
     let exp = claims
         .get("exp")
         .and_then(serde_json::Value::as_f64)
@@ -440,6 +427,7 @@ fn enforce_time_claims(claims: &serde_json::Value) -> Result<()> {
 
 fn es384_verifying_key_from_jwks_entry(
     key: &crate::platforms::nvidia_gpu::provider::JwksKey,
+    now: i64,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     // The signing key MUST come from an x5c chain that validates up to the
     // pinned NVIDIA trust anchor. The raw JWK `(x, y)` coordinates carry no
@@ -448,7 +436,7 @@ fn es384_verifying_key_from_jwks_entry(
     // serving a JWKS of attacker-chosen coordinates could forge every EAT. We
     // therefore require x5c and never fall back to bare coordinates.
     match &key.x5c {
-        Some(chain) if !chain.is_empty() => verify_x5c_chain_and_extract_key(chain),
+        Some(chain) if !chain.is_empty() => verify_x5c_chain_and_extract_key(chain, now),
         _ => Err(AttestationError::JwsVerification(
             "JWKS entry has no x5c chain; raw (x,y) coordinates are not accepted \
              because they bypass the pinned NVIDIA trust anchor"
@@ -480,7 +468,10 @@ const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
 /// This is the load-bearing trust check: there is no raw-coordinate fallback
 /// (see `es384_verifying_key_from_jwks_entry`), so every accepted signing key
 /// chains to the pinned anchor through these constraints.
-fn verify_x5c_chain_and_extract_key(chain: &[String]) -> Result<p384::ecdsa::VerifyingKey> {
+fn verify_x5c_chain_and_extract_key(
+    chain: &[String],
+    now: i64,
+) -> Result<p384::ecdsa::VerifyingKey> {
     use sha2::Digest;
     use spki::DecodePublicKey;
     use x509_cert::der::Decode;
@@ -505,11 +496,9 @@ fn verify_x5c_chain_and_extract_key(chain: &[String]) -> Result<p384::ecdsa::Ver
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Enforce certificate validity periods on all targets, including wasm32.
-    // `chrono::Utc::now()` works on wasm (unlike `SystemTime`, which we used to
-    // cfg out — silently accepting expired NRAS signing certs in the browser).
+    // Enforce certificate validity periods at the evaluation time.
     {
-        let now_secs = chrono::Utc::now().timestamp();
+        let now_secs = now;
         for (i, (_der, cert)) in certs.iter().enumerate() {
             let validity = &cert.tbs_certificate.validity;
             let nb_unix: i64 = validity
@@ -774,48 +763,42 @@ fn check_submodule_nonce(
     }
 }
 
-/// Enforce per-device policy against a submodule's claims, independent of NRAS's
+/// The device's SPDM report must have been produced for this session's nonce
+/// (`x-nvidia-gpu-attestation-report-nonce-match`); otherwise it could be a
+/// replay, so the evidence is not genuine.
+fn check_device_report_nonce(name: &str, dc: &NvidiaGpuDeviceClaims) -> Result<()> {
+    if dc.nonce_match == Some(true) {
+        Ok(())
+    } else {
+        Err(AttestationError::NvidiaGpuSubmoduleNonceMismatch {
+            name: name.to_string(),
+        })
+    }
+}
+
+/// Check per-device policy against a submodule's claims, independent of NRAS's
 /// opaque overall boolean. Each gate fails closed by default (see
-/// [`crate::types::NvidiaGpuDevicePolicy`]). A claim that is absent when its gate
-/// is enabled is treated as a failure — we do not trust a device whose state we
-/// cannot read.
-fn apply_device_policy(
+/// [`crate::types::NvidiaGpuDevicePolicy`]). A claim that is absent when its
+/// gate is enabled counts as a failure — we do not trust a device whose state
+/// we cannot read.
+fn device_policy_holds(
     name: &str,
     dc: &NvidiaGpuDeviceClaims,
     policy: &crate::types::NvidiaGpuDevicePolicy,
-) -> Result<()> {
-    let fail = |reason: String| {
-        Err(AttestationError::NvidiaGpuDevicePolicyFailed {
-            name: name.to_string(),
-            reason,
-        })
+) -> bool {
+    let failed = if !policy.allow_debug && dc.dbgstat.as_deref() != Some("disabled") {
+        Some("dbgstat is not \"disabled\"")
+    } else if policy.require_secboot && dc.secboot != Some(true) {
+        Some("secboot is not true")
+    } else if policy.require_measres_success && dc.measres.as_deref() != Some("success") {
+        Some("measres is not \"success\"")
+    } else {
+        None
     };
-
-    if !policy.allow_debug {
-        // `dbgstat` must be present and equal to "disabled".
-        match dc.dbgstat.as_deref() {
-            Some("disabled") => {}
-            Some(other) => return fail(format!("dbgstat is \"{other}\", expected \"disabled\"")),
-            None => return fail("dbgstat claim missing".into()),
-        }
+    if let Some(reason) = failed {
+        log::warn!("GPU device {name} failed policy: {reason}");
     }
-    if policy.require_secboot && dc.secboot != Some(true) {
-        return fail(format!("secboot is {:?}, expected true", dc.secboot));
-    }
-    if policy.require_nonce_match && dc.nonce_match != Some(true) {
-        return fail(format!(
-            "attestation-report-nonce-match is {:?}, expected true",
-            dc.nonce_match
-        ));
-    }
-    if policy.require_measres_success {
-        match dc.measres.as_deref() {
-            Some("success") => {}
-            Some(other) => return fail(format!("measres is \"{other}\", expected \"success\"")),
-            None => return fail("measres claim missing".into()),
-        }
-    }
-    Ok(())
+    failed.is_none()
 }
 
 /// Decode a single GPU submodule JWT body into [`NvidiaGpuDeviceClaims`].
@@ -864,7 +847,7 @@ mod tests {
     use crate::platforms::nvidia_gpu::MIN_GPU_USER_NONCE_LEN;
     use crate::types::{
         NvidiaGpuArch, NvidiaGpuBinding, NvidiaGpuDeviceClaims, NvidiaGpuDeviceEvidence,
-        NvidiaGpuEvidenceBundle, NvidiaGpuParams, VerifyParams,
+        NvidiaGpuEvidenceBundle, NvidiaGpuParams,
     };
 
     /// `NrasProvider` whose methods panic on call. Used to prove `verify_bundle`
@@ -905,15 +888,12 @@ mod tests {
     async fn verify_bundle_rejects_short_user_nonce_before_provider_call() {
         let too_short = vec![0u8; MIN_GPU_USER_NONCE_LEN - 1];
         let bundle = one_device_bundle();
-        let params = VerifyParams {
-            nvidia_gpu: NvidiaGpuParams {
-                user_nonce: Some(too_short.clone()),
-                ..Default::default()
-            },
+        let params = NvidiaGpuParams {
+            user_nonce: Some(too_short.clone()),
             ..Default::default()
         };
 
-        let result = verify_bundle(&bundle, &params, &PanicProvider).await;
+        let result = verify_bundle(&bundle, &params, &PanicProvider, now()).await;
 
         match result {
             Err(AttestationError::NvidiaGpuNonceTooShort(n)) => {
@@ -982,7 +962,7 @@ mod tests {
         // kid miss would surface as `JwksKidNotFound`, so getting the
         // `JwsVerification` variant proves the crit rejection ran first.
         assert!(matches!(
-            verify_jws_es384(&token, &jwks),
+            verify_jws_es384(&token, &jwks, now()),
             Err(AttestationError::JwsVerification(_))
         ));
     }
@@ -1009,7 +989,7 @@ mod tests {
                 x5c,
             };
             assert!(
-                es384_verifying_key_from_jwks_entry(&key).is_err(),
+                es384_verifying_key_from_jwks_entry(&key, now()).is_err(),
                 "raw (x,y) without an x5c chain must be rejected"
             );
         }
@@ -1023,33 +1003,33 @@ mod tests {
     fn time_claims_reject_missing_or_non_numeric_exp() {
         // No exp, or an exp that is not a number, must fail closed (no fail-open
         // "accept a token with no expiry").
-        assert!(enforce_time_claims(&serde_json::json!({ "foo": 1 })).is_err());
-        assert!(enforce_time_claims(&serde_json::json!({ "exp": "not-a-number" })).is_err());
+        assert!(enforce_time_claims(&serde_json::json!({ "foo": 1 }), now()).is_err());
+        assert!(enforce_time_claims(&serde_json::json!({ "exp": "not-a-number" }), now()).is_err());
     }
 
     #[test]
     fn time_claims_reject_expired() {
         let claims = serde_json::json!({ "exp": now() - 60 });
-        assert!(enforce_time_claims(&claims).is_err());
+        assert!(enforce_time_claims(&claims, now()).is_err());
     }
 
     #[test]
     fn time_claims_accept_fractional_future_exp() {
         // RFC 7519 permits a fractional NumericDate; `as_i64` would reject it.
         let claims = serde_json::json!({ "exp": (now() + 3600) as f64 + 0.5 });
-        enforce_time_claims(&claims).expect("fractional future exp must be accepted");
+        enforce_time_claims(&claims, now()).expect("fractional future exp must be accepted");
     }
 
     #[test]
     fn time_claims_reject_not_yet_valid_nbf() {
         let claims = serde_json::json!({ "exp": now() + 3600, "nbf": now() + 600 });
-        assert!(enforce_time_claims(&claims).is_err());
+        assert!(enforce_time_claims(&claims, now()).is_err());
     }
 
     #[test]
     fn time_claims_accept_past_nbf_and_future_exp() {
         let claims = serde_json::json!({ "exp": now() + 3600, "nbf": now() - 600 });
-        enforce_time_claims(&claims).expect("past nbf with valid exp must be accepted");
+        enforce_time_claims(&claims, now()).expect("past nbf with valid exp must be accepted");
     }
 
     // SEC-3: per-submodule eat_nonce binding.
@@ -1099,8 +1079,10 @@ mod tests {
     #[test]
     fn device_policy_accepts_compliant_device() {
         let policy = crate::types::NvidiaGpuDevicePolicy::default();
-        apply_device_policy("GPU-0", &compliant_device(), &policy)
-            .expect("fully compliant device must pass default policy");
+        assert!(
+            device_policy_holds("GPU-0", &compliant_device(), &policy),
+            "fully compliant device must pass default policy"
+        );
     }
 
     /// Each default gate must reject a device that violates it (including the
@@ -1113,8 +1095,6 @@ mod tests {
             |dc| dc.dbgstat = None,
             |dc| dc.secboot = Some(false),
             |dc| dc.secboot = None,
-            |dc| dc.nonce_match = Some(false),
-            |dc| dc.nonce_match = None,
             |dc| dc.measres = Some("failure".into()),
             |dc| dc.measres = None,
         ];
@@ -1122,12 +1102,49 @@ mod tests {
             let mut dc = compliant_device();
             m(&mut dc);
             assert!(
-                matches!(
-                    apply_device_policy("GPU-0", &dc, &policy),
-                    Err(AttestationError::NvidiaGpuDevicePolicyFailed { .. })
-                ),
+                !device_policy_holds("GPU-0", &dc, &policy),
                 "mutation #{i} should have been rejected by default policy"
             );
+        }
+    }
+
+    #[test]
+    fn device_report_nonce_mismatch_is_an_error() {
+        check_device_report_nonce("GPU-0", &compliant_device()).expect("matching nonce");
+        for nonce_match in [Some(false), None] {
+            let dc = NvidiaGpuDeviceClaims {
+                nonce_match,
+                ..compliant_device()
+            };
+            assert!(matches!(
+                check_device_report_nonce("GPU-0", &dc),
+                Err(AttestationError::NvidiaGpuSubmoduleNonceMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn gpu_result_passes_only_when_every_rule_holds() {
+        let passing = || NvidiaGpuResult {
+            claims: NvidiaGpuClaims {
+                overall_ok: true,
+                ..Default::default()
+            },
+            archs_allowed: Some(true),
+            device_count_match: true,
+            device_policy_met: true,
+        };
+        assert!(passing().passed());
+        let failing: &[fn(&mut NvidiaGpuResult)] = &[
+            |r| r.claims.overall_ok = false,
+            |r| r.archs_allowed = Some(false),
+            |r| r.device_count_match = false,
+            |r| r.device_policy_met = false,
+        ];
+        for (i, f) in failing.iter().enumerate() {
+            let mut r = passing();
+            f(&mut r);
+            assert!(!r.passed(), "rule #{i} must fail passed()");
         }
     }
 
@@ -1139,8 +1156,10 @@ mod tests {
         };
         let mut dc = compliant_device();
         dc.dbgstat = Some("enabled".into());
-        apply_device_policy("GPU-0", &dc, &policy)
-            .expect("debug-enabled device must pass when allow_debug is set");
+        assert!(
+            device_policy_holds("GPU-0", &dc, &policy),
+            "debug-enabled device must pass when allow_debug is set"
+        );
     }
 
     // SEC-4: x5c RFC 5280 path validation. These negative tests mutate a real
@@ -1169,7 +1188,7 @@ mod tests {
         // the issuer<->subject name chain; either way it must be rejected.
         let mut chain = nras_x5c_fixture();
         chain.reverse();
-        match verify_x5c_chain_and_extract_key(&chain) {
+        match verify_x5c_chain_and_extract_key(&chain, now()) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("reversed chain must be rejected, got {other:?}"),
         }
@@ -1181,7 +1200,7 @@ mod tests {
         // is not in the pinned trusted set. (If the captured leaf has aged out,
         // the validity check rejects it first — either way it must not pass.)
         let chain = vec![nras_x5c_fixture()[0].clone()];
-        match verify_x5c_chain_and_extract_key(&chain) {
+        match verify_x5c_chain_and_extract_key(&chain, now()) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("leaf-only chain must be rejected, got {other:?}"),
         }
@@ -1193,11 +1212,12 @@ mod tests {
         let policy = crate::types::NvidiaGpuDevicePolicy {
             allow_debug: true,
             require_secboot: false,
-            require_nonce_match: false,
             require_measres_success: false,
         };
         let dc = NvidiaGpuDeviceClaims::default();
-        apply_device_policy("GPU-0", &dc, &policy)
-            .expect("all-gates-off policy must accept any device");
+        assert!(
+            device_policy_holds("GPU-0", &dc, &policy),
+            "all-gates-off policy must accept any device"
+        );
     }
 }
