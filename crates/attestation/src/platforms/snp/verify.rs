@@ -91,6 +91,9 @@ pub struct SnpResult {
     pub reported_tcb: SnpTcb,
     /// `reported_tcb` is at or above `min_tcb` (`None` if no minimum given).
     pub min_tcb_met: Option<bool>,
+    /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` when no
+    /// CRL was checked: offline, or a provider without CRLs).
+    pub crl_ok: Option<bool>,
 }
 
 impl SnpResult {
@@ -101,6 +104,7 @@ impl SnpResult {
             self.host_data_match,
             self.launch_digest_match,
             self.min_tcb_met,
+            self.crl_ok,
         ]) && (!self.debug || self.allow_debug)
             && self.vmpl <= self.max_vmpl
     }
@@ -110,7 +114,11 @@ impl SnpResult {
 /// TCB) on a report whose signature has already been verified.
 /// `report_data_match` and `host_data_match` are left `None`: where those
 /// values live depends on the platform (report or vTPM).
-pub fn evaluate_report(report: &AttestationReport, params: &SnpParams) -> SnpResult {
+pub fn evaluate_report(
+    report: &AttestationReport,
+    params: &SnpParams,
+    crl_ok: Option<bool>,
+) -> SnpResult {
     let reported_tcb = snp_tcb(&report.reported_tcb);
     SnpResult {
         claims: extract_claims(report),
@@ -129,6 +137,7 @@ pub fn evaluate_report(report: &AttestationReport, params: &SnpParams) -> SnpRes
             .as_ref()
             .map(|min| min_tcb_met(&reported_tcb, min)),
         reported_tcb,
+        crl_ok,
     }
 }
 
@@ -225,20 +234,25 @@ impl Platform for Snp {
 
         // 8. CRL revocation check (if the provider supplies a CRL), only once
         // the evidence is known to be genuine, so a forged report is never
-        // reported as retryable. AMD CRLs are signed by the ARK.
-        if let Some(crl_der) = cert_provider.get_snp_crl(processor_gen).await? {
-            check_vcek_not_revoked(
+        // reported as retryable. A CRL the provider could not fetch is
+        // CollateralUnavailable.
+        let crl_ok = match cert_provider.get_snp_crl(processor_gen).await? {
+            Some(crl_der) => Some(check_vek_against_crl(
                 &vcek_der,
                 &crl_der,
-                super::certs::get_ark(processor_gen),
+                processor_gen,
                 now,
-            )?;
-        } else {
-            log::warn!("snp: CRL data not available from cert provider; skipping revocation check");
-        }
+            )?),
+            None => {
+                log::warn!(
+                    "snp: CRL data not available from cert provider; skipping revocation check"
+                );
+                None
+            }
+        };
 
         // 9. The params' rules: VMPL, debug, minimum TCB, launch digest
-        let mut result = evaluate_report(&report, params);
+        let mut result = evaluate_report(&report, params, crl_ok);
 
         // 10. report_data and HOST_DATA bindings
         check_report_bindings(&mut result, &report, params)?;
@@ -383,23 +397,31 @@ pub fn verify_vek_validity_period(vek_der: &[u8], now: i64) -> Result<()> {
 /// cross-validation against the report. This is step 6 of
 /// [`Snp::verify`] as one unit, for callers that resolve the VEK
 /// themselves (notably the WASM `verify_snp` entry point). Revocation is out
-/// of scope — pair with [`check_vcek_not_revoked`] when CRL data is available.
+/// of scope — pair with [`check_vek_against_crl`] when CRL data is available.
 pub fn verify_vek_endorsement(
     report: &AttestationReport,
     vek_der: &[u8],
     processor_gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
-    let ark_der = super::certs::get_ark(processor_gen);
-    let intermediate_der = if is_vlek_cert(vek_der)? {
-        super::certs::get_asvk(processor_gen)
-    } else {
-        super::certs::get_ask(processor_gen)
-    };
-    verify_cert_chain(ark_der, intermediate_der, vek_der)?;
+    verify_cert_chain(
+        super::certs::get_ark(processor_gen),
+        vek_issuer(vek_der, processor_gen)?,
+        vek_der,
+    )?;
     verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
+}
+
+/// The bundled AMD intermediate that issues `vek_der`: the ASVK for a VLEK
+/// (ARK → ASVK → VLEK), the ASK for a VCEK (ARK → ASK → VCEK).
+fn vek_issuer(vek_der: &[u8], processor_gen: ProcessorGeneration) -> Result<&'static [u8]> {
+    Ok(if is_vlek_cert(vek_der)? {
+        super::certs::get_asvk(processor_gen)
+    } else {
+        super::certs::get_ask(processor_gen)
+    })
 }
 
 /// Check if a VEK certificate is a VLEK (versioned loaded endorsement key)
@@ -580,23 +602,43 @@ pub fn verify_vcek_tcb(
     Ok(())
 }
 
-/// Check whether a VCEK/VLEK certificate has been revoked by an AMD CRL.
+/// Check the AMD certificate that issued a VEK against an AMD KDS CRL.
+/// Returns `Ok(false)` when the CRL revokes it.
 ///
-/// Verifies the CRL's own signature against the issuing CA before trusting the
-/// revocation list. Without this an attacker could supply a forged empty CRL
-/// to bypass revocation checks.
+/// AMD CRLs are signed by the ARK and list revoked ARK-issued certificates:
+/// ASKs and ASVKs. Every VCEK/VLEK carries serial 0 and is issued by the
+/// ASK/ASVK, so the entry that can revoke a VEK is its issuer's serial. The
+/// issuer (ASK, or ASVK for a VLEK) and the ARK are the bundled ones for
+/// `processor_gen`, the same chain [`verify_cert_chain`] validates.
 ///
-/// `vcek_der`: DER-encoded VCEK/VLEK certificate.
-/// `crl_der`: DER-encoded CRL from AMD KDS.
-/// `issuer_der`: DER-encoded issuing CA certificate (ARK — AMD CRLs are signed by the root).
+/// A CRL that cannot be parsed, is not signed by the ARK, or is outside its
+/// thisUpdate/nextUpdate window at `now` (Unix seconds) was not usefully
+/// obtained: [`AttestationError::CollateralUnavailable`]. Only "the issuer is
+/// listed" is a value.
+pub fn check_vek_against_crl(
+    vek_der: &[u8],
+    crl_der: &[u8],
+    processor_gen: ProcessorGeneration,
+    now: i64,
+) -> Result<bool> {
+    let ark_der = super::certs::get_ark(processor_gen);
+    let issuer_der = vek_issuer(vek_der, processor_gen)?;
+    let listed = crl_lists(issuer_der, crl_der, ark_der, now).map_err(|e| match e {
+        AttestationError::CollateralUnavailable(_) => e,
+        other => AttestationError::CollateralUnavailable(format!("AMD CRL: {other}")),
+    })?;
+    Ok(!listed)
+}
+
+/// Whether a CRL from `issuer_der` lists `cert_der`.
+///
+/// Verifies the CRL's own signature against the issuer and its
+/// thisUpdate/nextUpdate window before trusting the revocation list. Without
+/// this an attacker could supply a forged or stale empty CRL to bypass
+/// revocation checks.
 // INVARIANT CLASS: Correctness
 // INVARIANT: CRL signature verified against issuing CA before trusting revocation data.
-pub fn check_vcek_not_revoked(
-    vcek_der: &[u8],
-    crl_der: &[u8],
-    issuer_der: &[u8],
-    now: i64,
-) -> Result<()> {
+fn crl_lists(cert_der: &[u8], crl_der: &[u8], issuer_der: &[u8], now: i64) -> Result<bool> {
     // 1. Parse the issuing CA cert to extract its public key
     let (_, issuer_cert) = X509Certificate::from_der(issuer_der)
         .map_err(|e| AttestationError::CertChainError(format!("CRL issuer x509 parse: {e}")))?;
@@ -610,13 +652,13 @@ pub fn check_vcek_not_revoked(
     // doesn't support RSA-PSS (used by Milan ASK for CRL signing).
     verify_crl_signature(&crl, crl_der, &issuer_cert)?;
 
-    // 3b. Freshness: a genuine but stale CRL must not vouch for a VEK that a
-    // newer list may have revoked. AMD CRLs always carry nextUpdate; one
-    // without it has no defined shelf life, so it is rejected rather than
+    // 3b. Freshness: a genuine but stale CRL must not vouch for a certificate
+    // that a newer list may have revoked. AMD CRLs always carry nextUpdate;
+    // one without it has no defined shelf life, so it is rejected rather than
     // trusted forever.
     let now = crate::utils::asn1_time(now)?;
     if crl.last_update() > now {
-        return Err(AttestationError::CertChainError(format!(
+        return Err(AttestationError::CollateralUnavailable(format!(
             "AMD CRL thisUpdate {} is in the future",
             crl.last_update()
         )));
@@ -629,7 +671,7 @@ pub fn check_vcek_not_revoked(
             ));
         }
         Some(next_update) if next_update < now => {
-            return Err(AttestationError::CertChainError(format!(
+            return Err(AttestationError::CollateralUnavailable(format!(
                 "AMD CRL is stale: nextUpdate {next_update} has passed; fetch a current CRL"
             )));
         }
@@ -637,19 +679,20 @@ pub fn check_vcek_not_revoked(
     }
 
     // 4. Check serial number against revocation list
-    let (_, cert) = X509Certificate::from_der(vcek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("VCEK x509 parse for CRL: {e}")))?;
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| AttestationError::CertChainError(format!("x509 parse for CRL: {e}")))?;
     let cert_serial = cert.raw_serial();
-
-    for revoked in crl.iter_revoked_certificates() {
-        if revoked.raw_serial() == cert_serial {
-            return Err(AttestationError::CertChainError(
-                "VCEK/VLEK certificate has been revoked by AMD CRL".into(),
-            ));
-        }
+    let revoked = crl
+        .iter_revoked_certificates()
+        .any(|revoked| revoked.raw_serial() == cert_serial);
+    if revoked {
+        log::warn!(
+            "{} (serial {}) is listed in the AMD CRL",
+            cert.subject(),
+            cert.raw_serial_as_string()
+        );
     }
-
-    Ok(())
+    Ok(revoked)
 }
 
 /// Extract the TBSCertList raw DER bytes from a CRL DER blob.
@@ -1175,6 +1218,41 @@ mod tests {
         }
     }
 
+    /// A provider whose AMD CRL fetch fails.
+    struct CrlUnreachable;
+
+    #[async_trait::async_trait]
+    impl crate::collateral::CertProvider for CrlUnreachable {
+        async fn get_snp_vcek(
+            &self,
+            _: ProcessorGeneration,
+            _: &[u8; 64],
+            _: &SnpTcb,
+        ) -> Result<Vec<u8>> {
+            Ok(LIVE_VCEK_GENOA.to_vec())
+        }
+
+        async fn get_snp_cert_chain(&self, _: ProcessorGeneration) -> Result<(Vec<u8>, Vec<u8>)> {
+            unreachable!("the bare-metal SNP path uses the bundled chain")
+        }
+
+        async fn get_snp_crl(&self, _: ProcessorGeneration) -> Result<Option<Vec<u8>>> {
+            Err(AttestationError::CollateralUnavailable(
+                "unreachable".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crl_fetch_failure_is_collateral_unavailable() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let ctx = Context::offline().with_cert_provider(CrlUnreachable);
+        let err = Snp::verify(&evidence, &SnpParams::default(), &ctx)
+            .await
+            .expect_err("the CRL was needed and could not be fetched");
+        assert!(err.is_retryable());
+    }
+
     async fn verify(params: &SnpParams) -> Result<SnpResult> {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let ctx = Context::offline().with_cert_provider(StubCertProvider);
@@ -1347,14 +1425,40 @@ mod tests {
     }
 
     #[test]
-    fn test_crl_revoked_vek_rejected() {
+    fn test_crl_revoked_serial_is_listed() {
         let issuer = mint_issuer("TEST-ARK");
         let (not_before, not_after) = valid_window();
         let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
         let crl = mint_crl(&issuer, Some(LEAF_SERIAL), not_before, not_after);
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
-            .expect_err("revoked serial must be rejected");
-        assert!(err.to_string().contains("revoked"), "got: {err}");
+        assert!(
+            crl_lists(&leaf, &crl, issuer.0.der(), now_secs()).unwrap(),
+            "a revoked serial is reported, not an error"
+        );
+    }
+
+    #[test]
+    fn test_crl_revoking_bundled_ask_is_listed() {
+        // AMD CRLs list ASK/ASVK serials; a VEK is revoked through its issuer.
+        let ask = super::super::certs::get_ask(ProcessorGeneration::Genoa);
+        let (_, ask_cert) = X509Certificate::from_der(ask).unwrap();
+        let issuer = mint_issuer("TEST-ARK");
+        let (this_update, next_update) = valid_window();
+        let crl = mint_crl(
+            &issuer,
+            Some(ask_cert.raw_serial()),
+            this_update,
+            next_update,
+        );
+        assert!(crl_lists(ask, &crl, issuer.0.der(), now_secs()).unwrap());
+    }
+
+    #[test]
+    fn test_revoked_issuer_fails_passed() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let params = SnpParams::default();
+        assert!(evaluate_report(&report, &params, Some(true)).passed());
+        assert!(evaluate_report(&report, &params, None).passed());
+        assert!(!evaluate_report(&report, &params, Some(false)).passed());
     }
 
     #[test]
@@ -1363,8 +1467,8 @@ mod tests {
         let (not_before, not_after) = valid_window();
         let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
         let crl = mint_crl(&issuer, Some(&[0xEE; 4]), not_before, not_after);
-        check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
-            .expect("fresh CRL not naming the serial must pass");
+        assert!(!crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
+            .expect("fresh CRL not naming the serial must pass"));
     }
 
     #[test]
@@ -1380,9 +1484,9 @@ mod tests {
             now - TimeDuration::days(30),
             now - TimeDuration::days(1),
         );
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
+        let err = crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("stale CRL must be rejected");
-        assert!(err.to_string().contains("stale"), "got: {err}");
+        assert!(err.is_retryable(), "a stale CRL needs a fresh fetch: {err}");
     }
 
     #[test]
@@ -1397,7 +1501,7 @@ mod tests {
             now + TimeDuration::days(1),
             now + TimeDuration::days(30),
         );
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
+        let err = crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("future-dated CRL must be rejected");
         assert!(err.to_string().contains("future"), "got: {err}");
     }
@@ -1411,7 +1515,7 @@ mod tests {
         // An empty CRL signed by a key the verifier does not trust must not
         // clear the check — this is exactly the forged-empty-CRL bypass.
         let crl = mint_crl(&signer, None, not_before, not_after);
-        let err = check_vcek_not_revoked(&leaf, &crl, impostor.0.der(), now_secs())
+        let err = crl_lists(&leaf, &crl, impostor.0.der(), now_secs())
             .expect_err("CRL signed by the wrong issuer must be rejected");
         assert!(
             err.to_string().contains("signature verification failed"),

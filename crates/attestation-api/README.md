@@ -64,6 +64,7 @@ chain_ttl_hours = 168           # 7 days
 crl_refresh_hours = 6
 tdx_collateral_ttl_hours = 24
 prefetch_chains = ["milan"]
+skip_snp_crl = false            # true = do not check the AMD CRL (see below)
 
 [token]
 enabled = false
@@ -86,6 +87,14 @@ When `auth.api_keys` contains one or more Bearer tokens, all endpoints except `/
 ## Attestation
 
 The `/attest` endpoint is available when `attestation.enabled = true` (the default). Set it to `false` on verification-only deployments. The `attestation.platforms` list controls which platforms the service is allowed to generate evidence for.
+
+## SEV-SNP revocation
+
+`/verify` checks SEV-SNP evidence against the AMD KDS CRL for the processor
+generation. A CRL that cannot be fetched is `502 collateral_unavailable`, never
+a pass. Setting `certs.skip_snp_crl = true` turns the check off: the CRL is
+never fetched and `crl_ok` is `null`. The cost is that evidence whose AMD
+ASK/ASVK has been revoked still passes and can get a token.
 
 ## Usage Examples
 

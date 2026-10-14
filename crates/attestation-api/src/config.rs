@@ -101,16 +101,17 @@ pub struct CertsConfig {
     pub crl_refresh_hours: u64,
     pub tdx_collateral_ttl_hours: u64,
     pub prefetch_chains: Vec<String>,
-    /// If true, verification fails when CRL cannot be fetched (fail-closed).
-    /// If false, CRL fetch failures are logged and revocation check is skipped (fail-open).
-    pub require_crl: bool,
+    /// Opt out of the AMD CRL check for SEV-SNP. The CRL is then never fetched,
+    /// `crl_ok` is null, and a revoked ASK/ASVK goes undetected. Otherwise a
+    /// CRL that cannot be fetched is `CollateralUnavailable` (502).
+    pub skip_snp_crl: bool,
     /// Backoff for a CRL distribution point that is failing. Without it a dead
     /// endpoint costs every verify a fresh connect timeout, because only
     /// successes were cached. Doubles per consecutive failure from the base up
     /// to the max, so a blip is retried almost immediately while a real outage
-    /// stops being dialled. 0 disables the backoff and restores per-request
-    /// retries. Ignored under require_crl, where suppressing a retry means
-    /// refusing verification.
+    /// stops being dialled. While backing off, an SNP verify that needs the CRL
+    /// is `CollateralUnavailable`, so recovery can lag an outage by up to the
+    /// max. 0 disables the backoff and restores per-request retries.
     pub crl_backoff_base_secs: u64,
     /// Ceiling for the CRL failure backoff, in seconds.
     pub crl_backoff_max_secs: u64,
@@ -182,7 +183,7 @@ impl Default for CertsConfig {
             crl_refresh_hours: 6,
             tdx_collateral_ttl_hours: 24,
             prefetch_chains: vec!["milan".to_string()],
-            require_crl: false,
+            skip_snp_crl: false,
             crl_backoff_base_secs: 1,
             crl_backoff_max_secs: 300,
             local_collateral_dir: None,

@@ -152,6 +152,13 @@ firmware the cloud provider owns varies (the Azure paravisor build, the GCP
 firmware per memory size or machine type). The measurement must equal one of
 them; an empty set is invalid params (`Err`).
 
+For SEV-SNP (`snp`, `gcp-snp`, `az-snp`) the verifier fetches the AMD KDS CRL
+for the processor generation and checks the VEK's issuing ASK/ASVK against it
+(AMD CRLs are signed by the ARK and list ASK/ASVK serials). A revoked issuer is
+`crl_ok: false`; a CRL that cannot be fetched, parsed or verified, or is
+stale, is `CollateralUnavailable`; `Context::offline()` skips the check
+(`crl_ok: null`).
+
 The CLI exposes matching flags (`--expected-mrtd`, `--expected-rtmrN` and
 `--expected-launch-digest` are repeatable: any of the given values):
 
