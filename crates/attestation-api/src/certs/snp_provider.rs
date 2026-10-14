@@ -29,7 +29,9 @@ impl attestation::CertProvider for CachedCertProvider {
             .get_vcek(processor_gen, chip_id, reported_tcb)
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!("cached VCEK fetch: {e}"))
+                attestation::AttestationError::CollateralUnavailable(format!(
+                    "cached VCEK fetch: {e}"
+                ))
             })
     }
 
@@ -41,7 +43,7 @@ impl attestation::CertProvider for CachedCertProvider {
             .get_cert_chain(processor_gen.product_name())
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached cert chain fetch: {e}"
                 ))
             })
@@ -57,9 +59,9 @@ impl attestation::CertProvider for CachedCertProvider {
             Ok(entry) => Ok(Some(entry.data)),
             Err(e) => {
                 if self.require_crl {
-                    Err(attestation::AttestationError::CertFetchError(format!(
-                        "CRL fetch failed (require_crl=true): {e}"
-                    )))
+                    Err(attestation::AttestationError::CollateralUnavailable(
+                        format!("CRL fetch failed (require_crl=true): {e}"),
+                    ))
                 } else {
                     tracing::warn!(%issuer, error = %e, "CRL unavailable, skipping revocation check");
                     Ok(None)

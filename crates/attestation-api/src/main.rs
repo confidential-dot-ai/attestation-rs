@@ -107,12 +107,12 @@ async fn main() -> anyhow::Result<()> {
     // Build verifier with cached providers so verification uses the moka cache
     let cert_provider = CachedCertProvider::new(cert_cache.clone(), config.certs.require_crl);
     let tdx_provider = CachedTdxProvider::new(cert_cache.clone());
-    let verifier = Arc::new(
-        attestation::Verifier::new()
+    let verifier = Arc::new(attestation::Verifier::new(
+        attestation::Context::new()
             .with_cert_provider(cert_provider)
             .with_tdx_provider(tdx_provider)
             .with_nras_provider(nras_provider),
-    );
+    ));
 
     // Warm attestation::detect()'s process-lifetime cache before serving, so the
     // first /health/attest/platform request hits the memoized value instead of

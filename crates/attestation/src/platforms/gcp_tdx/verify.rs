@@ -6,8 +6,8 @@
 // THREAT MODEL:
 //   Attacker controls: the hypervisor, guest OS environment, DMI/SMBIOS tables,
 //   and the `platform` field in the attestation evidence envelope.
-//   Attacker goal: obtain a VerificationResult with platform=GcpTdx and
-//   signature_valid=true from hardware they control (not GCP).
+//   Attacker goal: obtain a result tagged GcpTdx and
+//   an Ok result from hardware they control (not GCP).
 //   Protection: The Intel DCAP root-of-trust (Intel Root CA → PCK cert chain
 //   → QE report → quote signature) is the only cryptographic trust anchor.
 //   A valid result proves the hardware contains a genuine Intel TDX processor
@@ -16,36 +16,67 @@
 //   Non-goal: This verifier cannot distinguish GCP hardware from any other
 //   valid Intel TDX machine. The `GcpTdx` tag is an attester-reported claim.
 //
-// SECURITY NOTE: The `GcpTdx` platform tag in VerificationResult reflects
+// SECURITY NOTE: The `GcpTdx` platform tag in the result reflects
 // what the *attester* claimed, not a cryptographic proof of GCP origin.
 // The Intel TDX DCAP quote does not contain cloud-provider identity.
 // Policy engines should NOT grant elevated trust based solely on the
 // `GcpTdx` tag — use report fields (mr_td, rtmr_*, tee_tcb_svn) instead.
 
-use crate::collateral::TdxCollateralProvider;
-use crate::error::Result;
-use crate::platforms::tdx::evidence::TdxEvidence;
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use serde::{Deserialize, Serialize};
 
-/// Verify GCP TDX attestation evidence.
+use crate::context::Context;
+use crate::error::Result;
+use crate::platform::Platform;
+use crate::platforms::tdx::evidence::TdxEvidence;
+use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
+use crate::types::PlatformType;
+
+/// What a caller can ask of GCP TDX evidence.
+#[derive(Debug, Clone, Default)]
+pub struct GcpTdxParams {
+    pub tdx: TdxParams,
+}
+
+/// The answer for genuine GCP TDX evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct GcpTdxResult {
+    #[serde(flatten)]
+    pub tdx: TdxResult,
+}
+
+impl GcpTdxResult {
+    /// True when the evidence satisfied every rule in the params.
+    pub fn passed(&self) -> bool {
+        self.tdx.passed()
+    }
+}
+
+/// GCP Confidential VM running Intel TDX.
 ///
-/// Delegates to the bare-metal TDX verification pipeline and overrides the
-/// platform tag to `GcpTdx`. The quote format, DCAP certificate chain, and
-/// all cryptographic verification are identical to bare-metal TDX.
+/// Delegates to the bare-metal TDX verifier. The quote format, DCAP
+/// certificate chain, and all cryptographic verification are identical to
+/// bare-metal TDX.
 ///
 /// **Note:** The `GcpTdx` platform tag reflects the attester's claim, not a
 /// cryptographic proof of GCP origin. Policy decisions should use report
 /// fields (mr_td, rtmr_*, tee_tcb_svn) rather than the platform tag alone.
-pub async fn verify_evidence(
-    evidence: &TdxEvidence,
-    params: &VerifyParams,
-    collateral_provider: Option<&dyn TdxCollateralProvider>,
-) -> Result<VerificationResult> {
-    let mut result =
-        crate::platforms::tdx::verify::verify_evidence(evidence, params, collateral_provider)
-            .await?;
-    result.platform = PlatformType::GcpTdx;
-    Ok(result)
+pub struct GcpTdx;
+
+impl Platform for GcpTdx {
+    const KIND: PlatformType = PlatformType::GcpTdx;
+    type Evidence = TdxEvidence;
+    type Params = GcpTdxParams;
+    type Result = GcpTdxResult;
+
+    async fn verify(
+        evidence: &TdxEvidence,
+        params: &GcpTdxParams,
+        ctx: &Context,
+    ) -> Result<GcpTdxResult> {
+        let tdx = Tdx::verify(evidence, &params.tdx, ctx).await?;
+        Ok(GcpTdxResult { tdx })
+    }
 }
 
 #[cfg(test)]
@@ -67,26 +98,33 @@ mod tests {
     async fn test_gcp_tdx_propagates_expected_mrtd_match() {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = VerifyParams {
-            allow_debug: true, // v4 fixture has the debug bit set
-            expected_mrtd: Some(quote.body.mr_td),
-            ..Default::default()
+        let params = GcpTdxParams {
+            tdx: TdxParams {
+                allow_debug: true, // v4 fixture has the debug bit set
+                mrtd: Some(quote.body.mr_td),
+                ..Default::default()
+            },
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.platform, PlatformType::GcpTdx);
-        assert_eq!(r.mrtd_match, Some(true));
+        let r = GcpTdx::verify(&evidence, &params, &Context::offline())
+            .await
+            .unwrap();
+        assert_eq!(r.tdx.mrtd_match, Some(true));
     }
 
     #[tokio::test]
     async fn test_gcp_tdx_propagates_wrong_mrtd_match() {
         let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = VerifyParams {
-            allow_debug: true,
-            expected_mrtd: Some([0x55; 48]),
-            ..Default::default()
+        let params = GcpTdxParams {
+            tdx: TdxParams {
+                allow_debug: true,
+                mrtd: Some([0x55; 48]),
+                ..Default::default()
+            },
         };
-        let r = verify_evidence(&evidence, &params, None).await.unwrap();
-        assert_eq!(r.platform, PlatformType::GcpTdx);
-        assert_eq!(r.mrtd_match, Some(false));
+        let r = GcpTdx::verify(&evidence, &params, &Context::offline())
+            .await
+            .unwrap();
+        assert_eq!(r.tdx.mrtd_match, Some(false));
+        assert!(!r.passed());
     }
 }

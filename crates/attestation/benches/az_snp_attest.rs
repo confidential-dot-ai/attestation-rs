@@ -5,9 +5,7 @@ fn main() {}
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[cfg(target_os = "linux")]
-use attestation::collateral::DefaultCertProvider;
-#[cfg(target_os = "linux")]
-use attestation::types::VerifyParams;
+use attestation::{AzSnp, AzSnpParams, Context, Platform};
 
 #[cfg(target_os = "linux")]
 fn bench_generate_evidence_with_data(c: &mut Criterion) {
@@ -44,8 +42,8 @@ fn bench_generate_evidence_empty(c: &mut Criterion) {
 fn bench_roundtrip(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let custom_data = b"benchmark-roundtrip-data";
-    let params = VerifyParams::default();
-    let provider = DefaultCertProvider::new();
+    let params = AzSnpParams::default();
+    let ctx = Context::new();
 
     c.bench_function("az_snp_attest/roundtrip", |b| {
         b.to_async(&rt).iter(|| async {
@@ -53,13 +51,9 @@ fn bench_roundtrip(c: &mut Criterion) {
                 attestation::platforms::az_snp::attest::generate_evidence(black_box(custom_data))
                     .await
                     .unwrap();
-            let result = attestation::platforms::az_snp::verify::verify_evidence(
-                black_box(&evidence),
-                black_box(&params),
-                black_box(&provider),
-            )
-            .await
-            .unwrap();
+            let result = AzSnp::verify(black_box(&evidence), black_box(&params), &ctx)
+                .await
+                .unwrap();
             black_box(&result);
         });
     });

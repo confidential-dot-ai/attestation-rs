@@ -1,24 +1,60 @@
-use crate::collateral::CertProvider;
+use serde::{Deserialize, Serialize};
+
+use crate::context::Context;
 use crate::error::{AttestationError, Result};
+use crate::platform::Platform;
+use crate::platforms::snp::{SnpParams, SnpResult};
 use crate::platforms::tpm_common;
-use crate::types::{PlatformType, ProcessorGeneration, VerificationResult, VerifyParams};
+use crate::types::{PlatformType, ProcessorGeneration};
 use crate::utils::decode_base64url;
 
 use super::evidence::AzSnpEvidence;
+
+/// What a caller can ask of Azure SEV-SNP (vTPM) evidence. `snp.report_data`
+/// is checked against the vTPM quote nonce and `snp.host_data` (a 32-byte
+/// init-data hash) against PCR[8].
+#[derive(Debug, Clone, Default)]
+pub struct AzSnpParams {
+    pub snp: SnpParams,
+}
+
+impl AzSnpParams {
+    /// Reject params that cannot be applied, before any I/O.
+    pub fn validate(&self) -> Result<()> {
+        self.snp.validate()?;
+        tpm_common::check_init_data_len(self.snp.host_data.as_deref())
+    }
+}
+
+/// The answer for genuine Azure SEV-SNP evidence. The vTPM PCRs and nonce are
+/// in `snp.claims.platform_data.tpm`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct AzSnpResult {
+    #[serde(flatten)]
+    pub snp: SnpResult,
+}
+
+impl AzSnpResult {
+    /// True when the evidence satisfied every rule in the params.
+    pub fn passed(&self) -> bool {
+        self.snp.passed()
+    }
+}
 
 /// A verified az-snp attestation together with the locator for its revocation
 /// collateral.
 ///
 /// [`verify_report`] performs the full cryptographic verification (TPM quote, AK
-/// binding, VCEK chain, SNP report signature, policy) but deliberately does not
-/// fetch or check revocation collateral — that is a separate concern. It returns
-/// this struct so a caller that *does* care about revocation (notably
-/// [`verify_evidence`]) has the pieces it needs to locate and run the CRL check:
-/// the matched generation pins the AMD root, and the VCEK is what the CRL is
-/// checked against.
+/// binding, VCEK chain, SNP report signature) and evaluates the params, but
+/// deliberately does not fetch or check revocation collateral — that is a
+/// separate concern. It returns this struct so a caller that *does* care about
+/// revocation (notably [`AzSnp::verify`]) has the pieces it needs to locate and
+/// run the CRL check: the matched generation pins the AMD root, and the VCEK is
+/// what the CRL is checked against.
 pub struct VerifiedReport {
-    /// Verification result with `collateral_verified = false` (no CRL checked yet).
-    pub result: VerificationResult,
+    /// Verification result; revocation is not checked yet.
+    pub result: AzSnpResult,
     /// AMD processor generation the VCEK chain validated against.
     pub matched_gen: ProcessorGeneration,
     /// VCEK certificate (DER) — needed for the CRL revocation check.
@@ -27,49 +63,67 @@ pub struct VerifiedReport {
     pub report_version: u32,
 }
 
-/// Verify Azure SNP vTPM attestation evidence — the full flow.
-///
-/// Assembles the two halves of az-snp verification: the cryptographic core in
-/// [`verify_report`], then the revocation check. This keeps the same signature
-/// as every other platform's `verify_evidence` so call sites are uniform.
-pub async fn verify_evidence(
-    evidence: &AzSnpEvidence,
-    params: &VerifyParams,
-    cert_provider: &dyn CertProvider,
-) -> Result<VerificationResult> {
-    let VerifiedReport {
-        mut result,
-        matched_gen,
-        vcek_der,
-        ..
-    } = verify_report(evidence, params)?;
+/// Azure SEV-SNP: an SNP report wrapped in an HCL report, bound to a vTPM quote.
+pub struct AzSnp;
 
-    // CRL revocation check (if provider supplies CRL data)
-    // AMD CRLs are signed by the ARK (root), not the ASK/ASVK intermediate.
-    let ark_der = crate::platforms::snp::certs::get_ark(matched_gen);
-    if let Some(crl_der) = cert_provider.get_snp_crl(matched_gen).await? {
-        crate::platforms::snp::verify::check_vcek_not_revoked(&vcek_der, &crl_der, ark_der)?;
-        result.collateral_verified = true;
-    } else {
-        log::warn!(
-            "az-snp: SNP CRL data not available from cert provider; skipping revocation check"
-        );
+impl Platform for AzSnp {
+    const KIND: PlatformType = PlatformType::AzSnp;
+    type Evidence = AzSnpEvidence;
+    type Params = AzSnpParams;
+    type Result = AzSnpResult;
+
+    /// The full flow: the cryptographic core in [`verify_report`], then the
+    /// revocation check with the context's cert provider.
+    async fn verify(
+        evidence: &AzSnpEvidence,
+        params: &AzSnpParams,
+        ctx: &Context,
+    ) -> Result<AzSnpResult> {
+        let VerifiedReport {
+            result,
+            matched_gen,
+            vcek_der,
+            ..
+        } = verify_report(evidence, params, ctx.now())?;
+
+        // CRL revocation check (if provider supplies CRL data)
+        // AMD CRLs are signed by the ARK (root), not the ASK/ASVK intermediate.
+        let ark_der = crate::platforms::snp::certs::get_ark(matched_gen);
+        if let Some(crl_der) = ctx.cert_provider().get_snp_crl(matched_gen).await? {
+            crate::platforms::snp::verify::check_vcek_not_revoked(
+                &vcek_der,
+                &crl_der,
+                ark_der,
+                ctx.now(),
+            )?;
+        } else {
+            log::warn!(
+                "az-snp: SNP CRL data not available from cert provider; skipping revocation check"
+            );
+        }
+
+        Ok(result)
     }
-
-    Ok(result)
 }
 
 /// The cryptographic core of az-snp verification.
 ///
 /// Performs the TPM quote signature check, AK-to-TEE binding, VCEK certificate
-/// chain validation, SNP report signature, and all policy enforcement (VMPL,
-/// debug, TCB). Revocation is intentionally out of scope: it is a separate fetch
-/// (the CRL) and check that needs a [`CertProvider`], so this returns the
-/// still-`collateral_verified = false` result together with the matched
-/// generation and VCEK that locate the collateral. Callers wanting the full flow
-/// use [`verify_evidence`]; callers without an async cert provider — notably
-/// WASM — call this directly and handle revocation separately, if at all.
-pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<VerifiedReport> {
+/// chain validation and SNP report signature, then evaluates the params
+/// (nonce, init data, launch digest, VMPL, debug, TCB). Revocation is
+/// intentionally out of scope: it is a separate fetch (the CRL) and check that
+/// needs a cert provider, so this returns the result together with the matched
+/// generation and VCEK that locate the collateral. Callers wanting the full flow use [`AzSnp::verify`]; callers
+/// without an async cert provider — notably WASM — call this directly and
+/// handle revocation separately, if at all. `now` is the evaluation time in
+/// Unix seconds.
+pub fn verify_report(
+    evidence: &AzSnpEvidence,
+    params: &AzSnpParams,
+    now: i64,
+) -> Result<VerifiedReport> {
+    params.validate()?;
+    let params = &params.snp;
     if evidence.version != 1 {
         return Err(AttestationError::EvidenceDeserialize(format!(
             "unsupported az_snp evidence version: {}",
@@ -122,24 +176,21 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     // 3. The TEE report itself is signed by the platform (VCEK/VLEK for SNP).
     // Trust chain: TEE report → var_data → AK → TPM quote → nonce
     tpm_common::verify_tpm_signature(&tpm_sig, &tpm_msg, &hcl.var_data)?;
-    if params.expected_report_data.is_none() {
-        log::warn!(
-            "az-snp: no expected_report_data provided; TPM nonce binding will not be verified"
-        );
+    if params.report_data.is_none() {
+        log::warn!("az-snp: no report_data provided; TPM nonce binding will not be verified");
     }
-    let report_data_match =
-        tpm_common::check_report_data(&tpm_msg, params.expected_report_data.as_deref())?;
+    let report_data_match = tpm_common::check_report_data(&tpm_msg, params.report_data.as_deref())?;
     tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
 
     // HCL binding
     tpm_common::verify_hcl_var_data_binding(snp_report.report_data.as_ref(), &hcl.var_data)?;
 
-    // VCEK/VLEK validation against bundled AMD CA chain
-    let is_vlek = crate::platforms::snp::verify::is_vlek_cert(&vcek_der)?;
+    // VEK endorsement (chain to the bundled AMD roots, validity, chip-id/TCB
+    // OIDs), as on bare-metal SNP. Azure v2 reports carry no CPUID, so the
+    // generation is found by trying each known root.
     let cpuid_fam_id = snp_report.cpuid_fam_id.unwrap_or(0);
     let cpuid_mod_id = snp_report.cpuid_mod_id.unwrap_or(0);
-    let processor_gen = ProcessorGeneration::from_cpuid(cpuid_fam_id, cpuid_mod_id);
-    let gens = match processor_gen {
+    let gens = match ProcessorGeneration::from_cpuid(cpuid_fam_id, cpuid_mod_id) {
         Some(g) => vec![g],
         None => {
             log::warn!(
@@ -156,15 +207,12 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
     let mut last_err = None;
     let mut matched_gen = None;
     for gen in &gens {
-        let ark_der = crate::platforms::snp::certs::get_ark(*gen);
-        // VLEK chain: ARK → ASVK → VLEK; VCEK chain: ARK → ASK → VCEK
-        let intermediate_der = if is_vlek {
-            crate::platforms::snp::certs::get_asvk(*gen)
-        } else {
-            crate::platforms::snp::certs::get_ask(*gen)
-        };
-        match crate::platforms::snp::verify::verify_cert_chain(ark_der, intermediate_der, &vcek_der)
-        {
+        match crate::platforms::snp::verify::verify_vek_endorsement(
+            &snp_report,
+            &vcek_der,
+            *gen,
+            now,
+        ) {
             Ok(()) => {
                 if gens.len() > 1 {
                     log::warn!("az-snp: processor generation fallback matched {gen:?}");
@@ -173,7 +221,7 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
                 break;
             }
             Err(e) => {
-                log::debug!("VEK chain check failed for {gen:?}: {e}");
+                log::debug!("VEK endorsement check failed for {gen:?}: {e}");
                 last_err = Some(e);
             }
         }
@@ -184,59 +232,18 @@ pub fn verify_report(evidence: &AzSnpEvidence, params: &VerifyParams) -> Result<
         })
     })?;
 
-    // VCEK/VLEK validity period — same check as the bare-metal SNP path (6b).
-    crate::platforms::snp::verify::verify_vek_validity_period(&vcek_der)?;
-
     // SNP report signature against VCEK
     crate::platforms::snp::verify::verify_report_signature(&hcl.tee_report, &vcek_der)?;
 
-    // VMPL check
-    if snp_report.vmpl != 0 {
-        return Err(AttestationError::VmplCheckFailed(snp_report.vmpl));
-    }
+    // The params' rules
+    let mut snp = crate::platforms::snp::verify::evaluate_report(&snp_report, params);
+    snp.report_data_match = report_data_match;
+    snp.host_data_match =
+        tpm_common::check_init_data(&tpm_msg, &tpm_pcrs, params.host_data.as_deref())?;
+    snp.claims = tpm_common::tpm_claims(snp.claims, &tpm_pcrs, &tpm_msg);
 
-    // Debug policy enforcement
-    if snp_report.policy.debug_allowed() && !params.allow_debug {
-        return Err(AttestationError::DebugPolicyViolation);
-    }
-
-    // VCEK OID cross-validation
-    crate::platforms::snp::verify::verify_vcek_tcb(&snp_report, &vcek_der, matched_gen)?;
-
-    // Minimum TCB enforcement (including FMC for Turin)
-    if let Some(ref min_tcb) = params.min_tcb {
-        crate::platforms::snp::verify::enforce_min_tcb(&snp_report.reported_tcb, min_tcb)?;
-    }
-
-    // Init data and result
-    let init_data_match = tpm_common::check_init_data(
-        &tpm_msg,
-        &tpm_pcrs,
-        params.expected_init_data_hash.as_deref(),
-    )?;
-
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&snp_report.measurement[..], expected));
-
-    let snp_claims = crate::platforms::snp::claims::extract_claims(&snp_report);
-    let mut result = tpm_common::build_tpm_verification_result(
-        snp_claims,
-        &tpm_pcrs,
-        &tpm_msg,
-        PlatformType::AzSnp,
-        report_data_match,
-        init_data_match,
-        // collateral_verified is set by the async wrapper after the CRL check;
-        // the synchronous core has not checked revocation.
-        false,
-    );
-    result.launch_digest_match = launch_digest_match;
     Ok(VerifiedReport {
-        result,
+        result: AzSnpResult { snp },
         matched_gen,
         vcek_der,
         report_version: snp_report.version,
@@ -268,10 +275,9 @@ mod tests {
         };
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let provider = crate::collateral::DefaultCertProvider::new();
-        let params = VerifyParams::default();
+        let ctx = Context::offline();
 
-        let result = rt.block_on(verify_evidence(&evidence, &params, &provider));
+        let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
         assert!(result.is_err(), "short HCL report should fail");
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -290,10 +296,9 @@ mod tests {
         };
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let provider = crate::collateral::DefaultCertProvider::new();
-        let params = VerifyParams::default();
+        let ctx = Context::offline();
 
-        let result = rt.block_on(verify_evidence(&evidence, &params, &provider));
+        let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
         assert!(result.is_err());
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -432,11 +437,10 @@ mod tests {
     fn test_verify_report_milan_fixture() {
         let evidence = load_az_snp_evidence(MILAN_V3_FIXTURE);
 
-        let verified = verify_report(&evidence, &VerifyParams::default())
+        let verified = verify_report(&evidence, &AzSnpParams::default(), now())
             .expect("Milan az-snp fixture should verify end to end");
 
-        assert!(verified.result.signature_valid);
-        assert_eq!(verified.result.platform, crate::types::PlatformType::AzSnp);
+        assert!(verified.result.passed());
         assert_eq!(
             verified.report_version, 3,
             "this fixture uses SNP report v3"
@@ -445,26 +449,34 @@ mod tests {
             !verified.vcek_der.is_empty(),
             "VCEK is returned for the CRL check"
         );
-        // No expected_report_data supplied → freshness binding is not enforced.
-        assert_eq!(verified.result.report_data_match, None);
+        // No report_data supplied → freshness binding is not checked.
+        assert_eq!(verified.result.snp.report_data_match, None);
         // The verification core does not run the (async) CRL revocation check.
-        assert!(!verified.result.collateral_verified);
+    }
+
+    fn params_with_nonce(nonce: &[u8]) -> AzSnpParams {
+        AzSnpParams {
+            snp: SnpParams {
+                report_data: Some(nonce.to_vec()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
     }
 
     #[test]
-    fn test_verify_report_rejects_wrong_nonce() {
+    fn test_verify_report_reports_wrong_nonce() {
         // This fixture's quote carries an empty extraData, so any non-empty
-        // expected report_data must fail closed (TPM nonce length mismatch).
+        // expected report_data is a mismatch.
         let evidence = load_az_snp_evidence(MILAN_V3_FIXTURE);
 
-        let params = VerifyParams {
-            expected_report_data: Some(b"unexpected-nonce".to_vec()),
-            ..Default::default()
-        };
-        assert!(
-            verify_report(&evidence, &params).is_err(),
-            "non-empty expected report_data must not match an empty quote nonce"
-        );
+        let verified = verify_report(&evidence, &params_with_nonce(b"unexpected-nonce"), now())
+            .expect("a nonce mismatch is a value, not an error");
+        assert_eq!(verified.result.snp.report_data_match, Some(false));
+        assert!(!verified.result.passed());
     }
 
     #[test]
@@ -474,19 +486,13 @@ mod tests {
         let evidence =
             load_az_snp_evidence(include_str!("../../../test_data/az_snp/evidence-v1.json"));
 
-        let params = VerifyParams {
-            expected_report_data: Some(b"challenge".to_vec()),
-            ..Default::default()
-        };
-        let verified = verify_report(&evidence, &params)
+        let verified = verify_report(&evidence, &params_with_nonce(b"challenge"), now())
             .expect("evidence-v1 should verify with its bound nonce");
-        assert_eq!(verified.result.report_data_match, Some(true));
+        assert_eq!(verified.result.snp.report_data_match, Some(true));
 
-        // A different nonce must fail closed.
-        let wrong = VerifyParams {
-            expected_report_data: Some(b"not-the-challenge".to_vec()),
-            ..Default::default()
-        };
-        assert!(verify_report(&evidence, &wrong).is_err());
+        // A different nonce is reported as a mismatch.
+        let wrong =
+            verify_report(&evidence, &params_with_nonce(b"not-the-challenge"), now()).unwrap();
+        assert_eq!(wrong.result.snp.report_data_match, Some(false));
     }
 }

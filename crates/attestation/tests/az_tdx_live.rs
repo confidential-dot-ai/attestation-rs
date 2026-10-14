@@ -16,7 +16,16 @@ use std::path::Path;
 
 use base64::Engine;
 
-use attestation::types::VerifyParams;
+use attestation::{AzTdx, AzTdxParams, Context, Platform, Policies, TdxParams};
+
+fn nonce_params(nonce: &[u8]) -> AzTdxParams {
+    AzTdxParams {
+        tdx: TdxParams {
+            report_data: Some(nonce.to_vec()),
+            ..Default::default()
+        },
+    }
+}
 
 /// Helper: check if we're running on an Azure TDX CVM with the required tools.
 fn is_az_tdx_cvm() -> bool {
@@ -181,9 +190,7 @@ async fn test_az_tdx_attest_then_verify_roundtrip() {
         .expect("generate_evidence() should succeed");
 
     // Verify without expected values (just check structure)
-    let params = VerifyParams::default();
-    let result =
-        attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None).await;
+    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline()).await;
 
     assert!(
         result.is_ok(),
@@ -191,16 +198,7 @@ async fn test_az_tdx_attest_then_verify_roundtrip() {
         result.err()
     );
 
-    let result = result.unwrap();
-
-    // TPM signature should be valid
-    assert!(
-        result.signature_valid,
-        "TPM signature should be valid on fresh evidence"
-    );
-
-    // Platform should be AzTdx
-    assert_eq!(result.platform, attestation::PlatformType::AzTdx);
+    let result = result.unwrap().tdx;
 
     // Claims should be populated
     assert!(
@@ -232,21 +230,14 @@ async fn test_az_tdx_verify_with_expected_nonce() {
         .expect("generate_evidence() should succeed");
 
     // Verify with correct nonce (unpadded — TPM stores the raw qualifying data)
-    let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
-        ..Default::default()
-    };
-
-    let result =
-        attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None).await;
+    let result = AzTdx::verify(&evidence, &nonce_params(nonce), &Context::offline()).await;
 
     assert!(
         result.is_ok(),
         "verify with correct nonce should succeed: {:?}",
         result.err()
     );
-    let result = result.unwrap();
-    assert!(result.signature_valid);
+    assert_eq!(result.unwrap().tdx.report_data_match, Some(true));
 }
 
 #[tokio::test]
@@ -308,17 +299,13 @@ async fn test_az_tdx_cross_process_serialization() {
         serde_json::from_str(&json_back).unwrap();
 
     // Verify the deserialized evidence
-    let params = VerifyParams::default();
-    let result =
-        attestation::platforms::az_tdx::verify::verify_evidence(&evidence_back, &params, None)
-            .await;
+    let result = AzTdx::verify(&evidence_back, &AzTdxParams::default(), &Context::offline()).await;
 
     assert!(
         result.is_ok(),
         "should verify evidence deserialized from file: {:?}",
         result.err()
     );
-    assert!(result.unwrap().signature_valid);
 }
 
 #[tokio::test]
@@ -352,8 +339,11 @@ async fn test_az_tdx_dcap_chain_validation() {
     let auth = attestation::platforms::tdx::dcap::parse_auth_data(&td_quote_bytes, body_end)
         .expect("parse_auth_data should succeed");
 
-    let pck_key = attestation::platforms::tdx::dcap::verify_pck_cert_chain(auth.pck_cert_chain_pem)
-        .expect("PCK cert chain should validate to Intel Root CA");
+    let pck_key = attestation::platforms::tdx::dcap::verify_pck_cert_chain(
+        auth.pck_cert_chain_pem,
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("PCK cert chain should validate to Intel Root CA");
 
     attestation::platforms::tdx::dcap::verify_qe_report_signature(&auth, &pck_key)
         .expect("QE report signature should verify with PCK key");
@@ -379,28 +369,17 @@ async fn test_az_tdx_wrong_nonce_fails_verification() {
         .await
         .expect("generate_evidence() should succeed");
 
-    // Verify with WRONG nonce — should fail
-    let params = VerifyParams {
-        expected_report_data: Some(b"wrong-nonce-value!!".to_vec()),
-        ..Default::default()
-    };
+    // Verify with WRONG nonce — a mismatch, not an error
+    let result = AzTdx::verify(
+        &evidence,
+        &nonce_params(b"wrong-nonce-value!!"),
+        &Context::offline(),
+    )
+    .await
+    .expect("a wrong nonce is a value, not an error");
 
-    let result =
-        attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None).await;
-
-    assert!(
-        result.is_err(),
-        "verification with wrong nonce should fail, but got: {:?}",
-        result.unwrap()
-    );
-
-    // Should be a ReportDataMismatch error
-    let err = format!("{:?}", result.err().unwrap());
-    assert!(
-        err.contains("ReportDataMismatch"),
-        "error should be ReportDataMismatch, got: {}",
-        err
-    );
+    assert_eq!(result.tdx.report_data_match, Some(false));
+    assert!(!result.passed());
 }
 
 #[tokio::test]
@@ -422,31 +401,25 @@ async fn test_az_tdx_top_level_api_roundtrip_with_nonce() {
     .expect("attest() should succeed");
 
     // Verify through top-level verify() API with matching nonce
-    let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
+    let policies = Policies {
+        az_tdx: Some(nonce_params(nonce)),
         ..Default::default()
     };
-    let result = attestation::verify(&evidence_json, &params)
+    let verified = attestation::verify(&evidence_json, &policies)
         .await
         .expect("verify() with correct nonce should succeed");
 
-    assert!(result.signature_valid, "signature should be valid");
-    assert_eq!(result.platform, attestation::PlatformType::AzTdx);
     assert_eq!(
-        result.report_data_match,
-        Some(true),
-        "report_data_match should be Some(true)"
+        verified.platform.platform(),
+        attestation::PlatformType::AzTdx
     );
+    assert!(verified.passed(), "matching nonce should pass");
 
     // Print the result for visibility
     eprintln!("=== Top-level API roundtrip with nonce ===");
-    eprintln!("  Platform: {}", result.platform);
-    eprintln!("  Signature valid: {}", result.signature_valid);
-    eprintln!("  Report data match: {:?}", result.report_data_match);
-    eprintln!("  Launch digest: {}", result.claims.launch_digest);
     eprintln!(
-        "  Report data (hex): {}",
-        hex::encode(&result.claims.report_data)
+        "  Launch digest: {}",
+        verified.platform.claims().launch_digest
     );
 }
 
@@ -468,13 +441,18 @@ async fn test_az_tdx_top_level_api_wrong_nonce_fails() {
     .expect("attest() should succeed");
 
     // Verify through top-level verify() API with WRONG nonce
-    let params = VerifyParams {
-        expected_report_data: Some(b"completely-different".to_vec()),
+    let policies = Policies {
+        az_tdx: Some(nonce_params(b"completely-different")),
         ..Default::default()
     };
-    let result = attestation::verify(&evidence_json, &params).await;
+    let verified = attestation::verify(&evidence_json, &policies)
+        .await
+        .expect("a wrong nonce is a value, not an error");
 
-    assert!(result.is_err(), "verify() with wrong nonce should fail");
+    assert!(
+        !verified.passed(),
+        "verify() with wrong nonce must not pass"
+    );
 }
 
 #[tokio::test]
@@ -491,16 +469,11 @@ async fn test_az_tdx_empty_nonce_roundtrip() {
         .expect("generate_evidence() with empty nonce should succeed");
 
     // Verify without expected_report_data (don't check nonce)
-    let params = VerifyParams::default();
-    let result = attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None)
+    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline())
         .await
         .expect("verify() with empty nonce evidence should succeed");
 
-    assert!(result.signature_valid);
-    assert!(result.report_data_match.is_none());
-
-    eprintln!("=== Empty nonce roundtrip ===");
-    eprintln!("  Signature valid: {}", result.signature_valid);
+    assert!(result.tdx.report_data_match.is_none());
 }
 
 #[tokio::test]
@@ -518,19 +491,11 @@ async fn test_az_tdx_32_byte_nonce() {
         .expect("generate_evidence() with 32-byte nonce should succeed");
 
     // Verify with matching nonce
-    let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
-        ..Default::default()
-    };
-    let result = attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None)
+    let result = AzTdx::verify(&evidence, &nonce_params(&nonce), &Context::offline())
         .await
         .expect("verify() with 32-byte nonce should succeed");
 
-    assert!(result.signature_valid);
-
-    eprintln!("=== 32-byte nonce roundtrip ===");
-    eprintln!("  Signature valid: {}", result.signature_valid);
-    eprintln!("  Report data match: {:?}", result.report_data_match);
+    assert_eq!(result.tdx.report_data_match, Some(true));
 }
 
 #[tokio::test]

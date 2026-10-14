@@ -8,14 +8,14 @@
 //! - QE report signature and binding
 //! - QE Identity against Intel PCS (when collateral provider is available)
 //! - TCB status evaluation and CRL revocation checks
-//! - `report_data` binding (when `VerifyParams::expected_report_data` is set)
-//! - `mr_config_id` binding (when `VerifyParams::expected_init_data_hash` is set)
+//! - `report_data` binding (when `TdxParams::report_data` is set)
+//! - `mr_config_id` binding (when `TdxParams::init_data` is set)
 //!
 //! # What the caller must verify
 //!
 //! The following checks are **not** performed by this module and are the
 //! caller's responsibility (RTMR values are available in
-//! `VerificationResult::claims::platform_data`):
+//! `TdxResult::claims::platform_data`):
 //!
 //! - **RTMR3 event log replay**: dstack records compose-hash, instance-id, and
 //!   key-provider events in RTMR3 via SHA-384 hash chaining. The event log is
@@ -30,9 +30,13 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-use crate::collateral::TdxCollateralProvider;
+use serde::{Deserialize, Serialize};
+
+use crate::context::Context;
 use crate::error::Result;
-use crate::types::{PlatformType, VerificationResult, VerifyParams};
+use crate::platform::Platform;
+use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
+use crate::types::PlatformType;
 
 use super::evidence::DstackEvidence;
 
@@ -59,37 +63,53 @@ fn normalize_quote_to_base64(quote: &str) -> String {
     quote.to_string()
 }
 
-/// Verify dstack TDX attestation evidence.
-///
-/// Since dstack produces standard Intel TDX v4/v5 quotes, verification
-/// is delegated to the existing TDX DCAP verification pipeline. The only
-/// difference is that the result is tagged with `PlatformType::Dstack`.
-pub async fn verify_evidence(
-    evidence: &DstackEvidence,
-    params: &VerifyParams,
-    collateral_provider: Option<&dyn TdxCollateralProvider>,
-) -> Result<VerificationResult> {
-    // Validate field sizes
-    crate::utils::check_field_size("quote", evidence.quote.len())?;
+/// What a caller can ask of dstack evidence.
+#[derive(Debug, Clone, Default)]
+pub struct DstackParams {
+    pub tdx: TdxParams,
+}
 
-    let quote_b64 = normalize_quote_to_base64(&evidence.quote);
+/// The answer for genuine dstack evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct DstackResult {
+    #[serde(flatten)]
+    pub tdx: TdxResult,
+}
 
-    // Convert DstackEvidence to TdxEvidence for reuse of TDX verification
-    let tdx_evidence = crate::platforms::tdx::evidence::TdxEvidence {
-        quote: quote_b64,
+impl DstackResult {
+    /// True when the evidence satisfied every rule in the params.
+    pub fn passed(&self) -> bool {
+        self.tdx.passed()
+    }
+}
+
+/// dstack (Phala) TDX. dstack produces standard Intel TDX v4/v5 quotes, so
+/// verification is delegated to the TDX verifier.
+pub struct Dstack;
+
+impl Platform for Dstack {
+    const KIND: PlatformType = PlatformType::Dstack;
+    type Evidence = DstackEvidence;
+    type Params = DstackParams;
+    type Result = DstackResult;
+
+    async fn verify(
+        evidence: &DstackEvidence,
+        params: &DstackParams,
+        ctx: &Context,
+    ) -> Result<DstackResult> {
+        crate::utils::check_field_size("quote", evidence.quote.len())?;
+
         // dstack's event_log is in a different format than the CC eventlog
-        // from ACPI CCEL, so we don't pass it through to TDX verification
-        cc_eventlog: None,
-    };
-
-    let mut result =
-        crate::platforms::tdx::verify::verify_evidence(&tdx_evidence, params, collateral_provider)
-            .await?;
-
-    // Re-tag the platform as Dstack
-    result.platform = PlatformType::Dstack;
-
-    Ok(result)
+        // from ACPI CCEL, so it is not passed through to TDX verification.
+        let tdx_evidence = crate::platforms::tdx::evidence::TdxEvidence {
+            quote: normalize_quote_to_base64(&evidence.quote),
+            cc_eventlog: None,
+        };
+        let tdx = Tdx::verify(&tdx_evidence, &params.tdx, ctx).await?;
+        Ok(DstackResult { tdx })
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,15 @@ pub enum AttestationError {
     #[error("platform {0} is not enabled (enable the corresponding cargo feature)")]
     PlatformNotEnabled(String),
 
+    /// The evidence is for a platform the caller gave no policy for.
+    #[error("evidence is for {0}, which the policies do not allow")]
+    PlatformNotAllowed(String),
+
+    /// The caller's parameters cannot be applied (for example a value of the
+    /// wrong size).
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
+
     #[error("report_data exceeds maximum size ({max} bytes)")]
     ReportDataTooLarge { max: usize },
 
@@ -21,17 +30,17 @@ pub enum AttestationError {
     #[error("certificate chain validation failed: {0}")]
     CertChainError(String),
 
-    #[error("certificate fetch failed: {0}")]
-    CertFetchError(String),
+    /// Collateral the verifier needed (certificates, CRLs, TCB info, NRAS
+    /// results) could not be fetched. The only retryable error: the evidence
+    /// was not judged.
+    #[error("collateral unavailable: {0}")]
+    CollateralUnavailable(String),
 
     #[error("quote parsing failed: {0}")]
     QuoteParseFailed(String),
 
     #[error("report version {version} not supported (min: {min}, max: {max})")]
     UnsupportedReportVersion { version: u32, min: u32, max: u32 },
-
-    #[error("VMPL check failed: expected 0, got {0}")]
-    VmplCheckFailed(u32),
 
     #[error("eventlog integrity check failed: {0}")]
     EventlogIntegrityFailed(String),
@@ -41,15 +50,6 @@ pub enum AttestationError {
 
     #[error("TCB version mismatch: {0}")]
     TcbMismatch(String),
-
-    #[error("report_data mismatch")]
-    ReportDataMismatch,
-
-    #[error("init_data / host_data mismatch")]
-    InitDataMismatch,
-
-    #[error("guest launched with debug policy enabled")]
-    DebugPolicyViolation,
 
     #[error("evidence too large: {size} bytes exceeds maximum {max} bytes")]
     EvidenceTooLarge { size: usize, max: usize },
@@ -66,15 +66,11 @@ pub enum AttestationError {
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuSubmoduleNonceMismatch { name: String },
 
-    #[error("GPU device \"{name}\" failed policy: {reason}")]
-    #[cfg(feature = "nvidia-gpu")]
-    NvidiaGpuDevicePolicyFailed { name: String, reason: String },
-
-    #[error("GPU bundle requires VerifyParams::nvidia_gpu_user_nonce")]
+    #[error("GPU bundle requires NvidiaGpuParams::user_nonce")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuUserNonceMissing,
 
-    #[error("nvidia_gpu_user_nonce is set but expected_report_data is not — both are required for CPU-GPU binding")]
+    #[error("the GPU user_nonce is set but the platform report_data is not — both are required for CPU-GPU binding")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuReportDataRequired,
 
@@ -86,17 +82,9 @@ pub enum AttestationError {
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuNonceTooShort(usize),
 
-    #[error("GPU device arch {0} not in expected_archs whitelist")]
-    #[cfg(feature = "nvidia-gpu")]
-    NvidiaGpuArchNotAllowed(String),
-
     #[error("GPU bundle is empty")]
     #[cfg(feature = "nvidia-gpu")]
     NvidiaGpuBundleEmpty,
-
-    #[error("NRAS returned {got} device claims but bundle had {expected} devices")]
-    #[cfg(feature = "nvidia-gpu")]
-    NvidiaGpuDeviceCountMismatch { expected: usize, got: usize },
 
     #[error("GPU bundle has {0} devices, exceeding maximum of {1}")]
     #[cfg(feature = "nvidia-gpu")]
@@ -109,10 +97,6 @@ pub enum AttestationError {
     #[error("NRAS response parse failed: {0}")]
     #[cfg(feature = "nvidia-gpu")]
     NrasResponseParse(String),
-
-    #[error("NRAS overall attestation result is false")]
-    #[cfg(feature = "nvidia-gpu")]
-    NrasOverallFailed,
 
     #[error("JWS verification failed: {0}")]
     #[cfg(feature = "nvidia-gpu")]
@@ -132,6 +116,33 @@ pub enum AttestationError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl AttestationError {
+    /// True for [`AttestationError::CollateralUnavailable`]: the verifier could
+    /// not fetch what it needed, so retrying may succeed. Every other error is
+    /// final for the given evidence and params.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, AttestationError::CollateralUnavailable(_))
+    }
+
+    /// True when the caller's params cannot be applied: fixing the params,
+    /// not the evidence or the network, is what helps.
+    pub fn is_invalid_params(&self) -> bool {
+        #[cfg(feature = "nvidia-gpu")]
+        if matches!(
+            self,
+            AttestationError::NvidiaGpuUserNonceMissing
+                | AttestationError::NvidiaGpuReportDataRequired
+                | AttestationError::NvidiaGpuNonceTooShort(_)
+        ) {
+            return true;
+        }
+        matches!(
+            self,
+            AttestationError::InvalidParams(_) | AttestationError::ReportDataTooLarge { .. }
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, AttestationError>;

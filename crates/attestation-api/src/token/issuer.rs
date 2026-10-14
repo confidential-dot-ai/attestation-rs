@@ -10,7 +10,19 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::api::verify::PoliciesInput;
 use crate::error::ApiError;
+
+/// A verification result that passed every rule in its policies. It is the only
+/// thing [`TokenIssuer::issue`] signs.
+pub struct PassedVerification<'a>(&'a attestation::Verified);
+
+impl<'a> PassedVerification<'a> {
+    /// `None` unless `verified.passed()`.
+    pub fn new(verified: &'a attestation::Verified) -> Option<Self> {
+        verified.passed().then_some(Self(verified))
+    }
+}
 
 /// JWT token issuer using ES256 (ECDSA P-256 + SHA-256).
 ///
@@ -39,11 +51,10 @@ struct JwtClaims {
     nbf: u64,
     exp: u64,
     platform: String,
-    signature_valid: bool,
-    claims: Value,
-    report_data_match: Option<bool>,
-    init_data_match: Option<bool>,
-    collateral_verified: bool,
+    /// The verification result the token attests to, as `/verify` returns it.
+    result: Value,
+    /// The policies `result` was evaluated against, as `/verify` applied them.
+    policy: Value,
 }
 
 impl fmt::Debug for JwtClaims {
@@ -52,7 +63,8 @@ impl fmt::Debug for JwtClaims {
             .field("iss", &self.iss)
             .field("jti", &self.jti)
             .field("platform", &self.platform)
-            .field("claims", &"[redacted]")
+            .field("result", &"[redacted]")
+            .field("policy", &"[redacted]")
             .finish()
     }
 }
@@ -75,13 +87,21 @@ impl TokenIssuer {
         })
     }
 
-    pub fn issue(&self, result: &attestation::VerificationResult) -> Result<String, ApiError> {
+    /// Sign a token for a passed verification and the policies it passed.
+    pub fn issue(
+        &self,
+        passed: &PassedVerification<'_>,
+        policy: &PoliciesInput,
+    ) -> Result<String, ApiError> {
+        let verified = passed.0;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| ApiError::Internal(format!("system time error: {e}")))?;
 
-        let claims_json = serde_json::to_value(&result.claims)
-            .map_err(|e| ApiError::Internal(format!("failed to serialize claims: {e}")))?;
+        let result_json = serde_json::to_value(verified)
+            .map_err(|e| ApiError::Internal(format!("failed to serialize result: {e}")))?;
+        let policy_json = serde_json::to_value(policy)
+            .map_err(|e| ApiError::Internal(format!("failed to serialize policy: {e}")))?;
 
         let jwt_claims = JwtClaims {
             iss: self.issuer.clone(),
@@ -89,12 +109,9 @@ impl TokenIssuer {
             iat: now.as_secs(),
             nbf: now.as_secs(),
             exp: now.as_secs() + self.duration.as_secs(),
-            platform: format!("{}", result.platform),
-            signature_valid: result.signature_valid,
-            claims: claims_json,
-            report_data_match: result.report_data_match,
-            init_data_match: result.init_data_match,
-            collateral_verified: result.collateral_verified,
+            platform: verified.platform.platform().to_string(),
+            result: result_json,
+            policy: policy_json,
         };
 
         let header = JwtHeader {

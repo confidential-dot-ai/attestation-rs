@@ -24,7 +24,7 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             .get_tdx_collateral("tcb_info", fmspc)
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached TDX tcb_info fetch: {e}"
                 ))
             })
@@ -35,7 +35,7 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             .get_tdx_collateral("qe_identity", "default")
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached TDX qe_identity fetch: {e}"
                 ))
             })
@@ -46,7 +46,7 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             .get_tdx_collateral("td_qe_identity", "default")
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached TDX td_qe_identity fetch: {e}"
                 ))
             })
@@ -57,7 +57,7 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             .get_tdx_collateral("root_ca_crl", "default")
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached TDX root_ca_crl fetch: {e}"
                 ))
             })
@@ -68,7 +68,7 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
             .get_tdx_collateral("pck_crl", ca)
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!(
+                attestation::AttestationError::CollateralUnavailable(format!(
                     "cached TDX pck_crl fetch: {e}"
                 ))
             })
@@ -89,23 +89,24 @@ impl attestation::TdxCollateralProvider for CachedTdxProvider {
         self.signing_chain(TD_QE_IDENTITY_SIGNING_CHAIN).await
     }
 
-    async fn check_pck_revocation(&self, pck_pem: &[u8]) -> attestation::Result<()> {
+    async fn pck_revoked(&self, pck_pem: &[u8]) -> attestation::Result<bool> {
         let ca_type = attestation::determine_ca_type(pck_pem)?;
         let pck_crl = self
             .cache
             .get_tdx_collateral("pck_crl", &ca_type)
             .await
-            .map_err(|e| attestation::AttestationError::CertFetchError(format!("pck_crl: {e}")))?;
-        attestation::check_cert_revocation(pck_pem, &pck_crl)?;
+            .map_err(|e| {
+                attestation::AttestationError::CollateralUnavailable(format!("pck_crl: {e}"))
+            })?;
         let root_crl = self
             .cache
             .get_tdx_collateral("root_ca_crl", "default")
             .await
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!("root_ca_crl: {e}"))
+                attestation::AttestationError::CollateralUnavailable(format!("root_ca_crl: {e}"))
             })?;
-        attestation::check_intermediate_ca_revocation(pck_pem, &root_crl)?;
-        Ok(())
+        Ok(attestation::cert_revoked(pck_pem, &pck_crl)?
+            || attestation::intermediate_ca_revoked(pck_pem, &root_crl)?)
     }
 }
 
@@ -116,7 +117,9 @@ impl CachedTdxProvider {
             .await
             .map(Some)
             .map_err(|e| {
-                attestation::AttestationError::CertFetchError(format!("cached TDX {kind}: {e}"))
+                attestation::AttestationError::CollateralUnavailable(format!(
+                    "cached TDX {kind}: {e}"
+                ))
             })
     }
 }
