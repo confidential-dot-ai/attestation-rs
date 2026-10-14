@@ -214,7 +214,7 @@ impl DefaultCertProvider {
 
 /// Read response body with size limit enforcement.
 #[cfg(not(target_arch = "wasm32"))]
-async fn read_response_with_limit(response: reqwest::Response) -> Result<Vec<u8>> {
+pub(crate) async fn read_response_with_limit(response: reqwest::Response) -> Result<Vec<u8>> {
     if let Some(len) = response.content_length() {
         if len as usize > MAX_RESPONSE_SIZE {
             return Err(crate::error::AttestationError::CollateralUnavailable(
@@ -245,7 +245,7 @@ async fn read_response_with_limit(response: reqwest::Response) -> Result<Vec<u8>
 
 /// Send a GET request and return the response with status check.
 #[cfg(not(target_arch = "wasm32"))]
-async fn send_get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+pub(crate) async fn send_get(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
     client
         .get(url)
         .send()

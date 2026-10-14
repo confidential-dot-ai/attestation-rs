@@ -112,6 +112,10 @@ chrono = { version = "0.4", default-features = false, features = ["std", "now", 
 # validity check, which is why only the TDX path needed this.)
 time = { version = "0.3", default-features = false, features = ["wasm-bindgen"] }
 
+[lints.rust]
+# Set by cargo-fuzz for crates/attestation/fuzz.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["async_tokio"] }

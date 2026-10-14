@@ -42,6 +42,7 @@ async fn main() {
                 report_data: Some(nonce.to_vec()),
                 ..Default::default()
             },
+            ..Default::default()
         }),
         ..Default::default()
     };
