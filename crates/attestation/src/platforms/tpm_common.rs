@@ -3,6 +3,7 @@ use rsa::pkcs1v15::VerifyingKey as RsaVerifyingKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[cfg(all(feature = "attest", target_os = "linux"))]
 use std::sync::Once;
@@ -506,7 +507,11 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
     // Rather than fully re-parse, extract the digest from the end of the attest
     // and verify by hashing the concatenation of all selected PCR values.
 
-    let (selected_pcrs, expected_digest) = parse_quote_info(message)?;
+    let QuoteInfo {
+        selected_pcrs,
+        digest: expected_digest,
+        ..
+    } = parse_quote_info(message)?;
 
     // Concatenate all selected PCR values and hash them
     let mut pcr_concat = Vec::new();
@@ -534,14 +539,15 @@ pub fn verify_tpm_pcrs(message: &[u8], pcrs: &[Vec<u8>]) -> Result<()> {
 
 /// Parse TPMS_QUOTE_INFO from a TPMS_ATTEST message to extract the PCR
 /// selection bitmap and the expected PCR digest.
-fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
+fn parse_quote_info(message: &[u8]) -> Result<QuoteInfo> {
     if message.len() < 10 {
         return Err(AttestationError::QuoteParseFailed(
             "TPMS_ATTEST too short".to_string(),
         ));
     }
 
-    // Skip: magic(4) + type(2)
+    // Skip magic(4); read type(2)
+    let attest_type = read_be_u16(message, 4, "attest type")?;
     let mut offset = 6;
 
     // qualifiedSigner (TPM2B_NAME): size(2) + data
@@ -564,10 +570,11 @@ fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
     offset += 4;
 
     let mut selected_pcrs = Vec::new();
+    let mut hash_algs = Vec::new();
 
     for _ in 0..pcr_selection_count {
         // TPMS_PCR_SELECTION: hash(2) + sizeofSelect(1) + pcrSelect(sizeofSelect)
-        let _hash_alg = read_be_u16(message, offset, "PCR hash alg")?;
+        hash_algs.push(read_be_u16(message, offset, "PCR hash alg")?);
         offset += 2;
 
         if offset >= message.len() {
@@ -608,8 +615,40 @@ fn parse_quote_info(message: &[u8]) -> Result<(Vec<usize>, Vec<u8>)> {
 
     let digest = message[offset..offset + digest_size].to_vec();
 
-    Ok((selected_pcrs, digest))
+    let quote = QuoteInfo {
+        attest_type,
+        hash_algs,
+        selected_pcrs,
+        digest,
+    };
+    if !quote.is_sha256_quote() {
+        return Err(AttestationError::QuoteParseFailed(
+            "TPMS_ATTEST is not a TPM2_Quote over one SHA-256 PCR selection".to_string(),
+        ));
+    }
+    Ok(quote)
 }
+
+/// The parts of a TPMS_ATTEST quote message the verifier reads.
+struct QuoteInfo {
+    attest_type: u16,
+    /// The hash algorithm of each PCR selection, in order.
+    hash_algs: Vec<u16>,
+    /// PCR indices across all selections.
+    selected_pcrs: Vec<usize>,
+    digest: Vec<u8>,
+}
+
+impl QuoteInfo {
+    /// The quote is a `TPM2_Quote` over exactly one selection, in the SHA-256
+    /// bank: the only shape the PCR checks (digest, PCR[8], pins) accept.
+    fn is_sha256_quote(&self) -> bool {
+        self.attest_type == TPM_ST_ATTEST_QUOTE && self.hash_algs == [TPM_ALG_SHA256]
+    }
+}
+
+const TPM_ST_ATTEST_QUOTE: u16 = 0x8018;
+const TPM_ALG_SHA256: u16 = 0x000B;
 
 /// Parse TPM quote from evidence, returning decoded (sig, msg, pcrs).
 pub fn decode_tpm_quote(quote: &TpmQuote) -> Result<DecodedTpmQuote> {
@@ -664,7 +703,7 @@ pub fn check_init_data(
     let Some(expected) = expected else {
         return Ok(None);
     };
-    let (selected_pcrs, _) = parse_quote_info(tpm_msg)?;
+    let selected_pcrs = parse_quote_info(tpm_msg)?.selected_pcrs;
     if !selected_pcrs.contains(&INIT_DATA_PCR) {
         log::warn!(
             "init_data check requires PCR[{INIT_DATA_PCR}], but it is not in the quote's signed PCR selection"
@@ -690,6 +729,57 @@ pub fn check_init_data_len(expected: Option<&[u8]>) -> Result<()> {
             e.len()
         ))),
         _ => Ok(()),
+    }
+}
+
+/// Compare expected PCR values (SHA-256 bank) with the quote. Returns `None`
+/// if no expectation was provided, otherwise whether all of them matched.
+///
+/// Same trust rule as [`check_init_data`]: `tpm_pcrs[i]` is authenticated only
+/// for `i` in the quote's signed `pcrSelect`, so an expected PCR outside that
+/// selection cannot be confirmed and counts as a mismatch, whatever
+/// `tpm_pcrs` says.
+///
+/// Callers MUST have verified the quote signature and called `verify_tpm_pcrs`
+/// before calling this.
+pub fn check_pcrs(
+    tpm_msg: &[u8],
+    tpm_pcrs: &[Vec<u8>],
+    expected: &BTreeMap<u8, [u8; 32]>,
+) -> Result<Option<bool>> {
+    if expected.is_empty() {
+        return Ok(None);
+    }
+    check_pcr_pin_indexes(expected)?;
+    let quote = parse_quote_info(tpm_msg)?;
+    if !quote.is_sha256_quote() {
+        return Err(AttestationError::QuoteParseFailed(
+            "PCR pins need a TPM2_Quote over one SHA-256 PCR selection".to_string(),
+        ));
+    }
+    let selected_pcrs = quote.selected_pcrs;
+    let mut all_match = true;
+    for (&index, want) in expected {
+        let index = usize::from(index);
+        if !selected_pcrs.contains(&index) {
+            log::warn!("PCR[{index}] is pinned but not in the quote's signed PCR selection");
+            all_match = false;
+            continue;
+        }
+        all_match &= tpm_pcrs
+            .get(index)
+            .is_some_and(|got| constant_time_eq(got, want));
+    }
+    Ok(Some(all_match))
+}
+
+/// PCR pins name TPM PCRs 0..=23.
+pub fn check_pcr_pin_indexes(expected: &BTreeMap<u8, [u8; 32]>) -> Result<()> {
+    match expected.keys().find(|&&i| i > 23) {
+        Some(i) => Err(AttestationError::InvalidParams(format!(
+            "PCR index {i} is out of range (0-23)"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -1076,9 +1166,9 @@ mod tests {
         // Select PCRs 0, 1, 2 (bitmap byte 0 = 0b00000111 = 0x07)
         let msg = build_tpms_attest(&[0u8; 32], &[3, 0x07, 0x00, 0x00], &digest);
 
-        let (selected, extracted_digest) = parse_quote_info(&msg).unwrap();
-        assert_eq!(selected, vec![0, 1, 2]);
-        assert_eq!(extracted_digest, digest.to_vec());
+        let quote = parse_quote_info(&msg).unwrap();
+        assert_eq!(quote.selected_pcrs, vec![0, 1, 2]);
+        assert_eq!(quote.digest, digest.to_vec());
     }
 
     #[test]
@@ -1087,7 +1177,7 @@ mod tests {
         let digest = [0xCC; 32];
         let msg = build_tpms_attest(&[0u8; 32], &[3, 0x00, 0x00, 0x07], &digest);
 
-        let (selected, _) = parse_quote_info(&msg).unwrap();
+        let selected = parse_quote_info(&msg).unwrap().selected_pcrs;
         assert_eq!(selected, vec![16, 17, 18]);
     }
 
@@ -1096,7 +1186,7 @@ mod tests {
         let digest = [0xDD; 32];
         let msg = build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0xFF, 0xFF], &digest);
 
-        let (selected, _) = parse_quote_info(&msg).unwrap();
+        let selected = parse_quote_info(&msg).unwrap().selected_pcrs;
         assert_eq!(selected.len(), 24);
         assert_eq!(selected, (0..24).collect::<Vec<_>>());
     }
@@ -1507,5 +1597,100 @@ mod tests {
 
         let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data));
         assert_eq!(result.unwrap(), Some(true));
+    }
+
+    // --- check_pcrs tests (real Azure TDX vTPM quote from a confos v0.1.2 boot) ---
+
+    /// PCR values confos predicts from the image build; this boot measured them.
+    const CONFOS_PCR4: &str = "01a877a78619b163df80fb2cc469de09a74682efcc19b282e211285719cfa51a";
+    const CONFOS_PCR9: &str = "aabf3cb9ccf46c2742a0358c5d8d6466c8b7798584dc985ba7dd1b417cd0c0a9";
+    const CONFOS_PCR11: &str = "bb522ef6ca6baa0497820cc06c22c3c2ba9ec0c9055c00b758a05172b5ff3921";
+
+    /// Load the real quote and check it the way az-tdx/az-snp verify does
+    /// before `check_pcrs`: AK signature, then PCR digest.
+    fn confos_quote() -> (Vec<u8>, Vec<Vec<u8>>) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test_data/az_tdx/confos-boot-evidence.json"
+        ))
+        .unwrap();
+        let quote: TpmQuote = serde_json::from_value(fixture["tpm_quote"].clone()).unwrap();
+        let hcl_bytes =
+            crate::utils::decode_base64url(fixture["hcl_report"].as_str().unwrap()).unwrap();
+        let hcl = parse_hcl_report(&hcl_bytes).unwrap();
+        let (sig, msg, pcrs) = decode_tpm_quote(&quote).unwrap();
+        verify_tpm_signature(&sig, &msg, &hcl.var_data).unwrap();
+        verify_tpm_pcrs(&msg, &pcrs).unwrap();
+        (msg, pcrs)
+    }
+
+    fn pins(entries: &[(u8, &str)]) -> BTreeMap<u8, [u8; 32]> {
+        entries
+            .iter()
+            .map(|&(i, h)| (i, hex::decode(h).unwrap().try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn test_check_pcrs_against_real_quote() {
+        let (msg, pcrs) = confos_quote();
+        assert_eq!(check_pcrs(&msg, &pcrs, &BTreeMap::new()).unwrap(), None);
+
+        let mut expected = pins(&[(4, CONFOS_PCR4), (9, CONFOS_PCR9), (11, CONFOS_PCR11)]);
+        assert_eq!(check_pcrs(&msg, &pcrs, &expected).unwrap(), Some(true));
+
+        expected.get_mut(&9).unwrap()[0] ^= 0x01;
+        assert_eq!(check_pcrs(&msg, &pcrs, &expected).unwrap(), Some(false));
+    }
+
+    /// The real quote selects PCRs 0-23. A pin on PCR 24 is not covered by the
+    /// signature, so a value appended to the attacker-supplied `pcrs` array must
+    /// not count, even though the quote still verifies.
+    #[test]
+    fn test_check_pcrs_rejects_out_of_range_pin_real_quote() {
+        let (msg, mut pcrs) = confos_quote();
+        let forged = [0x42u8; 32];
+        pcrs.push(forged.to_vec());
+        assert!(verify_tpm_pcrs(&msg, &pcrs).is_ok());
+
+        let mut expected = pins(&[(4, CONFOS_PCR4)]);
+        expected.insert(24, forged);
+        assert!(matches!(
+            check_pcrs(&msg, &pcrs, &expected),
+            Err(AttestationError::InvalidParams(_))
+        ));
+    }
+
+    /// Same rule for an in-range index: a genuine quote that selects only PCRs
+    /// 0-7, with `pcrs[11]` edited to equal the pin.
+    #[test]
+    fn test_check_pcrs_rejects_unselected_pcr_edited_to_pin() {
+        let pin = pins(&[(11, CONFOS_PCR11)]);
+        let mut pcrs = vec![vec![0u8; 32]; 24];
+        pcrs[11] = pin[&11].to_vec();
+        let digest = crate::utils::sha256(&pcrs[..8].concat());
+        let msg = build_tpms_attest(&[0u8; 32], &[3, 0xFF, 0x00, 0x00], &digest);
+        assert!(verify_tpm_pcrs(&msg, &pcrs).is_ok());
+
+        assert_eq!(check_pcrs(&msg, &pcrs, &pin).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn test_check_pcrs_requires_a_sha256_quote() {
+        let pin = BTreeMap::from([(0u8, [0u8; 32])]);
+        let pcrs = vec![vec![0u8; 32]; 3];
+        let quote = build_tpms_attest(&[0u8; 32], &[3, 0x07, 0x00, 0x00], &[0xBB; 32]);
+        assert!(check_pcrs(&quote, &pcrs, &pin).is_ok());
+
+        let mut certify = quote.clone();
+        certify[4..6].copy_from_slice(&0x8017u16.to_be_bytes());
+        let mut sha1_bank = quote.clone();
+        let alg = 4 + 2 + 2 + 2 + 32 + 17 + 8 + 4;
+        sha1_bank[alg..alg + 2].copy_from_slice(&0x0004u16.to_be_bytes());
+        for msg in [certify, sha1_bank] {
+            assert!(matches!(
+                check_pcrs(&msg, &pcrs, &pin),
+                Err(AttestationError::QuoteParseFailed(_))
+            ));
+        }
     }
 }

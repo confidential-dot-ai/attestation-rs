@@ -166,6 +166,23 @@ verifies without network access.
 | 2 | Usage error or invalid params |
 | 3 | Collateral unavailable (AMD KDS, Intel PCS, NRAS); retrying may help |
 
+On Azure CVMs (`az-snp`, `az-tdx`) the guest boot chain is measured into vTPM
+PCRs. `AzTdxParams::pcrs` / `AzSnpParams::pcrs` pin SHA-256 PCR values by
+index; `pcrs_match` is `false` if any pin does not match. A PCR counts only if
+its index is in the TPM quote's signed PCR selection, because the quote signs
+only a digest over the selected PCRs, and only a `TPM2_Quote` over one
+SHA-256 selection is compared. An index above 23, or the same index pinned
+twice, is invalid params. The CLI flag is `--expected-pcr INDEX=HEX`
+(repeatable); on its own it accepts the Azure platforms:
+
+```bash
+attestation-cli verify \
+  --evidence evidence.json \
+  --expected-pcr 4=$PCR4 \
+  --expected-pcr 9=$PCR9 \
+  --expected-pcr 11=$PCR11
+```
+
 ## Documentation
 
 - Core library: `crates/attestation/README.md`

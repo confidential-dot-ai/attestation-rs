@@ -5,6 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
@@ -67,6 +68,9 @@ pub struct TdxParamsInput {
     /// unless `attestation.allow_revoked_or_unlisted_tcb` is set.
     #[serde(default = "default_tcb_statuses")]
     pub accepted_tcb_statuses: Vec<attestation::TdxTcbStatus>,
+    /// az-tdx only: expected vTPM PCRs by index, 32 bytes each.
+    #[serde(default, deserialize_with = "unique_pcrs")]
+    pub pcrs: Option<BTreeMap<u8, String>>,
 }
 
 fn default_tcb_statuses() -> Vec<attestation::TdxTcbStatus> {
@@ -87,6 +91,9 @@ pub struct SnpParamsInput {
     /// Above 0 is refused unless `attestation.allow_nonzero_vmpl` is set.
     #[serde(default)]
     pub max_vmpl: u32,
+    /// az-snp only: expected vTPM PCRs by index, 32 bytes each.
+    #[serde(default, deserialize_with = "unique_pcrs")]
+    pub pcrs: Option<BTreeMap<u8, String>>,
 }
 
 /// NVIDIA GPU params. See `attestation::NvidiaGpuParams`.
@@ -175,12 +182,14 @@ fn build_policies(
     // Which `Policies` fields exist depends on attestation's features.
     #[allow(clippy::needless_update)]
     let policies = attestation::Policies {
-        tdx: tdx(&input.tdx)?,
-        snp: snp(&input.snp)?,
-        az_tdx: tdx(&input.az_tdx)?.map(|tdx| attestation::AzTdxParams { tdx }),
-        az_snp: snp(&input.az_snp)?.map(|snp| attestation::AzSnpParams { snp }),
-        gcp_tdx: tdx(&input.gcp_tdx)?.map(|tdx| attestation::GcpTdxParams { tdx }),
-        gcp_snp: snp(&input.gcp_snp)?.map(|snp| attestation::GcpSnpParams { snp }),
+        tdx: without_pcrs(tdx(&input.tdx)?, "tdx")?,
+        snp: without_pcrs(snp(&input.snp)?, "snp")?,
+        az_tdx: tdx(&input.az_tdx)?.map(|(tdx, pcrs)| attestation::AzTdxParams { tdx, pcrs }),
+        az_snp: snp(&input.az_snp)?.map(|(snp, pcrs)| attestation::AzSnpParams { snp, pcrs }),
+        gcp_tdx: without_pcrs(tdx(&input.gcp_tdx)?, "gcp-tdx")?
+            .map(|tdx| attestation::GcpTdxParams { tdx }),
+        gcp_snp: without_pcrs(snp(&input.gcp_snp)?, "gcp-snp")?
+            .map(|snp| attestation::GcpSnpParams { snp }),
         gpu: input
             .nvidia_gpu
             .as_ref()
@@ -189,6 +198,62 @@ fn build_policies(
         ..Default::default()
     };
     Ok(policies)
+}
+
+type Pcrs = BTreeMap<u8, [u8; 32]>;
+
+/// PCR pins exist only on the Azure vTPM platforms.
+fn without_pcrs<T>(params: Option<(T, Pcrs)>, platform: &str) -> Result<Option<T>, ApiError> {
+    match params {
+        Some((_, pcrs)) if !pcrs.is_empty() => Err(ApiError::BadRequest(format!(
+            "pcrs does not apply to {platform}"
+        ))),
+        other => Ok(other.map(|(params, _)| params)),
+    }
+}
+
+fn decode_pcrs(pcrs: &Option<BTreeMap<u8, String>>) -> Result<Pcrs, ApiError> {
+    pcrs.iter()
+        .flatten()
+        .map(|(&index, value)| {
+            let name = format!("pcrs.{index}");
+            let bytes = decode(&Some(value.clone()), &name)?.unwrap_or_default();
+            let value: [u8; 32] = bytes.try_into().map_err(|b: Vec<u8>| {
+                ApiError::BadRequest(format!("{name} must be 32 bytes, got {}", b.len()))
+            })?;
+            Ok((index, value))
+        })
+        .collect()
+}
+
+/// A JSON object of PCR pins. A repeated index is refused rather than
+/// silently keeping the last value.
+fn unique_pcrs<'de, D>(deserializer: D) -> Result<Option<BTreeMap<u8, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Pins;
+    impl<'de> serde::de::Visitor<'de> for Pins {
+        type Value = BTreeMap<u8, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object of PCR index to base64 value")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut pins = BTreeMap::new();
+            while let Some((index, value)) = map.next_entry::<u8, String>()? {
+                if pins.insert(index, value).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "PCR {index} is pinned more than once"
+                    )));
+                }
+            }
+            Ok(pins)
+        }
+    }
+    deserializer.deserialize_map(Pins).map(Some)
 }
 
 fn check_allow_debug(requested: bool, config: &AttestationConfig) -> Result<(), ApiError> {
@@ -201,7 +266,10 @@ fn check_allow_debug(requested: bool, config: &AttestationConfig) -> Result<(), 
 }
 
 impl TdxParamsInput {
-    fn to_params(&self, config: &AttestationConfig) -> Result<attestation::TdxParams, ApiError> {
+    fn to_params(
+        &self,
+        config: &AttestationConfig,
+    ) -> Result<(attestation::TdxParams, Pcrs), ApiError> {
         check_allow_debug(self.allow_debug, config)?;
         if !config.allow_revoked_or_unlisted_tcb {
             let valid = default_tcb_statuses();
@@ -215,7 +283,7 @@ impl TdxParamsInput {
                 )));
             }
         }
-        Ok(attestation::TdxParams {
+        let params = attestation::TdxParams {
             report_data: decode(&self.report_data, "report_data")?,
             init_data: decode(&self.init_data, "init_data")?,
             mrtd: decode_digest(&self.mrtd, "mrtd")?,
@@ -227,26 +295,31 @@ impl TdxParamsInput {
             ],
             allow_debug: self.allow_debug,
             accepted_tcb_statuses: self.accepted_tcb_statuses.clone(),
-        })
+        };
+        Ok((params, decode_pcrs(&self.pcrs)?))
     }
 }
 
 impl SnpParamsInput {
-    fn to_params(&self, config: &AttestationConfig) -> Result<attestation::SnpParams, ApiError> {
+    fn to_params(
+        &self,
+        config: &AttestationConfig,
+    ) -> Result<(attestation::SnpParams, Pcrs), ApiError> {
         check_allow_debug(self.allow_debug, config)?;
         if self.max_vmpl > 0 && !config.allow_nonzero_vmpl {
             return Err(ApiError::BadRequest(
                 "max_vmpl above 0 is disabled by server configuration".to_string(),
             ));
         }
-        Ok(attestation::SnpParams {
+        let params = attestation::SnpParams {
             report_data: decode(&self.report_data, "report_data")?,
             host_data: decode(&self.host_data, "host_data")?,
             launch_digest: decode_digest(&self.launch_digest, "launch_digest")?,
             allow_debug: self.allow_debug,
             min_tcb: self.min_tcb,
             max_vmpl: self.max_vmpl,
-        })
+        };
+        Ok((params, decode_pcrs(&self.pcrs)?))
     }
 }
 
@@ -320,7 +393,10 @@ fn is_attestation_envelope(evidence: &Value) -> bool {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{build_evidence_envelope, canonical_platform, decode_digest, PoliciesInput};
+    use super::{
+        build_evidence_envelope, build_policies, canonical_platform, decode_digest, PoliciesInput,
+    };
+    use crate::config::AttestationConfig;
     use crate::error::ApiError;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -398,6 +474,13 @@ mod tests {
     }
 
     #[test]
+    fn a_pcr_pinned_twice_is_refused() {
+        let pin = BASE64.encode([0u8; 32]);
+        let body = format!(r#"{{"az-snp":{{"pcrs":{{"4":"{pin}","4":"{pin}"}}}}}}"#);
+        assert!(serde_json::from_str::<PoliciesInput>(&body).is_err());
+    }
+
+    #[test]
     fn a_pin_the_platform_does_not_have_is_refused() {
         let mrtd = BASE64.encode([0u8; 48]);
         assert!(
@@ -406,6 +489,14 @@ mod tests {
         assert!(
             serde_json::from_value::<PoliciesInput>(json!({ "snp": { "mrtd": mrtd } })).is_err()
         );
+
+        let policies = |v: Value| serde_json::from_value::<PoliciesInput>(v).unwrap();
+        let config = AttestationConfig::default();
+        let pcrs = json!({ "4": BASE64.encode([0u8; 32]) });
+        assert!(build_policies(&policies(json!({ "az-tdx": { "pcrs": pcrs } })), &config).is_ok());
+        let err =
+            build_policies(&policies(json!({ "tdx": { "pcrs": pcrs } })), &config).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[test]

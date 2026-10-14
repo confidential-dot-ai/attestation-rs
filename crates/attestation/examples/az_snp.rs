@@ -47,6 +47,7 @@ async fn main() {
                 report_data: Some(nonce.clone()),
                 ..Default::default()
             },
+            ..Default::default()
         }),
         ..Default::default()
     };

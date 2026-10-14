@@ -223,10 +223,20 @@ async fn evaluate_impl(
             .map_err(|_| format!("platforms: unknown platform {tag:?}"))?;
         match platform {
             PlatformType::Tdx => policies.tdx = Some(tdx.clone()),
-            PlatformType::AzTdx => policies.az_tdx = Some(AzTdxParams { tdx: tdx.clone() }),
+            PlatformType::AzTdx => {
+                policies.az_tdx = Some(AzTdxParams {
+                    tdx: tdx.clone(),
+                    ..Default::default()
+                })
+            }
             PlatformType::GcpTdx => policies.gcp_tdx = Some(GcpTdxParams { tdx: tdx.clone() }),
             PlatformType::Snp => policies.snp = Some(snp.clone()),
-            PlatformType::AzSnp => policies.az_snp = Some(AzSnpParams { snp: snp.clone() }),
+            PlatformType::AzSnp => {
+                policies.az_snp = Some(AzSnpParams {
+                    snp: snp.clone(),
+                    ..Default::default()
+                })
+            }
             PlatformType::GcpSnp => policies.gcp_snp = Some(GcpSnpParams { snp: snp.clone() }),
             PlatformType::Dstack => return Err(format!("platforms: {tag} is not compiled in")),
         }
@@ -447,6 +457,7 @@ fn evaluate_az_snp_impl(
             min_tcb,
             ..Default::default()
         },
+        ..Default::default()
     };
     let now = now();
     let VerifiedReport {
@@ -672,6 +683,7 @@ async fn evaluate_az_tdx_impl(
             init_data: expected_init_data_hash,
             ..Default::default()
         },
+        ..Default::default()
     };
 
     // Offline context: CRL/TCB/QE-identity checks are skipped (same trade-off
