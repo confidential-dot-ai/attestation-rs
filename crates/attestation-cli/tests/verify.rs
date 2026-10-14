@@ -96,6 +96,16 @@ fn usage_errors_exit_two() {
             "--expected-pcr",
             &format!("4={}", "aa".repeat(32)),
         ],
+        &["--platform", "snp", "--fetch-gcp-endorsement"],
+        &[
+            "--platform",
+            "snp",
+            "--gcp-endorsement",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../attestation/test_data/gcp_snp/endorsement-0e017d2f.binarypb"
+            ),
+        ],
         &["--expected-pcr", &format!("24={}", "aa".repeat(32))],
         &[
             "--expected-pcr",

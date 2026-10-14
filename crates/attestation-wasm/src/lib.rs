@@ -230,7 +230,12 @@ async fn evaluate_impl(
                     ..Default::default()
                 })
             }
-            PlatformType::GcpTdx => policies.gcp_tdx = Some(GcpTdxParams { tdx: tdx.clone() }),
+            PlatformType::GcpTdx => {
+                policies.gcp_tdx = Some(GcpTdxParams {
+                    tdx: tdx.clone(),
+                    ..Default::default()
+                })
+            }
             PlatformType::Snp => policies.snp = Some(snp.clone()),
             PlatformType::AzSnp => {
                 policies.az_snp = Some(AzSnpParams {
@@ -238,7 +243,12 @@ async fn evaluate_impl(
                     ..Default::default()
                 })
             }
-            PlatformType::GcpSnp => policies.gcp_snp = Some(GcpSnpParams { snp: snp.clone() }),
+            PlatformType::GcpSnp => {
+                policies.gcp_snp = Some(GcpSnpParams {
+                    snp: snp.clone(),
+                    ..Default::default()
+                })
+            }
             PlatformType::Dstack => return Err(format!("platforms: {tag} is not compiled in")),
         }
     }
