@@ -144,7 +144,9 @@ pub trait CertProvider: Send + Sync {
     }
 }
 
-/// Default implementation: try cache first, fetch from vendor on miss.
+/// Default implementation: try cache first, fetch from vendor on miss. On
+/// native targets this fetches the VCEK, the ARK/ASK chain and the SNP CRL
+/// from AMD KDS; on wasm it serves only cached VCEKs and the bundled chain.
 pub struct DefaultCertProvider {
     #[cfg(not(target_arch = "wasm32"))]
     client: reqwest::Client,
@@ -333,6 +335,10 @@ impl CertProvider for DefaultCertProvider {
         // First cert is typically VCEK/ASK, second is ARK
         // The AMD KDS returns ASK first, ARK second
         Ok((certs[1].clone(), certs[0].clone()))
+    }
+
+    async fn get_snp_crl(&self, processor_gen: ProcessorGeneration) -> Result<Option<Vec<u8>>> {
+        self.fetch_cert(&snp_crl_url(processor_gen)).await.map(Some)
     }
 }
 

@@ -4,11 +4,10 @@ use wasm_bindgen::prelude::*;
 use attestation::collateral::CertProvider;
 use attestation::error::{AttestationError, Result as AttestationResult};
 use attestation::platforms::az_snp::evidence::AzSnpEvidence;
-use attestation::platforms::az_snp::verify::{verify_report, VerifiedReport};
+use attestation::platforms::az_snp::verify::verify_report;
 use attestation::platforms::az_tdx::evidence::AzTdxEvidence;
-use attestation::platforms::snp::certs::get_ark;
 use attestation::platforms::snp::verify::{
-    check_report_bindings, check_vcek_not_revoked, evaluate_report, parse_report,
+    check_report_bindings, check_vek_against_crl, evaluate_report, parse_report,
     verify_report_signature, verify_vek_endorsement, MAX_REPORT_VERSION,
 };
 use attestation::platforms::tdx::collateral::StaticTdxCollateral;
@@ -148,8 +147,10 @@ impl CertProvider for StaticSnpCollateral {
 /// Collateral: the TDX checks that need Intel PCS (PCK CRL, TCB status, QE
 /// identity) are skipped; use [`evaluate_tdx`] to supply that collateral. For
 /// SNP, the caller may staple the AMD KDS CRL as `snp_crl_der`; its signature
-/// and thisUpdate/nextUpdate window are verified before the VEK is checked
-/// against it. Without it, revocation is skipped.
+/// and thisUpdate/nextUpdate window are verified before the VEK's issuing
+/// ASK/ASVK is checked against it (`crl_ok`, false if revoked). Without it,
+/// revocation is skipped (`crl_ok: null`). A CRL that cannot be parsed, is
+/// not ARK-signed or is stale throws.
 ///
 /// `min_tcb_json`, when supplied, is the minimum SNP TCB policy as
 /// [`SnpTcb`] JSON (`{ "bootloader": u8, "tee": u8, "snp": u8,
@@ -275,8 +276,9 @@ async fn evaluate_impl(
 ///
 /// Collateral: when `crl_der` carries the AMD KDS CRL for this generation,
 /// its signature is verified against the bundled ARK and its
-/// thisUpdate/nextUpdate window against the current time, then the VEK is
-/// checked against it. Without it, revocation is skipped.
+/// thisUpdate/nextUpdate window against the current time, then the VEK's
+/// issuing ASK/ASVK is checked against it: `crl_ok` (false if revoked).
+/// Without it, revocation is skipped (`crl_ok: null`).
 ///
 /// - `evidence_json`: evidence JSON with inline cert_chain.vcek
 /// - `generation`: processor generation ("milan", "genoa", "turin")
@@ -370,19 +372,18 @@ fn evaluate_snp_impl(
 
     // CRL revocation check, once the report is known to be genuine —
     // caller-supplied collateral, ARK-signature- and freshness-verified
-    // before it is trusted (AMD CRLs are signed by the
-    // ARK, not the ASK/ASVK intermediate).
-    if let Some(crl) = crl_der {
-        check_vcek_not_revoked(&vek_der, &crl, get_ark(gen), now)
-            .map_err(|e| format!("CRL check: {e}"))?;
-    }
+    // before it is trusted. A revoked ASK/ASVK is a value (`crl_ok: false`).
+    let crl_ok = crl_der
+        .map(|crl| check_vek_against_crl(&vek_der, &crl, gen, now))
+        .transpose()
+        .map_err(|e| format!("CRL check: {e}"))?;
 
     // Guest policy, as values. VMPL must be 0 and debug off: a malicious host
     // can launch the *correctly-measured* image as a debug-enabled or
     // non-VMPL-0 SNP guest and read its memory, and a measurement pin cannot
     // catch that (SEV-SNP guest policy lives in the report, not the launch
     // measurement). The browser entry has no `allow_debug` opt-in.
-    let mut result = evaluate_report(&report, &params);
+    let mut result = evaluate_report(&report, &params, crl_ok);
     check_report_bindings(&mut result, &report, &params).map_err(|e| e.to_string())?;
 
     let mut json = result_json(&result, "snp", result.passed())?;
@@ -409,8 +410,9 @@ fn evaluate_snp_impl(
 ///    SNP report signature, then evaluate VMPL/debug and the optional
 ///    minimum-TCB floor as values.
 /// 6. When `crl_der` carries the AMD KDS CRL for the matched generation, verify
-///    its ARK signature and freshness, then check the VCEK against it. Without
-///    it, revocation is skipped.
+///    its ARK signature and freshness, then check the VCEK's issuing ASK
+///    against it: `crl_ok` (false if revoked). Without it, revocation is
+///    skipped (`crl_ok: null`).
 ///
 /// - `evidence_json`: az-snp evidence JSON (`{ version, tpm_quote, hcl_report, vcek }`)
 /// - `expected_report_data`: optional raw bytes the TPM quote `extraData` must equal
@@ -460,21 +462,18 @@ fn evaluate_az_snp_impl(
         ..Default::default()
     };
     let now = now();
-    let VerifiedReport {
-        result,
-        matched_gen,
-        vcek_der,
-        report_version,
-    } = verify_report(&evidence, &params, now).map_err(|e| format!("az-snp verify: {e}"))?;
+    let verified =
+        verify_report(&evidence, &params, now).map_err(|e| format!("az-snp verify: {e}"))?;
+    let report_version = verified.report_version;
 
     // CRL revocation check — caller-supplied collateral, exactly the check the
     // native async path (`AzSnp::verify`) runs with a provider-fetched CRL.
-    // AMD CRLs are signed by the ARK, not the ASK/ASVK intermediate, and the
-    // CRL's signature and freshness are verified before it is trusted.
-    if let Some(crl) = crl_der {
-        check_vcek_not_revoked(&vcek_der, &crl, get_ark(matched_gen), now)
-            .map_err(|e| format!("CRL check: {e}"))?;
-    }
+    let result = match crl_der {
+        Some(crl) => verified
+            .check_crl(&crl, now)
+            .map_err(|e| format!("CRL check: {e}"))?,
+        None => verified.result,
+    };
 
     let mut json = result_json(&result, "az-snp", result.passed())?;
     json["report_version"] = report_version.into();
@@ -801,6 +800,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json["passed"], serde_json::json!(true));
         assert_eq!(json["report_version"], serde_json::json!(5));
+        assert!(json["crl_ok"].is_null(), "no CRL supplied: not checked");
     }
 
     #[test]

@@ -124,20 +124,6 @@ impl CertCache {
 
         // NRAS publishes a small key set (~5-10 keys). A handful of slots is
         // enough even if GPU and switch endpoints diverge in the future.
-        // Fail-closed deployments do NOT get the negative cache. Under
-        // require_crl a remembered failure refuses verification outright, so a
-        // one-second blip would become a full-backoff outage even after
-        // the endpoint recovers. Fail-open is the case worth caching: the CRL
-        // result is discarded anyway, so the only thing repeated dialling buys
-        // is the stall this fixes.
-        // 0 disables it; moka treats a zero TTL as "expire immediately".
-        // Under require_crl a suppressed retry means a refused verification, so
-        // fail-closed always dials.
-        let crl_backoff_base_secs = if config.require_crl {
-            0
-        } else {
-            config.crl_backoff_base_secs
-        };
         // Outlive the longest backoff so an outage does not keep resetting the
         // consecutive count back to the base delay.
         let crl_failure_cache = Cache::builder()
@@ -169,7 +155,7 @@ impl CertCache {
             http_client,
             configured_generations,
             crl_refresh_hours: config.crl_refresh_hours,
-            crl_backoff_base_secs,
+            crl_backoff_base_secs: config.crl_backoff_base_secs,
             crl_backoff_max_secs: config.crl_backoff_max_secs,
             store: config
                 .local_collateral_dir
@@ -1211,28 +1197,6 @@ mod tests {
             hits_of(&hits),
             2,
             "base=0 must disable the backoff and retry per request"
-        );
-    }
-
-    // Guards the regression the negative cache would otherwise introduce: under
-    // require_crl a remembered failure REFUSES verification, so caching it would
-    // extend a momentary blip into a full-TTL outage. Fail-closed must keep
-    // retrying.
-    #[tokio::test]
-    async fn fail_closed_keeps_retrying_and_is_never_negatively_cached() {
-        let (url, hits) = counting_crl_endpoint().await;
-        let cache = CertCache::new(&CertsConfig {
-            require_crl: true,
-            crl_backoff_base_secs: 300,
-            ..Default::default()
-        });
-
-        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
-        assert!(cache.get_crl("snp_genoa", &url).await.is_err());
-        assert_eq!(
-            hits_of(&hits),
-            2,
-            "require_crl must re-dial so recovery is picked up immediately"
         );
     }
 

@@ -20,8 +20,10 @@ fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
     let cert_cache = Arc::new(CertCache::new(&Default::default()));
-    let cert_provider =
-        attestation_api::certs::snp_provider::CachedCertProvider::new(cert_cache.clone(), false);
+    let cert_provider = attestation_api::certs::snp_provider::CachedCertProvider::new(
+        cert_cache.clone(),
+        !config.certs.skip_snp_crl,
+    );
     let tdx_provider =
         attestation_api::certs::tdx_provider::CachedTdxProvider::new(cert_cache.clone());
     let verifier = Arc::new(attestation::Verifier::new(

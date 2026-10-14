@@ -55,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    if !config.certs.require_crl {
-        tracing::warn!("CRL checking is disabled (certs.require_crl = false); revocation check failures will be silently skipped");
+    if config.certs.skip_snp_crl {
+        tracing::warn!("SNP CRL checking is off (certs.skip_snp_crl = true); a revoked AMD ASK/ASVK is not detected");
     }
 
     // Build cert cache
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build verifier with cached providers so verification uses the moka cache
-    let cert_provider = CachedCertProvider::new(cert_cache.clone(), config.certs.require_crl);
+    let cert_provider = CachedCertProvider::new(cert_cache.clone(), !config.certs.skip_snp_crl);
     let tdx_provider = CachedTdxProvider::new(cert_cache.clone());
     let verifier = Arc::new(attestation::Verifier::new(
         attestation::Context::new()
