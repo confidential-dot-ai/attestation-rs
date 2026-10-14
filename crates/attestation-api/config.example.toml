@@ -18,7 +18,7 @@ chain_ttl_hours = 168             # 7 days
 crl_refresh_hours = 6
 tdx_collateral_ttl_hours = 24
 prefetch_chains = ["milan"]       # Pre-warm on startup
-require_crl = false               # true = fail-closed on CRL fetch errors
+skip_snp_crl = false              # true = never fetch or check the AMD CRL (revoked ASK/ASVK undetected)
 
 [token]
 enabled = false

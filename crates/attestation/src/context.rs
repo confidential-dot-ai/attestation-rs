@@ -200,9 +200,10 @@ mod tests {
             serde_json::from_value(envelope["evidence"].clone()).unwrap();
         let ctx = Context::offline();
 
-        let _verified = Snp::verify(&evidence, &SnpParams::default(), &ctx)
+        let r = Snp::verify(&evidence, &SnpParams::default(), &ctx)
             .await
             .expect("inline VEK verifies offline");
+        assert!(r.crl_ok.is_none(), "the AMD CRL is not fetched");
 
         evidence.cert_chain = None;
         let err = Snp::verify(&evidence, &SnpParams::default(), &ctx)
