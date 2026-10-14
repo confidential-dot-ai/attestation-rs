@@ -27,6 +27,8 @@ struct Cli {
     command: Commands,
 }
 
+// Parsed once at startup; boxing the larger variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Generate attestation evidence from TEE hardware (Linux only).
@@ -129,6 +131,11 @@ struct VerifyArgs {
     /// Expected SNP launch digest (hex-encoded, 48 bytes). SNP-only.
     #[arg(long)]
     expected_launch_digest: Option<String>,
+
+    /// Expected vTPM PCR as INDEX=HEX (SHA-256 bank, 32 bytes). Repeatable.
+    /// Azure vTPM only (az-snp, az-tdx).
+    #[arg(long, value_name = "INDEX=HEX")]
+    expected_pcr: Vec<String>,
 
     /// NVIDIA GPU user nonce (hex) that seeded the GPU SPDM nonce. Enables GPU
     /// bundle verification via NRAS. If --expected-report-data is not given, it
@@ -340,39 +347,69 @@ fn parse_digest(hex_str: &str, flag: &str) -> [u8; 48] {
     })
 }
 
+const ALL_PLATFORMS: [PlatformType; 6] = [
+    PlatformType::Tdx,
+    PlatformType::AzTdx,
+    PlatformType::GcpTdx,
+    PlatformType::Snp,
+    PlatformType::AzSnp,
+    PlatformType::GcpSnp,
+];
 const TDX_PLATFORMS: [PlatformType; 3] =
     [PlatformType::Tdx, PlatformType::AzTdx, PlatformType::GcpTdx];
 const SNP_PLATFORMS: [PlatformType; 3] =
     [PlatformType::Snp, PlatformType::AzSnp, PlatformType::GcpSnp];
+const AZURE_PLATFORMS: [PlatformType; 2] = [PlatformType::AzTdx, PlatformType::AzSnp];
 
-/// The platforms to accept: `--platform`, or else the platforms the
-/// platform-specific flags apply to. Never the evidence's own tag, which is
-/// an attester claim.
+/// The platforms to accept: `--platform`, or else the platforms every
+/// platform-specific pin applies to. Never the evidence's own tag, which is
+/// an attester claim. A pin that does not apply to an accepted platform is a
+/// usage error.
 fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
-    if !args.platform.is_empty() {
-        return args.platform.iter().map(|p| p.to_platform_type()).collect();
+    let mut pins: Vec<(&str, &[PlatformType])> = Vec::new();
+    let rtmr_pinned = [
+        &args.expected_rtmr0,
+        &args.expected_rtmr1,
+        &args.expected_rtmr2,
+        &args.expected_rtmr3,
+    ]
+    .iter()
+    .any(|r| r.is_some());
+    if args.expected_mrtd.is_some() || rtmr_pinned {
+        pins.push(("--expected-mrtd and --expected-rtmrN", &TDX_PLATFORMS));
     }
-    let tdx_pins = args.expected_mrtd.is_some()
-        || [
-            &args.expected_rtmr0,
-            &args.expected_rtmr1,
-            &args.expected_rtmr2,
-            &args.expected_rtmr3,
-        ]
-        .iter()
-        .any(|r| r.is_some());
-    match (tdx_pins, args.expected_launch_digest.is_some()) {
-        (true, false) => TDX_PLATFORMS.to_vec(),
-        (false, true) => SNP_PLATFORMS.to_vec(),
-        (true, true) => usage_error(
-            "--expected-launch-digest (SNP) and --expected-mrtd/--expected-rtmrN (TDX) \
-             do not apply to the same evidence",
-        ),
-        (false, false) => usage_error(
-            "say which platform the evidence must come from with --platform \
-             (or pin --expected-mrtd or --expected-launch-digest)",
-        ),
+    if args.expected_launch_digest.is_some() {
+        pins.push(("--expected-launch-digest", &SNP_PLATFORMS));
     }
+    if !args.expected_pcr.is_empty() {
+        pins.push(("--expected-pcr", &AZURE_PLATFORMS));
+    }
+
+    let platforms: Vec<PlatformType> = if args.platform.is_empty() {
+        if pins.is_empty() {
+            usage_error(
+                "say which platform the evidence must come from with --platform \
+                 (or pin a platform-specific value such as --expected-mrtd)",
+            );
+        }
+        ALL_PLATFORMS
+            .into_iter()
+            .filter(|p| pins.iter().all(|(_, applies)| applies.contains(p)))
+            .collect()
+    } else {
+        args.platform.iter().map(|p| p.to_platform_type()).collect()
+    };
+    if platforms.is_empty() {
+        usage_error("the pins given do not all apply to any one platform");
+    }
+    for platform in &platforms {
+        for (flag, applies) in &pins {
+            if !applies.contains(platform) {
+                usage_error(&format!("{flag} do not apply to {platform} evidence"));
+            }
+        }
+    }
+    platforms
 }
 
 /// Build one policy per accepted platform from the flags. A pin an accepted
@@ -403,6 +440,14 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         .expected_launch_digest
         .as_deref()
         .map(|h| parse_digest(h, "expected-launch-digest"));
+    let mut pcrs = std::collections::BTreeMap::<u8, [u8; 32]>::new();
+    for pin in &args.expected_pcr {
+        let (index, value) = parse_pcr_pin(pin)
+            .unwrap_or_else(|e| usage_error(&format!("invalid --expected-pcr {pin:?}: {e}")));
+        if pcrs.insert(index, value).is_some() {
+            usage_error(&format!("--expected-pcr pins PCR[{index}] more than once"));
+        }
+    }
 
     #[allow(unused_mut)]
     let mut policies = Policies::default();
@@ -447,20 +492,6 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         report_data
     };
 
-    for platform in &platforms {
-        let tdx_family = TDX_PLATFORMS.contains(platform);
-        if tdx_family && launch_digest.is_some() {
-            usage_error(&format!(
-                "--expected-launch-digest does not apply to {platform} evidence"
-            ));
-        }
-        if !tdx_family && (mrtd.is_some() || rtmr.iter().any(Option::is_some)) {
-            usage_error(&format!(
-                "--expected-mrtd and --expected-rtmrN do not apply to {platform} evidence"
-            ));
-        }
-    }
-
     let tdx = || TdxParams {
         report_data: report_data.clone(),
         init_data: init_data.clone(),
@@ -477,12 +508,22 @@ fn build_policies(args: &VerifyArgs) -> Policies {
     for platform in platforms {
         match platform {
             PlatformType::Tdx => policies.tdx = Some(tdx()),
-            PlatformType::AzTdx => policies.az_tdx = Some(attestation::AzTdxParams { tdx: tdx() }),
+            PlatformType::AzTdx => {
+                policies.az_tdx = Some(attestation::AzTdxParams {
+                    tdx: tdx(),
+                    pcrs: pcrs.clone(),
+                })
+            }
             PlatformType::GcpTdx => {
                 policies.gcp_tdx = Some(attestation::GcpTdxParams { tdx: tdx() })
             }
             PlatformType::Snp => policies.snp = Some(snp()),
-            PlatformType::AzSnp => policies.az_snp = Some(attestation::AzSnpParams { snp: snp() }),
+            PlatformType::AzSnp => {
+                policies.az_snp = Some(attestation::AzSnpParams {
+                    snp: snp(),
+                    pcrs: pcrs.clone(),
+                })
+            }
             PlatformType::GcpSnp => {
                 policies.gcp_snp = Some(attestation::GcpSnpParams { snp: snp() })
             }
@@ -564,4 +605,18 @@ async fn cmd_verify(args: VerifyArgs) {
     if !passed {
         process::exit(1);
     }
+}
+
+/// Parse an `--expected-pcr` value of the form `INDEX=HEX`.
+fn parse_pcr_pin(pin: &str) -> Result<(u8, [u8; 32]), String> {
+    let (index, value) = pin.split_once('=').ok_or("expected INDEX=HEX")?;
+    let index: u8 = index
+        .parse()
+        .ok()
+        .filter(|i| *i <= 23)
+        .ok_or_else(|| format!("PCR index {index:?} is not 0-23"))?;
+    let bytes = hex::decode(value).map_err(|e| format!("bad hex: {e}"))?;
+    let value = <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| format!("PCR value must be 32 bytes, got {}", bytes.len()))?;
+    Ok((index, value))
 }

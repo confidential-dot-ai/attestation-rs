@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
@@ -16,13 +18,16 @@ use super::evidence::AzTdxEvidence;
 #[derive(Debug, Clone, Default)]
 pub struct AzTdxParams {
     pub tdx: TdxParams,
+    /// Expected vTPM PCR values (SHA-256 bank) by index. Empty means no check.
+    pub pcrs: BTreeMap<u8, [u8; 32]>,
 }
 
 impl AzTdxParams {
     /// Reject params that cannot be applied, before any I/O.
     pub fn validate(&self) -> Result<()> {
         self.tdx.validate()?;
-        tpm_common::check_init_data_len(self.tdx.init_data.as_deref())
+        tpm_common::check_init_data_len(self.tdx.init_data.as_deref())?;
+        tpm_common::check_pcr_pin_indexes(&self.pcrs)
     }
 }
 
@@ -33,12 +38,15 @@ impl AzTdxParams {
 pub struct AzTdxResult {
     #[serde(flatten)]
     pub tdx: TdxResult,
+    /// Every pinned PCR matched (`None` if no PCR was pinned). A PCR outside
+    /// the quote's signed PCR selection does not match.
+    pub pcrs_match: Option<bool>,
 }
 
 impl AzTdxResult {
     /// True when the evidence satisfied every rule in the params.
     pub fn passed(&self) -> bool {
-        self.tdx.passed()
+        self.tdx.passed() && self.pcrs_match != Some(false)
     }
 }
 
@@ -59,6 +67,7 @@ impl Platform for AzTdx {
         ctx: &Context,
     ) -> Result<AzTdxResult> {
         params.validate()?;
+        let pcrs = &params.pcrs;
         let params = &params.tdx;
         if evidence.version != 1 {
             return Err(AttestationError::EvidenceDeserialize(format!(
@@ -106,6 +115,7 @@ impl Platform for AzTdx {
         let report_data_match =
             tpm_common::check_report_data(&tpm_msg, params.report_data.as_deref())?;
         tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
+        let pcrs_match = tpm_common::check_pcrs(&tpm_msg, &tpm_pcrs, pcrs)?;
 
         // TDX DCAP layer: signature, chain, and the quote rules
         let (tdx_quote, mut tdx) = tdx_verify::verify_quote(&td_quote_bytes, params, ctx)?;
@@ -119,7 +129,7 @@ impl Platform for AzTdx {
 
         // Collateral last, once the evidence is known to be genuine.
         tdx_verify::check_collateral(&mut tdx, &td_quote_bytes, &tdx_quote, params, ctx).await?;
-        Ok(AzTdxResult { tdx })
+        Ok(AzTdxResult { tdx, pcrs_match })
     }
 }
 
@@ -340,5 +350,53 @@ mod tests {
             "TDX TPM signature should verify: {:?}",
             result.err()
         );
+    }
+
+    // Real az-tdx evidence from an Azure DCesv6 confidential VM (confos image).
+    const CONFOS_EVIDENCE: &str =
+        include_str!("../../../test_data/az_tdx/confos-boot-evidence.json");
+
+    #[tokio::test]
+    async fn test_confos_pcr_pins() {
+        let evidence: AzTdxEvidence = serde_json::from_str(CONFOS_EVIDENCE).unwrap();
+        // PCR4/9/11 as predicted by the confos v0.1.2 image build.
+        let mut pcrs: BTreeMap<u8, [u8; 32]> = [
+            (
+                4,
+                "01a877a78619b163df80fb2cc469de09a74682efcc19b282e211285719cfa51a",
+            ),
+            (
+                9,
+                "aabf3cb9ccf46c2742a0358c5d8d6466c8b7798584dc985ba7dd1b417cd0c0a9",
+            ),
+            (
+                11,
+                "bb522ef6ca6baa0497820cc06c22c3c2ba9ec0c9055c00b758a05172b5ff3921",
+            ),
+        ]
+        .into_iter()
+        .map(|(i, h)| (i, hex::decode(h).unwrap().try_into().unwrap()))
+        .collect();
+        let verify = |pcrs: BTreeMap<u8, [u8; 32]>| {
+            let params = AzTdxParams {
+                pcrs,
+                ..Default::default()
+            };
+            let evidence = evidence.clone();
+            async move {
+                AzTdx::verify(&evidence, &params, &Context::offline())
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let r = verify(pcrs.clone()).await;
+        assert_eq!(r.pcrs_match, Some(true));
+        assert!(r.passed());
+
+        pcrs.get_mut(&9).unwrap()[0] ^= 1;
+        let r = verify(pcrs).await;
+        assert_eq!(r.pcrs_match, Some(false));
+        assert!(!r.passed());
     }
 }
