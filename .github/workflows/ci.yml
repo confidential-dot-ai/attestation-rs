@@ -11,6 +11,10 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: confidential-dot-ai/attestation-api
 
+# Jobs that need more (GHCR push, release) widen this at the job level.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check & Lint
