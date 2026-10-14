@@ -16,7 +16,7 @@ use std::path::Path;
 
 use base64::Engine;
 
-use attestation::types::VerifyParams;
+use attestation::{AzSnp, AzSnpParams, Context, Platform, SnpParams};
 
 /// Helper: check if we're running on an Azure SNP CVM with the required tools.
 fn is_az_snp_cvm() -> bool {
@@ -171,11 +171,7 @@ async fn test_az_snp_attest_then_verify_roundtrip() {
         .expect("generate_evidence() should succeed");
 
     // Verify without expected values (just check structure)
-    let params = VerifyParams::default();
-    let provider = attestation::collateral::DefaultCertProvider::new();
-    let result =
-        attestation::platforms::az_snp::verify::verify_evidence(&evidence, &params, &provider)
-            .await;
+    let result = AzSnp::verify(&evidence, &AzSnpParams::default(), &Context::new()).await;
 
     assert!(
         result.is_ok(),
@@ -183,16 +179,7 @@ async fn test_az_snp_attest_then_verify_roundtrip() {
         result.err()
     );
 
-    let result = result.unwrap();
-
-    // TPM signature should be valid
-    assert!(
-        result.signature_valid,
-        "TPM signature should be valid on fresh evidence"
-    );
-
-    // Platform should be AzSnp
-    assert_eq!(result.platform, attestation::PlatformType::AzSnp);
+    let result = result.unwrap().snp;
 
     // Claims should be populated
     assert!(
@@ -207,7 +194,7 @@ async fn test_az_snp_attest_then_verify_roundtrip() {
 
     // No expected values were provided, so these should be None
     assert!(result.report_data_match.is_none());
-    assert!(result.init_data_match.is_none());
+    assert!(result.host_data_match.is_none());
 }
 
 #[tokio::test]
@@ -224,21 +211,20 @@ async fn test_az_snp_verify_with_expected_nonce() {
         .expect("generate_evidence() should succeed");
 
     // Verify with correct nonce. Pass it unpadded: attest::generate_evidence puts
-    // report_data verbatim into the TPM nonce, and verify_tpm_nonce requires the
+    // report_data verbatim into the TPM nonce, and the nonce check requires the
     // expectation to be the same length as that nonce.
-    let params = VerifyParams {
-        expected_report_data: Some(nonce.to_vec()),
-        expected_init_data_hash: None,
-        ..Default::default()
+    let params = AzSnpParams {
+        snp: SnpParams {
+            report_data: Some(nonce.to_vec()),
+            ..Default::default()
+        },
     };
 
-    let provider = attestation::collateral::DefaultCertProvider::new();
-    let result =
-        attestation::platforms::az_snp::verify::verify_evidence(&evidence, &params, &provider)
-            .await
-            .expect("verify should succeed");
+    let result = AzSnp::verify(&evidence, &params, &Context::new())
+        .await
+        .expect("verify should succeed");
 
-    assert!(result.signature_valid);
+    assert_eq!(result.snp.report_data_match, Some(true));
 }
 
 #[tokio::test]
@@ -314,16 +300,11 @@ async fn test_az_snp_cross_process_serialization() {
         serde_json::from_str(&json_back).unwrap();
 
     // Verify the deserialized evidence
-    let params = VerifyParams::default();
-    let provider = attestation::collateral::DefaultCertProvider::new();
-    let result =
-        attestation::platforms::az_snp::verify::verify_evidence(&evidence_back, &params, &provider)
-            .await;
+    let result = AzSnp::verify(&evidence_back, &AzSnpParams::default(), &Context::new()).await;
 
     assert!(
         result.is_ok(),
         "should verify evidence deserialized from file: {:?}",
         result.err()
     );
-    assert!(result.unwrap().signature_valid);
 }

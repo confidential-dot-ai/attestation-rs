@@ -1519,16 +1519,24 @@ mod tests {
     /// The real verifier, wired the way main.rs wires it, against a loopback PCS.
     async fn verify_v4_through_service(
         pcs: FakePcs,
-    ) -> attestation::Result<attestation::VerificationResult> {
+    ) -> attestation::Result<attestation::TdxResult> {
         let cache = Arc::new(cache_at(fake_pcs(pcs).await));
-        let verifier = attestation::Verifier::new()
-            .with_tdx_provider(crate::certs::tdx_provider::CachedTdxProvider::new(cache));
+        let verifier = attestation::Verifier::new(
+            attestation::Context::new()
+                .with_tdx_provider(crate::certs::tdx_provider::CachedTdxProvider::new(cache)),
+        );
         // The v4 fixture was minted with the TD debug attribute set.
-        let params = attestation::VerifyParams {
-            allow_debug: true,
+        let policies = attestation::Policies {
+            tdx: Some(attestation::TdxParams {
+                allow_debug: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        verifier.verify(&v4_envelope(), &params).await
+        match verifier.verify(&v4_envelope(), &policies).await?.platform {
+            attestation::PlatformResult::Tdx(result) => Ok(result),
+            other => panic!("expected a TDX result, got {}", other.platform()),
+        }
     }
 
     #[tokio::test]
@@ -1536,7 +1544,7 @@ mod tests {
         let result = verify_v4_through_service(FakePcs::intel_fixtures())
             .await
             .expect("the v4 quote with Intel's own collateral must verify");
-        assert!(result.collateral_verified);
+        assert_eq!(result.crl_ok, Some(true));
         assert!(result.tcb_status.is_some());
     }
 

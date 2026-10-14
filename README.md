@@ -67,24 +67,24 @@ module script:
 
 ```html
 <script type="module">
-  import init, { verify_snp } from './pkg/attestation_wasm.js';
+  import init, { evaluate_snp } from './pkg/attestation_wasm.js';
 
   await init(); // fetches and instantiates the .wasm blob
 
   // evidence: SNP evidence JSON with an inline cert_chain.vcek (base64 DER)
   // generation: "milan" | "genoa" | "turin"
   // expectedReportData (optional): Uint8Array of the nonce to bind against
-  const resultJson = verify_snp(
+  const result = JSON.parse(evaluate_snp(
     JSON.stringify(evidence),
     'genoa',
     new TextEncoder().encode('my-nonce'),
-  );
-  console.log(JSON.parse(resultJson));
+  ));
+  if (!result.passed) throw new Error('attestation did not pass');
 </script>
 ```
 
-The module also exports `verify_az_snp` for full **Azure SEV-SNP** (vTPM)
-verification. Unlike `verify_snp`, which checks only the bare SNP hardware report,
+The module also exports `evaluate_az_snp` for full **Azure SEV-SNP** (vTPM)
+verification. Unlike `evaluate_snp`, which checks only the bare SNP hardware report,
 it verifies the HCL-wrapped report *and* the vTPM quote — the TPM signature against
 the attestation key (AK) in the HCL runtime data, the AK→TEE binding, and the
 freshness anchor in the quote's `extraData` (not the SNP `report_data`). The
@@ -92,67 +92,85 @@ processor generation is auto-detected from the report CPUID, so no `generation`
 argument is needed:
 
 ```js
-import init, { verify_az_snp } from './pkg/attestation_wasm.js';
+import init, { evaluate_az_snp } from './pkg/attestation_wasm.js';
 await init();
 // evidence: AzSnpEvidence JSON { version, tpm_quote, hcl_report, vcek }
 // expectedReportData (optional): Uint8Array the quote's extraData must equal
-const resultJson = verify_az_snp(JSON.stringify(evidence), expectedReportData);
+const resultJson = evaluate_az_snp(JSON.stringify(evidence), expectedReportData);
 ```
 
-It returns the same result shape as `verify_snp` with `platform: "az-snp"`. The
-WASM path skips the async CRL revocation check (`collateral_verified: false`); the
-native async `az_snp::verify::verify_evidence` adds it via a `CertProvider`.
+It returns the same top-level keys as `evaluate_snp` (with `platform: "az-snp"`),
+including `passed`. The other exports are `evaluate` (any accepted platform,
+from a `{ platform, evidence }` envelope and a required list of accepted
+platform tags), `evaluate_tdx` and `evaluate_az_tdx`. Every export throws only
+when the evidence cannot be evaluated; mismatches and policy flags are fields,
+so the caller must read `passed`. (The exports were named `verify*` before the
+result shape changed; the rename makes old callers that treated "no throw" as
+success fail loudly.) Without a CRL argument the revocation check is skipped.
 
 For a Node.js end-to-end example (generate live evidence, fetch the VCEK from AMD
 KDS, verify in WASM), build with `--target nodejs` and run
 `crates/attestation-wasm/example.mjs`.
 
-## Pinning launch measurements
+## Verifying evidence
 
-`VerifyParams` carries optional reference values that the verifier compares
-against the measurement registers in the quote. When the operator supplies a
-value, the corresponding `VerificationResult` field is `Some(true)`/`Some(false)`;
-when omitted the result is `None` (no check requested).
+Callers say which platforms they accept and what each must satisfy, with one
+params type per platform:
 
 ```rust
-use attestation::types::VerifyParams;
+use attestation::{Policies, TdxParams};
 
-let params = VerifyParams {
-    // TDX policy
-    expected_mrtd: Some(mrtd_bytes),                   // [u8; 48]
-    expected_rtmr1: Some(rtmr1_bytes),
-    expected_rtmr2: Some(rtmr2_bytes),
-    // SNP policy
-    expected_launch_digest: Some(launch_digest_bytes), // [u8; 48]
-    // existing fields
-    expected_report_data: Some(nonce.to_vec()),
+let policies = Policies {
+    tdx: Some(TdxParams {
+        report_data: Some(nonce.to_vec()),
+        mrtd: Some(mrtd_bytes),                  // [u8; 48]
+        rtmr: [None, Some(rtmr1_bytes), None, None],
+        ..Default::default()
+    }),
     ..Default::default()
 };
 
-let result = attestation::verify(&evidence_json, &params).await?;
-assert_eq!(result.mrtd_match, Some(true));
-assert_eq!(result.rtmr1_match, Some(true));
-assert_eq!(result.rtmr2_match, Some(true));
+let verified = attestation::verify(&evidence_json, &policies).await?;
+if !verified.passed() { /* refuse */ }
 ```
 
-All comparisons are constant-time (`subtle::ConstantTimeEq`) and do not
-short-circuit — every populated reference is checked. `VerificationResult`
-carries `#[must_use]` so dropping the result without inspecting the policy
-outcomes is a compile-time warning.
+To accept any platform with its default checks, and require your nonce:
+
+```rust
+let verified = attestation::verify(&evidence_json, &Policies::all().with_report_data(&nonce)).await?;
+```
+
+`Err` means the evidence could not be verified (malformed, not genuine,
+platform not allowed, invalid params) or, retryably, that collateral could not
+be fetched (`CollateralUnavailable`). A genuine answer the caller may not like
+is a value: mismatches are `*_match: Some(false)`, and debug, VMPL, minimum TCB
+and TCB status are fields. `passed()` is true only when every rule held. Pins,
+`report_data` and init data are compared in constant time.
 
 The CLI exposes matching flags:
 
 ```bash
 attestation-cli verify \
   --evidence evidence.json \
+  --platform tdx \
   --expected-mrtd $MRTD \
   --expected-rtmr1 $RTMR1 \
   --expected-rtmr2 $RTMR2
-# exit 0 on full match; exit 1 on any explicit --expected-* mismatch.
 ```
 
-A failing `--expected-*` check forces the process to exit non-zero, so a
-CI gate using these flags fails closed on a wrong workload.
+`--platform` (repeatable) says which platforms to accept. Without it, the
+platform-specific pins decide (`--expected-mrtd`/`--expected-rtmrN`: the TDX
+platforms; `--expected-launch-digest`: the SNP platforms); the evidence's own
+platform tag never does. A pin an accepted platform does not have
+(`--expected-mrtd` with `--platform snp`) is a usage error. `--offline`
+verifies without network access.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Passed: genuine, and every rule in the flags held |
+| 1 | Did not pass, or the evidence is not genuine |
+| 2 | Usage error or invalid params |
+| 3 | Collateral unavailable (AMD KDS, Intel PCS, NRAS); retrying may help |
 
 ## Documentation
 

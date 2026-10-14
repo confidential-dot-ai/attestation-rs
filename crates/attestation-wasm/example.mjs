@@ -81,7 +81,7 @@ const wasm = await import('./pkg/attestation_wasm.js');
 const nonceBytes = new TextEncoder().encode(nonce);
 
 const t0 = performance.now();
-const resultJson = wasm.verify_snp(JSON.stringify(evidence), 'genoa', nonceBytes);
+const resultJson = wasm.evaluate_snp(JSON.stringify(evidence), 'genoa', nonceBytes);
 const elapsed = (performance.now() - t0).toFixed(1);
 const result = JSON.parse(resultJson);
 
@@ -92,20 +92,20 @@ console.log(JSON.stringify(result, null, 2));
 console.log('\n=== Step 4: Verifying wrong report_data is rejected ===\n');
 
 const wrongNonce = new TextEncoder().encode('wrong-nonce');
-const mismatchJson = wasm.verify_snp(JSON.stringify(evidence), 'genoa', wrongNonce);
+const mismatchJson = wasm.evaluate_snp(JSON.stringify(evidence), 'genoa', wrongNonce);
 const mismatch = JSON.parse(mismatchJson);
 console.log(`report_data_match with wrong nonce: ${mismatch.report_data_match}`);
 
 // --- Step 5: Verify without report_data check ---
 console.log('\n=== Step 5: Verifying without report_data check ===\n');
 
-const noCheckJson = wasm.verify_snp(JSON.stringify(evidence), 'genoa', undefined);
+const noCheckJson = wasm.evaluate_snp(JSON.stringify(evidence), 'genoa', undefined);
 const noCheck = JSON.parse(noCheckJson);
 console.log(`report_data_match (no check): ${noCheck.report_data_match}`);
 
 // --- Summary ---
 console.log('\n=== Summary ===\n');
-console.log(`Signature valid:      ${result.signature_valid}`);
+console.log(`Passed:               ${result.passed}`);
 console.log(`Report data match:    ${result.report_data_match}`);
 console.log(`Platform:             ${result.platform}`);
 console.log(`Report version:       ${result.report_version}`);
@@ -116,15 +116,15 @@ console.log(`TCB:                  bl=${result.claims.tcb.bootloader} tee=${resu
 console.log(`VMPL:                 ${result.claims.platform_data.vmpl}`);
 console.log(`Debug allowed:        ${result.claims.platform_data.policy.debug_allowed}`);
 
-if (!result.signature_valid) {
-  console.error('\nFAILED: signature not valid');
+if (result.passed !== true) {
+  console.error('\nFAILED: evidence did not pass');
   process.exit(1);
 }
 if (result.report_data_match !== true) {
   console.error('\nFAILED: report_data did not match nonce');
   process.exit(1);
 }
-if (mismatch.report_data_match !== false) {
+if (mismatch.report_data_match !== false || mismatch.passed !== false) {
   console.error('\nFAILED: wrong nonce was not rejected');
   process.exit(1);
 }

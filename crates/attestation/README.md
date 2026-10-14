@@ -42,47 +42,84 @@ All six platform features are enabled by default. Verification is always compile
 
 ### Verifier (Server-Side or WASM)
 
+Say which platforms you accept and what each must satisfy:
+
 ```rust
-use attestation::{VerifyParams, VerificationResult};
+use attestation::{Policies, TdxParams};
 
 #[tokio::main]
 async fn main() {
     // evidence_json is a self-describing AttestationEvidence envelope
     let evidence_json: &[u8] = b"...";
 
-    let params = VerifyParams {
-        expected_report_data: Some(vec![0xAA; 64]),
+    let policies = Policies {
+        tdx: Some(TdxParams {
+            report_data: Some(nonce.to_vec()),
+            mrtd: Some(expected_mrtd),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
-    let result = attestation::verify(evidence_json, &params).await.unwrap();
-
-    println!("Signature valid: {}", result.signature_valid);
-    println!("Platform: {}", result.platform);
-    println!("Launch digest: {}", result.claims.launch_digest);
-    println!("Report data match: {:?}", result.report_data_match);
+    match attestation::verify(evidence_json, &policies).await {
+        Ok(verified) if verified.passed() => { /* accept */ }
+        Ok(verified) => { /* genuine, but a rule failed: read the fields */ }
+        Err(e) if e.is_retryable() => { /* collateral unavailable: retry */ }
+        Err(e) => { /* not verifiable: refuse */ }
+    }
 }
 ```
 
-### Verifier with Custom Providers
+`Policies::all()` accepts every compiled-in platform with its default params,
+and `.with_report_data(&nonce)` requires your nonce on each of them:
 
 ```rust
-use attestation::{Verifier, VerifyParams};
-
-#[tokio::main]
-async fn main() {
-    let verifier = Verifier::new();
-    // Or with custom cert/collateral providers:
-    // let verifier = Verifier::new()
-    //     .with_cert_provider(my_cert_provider)
-    //     .with_tdx_provider(my_tdx_provider);
-
-    let result = verifier
-        .verify(evidence_json, &VerifyParams::default())
-        .await
-        .unwrap();
-}
+let verified = attestation::verify(evidence_json, &Policies::all().with_report_data(&nonce)).await?;
 ```
+
+Each platform has its own params and result (`TdxParams`/`TdxResult`,
+`SnpParams`/`SnpResult`, `AzTdxParams`, `AzSnpParams`, `GcpTdxParams`,
+`GcpSnpParams`, `DstackParams`). If you know the platform, call it directly:
+
+```rust
+use attestation::{Context, Platform, Tdx};
+
+let result = Tdx::verify(&evidence, &params, &Context::new()).await?;
+```
+
+### What is an error
+
+| Case | Result |
+| --- | --- |
+| Malformed or too large evidence, platform not compiled in, invalid params | `Err` |
+| Evidence for a platform with no params in `Policies` | `Err(PlatformNotAllowed)` |
+| Bad signature, cert chain, QE binding, event log, GPU nonce binding (overall or per device) | `Err` |
+| Collateral could not be fetched (AMD KDS, Intel PCS, NRAS) | `Err(CollateralUnavailable)`, retryable |
+| Measurement, RTMR, launch digest, `report_data` or init data mismatch | value: `*_match: Some(false)` |
+| Debug, VMPL, minimum TCB, TDX TCB status (including no matching level), revoked TDX PCK, GPU device policy | value |
+| A check you did not ask for | value: `None` |
+
+`passed()` is true only when every rule in the params held. Results are
+`#[must_use]`.
+
+### Custom Providers and Time
+
+```rust
+use attestation::{Context, Verifier};
+
+let verifier = Verifier::new(
+    Context::new()
+        .with_cert_provider(my_cert_provider)
+        .with_tdx_provider(my_tdx_provider),
+);
+let verified = verifier.verify(evidence_json, &policies).await?;
+```
+
+`Context::offline()` never touches the network: checks that need fetched
+collateral (TDX CRLs, TCB status and QE identity) are skipped and their fields
+stay `None`, and evidence that cannot be verified without a fetch (SNP
+without an inline VEK, an NVIDIA GPU bundle) is `CollateralUnavailable`. `Context::at(unix_seconds)` fixes the
+time used for certificate, CRL and token validity.
 
 ### Attester (Guest-Side Agent)
 
@@ -236,30 +273,29 @@ GCP TDX uses the same wire format as bare-metal TDX. The `platform` field in the
 
 ### Verification Result
 
+`Verified` serializes as the platform result plus a `platform` tag, and a `gpu`
+object when the evidence carried a GPU bundle. SNP example:
+
 ```json
 {
-  "signature_valid": true,
   "platform": "snp",
   "claims": {
     "launch_digest": "<96-char hex string (48 bytes)>",
     "report_data": "<128-char hex string (64 bytes)>",
     "signed_data": "<hex-encoded bytes>",
     "init_data": "<hex-encoded bytes>",
-    "tcb": {
-      "type": "Snp",
-      "bootloader": 3,
-      "tee": 0,
-      "snp": 8,
-      "microcode": 115
-    },
-    "platform_data": {
-      "policy": { "abi_major": 0, "debug_allowed": false, "..." : "..." },
-      "vmpl": 0,
-      "chip_id": "<128-char hex>"
-    }
+    "tcb": { "type": "Snp", "bootloader": 3, "tee": 0, "snp": 8, "microcode": 115 },
+    "platform_data": { "...": "..." }
   },
   "report_data_match": true,
-  "init_data_match": null
+  "host_data_match": null,
+  "launch_digest_match": null,
+  "debug": false,
+  "allow_debug": false,
+  "vmpl": 0,
+  "max_vmpl": 0,
+  "reported_tcb": { "bootloader": 3, "tee": 0, "snp": 8, "microcode": 115 },
+  "min_tcb_met": null
 }
 ```
 

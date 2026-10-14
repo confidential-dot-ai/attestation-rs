@@ -195,9 +195,9 @@ impl DefaultNrasProvider {
             .get(&url)
             .send()
             .await
-            .map_err(|e| AttestationError::JwksFetch(format!("HTTP: {e}")))?
+            .map_err(|e| AttestationError::CollateralUnavailable(format!("NRAS JWKS: {e}")))?
             .error_for_status()
-            .map_err(|e| AttestationError::JwksFetch(format!("status: {e}")))?
+            .map_err(|e| AttestationError::CollateralUnavailable(format!("NRAS JWKS: {e}")))?
             .json()
             .await
             .map_err(|e| AttestationError::JwksFetch(format!("parse: {e}")))?;
@@ -311,12 +311,17 @@ impl NrasProvider for DefaultNrasProvider {
         let resp = req
             .send()
             .await
-            .map_err(|e| AttestationError::NrasRequestFailed(format!("HTTP send: {e}")))?;
+            .map_err(|e| AttestationError::CollateralUnavailable(format!("NRAS send: {e}")))?;
         let status = resp.status();
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| AttestationError::NrasRequestFailed(format!("read body: {e}")))?;
+            .map_err(|e| AttestationError::CollateralUnavailable(format!("NRAS read body: {e}")))?;
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(AttestationError::CollateralUnavailable(format!(
+                "NRAS status {status}"
+            )));
+        }
         if !status.is_success() {
             let body_preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
             return Err(AttestationError::NrasRequestFailed(format!(

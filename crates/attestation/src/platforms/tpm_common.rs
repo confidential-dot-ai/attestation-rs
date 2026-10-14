@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Once;
 
 use crate::error::{AttestationError, Result};
-use crate::types::{Claims, PlatformType, VerificationResult};
+use crate::types::Claims;
 use crate::utils::{constant_time_eq, sha256, sha256_two, strip_trailing_nulls};
 
 /// Decoded TPM quote components: (signature, message, pcr_values).
@@ -466,18 +466,10 @@ pub fn extract_tpm_nonce(message: &[u8]) -> Result<Vec<u8>> {
     Ok(message[offset..offset + nonce_size].to_vec())
 }
 
-/// Verify TPM nonce matches expected report_data.
-pub fn verify_tpm_nonce(message: &[u8], expected: &[u8]) -> Result<()> {
+/// Whether the TPM nonce equals the expected report_data.
+pub fn tpm_nonce_matches(message: &[u8], expected: &[u8]) -> Result<bool> {
     let nonce = extract_tpm_nonce(message)?;
-    if nonce.len() != expected.len() {
-        return Err(AttestationError::QuoteParseFailed(
-            "TPM nonce length mismatch".to_string(),
-        ));
-    }
-    if !constant_time_eq(&nonce, expected) {
-        return Err(AttestationError::ReportDataMismatch);
-    }
-    Ok(())
+    Ok(constant_time_eq(&nonce, expected))
 }
 
 /// Verify TPM PCR digest integrity.
@@ -641,8 +633,10 @@ pub fn check_report_data(tpm_msg: &[u8], expected: Option<&[u8]>) -> Result<Opti
     let Some(expected) = expected else {
         return Ok(None);
     };
-    verify_tpm_nonce(tpm_msg, expected)?;
-    Ok(Some(true))
+    if expected.len() > 64 {
+        return Err(AttestationError::ReportDataTooLarge { max: 64 });
+    }
+    tpm_nonce_matches(tpm_msg, expected).map(Some)
 }
 
 /// Check TPM PCR[8] against expected init_data_hash, returning `None` if no expectation was provided.
@@ -656,7 +650,8 @@ pub fn check_report_data(tpm_msg: &[u8], expected: Option<&[u8]>) -> Result<Opti
 /// so `verify_tpm_pcrs` authenticates `tpm_pcrs[i]` only for `i` in that
 /// selection. Any entry outside it is unauthenticated. We therefore re-derive
 /// the signed selection from the (already signature-verified) quote message and
-/// require index 8 to be present before trusting `tpm_pcrs[8]`.
+/// require index 8 to be present before trusting `tpm_pcrs[8]`; without it the
+/// expected value cannot be confirmed and the result is `Some(false)`.
 ///
 /// Callers MUST have verified the quote signature and called `verify_tpm_pcrs`
 /// before calling this.
@@ -665,21 +660,16 @@ pub fn check_init_data(
     tpm_pcrs: &[Vec<u8>],
     expected: Option<&[u8]>,
 ) -> Result<Option<bool>> {
+    check_init_data_len(expected)?;
     let Some(expected) = expected else {
         return Ok(None);
     };
-    if expected.len() != 32 {
-        return Err(AttestationError::QuoteParseFailed(format!(
-            "expected_init_data_hash must be exactly 32 bytes, got {}",
-            expected.len()
-        )));
-    }
     let (selected_pcrs, _) = parse_quote_info(tpm_msg)?;
     if !selected_pcrs.contains(&INIT_DATA_PCR) {
-        return Err(AttestationError::QuoteParseFailed(format!(
-            "init_data check requires PCR[{INIT_DATA_PCR}], but it is not in the quote's signed \
-             PCR selection (the supplied value would be unauthenticated)"
-        )));
+        log::warn!(
+            "init_data check requires PCR[{INIT_DATA_PCR}], but it is not in the quote's signed PCR selection"
+        );
+        return Ok(Some(false));
     }
     if tpm_pcrs.len() <= INIT_DATA_PCR {
         return Err(AttestationError::QuoteParseFailed(format!(
@@ -689,22 +679,22 @@ pub fn check_init_data(
     }
     // Compute TPM PCR extend: PCR[8] = SHA256(zeros_32 || init_data_hash)
     let extended = sha256_two(&[0u8; 32], expected);
-    if !constant_time_eq(&tpm_pcrs[INIT_DATA_PCR], &extended) {
-        return Err(AttestationError::InitDataMismatch);
-    }
-    Ok(Some(true))
+    Ok(Some(constant_time_eq(&tpm_pcrs[INIT_DATA_PCR], &extended)))
 }
 
-/// Build a `VerificationResult` with TPM PCR values and nonce in platform claims.
-pub fn build_tpm_verification_result(
-    base_claims: Claims,
-    tpm_pcrs: &[Vec<u8>],
-    tpm_msg: &[u8],
-    platform: PlatformType,
-    report_data_match: Option<bool>,
-    init_data_match: Option<bool>,
-    collateral_verified: bool,
-) -> VerificationResult {
+/// The init-data hash checked against PCR[8] must be exactly 32 bytes.
+pub fn check_init_data_len(expected: Option<&[u8]>) -> Result<()> {
+    match expected {
+        Some(e) if e.len() != 32 => Err(AttestationError::InvalidParams(format!(
+            "init data hash must be exactly 32 bytes on vTPM platforms, got {}",
+            e.len()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Add the TPM PCR values and nonce to the platform claims.
+pub fn tpm_claims(base_claims: Claims, tpm_pcrs: &[Vec<u8>], tpm_msg: &[u8]) -> Claims {
     let mut platform_data = base_claims.platform_data.clone();
 
     let pcr_map: serde_json::Value = tpm_pcrs
@@ -734,27 +724,10 @@ pub fn build_tpm_verification_result(
         }
     }
 
-    let claims = Claims {
+    Claims {
         signed_data,
         platform_data,
         ..base_claims
-    };
-
-    VerificationResult {
-        signature_valid: true,
-        platform,
-        claims,
-        report_data_match,
-        init_data_match,
-        collateral_verified,
-        tcb_status: None,
-        // Launch-measurement compares are populated by the caller (az_snp/az_tdx).
-        mrtd_match: None,
-        rtmr0_match: None,
-        rtmr1_match: None,
-        rtmr2_match: None,
-        rtmr3_match: None,
-        launch_digest_match: None,
     }
 }
 
@@ -825,13 +798,13 @@ mod tests {
     #[test]
     fn test_tpm_nonce_parse_bad_magic() {
         let msg = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert!(verify_tpm_nonce(&msg, b"test").is_err());
+        assert!(tpm_nonce_matches(&msg, b"test").is_err());
     }
 
     #[test]
     fn test_tpm_nonce_parse_too_short() {
         let msg = vec![0xFF, 0x54, 0x43, 0x47, 0x00];
-        assert!(verify_tpm_nonce(&msg, b"test").is_err());
+        assert!(tpm_nonce_matches(&msg, b"test").is_err());
     }
 
     #[test]
@@ -842,7 +815,7 @@ mod tests {
         let pcr_digest = [0u8; 32];
         let msg = build_tpms_attest(report_data, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
         assert!(
-            verify_tpm_nonce(&msg, report_data).is_ok(),
+            tpm_nonce_matches(&msg, report_data).unwrap(),
             "nonce should match via direct comparison"
         );
     }
@@ -853,7 +826,7 @@ mod tests {
         let pcr_digest = [0u8; 32];
         let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
         assert!(
-            verify_tpm_nonce(&msg, b"wrong___data nonce value").is_err(),
+            !tpm_nonce_matches(&msg, b"wrong___data nonce value").unwrap(),
             "nonce should not match for different data"
         );
     }
@@ -863,10 +836,9 @@ mod tests {
         let nonce = b"short";
         let pcr_digest = [0u8; 32];
         let msg = build_tpms_attest(nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
-        let result = verify_tpm_nonce(&msg, b"much longer expected data");
         assert!(
-            result.is_err(),
-            "different length nonce should return error"
+            !tpm_nonce_matches(&msg, b"much longer expected data").unwrap(),
+            "different length nonce must not match"
         );
     }
 
@@ -1292,9 +1264,10 @@ mod tests {
         let mut padded_expected = vec![0u8; 64];
         padded_expected[..5].copy_from_slice(b"hello");
 
-        let result = check_report_data(&msg, Some(&padded_expected));
-        assert!(
-            result.is_err(),
+        let result = check_report_data(&msg, Some(&padded_expected)).unwrap();
+        assert_eq!(
+            result,
+            Some(false),
             "padded expected should not match unpadded nonce"
         );
     }
@@ -1310,9 +1283,10 @@ mod tests {
         let pcr_digest = [0u8; 32];
         let msg = build_tpms_attest(&padded_nonce, &[3, 0xFF, 0xFF, 0xFF], &pcr_digest);
 
-        let result = check_report_data(&msg, Some(b"hello"));
-        assert!(
-            result.is_err(),
+        let result = check_report_data(&msg, Some(b"hello")).unwrap();
+        assert_eq!(
+            result,
+            Some(false),
             "unpadded expected should not match padded nonce (length mismatch)"
         );
     }
@@ -1325,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tpm_verification_result_sets_signed_data_to_nonce() {
+    fn test_tpm_claims_sets_signed_data_to_nonce() {
         use crate::types::{Claims, TcbInfo};
 
         let nonce = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -1347,39 +1321,27 @@ mod tests {
                 fmc: None,
             },
             platform_data: serde_json::json!({}),
-            #[cfg(feature = "nvidia-gpu")]
-            nvidia_gpu: None,
         };
 
-        let result = build_tpm_verification_result(
-            base_claims,
-            &tpm_pcrs,
-            &tpm_msg,
-            PlatformType::AzSnp,
-            None,
-            None,
-            false,
-        );
+        let claims = tpm_claims(base_claims, &tpm_pcrs, &tpm_msg);
 
         assert_eq!(
-            result.claims.signed_data, nonce,
+            claims.signed_data, nonce,
             "signed_data should be the TPM nonce"
         );
         assert_eq!(
-            result.claims.report_data,
+            claims.report_data,
             vec![0xFF; 64],
             "report_data should be unchanged"
         );
         assert_eq!(
-            result.claims.platform_data["tpm"]["nonce"]
-                .as_str()
-                .unwrap(),
+            claims.platform_data["tpm"]["nonce"].as_str().unwrap(),
             hex::encode(&nonce),
         );
     }
 
     #[test]
-    fn test_build_tpm_verification_result_strips_trailing_nulls_from_signed_data() {
+    fn test_tpm_claims_strips_trailing_nulls_from_signed_data() {
         use crate::types::{Claims, TcbInfo};
 
         // Simulate a nonce that was zero-padded to 64 bytes (as attest does)
@@ -1404,30 +1366,18 @@ mod tests {
                 fmc: None,
             },
             platform_data: serde_json::json!({}),
-            #[cfg(feature = "nvidia-gpu")]
-            nvidia_gpu: None,
         };
 
-        let result = build_tpm_verification_result(
-            base_claims,
-            &tpm_pcrs,
-            &tpm_msg,
-            PlatformType::AzSnp,
-            None,
-            None,
-            false,
-        );
+        let claims = tpm_claims(base_claims, &tpm_pcrs, &tpm_msg);
 
         assert_eq!(
-            result.claims.signed_data,
+            claims.signed_data,
             b"hello".to_vec(),
             "signed_data should have trailing nulls stripped"
         );
         // platform_data nonce should still contain the full padded value
         assert_eq!(
-            result.claims.platform_data["tpm"]["nonce"]
-                .as_str()
-                .unwrap(),
+            claims.platform_data["tpm"]["nonce"].as_str().unwrap(),
             hex::encode(&padded_nonce),
         );
     }
@@ -1471,8 +1421,9 @@ mod tests {
         pcrs[8] = init_data_hash.to_vec(); // raw, not extended
 
         let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data_hash));
-        assert!(
-            result.is_err(),
+        assert_eq!(
+            result.unwrap(),
+            Some(false),
             "raw hash should not match extended PCR value"
         );
     }
@@ -1487,7 +1438,7 @@ mod tests {
         pcrs[8] = extended;
 
         let result = check_init_data(&attest_selecting_pcr8(), &pcrs, Some(&init_data_hash));
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), Some(false));
     }
 
     #[test]
@@ -1536,10 +1487,11 @@ mod tests {
         );
 
         let result = check_init_data(&msg, &pcrs, Some(&attacker_init_data));
-        assert!(
-            result.is_err(),
+        assert_eq!(
+            result.unwrap(),
+            Some(false),
             "PCR[8] outside the signed selection is unauthenticated and must be \
-             rejected, not reported as InitDataMatch=true"
+             reported as a mismatch, never as a match"
         );
     }
 

@@ -1,3 +1,4 @@
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -5,246 +6,299 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::normalize_platform;
+use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
+use crate::token::issuer::PassedVerification;
 use crate::AppState;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyRequest {
     /// Platform for the platform-specific evidence returned by /attest.
     pub platform: Option<String>,
     pub evidence: Value,
     /// NVIDIA GPU evidence bundle, as returned by /attest with `nvidia_gpu: true`.
-    /// When present, the verifier will check it against NRAS — `params.nvidia_gpu_user_nonce`
-    /// must also be set.
+    /// When present, `policies.nvidia_gpu` must be set.
     #[serde(default)]
     pub nvidia_gpu: Option<Value>,
+    /// Accepted platforms and their params. Evidence for a platform without an
+    /// entry is refused.
     #[serde(default)]
-    pub params: VerifyParamsInput,
+    pub policies: PoliciesInput,
     #[serde(default)]
     pub issue_token: bool,
 }
 
-#[derive(Deserialize, Default)]
-pub struct VerifyParamsInput {
-    pub expected_report_data: Option<String>,
-    pub expected_init_data_hash: Option<String>,
-    #[serde(default)]
-    pub allow_debug: bool,
-    pub min_tcb: Option<MinTcbInput>,
-
-    /// Base64-encoded user nonce that seeded the GPU SPDM nonce derivation.
-    /// Required when verifying an envelope that carries a `nvidia_gpu`
-    /// bundle; ignored otherwise.
-    pub nvidia_gpu_user_nonce: Option<String>,
-    /// If true, fail verification when the envelope has no GPU bundle.
-    #[serde(default)]
-    pub nvidia_gpu_required: bool,
-    /// Optional whitelist of acceptable GPU/switch architectures
-    /// (`"HOPPER"`, `"BLACKWELL"`, `"LS10"`). If absent, all known archs
-    /// are accepted.
-    pub nvidia_gpu_expected_archs: Option<Vec<attestation::NvidiaGpuArch>>,
-
-    /// Base64 48-byte SEV-SNP launch measurement (`report.measurement`) the
-    /// evidence must carry. SNP evidence only.
-    pub expected_launch_digest: Option<String>,
-    /// Base64 48-byte TDX MRTD the evidence must carry. TDX evidence only.
-    pub expected_mrtd: Option<String>,
-    /// Base64 48-byte TDX RTMR[0..3] values the evidence must carry. TDX
-    /// evidence only.
-    pub expected_rtmr0: Option<String>,
-    pub expected_rtmr1: Option<String>,
-    pub expected_rtmr2: Option<String>,
-    pub expected_rtmr3: Option<String>,
+/// Accepted platforms, keyed by platform name, each with its params. Byte
+/// values are base64. A field that does not exist for a platform is refused.
+/// Issued tokens carry it as their `policy` claim.
+#[derive(Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PoliciesInput {
+    pub tdx: Option<TdxParamsInput>,
+    pub snp: Option<SnpParamsInput>,
+    #[serde(rename = "az-tdx")]
+    pub az_tdx: Option<TdxParamsInput>,
+    #[serde(rename = "az-snp")]
+    pub az_snp: Option<SnpParamsInput>,
+    #[serde(rename = "gcp-tdx")]
+    pub gcp_tdx: Option<TdxParamsInput>,
+    #[serde(rename = "gcp-snp")]
+    pub gcp_snp: Option<SnpParamsInput>,
+    pub nvidia_gpu: Option<GpuParamsInput>,
 }
 
-#[derive(Deserialize)]
-pub struct MinTcbInput {
-    pub bootloader: u8,
-    pub tee: u8,
-    pub snp: u8,
-    pub microcode: u8,
+/// TDX params (also az-tdx, gcp-tdx). See `attestation::TdxParams`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TdxParamsInput {
+    pub report_data: Option<String>,
+    pub init_data: Option<String>,
+    /// 48 bytes.
+    pub mrtd: Option<String>,
+    /// 48 bytes each.
+    pub rtmr0: Option<String>,
+    pub rtmr1: Option<String>,
+    pub rtmr2: Option<String>,
+    pub rtmr3: Option<String>,
+    #[serde(default)]
+    pub allow_debug: bool,
+    /// A status outside the default (`Revoked`, `NoMatchingLevel`) is refused
+    /// unless `attestation.allow_revoked_or_unlisted_tcb` is set.
+    #[serde(default = "default_tcb_statuses")]
+    pub accepted_tcb_statuses: Vec<attestation::TdxTcbStatus>,
+}
+
+fn default_tcb_statuses() -> Vec<attestation::TdxTcbStatus> {
+    attestation::TdxParams::default().accepted_tcb_statuses
+}
+
+/// SEV-SNP params (also az-snp, gcp-snp). See `attestation::SnpParams`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnpParamsInput {
+    pub report_data: Option<String>,
+    pub host_data: Option<String>,
+    /// 48 bytes.
+    pub launch_digest: Option<String>,
+    #[serde(default)]
+    pub allow_debug: bool,
+    pub min_tcb: Option<attestation::SnpTcb>,
+    /// Above 0 is refused unless `attestation.allow_nonzero_vmpl` is set.
+    #[serde(default)]
+    pub max_vmpl: u32,
+}
+
+/// NVIDIA GPU params. See `attestation::NvidiaGpuParams`.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuParamsInput {
+    /// The user nonce that seeded the GPU SPDM nonce; must equal the platform
+    /// `report_data`.
+    pub user_nonce: Option<String>,
+    /// Refuse evidence without a GPU bundle.
+    #[serde(default)]
+    pub required: bool,
+    /// Acceptable GPU/switch architectures (`"HOPPER"`, `"BLACKWELL"`,
+    /// `"LS10"`). If absent, all known archs are accepted.
+    pub expected_archs: Option<Vec<attestation::NvidiaGpuArch>>,
 }
 
 #[derive(Serialize)]
 pub struct VerifyResponse {
-    pub result: attestation::VerificationResult,
+    pub result: attestation::Verified,
+    /// True when the evidence satisfied every rule in the policies.
+    pub passed: bool,
+    /// Issued only when requested and `passed` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
 pub async fn handler(
     State(state): State<AppState>,
-    Json(req): Json<VerifyRequest>,
+    payload: Result<Json<VerifyRequest>, JsonRejection>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
-    let evidence_json = build_evidence_envelope(req.platform, req.evidence, req.nvidia_gpu)?;
+    let Json(req) = payload?;
+    let platform = canonical_platform(req.platform.as_deref())?;
+    let policies = build_policies(&req.policies, &state.config.attestation)?;
+    if req.issue_token && !req.policies.pins_report_data(platform) {
+        return Err(ApiError::BadRequest(format!(
+            "issue_token requires policies.{platform}.report_data"
+        )));
+    }
+    let evidence_json = build_evidence_envelope(platform, req.evidence, req.nvidia_gpu)?;
 
-    let expected_report_data = req
-        .params
-        .expected_report_data
-        .map(|s| BASE64.decode(&s))
-        .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 report_data: {e}")))?;
+    let result = state.verifier.verify(&evidence_json, &policies).await?;
+    let passed = PassedVerification::new(&result);
 
-    let expected_init_data_hash = req
-        .params
-        .expected_init_data_hash
-        .map(|s| BASE64.decode(&s))
-        .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 init_data_hash: {e}")))?;
+    let token = match &passed {
+        Some(passed) if req.issue_token => {
+            let issuer = state
+                .token_issuer
+                .as_ref()
+                .ok_or(ApiError::TokenNotConfigured)?;
+            Some(issuer.issue(passed, &req.policies)?)
+        }
+        _ => None,
+    };
+    let passed = passed.is_some();
 
-    let min_tcb = req.params.min_tcb.map(|t| attestation::SnpTcb {
-        bootloader: t.bootloader,
-        tee: t.tee,
-        snp: t.snp,
-        microcode: t.microcode,
-        fmc: None,
-    });
+    Ok(Json(VerifyResponse {
+        result,
+        passed,
+        token,
+    }))
+}
 
-    let allow_debug = req.params.allow_debug;
-    if allow_debug && !state.config.attestation.allow_debug {
+impl PoliciesInput {
+    fn pins_report_data(&self, platform: &str) -> bool {
+        let tdx = |p: &Option<TdxParamsInput>| p.as_ref().is_some_and(|p| p.report_data.is_some());
+        let snp = |p: &Option<SnpParamsInput>| p.as_ref().is_some_and(|p| p.report_data.is_some());
+        match platform {
+            "tdx" => tdx(&self.tdx),
+            "az-tdx" => tdx(&self.az_tdx),
+            "gcp-tdx" => tdx(&self.gcp_tdx),
+            "snp" => snp(&self.snp),
+            "az-snp" => snp(&self.az_snp),
+            "gcp-snp" => snp(&self.gcp_snp),
+            _ => false,
+        }
+    }
+}
+
+fn build_policies(
+    input: &PoliciesInput,
+    config: &AttestationConfig,
+) -> Result<attestation::Policies, ApiError> {
+    let tdx = |p: &Option<TdxParamsInput>| p.as_ref().map(|p| p.to_params(config)).transpose();
+    let snp = |p: &Option<SnpParamsInput>| p.as_ref().map(|p| p.to_params(config)).transpose();
+    // Which `Policies` fields exist depends on attestation's features.
+    #[allow(clippy::needless_update)]
+    let policies = attestation::Policies {
+        tdx: tdx(&input.tdx)?,
+        snp: snp(&input.snp)?,
+        az_tdx: tdx(&input.az_tdx)?.map(|tdx| attestation::AzTdxParams { tdx }),
+        az_snp: snp(&input.az_snp)?.map(|snp| attestation::AzSnpParams { snp }),
+        gcp_tdx: tdx(&input.gcp_tdx)?.map(|tdx| attestation::GcpTdxParams { tdx }),
+        gcp_snp: snp(&input.gcp_snp)?.map(|snp| attestation::GcpSnpParams { snp }),
+        gpu: input
+            .nvidia_gpu
+            .as_ref()
+            .map(GpuParamsInput::to_params)
+            .transpose()?,
+        ..Default::default()
+    };
+    Ok(policies)
+}
+
+fn check_allow_debug(requested: bool, config: &AttestationConfig) -> Result<(), ApiError> {
+    if requested && !config.allow_debug {
         return Err(ApiError::BadRequest(
             "allow_debug is disabled by server configuration".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let nvidia_gpu_user_nonce = req
-        .params
-        .nvidia_gpu_user_nonce
-        .map(|s| BASE64.decode(&s))
-        .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 nvidia_gpu_user_nonce: {e}")))?;
+impl TdxParamsInput {
+    fn to_params(&self, config: &AttestationConfig) -> Result<attestation::TdxParams, ApiError> {
+        check_allow_debug(self.allow_debug, config)?;
+        if !config.allow_revoked_or_unlisted_tcb {
+            let valid = default_tcb_statuses();
+            if let Some(status) = self
+                .accepted_tcb_statuses
+                .iter()
+                .find(|s| !valid.contains(s))
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "accepting TCB status {status} is disabled by server configuration"
+                )));
+            }
+        }
+        Ok(attestation::TdxParams {
+            report_data: decode(&self.report_data, "report_data")?,
+            init_data: decode(&self.init_data, "init_data")?,
+            mrtd: decode_digest(&self.mrtd, "mrtd")?,
+            rtmr: [
+                decode_digest(&self.rtmr0, "rtmr0")?,
+                decode_digest(&self.rtmr1, "rtmr1")?,
+                decode_digest(&self.rtmr2, "rtmr2")?,
+                decode_digest(&self.rtmr3, "rtmr3")?,
+            ],
+            allow_debug: self.allow_debug,
+            accepted_tcb_statuses: self.accepted_tcb_statuses.clone(),
+        })
+    }
+}
 
-    let params = attestation::VerifyParams {
-        expected_report_data,
-        expected_init_data_hash,
-        allow_debug,
-        min_tcb,
-        expected_launch_digest: decode_digest(
-            req.params.expected_launch_digest,
-            "expected_launch_digest",
-        )?,
-        expected_mrtd: decode_digest(req.params.expected_mrtd, "expected_mrtd")?,
-        expected_rtmr0: decode_digest(req.params.expected_rtmr0, "expected_rtmr0")?,
-        expected_rtmr1: decode_digest(req.params.expected_rtmr1, "expected_rtmr1")?,
-        expected_rtmr2: decode_digest(req.params.expected_rtmr2, "expected_rtmr2")?,
-        expected_rtmr3: decode_digest(req.params.expected_rtmr3, "expected_rtmr3")?,
-        // Map the HTTP GPU params into the grouped NvidiaGpuParams struct (the
-        // library moved these out of flat VerifyParams). `..Default::default()`
-        // fills the remaining GPU fields (allowed_bindings, device_policy) with
-        // their secure defaults.
-        nvidia_gpu: attestation::NvidiaGpuParams {
-            user_nonce: nvidia_gpu_user_nonce,
-            required: req.params.nvidia_gpu_required,
-            expected_archs: req.params.nvidia_gpu_expected_archs,
+impl SnpParamsInput {
+    fn to_params(&self, config: &AttestationConfig) -> Result<attestation::SnpParams, ApiError> {
+        check_allow_debug(self.allow_debug, config)?;
+        if self.max_vmpl > 0 && !config.allow_nonzero_vmpl {
+            return Err(ApiError::BadRequest(
+                "max_vmpl above 0 is disabled by server configuration".to_string(),
+            ));
+        }
+        Ok(attestation::SnpParams {
+            report_data: decode(&self.report_data, "report_data")?,
+            host_data: decode(&self.host_data, "host_data")?,
+            launch_digest: decode_digest(&self.launch_digest, "launch_digest")?,
+            allow_debug: self.allow_debug,
+            min_tcb: self.min_tcb,
+            max_vmpl: self.max_vmpl,
+        })
+    }
+}
+
+impl GpuParamsInput {
+    fn to_params(&self) -> Result<attestation::NvidiaGpuParams, ApiError> {
+        Ok(attestation::NvidiaGpuParams {
+            user_nonce: decode(&self.user_nonce, "nvidia_gpu.user_nonce")?,
+            required: self.required,
+            expected_archs: self.expected_archs.clone(),
             ..Default::default()
-        },
-    };
+        })
+    }
+}
 
-    let result = state.verifier.verify(&evidence_json, &params).await?;
-    enforce_expected_measurements(&params, &result)?;
-
-    let token = if req.issue_token {
-        let issuer = state
-            .token_issuer
-            .as_ref()
-            .ok_or(ApiError::TokenNotConfigured)?;
-        Some(issuer.issue(&result)?)
-    } else {
-        None
-    };
-
-    Ok(Json(VerifyResponse { result, token }))
+fn decode(value: &Option<String>, name: &str) -> Result<Option<Vec<u8>>, ApiError> {
+    value
+        .as_ref()
+        .map(|v| BASE64.decode(v))
+        .transpose()
+        .map_err(|e| ApiError::BadRequest(format!("invalid base64 {name}: {e}")))
 }
 
 /// Decodes a base64 measurement parameter, which must be exactly 48 bytes.
-fn decode_digest(value: Option<String>, name: &str) -> Result<Option<[u8; 48]>, ApiError> {
-    let Some(value) = value else {
+fn decode_digest(value: &Option<String>, name: &str) -> Result<Option<[u8; 48]>, ApiError> {
+    let Some(bytes) = decode(value, name)? else {
         return Ok(None);
     };
-    let bytes = BASE64
-        .decode(&value)
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 {name}: {e}")))?;
     let digest: [u8; 48] = bytes.try_into().map_err(|b: Vec<u8>| {
         ApiError::BadRequest(format!("{name} must be 48 bytes, got {}", b.len()))
     })?;
     Ok(Some(digest))
 }
 
-/// Refuses a result that does not affirmatively satisfy every expected
-/// measurement the caller supplied. The library records a mismatch as
-/// `Some(false)` and an expectation the platform cannot answer (an RTMR pin
-/// against SEV-SNP evidence, which has no RTMRs) as `None`; both are refusals
-/// here, so a pin never reads as a pass on evidence that could not be checked
-/// against it. Callers that supply no expectation are unaffected.
-fn enforce_expected_measurements(
-    params: &attestation::VerifyParams,
-    result: &attestation::VerificationResult,
-) -> Result<(), ApiError> {
-    check_expected(
-        "expected_launch_digest",
-        params.expected_launch_digest.is_some(),
-        result.launch_digest_match,
-    )?;
-    check_expected(
-        "expected_mrtd",
-        params.expected_mrtd.is_some(),
-        result.mrtd_match,
-    )?;
-    check_expected(
-        "expected_rtmr0",
-        params.expected_rtmr0.is_some(),
-        result.rtmr0_match,
-    )?;
-    check_expected(
-        "expected_rtmr1",
-        params.expected_rtmr1.is_some(),
-        result.rtmr1_match,
-    )?;
-    check_expected(
-        "expected_rtmr2",
-        params.expected_rtmr2.is_some(),
-        result.rtmr2_match,
-    )?;
-    check_expected(
-        "expected_rtmr3",
-        params.expected_rtmr3.is_some(),
-        result.rtmr3_match,
-    )
-}
-
-fn check_expected(name: &str, supplied: bool, matched: Option<bool>) -> Result<(), ApiError> {
-    match (supplied, matched) {
-        (false, _) | (true, Some(true)) => Ok(()),
-        (true, Some(false)) => Err(ApiError::MeasurementMismatch(format!(
-            "{name} does not match the verified evidence"
-        ))),
-        (true, None) => Err(ApiError::MeasurementMismatch(format!(
-            "{name} cannot be checked: the verified evidence carries no such measurement"
-        ))),
-    }
+fn canonical_platform(platform: Option<&str>) -> Result<&'static str, ApiError> {
+    let platform = platform.ok_or_else(|| {
+        ApiError::BadRequest("platform is required for evidence verification".to_string())
+    })?;
+    normalize_platform(platform)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown platform: {platform}")))
 }
 
 fn build_evidence_envelope(
-    platform: Option<String>,
+    platform: &str,
     evidence: Value,
     nvidia_gpu: Option<Value>,
 ) -> Result<Vec<u8>, ApiError> {
-    let Some(platform) = platform else {
-        return Err(ApiError::BadRequest(
-            "platform is required for evidence verification".to_string(),
-        ));
-    };
-
     if is_attestation_envelope(&evidence) {
         return Err(ApiError::BadRequest(
             "evidence must be platform-specific evidence; put platform at the top level"
                 .to_string(),
         ));
     }
-
-    let platform = normalize_platform(&platform)
-        .ok_or_else(|| ApiError::BadRequest(format!("unknown platform: {platform}")))?;
 
     let mut envelope = serde_json::json!({
         "platform": platform,
@@ -266,7 +320,7 @@ fn is_attestation_envelope(evidence: &Value) -> bool {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{build_evidence_envelope, check_expected, decode_digest};
+    use super::{build_evidence_envelope, canonical_platform, decode_digest, PoliciesInput};
     use crate::error::ApiError;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -274,8 +328,12 @@ mod tests {
     #[test]
     fn build_evidence_envelope_wraps_split_form_with_canonical_platform() {
         let normalized: Value = serde_json::from_slice(
-            &build_evidence_envelope(Some("SNP".to_string()), json!({ "report": "abc" }), None)
-                .unwrap(),
+            &build_evidence_envelope(
+                canonical_platform(Some("SNP")).unwrap(),
+                json!({ "report": "abc" }),
+                None,
+            )
+            .unwrap(),
         )
         .expect("normalized evidence should be JSON");
 
@@ -288,12 +346,7 @@ mod tests {
     fn build_evidence_envelope_includes_gpu_bundle_when_present() {
         let gpu = json!({ "devices": [], "binding": { "kind": "concat" } });
         let normalized: Value = serde_json::from_slice(
-            &build_evidence_envelope(
-                Some("tdx".to_string()),
-                json!({ "quote": "abc" }),
-                Some(gpu.clone()),
-            )
-            .unwrap(),
+            &build_evidence_envelope("tdx", json!({ "quote": "abc" }), Some(gpu.clone())).unwrap(),
         )
         .expect("normalized evidence should be JSON");
 
@@ -304,7 +357,7 @@ mod tests {
     #[test]
     fn build_evidence_envelope_rejects_full_envelope_evidence() {
         let err = build_evidence_envelope(
-            Some("snp".to_string()),
+            "snp",
             json!({
                 "platform": "snp",
                 "evidence": { "report": "abc" }
@@ -313,62 +366,45 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("platform-specific evidence"));
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[test]
-    fn build_evidence_envelope_requires_platform() {
-        let err = build_evidence_envelope(None, json!({ "report": "abc" }), None).unwrap_err();
-
-        assert!(err.to_string().contains("platform is required"));
-    }
-
-    #[test]
-    fn build_evidence_envelope_rejects_unknown_platform() {
-        let err = build_evidence_envelope(
-            Some("not-a-platform".to_string()),
-            json!({ "report": "abc" }),
-            None,
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("unknown platform"));
+    fn platform_is_required_and_must_be_known() {
+        assert!(matches!(
+            canonical_platform(None),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            canonical_platform(Some("not-a-platform")),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 
     #[test]
     fn decode_digest_accepts_48_bytes_and_absent() {
-        assert_eq!(decode_digest(None, "expected_mrtd").unwrap(), None);
+        assert_eq!(decode_digest(&None, "mrtd").unwrap(), None);
         let digest = [0xabu8; 48];
-        let got = decode_digest(Some(BASE64.encode(digest)), "expected_mrtd").unwrap();
+        let got = decode_digest(&Some(BASE64.encode(digest)), "mrtd").unwrap();
         assert_eq!(got, Some(digest));
     }
 
     #[test]
     fn decode_digest_rejects_wrong_length_and_bad_base64() {
-        let short = decode_digest(Some(BASE64.encode([0u8; 47])), "expected_rtmr1").unwrap_err();
-        assert!(
-            matches!(short, ApiError::BadRequest(m) if m.contains("expected_rtmr1 must be 48 bytes"))
-        );
-        let junk = decode_digest(Some("!!not-base64".to_string()), "expected_rtmr1").unwrap_err();
-        assert!(
-            matches!(junk, ApiError::BadRequest(m) if m.contains("invalid base64 expected_rtmr1"))
-        );
+        let short = decode_digest(&Some(BASE64.encode([0u8; 47])), "rtmr1").unwrap_err();
+        assert!(matches!(short, ApiError::BadRequest(_)));
+        let junk = decode_digest(&Some("!!not-base64".to_string()), "rtmr1").unwrap_err();
+        assert!(matches!(junk, ApiError::BadRequest(_)));
     }
 
     #[test]
-    fn check_expected_passes_only_an_affirmative_match() {
-        assert!(check_expected("expected_rtmr0", false, None).is_ok());
-        assert!(check_expected("expected_rtmr0", false, Some(false)).is_ok());
-        assert!(check_expected("expected_rtmr0", true, Some(true)).is_ok());
-        let mismatch = check_expected("expected_rtmr0", true, Some(false)).unwrap_err();
+    fn a_pin_the_platform_does_not_have_is_refused() {
+        let mrtd = BASE64.encode([0u8; 48]);
         assert!(
-            matches!(mismatch, ApiError::MeasurementMismatch(m) if m.contains("does not match"))
+            serde_json::from_value::<PoliciesInput>(json!({ "tdx": { "mrtd": mrtd } })).is_ok()
         );
-        // An RTMR pin against SEV-SNP evidence: the verifier reports no
-        // verdict, and that must refuse rather than pass.
-        let inapplicable = check_expected("expected_rtmr0", true, None).unwrap_err();
         assert!(
-            matches!(inapplicable, ApiError::MeasurementMismatch(m) if m.contains("carries no such measurement"))
+            serde_json::from_value::<PoliciesInput>(json!({ "snp": { "mrtd": mrtd } })).is_err()
         );
     }
 

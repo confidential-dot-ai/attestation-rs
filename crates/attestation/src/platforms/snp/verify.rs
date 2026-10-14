@@ -8,9 +8,13 @@ use sev::certs::snp::{Certificate, Chain, Verifiable};
 use sev::firmware::guest::AttestationReport;
 use sev::parser::ByteParser;
 
+use serde::{Deserialize, Serialize};
+
 use crate::collateral::CertProvider;
+use crate::context::Context;
 use crate::error::{AttestationError, Result};
-use crate::types::{PlatformType, ProcessorGeneration, SnpTcb, VerificationResult, VerifyParams};
+use crate::platform::Platform;
+use crate::types::{Claims, PlatformType, ProcessorGeneration, SnpTcb};
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -29,189 +33,254 @@ const MIN_REPORT_VERSION: u32 = 3;
 /// Matches Trustee's upper bound — future versions may change field layout.
 pub const MAX_REPORT_VERSION: u32 = 5;
 
-/// Verify SNP attestation evidence.
-pub async fn verify_evidence(
-    evidence: &SnpEvidence,
-    params: &VerifyParams,
-    cert_provider: &dyn CertProvider,
-) -> Result<VerificationResult> {
-    // 0. Input size validation
-    crate::utils::check_field_size("attestation_report", evidence.attestation_report.len())?;
-
-    // 1. Decode the attestation report
-    let report_bytes = BASE64
-        .decode(&evidence.attestation_report)
-        .map_err(|e| AttestationError::EvidenceDeserialize(format!("base64 decode: {e}")))?;
-
-    // 2. Parse with sev crate
-    let report = AttestationReport::from_bytes(&report_bytes)
-        .map_err(|e| AttestationError::QuoteParseFailed(format!("SNP report parse: {e}")))?;
-
-    // 3. Version check
-    if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
-        return Err(AttestationError::UnsupportedReportVersion {
-            version: report.version,
-            min: MIN_REPORT_VERSION,
-            max: MAX_REPORT_VERSION,
-        });
-    }
-
-    // 4. Determine processor generation
-    // v3+ reports are required to have CPUID fields; treat None as a spec violation.
-    let cpuid_fam = match report.cpuid_fam_id {
-        Some(v) => v,
-        None if report.version >= 3 => {
-            return Err(AttestationError::QuoteParseFailed(
-                "v3+ SNP report missing cpuid_fam_id field".to_string(),
-            ));
-        }
-        None => 0,
-    };
-    let cpuid_mod = match report.cpuid_mod_id {
-        Some(v) => v,
-        None if report.version >= 3 => {
-            return Err(AttestationError::QuoteParseFailed(
-                "v3+ SNP report missing cpuid_mod_id field".to_string(),
-            ));
-        }
-        None => 0,
-    };
-    let processor_gen = ProcessorGeneration::from_cpuid(cpuid_fam, cpuid_mod).ok_or_else(|| {
-        AttestationError::QuoteParseFailed(format!(
-            "unknown processor: family=0x{cpuid_fam:02X}, model=0x{cpuid_mod:02X}"
-        ))
-    })?;
-
-    // 5. Resolve VEK cert (VCEK or VLEK)
-    let vcek_der = resolve_vcek(evidence, &report, processor_gen, cert_provider).await?;
-
-    // 6. Detect VLEK vs VCEK and build the appropriate cert chain
-    let is_vlek = is_vlek_cert(&vcek_der)?;
-    let ark_der = super::certs::get_ark(processor_gen);
-    let intermediate_der = if is_vlek {
-        // VLEK chain: ARK → ASVK → VLEK
-        super::certs::get_asvk(processor_gen)
-    } else {
-        // VCEK chain: ARK → ASK → VCEK
-        super::certs::get_ask(processor_gen)
-    };
-    verify_cert_chain(ark_der, intermediate_der, &vcek_der)?;
-
-    // 6b. Verify VCEK/VLEK certificate validity period
-    verify_vek_validity_period(&vcek_der)?;
-
-    // 6c. CRL revocation check (if provider supplies CRL data)
-    // AMD CRLs are signed by the ARK (root), not the ASK/ASVK intermediate.
-    let crl_verified = if let Some(crl_der) = cert_provider.get_snp_crl(processor_gen).await? {
-        check_vcek_not_revoked(&vcek_der, &crl_der, ark_der)?;
-        true
-    } else {
-        log::warn!("snp: CRL data not available from cert provider; skipping revocation check");
-        false
-    };
-
-    // 7. Verify report signature against VEK
-    let vek = Certificate::from_der(&vcek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("VEK to sev Certificate: {e}")))?;
-    (&vek, &report)
-        .verify()
-        .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
-
-    // 8. VMPL check
-    if report.vmpl != 0 {
-        return Err(AttestationError::VmplCheckFailed(report.vmpl));
-    }
-
-    // 8b. Debug policy enforcement
-    if report.policy.debug_allowed() && !params.allow_debug {
-        return Err(AttestationError::DebugPolicyViolation);
-    }
-
-    // 8c. VCEK OID cross-validation (chip_id + TCB SPLs)
-    verify_vcek_tcb(&report, &vcek_der, processor_gen)?;
-
-    // 8d. Minimum TCB enforcement
-    if let Some(ref min_tcb) = params.min_tcb {
-        enforce_min_tcb(&report.reported_tcb, min_tcb)?;
-    }
-
-    // 9. Check report_data binding
-    let report_data_match = if let Some(expected) = &params.expected_report_data {
-        let padded = crate::utils::pad_report_data(expected, 64)?;
-        if !crate::utils::constant_time_eq(&report.report_data[..], &padded) {
-            return Err(AttestationError::ReportDataMismatch);
-        }
-        Some(true)
-    } else {
-        None
-    };
-
-    // 10. Check init_data binding (host_data, 32 bytes)
-    let init_data_match = if let Some(expected) = &params.expected_init_data_hash {
-        let padded = crate::utils::pad_report_data(expected, 32)?;
-        if !crate::utils::constant_time_eq(&report.host_data[..], &padded) {
-            return Err(AttestationError::InitDataMismatch);
-        }
-        Some(true)
-    } else {
-        None
-    };
-
-    // Optional launch-digest compare. Mismatch surfaces in the result and
-    // does not fail verification.
-    let launch_digest_match = params
-        .expected_launch_digest
-        .as_ref()
-        .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected));
-
-    // 11. Extract claims
-    let claims = extract_claims(&report);
-
-    Ok(VerificationResult {
-        signature_valid: true,
-        platform: PlatformType::Snp,
-        claims,
-        report_data_match,
-        init_data_match,
-        collateral_verified: crl_verified,
-        tcb_status: None,
-        mrtd_match: None,
-        rtmr0_match: None,
-        rtmr1_match: None,
-        rtmr2_match: None,
-        rtmr3_match: None,
-        launch_digest_match,
-    })
+/// What a caller can ask of SEV-SNP evidence.
+#[derive(Debug, Clone, Default)]
+pub struct SnpParams {
+    /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
+    /// [`SnpResult::report_data_match`]. On Azure (vTPM) this is checked
+    /// against the vTPM quote nonce instead.
+    pub report_data: Option<Vec<u8>>,
+    /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
+    /// 32-byte init-data hash checked against PCR[8].
+    pub host_data: Option<Vec<u8>>,
+    /// Expected launch digest (`report.measurement`).
+    pub launch_digest: Option<[u8; 48]>,
+    /// Accept a guest whose policy allows debug. Default: false.
+    pub allow_debug: bool,
+    /// Minimum reported TCB; each component must be at least this.
+    pub min_tcb: Option<SnpTcb>,
+    /// Highest VMPL accepted. Default: 0.
+    pub max_vmpl: u32,
 }
 
-/// Enforce minimum TCB version requirements.
+impl SnpParams {
+    /// Reject params that cannot be applied. Runs before any collateral is
+    /// fetched, so caller misuse is never reported as a retryable error.
+    pub fn validate(&self) -> Result<()> {
+        if self.report_data.as_ref().is_some_and(|d| d.len() > 64) {
+            return Err(AttestationError::ReportDataTooLarge { max: 64 });
+        }
+        if self.host_data.as_ref().is_some_and(|d| d.len() > 32) {
+            return Err(AttestationError::InvalidParams(
+                "host_data exceeds 32 bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The answer for genuine SEV-SNP evidence. Every `*_match` is `None` when
+/// the params did not ask, `Some(false)` on a mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct SnpResult {
+    pub claims: Claims,
+    pub report_data_match: Option<bool>,
+    pub host_data_match: Option<bool>,
+    pub launch_digest_match: Option<bool>,
+    /// The guest policy allows debug.
+    pub debug: bool,
+    /// The params allowed a debug guest.
+    pub allow_debug: bool,
+    /// VMPL the report was requested from.
+    pub vmpl: u32,
+    /// The highest VMPL the params accept.
+    pub max_vmpl: u32,
+    /// TCB the report was signed under.
+    pub reported_tcb: SnpTcb,
+    /// `reported_tcb` is at or above `min_tcb` (`None` if no minimum given).
+    pub min_tcb_met: Option<bool>,
+}
+
+impl SnpResult {
+    /// True when the evidence satisfied every rule in the params.
+    pub fn passed(&self) -> bool {
+        crate::platform::all_held(&[
+            self.report_data_match,
+            self.host_data_match,
+            self.launch_digest_match,
+            self.min_tcb_met,
+        ]) && (!self.debug || self.allow_debug)
+            && self.vmpl <= self.max_vmpl
+    }
+}
+
+/// Evaluate the params' report rules (launch digest, debug, VMPL, minimum
+/// TCB) on a report whose signature has already been verified.
+/// `report_data_match` and `host_data_match` are left `None`: where those
+/// values live depends on the platform (report or vTPM).
+pub fn evaluate_report(report: &AttestationReport, params: &SnpParams) -> SnpResult {
+    let reported_tcb = snp_tcb(&report.reported_tcb);
+    SnpResult {
+        claims: extract_claims(report),
+        report_data_match: None,
+        host_data_match: None,
+        launch_digest_match: params
+            .launch_digest
+            .as_ref()
+            .map(|expected| crate::utils::constant_time_eq(&report.measurement[..], expected)),
+        debug: report.policy.debug_allowed(),
+        allow_debug: params.allow_debug,
+        vmpl: report.vmpl,
+        max_vmpl: params.max_vmpl,
+        min_tcb_met: params
+            .min_tcb
+            .as_ref()
+            .map(|min| min_tcb_met(&reported_tcb, min)),
+        reported_tcb,
+    }
+}
+
+fn snp_tcb(tcb: &sev::firmware::host::TcbVersion) -> SnpTcb {
+    SnpTcb {
+        bootloader: tcb.bootloader,
+        tee: tcb.tee,
+        snp: tcb.snp,
+        microcode: tcb.microcode,
+        fmc: tcb.fmc,
+    }
+}
+
+/// Bare-metal AMD SEV-SNP.
+pub struct Snp;
+
+impl Platform for Snp {
+    const KIND: PlatformType = PlatformType::Snp;
+    type Evidence = SnpEvidence;
+    type Params = SnpParams;
+    type Result = SnpResult;
+
+    async fn verify(
+        evidence: &SnpEvidence,
+        params: &SnpParams,
+        ctx: &Context,
+    ) -> Result<SnpResult> {
+        params.validate()?;
+        let now = ctx.now();
+        let cert_provider = ctx.cert_provider();
+
+        // 0. Input size validation
+        crate::utils::check_field_size("attestation_report", evidence.attestation_report.len())?;
+
+        // 1. Decode the attestation report
+        let report_bytes = BASE64
+            .decode(&evidence.attestation_report)
+            .map_err(|e| AttestationError::EvidenceDeserialize(format!("base64 decode: {e}")))?;
+
+        // 2. Parse with sev crate
+        let report = AttestationReport::from_bytes(&report_bytes)
+            .map_err(|e| AttestationError::QuoteParseFailed(format!("SNP report parse: {e}")))?;
+
+        // 3. Version check
+        if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
+            return Err(AttestationError::UnsupportedReportVersion {
+                version: report.version,
+                min: MIN_REPORT_VERSION,
+                max: MAX_REPORT_VERSION,
+            });
+        }
+
+        // 4. Determine processor generation
+        // v3+ reports are required to have CPUID fields; treat None as a spec violation.
+        let cpuid_fam = match report.cpuid_fam_id {
+            Some(v) => v,
+            None if report.version >= 3 => {
+                return Err(AttestationError::QuoteParseFailed(
+                    "v3+ SNP report missing cpuid_fam_id field".to_string(),
+                ));
+            }
+            None => 0,
+        };
+        let cpuid_mod = match report.cpuid_mod_id {
+            Some(v) => v,
+            None if report.version >= 3 => {
+                return Err(AttestationError::QuoteParseFailed(
+                    "v3+ SNP report missing cpuid_mod_id field".to_string(),
+                ));
+            }
+            None => 0,
+        };
+        let processor_gen =
+            ProcessorGeneration::from_cpuid(cpuid_fam, cpuid_mod).ok_or_else(|| {
+                AttestationError::QuoteParseFailed(format!(
+                    "unknown processor: family=0x{cpuid_fam:02X}, model=0x{cpuid_mod:02X}"
+                ))
+            })?;
+
+        // 5. Resolve VEK cert (VCEK or VLEK)
+        let vcek_der = resolve_vcek(evidence, &report, processor_gen, cert_provider).await?;
+
+        // 6. VEK endorsement: chain to the bundled AMD roots (VLEK
+        // auto-detected), validity period, chip-id/TCB OIDs against the report
+        verify_vek_endorsement(&report, &vcek_der, processor_gen, now)?;
+
+        // 7. Verify report signature against VEK
+        let vek = Certificate::from_der(&vcek_der).map_err(|e| {
+            AttestationError::CertChainError(format!("VEK to sev Certificate: {e}"))
+        })?;
+        (&vek, &report)
+            .verify()
+            .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
+
+        // 8. CRL revocation check (if the provider supplies a CRL), only once
+        // the evidence is known to be genuine, so a forged report is never
+        // reported as retryable. AMD CRLs are signed by the ARK.
+        if let Some(crl_der) = cert_provider.get_snp_crl(processor_gen).await? {
+            check_vcek_not_revoked(
+                &vcek_der,
+                &crl_der,
+                super::certs::get_ark(processor_gen),
+                now,
+            )?;
+        } else {
+            log::warn!("snp: CRL data not available from cert provider; skipping revocation check");
+        }
+
+        // 9. The params' rules: VMPL, debug, minimum TCB, launch digest
+        let mut result = evaluate_report(&report, params);
+
+        // 10. report_data and HOST_DATA bindings
+        check_report_bindings(&mut result, &report, params)?;
+
+        Ok(result)
+    }
+}
+
+/// Compare the report's `report_data` and HOST_DATA with the params (each
+/// zero-padded, constant-time) into `result`.
+pub fn check_report_bindings(
+    result: &mut SnpResult,
+    report: &AttestationReport,
+    params: &SnpParams,
+) -> Result<()> {
+    let matches = |expected: Option<&[u8]>, actual: &[u8]| {
+        expected
+            .map(|e| {
+                let padded = crate::utils::pad_report_data(e, actual.len())?;
+                Ok::<_, AttestationError>(crate::utils::constant_time_eq(actual, &padded))
+            })
+            .transpose()
+    };
+    result.report_data_match = matches(params.report_data.as_deref(), &report.report_data[..])?;
+    result.host_data_match = matches(params.host_data.as_deref(), &report.host_data[..])?;
+    Ok(())
+}
+
+/// True when every component of `tcb` is at or above `min_tcb` (including FMC
+/// when the minimum names one).
 ///
 /// Shared between bare-metal SNP and Azure SNP verification paths.
-pub fn enforce_min_tcb(tcb: &sev::firmware::host::TcbVersion, min_tcb: &SnpTcb) -> Result<()> {
+pub fn min_tcb_met(tcb: &SnpTcb, min_tcb: &SnpTcb) -> bool {
     let fmc_below = match (min_tcb.fmc, tcb.fmc) {
         (Some(min_fmc), Some(report_fmc)) => report_fmc < min_fmc,
         (Some(_), None) => true, // min requires FMC but report doesn't have it
         _ => false,
     };
-    if tcb.bootloader < min_tcb.bootloader
+    !(tcb.bootloader < min_tcb.bootloader
         || tcb.tee < min_tcb.tee
         || tcb.snp < min_tcb.snp
         || tcb.microcode < min_tcb.microcode
-        || fmc_below
-    {
-        return Err(AttestationError::TcbMismatch(format!(
-            "reported TCB ({}.{}.{}.{}) below minimum ({}.{}.{}.{})",
-            tcb.bootloader,
-            tcb.tee,
-            tcb.snp,
-            tcb.microcode,
-            min_tcb.bootloader,
-            min_tcb.tee,
-            min_tcb.snp,
-            min_tcb.microcode,
-        )));
-    }
-    Ok(())
+        || fmc_below)
 }
 
 /// Resolve the VCEK certificate - either from evidence or from cert provider.
@@ -230,8 +299,8 @@ async fn resolve_vcek(
     } else {
         // Guard: all-zeros chip_id means MASK_CHIP_ID was set, can't fetch from KDS
         if report.chip_id.iter().all(|&b| b == 0) {
-            return Err(AttestationError::CertFetchError(
-                "chip_id is all zeros in attestation report. \
+            return Err(AttestationError::CertChainError(
+                "evidence carries no VEK and chip_id is all zeros in attestation report. \
                  Confirm that MASK_CHIP_ID is set to 0 to request VCEK from KDS."
                     .to_string(),
             ));
@@ -284,13 +353,14 @@ pub fn verify_report_signature(report_bytes: &[u8], vcek_der: &[u8]) -> Result<(
     Ok(())
 }
 
-/// Verify a VEK (VCEK/VLEK) certificate's validity period (notBefore/notAfter).
-pub fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
+/// Verify a VEK (VCEK/VLEK) certificate's validity period (notBefore/notAfter)
+/// at `now` (Unix seconds).
+pub fn verify_vek_validity_period(vek_der: &[u8], now: i64) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vek_der).map_err(|e| {
         AttestationError::CertChainError(format!("VEK x509 parse for validity: {e}"))
     })?;
     let validity = cert.validity();
-    let now = x509_parser::time::ASN1Time::now();
+    let now = crate::utils::asn1_time(now)?;
     if now < validity.not_before {
         return Err(AttestationError::CertChainError(format!(
             "VEK certificate is not yet valid (notBefore: {})",
@@ -309,14 +379,15 @@ pub fn verify_vek_validity_period(vek_der: &[u8]) -> Result<()> {
 /// Verify the full endorsement-key policy for an inline VEK against the
 /// bundled AMD roots: the ARK → ASK/ASVK → VEK chain (VLEK auto-detected from
 /// the certificate CN), the VEK validity period, and the VEK's chip-id/TCB OID
-/// cross-validation against the report. This is steps 6–6b and 8c of
-/// [`verify_evidence`] as one unit, for callers that resolve the VEK
+/// cross-validation against the report. This is step 6 of
+/// [`Snp::verify`] as one unit, for callers that resolve the VEK
 /// themselves (notably the WASM `verify_snp` entry point). Revocation is out
 /// of scope — pair with [`check_vcek_not_revoked`] when CRL data is available.
 pub fn verify_vek_endorsement(
     report: &AttestationReport,
     vek_der: &[u8],
     processor_gen: ProcessorGeneration,
+    now: i64,
 ) -> Result<()> {
     let ark_der = super::certs::get_ark(processor_gen);
     let intermediate_der = if is_vlek_cert(vek_der)? {
@@ -325,7 +396,7 @@ pub fn verify_vek_endorsement(
         super::certs::get_ask(processor_gen)
     };
     verify_cert_chain(ark_der, intermediate_der, vek_der)?;
-    verify_vek_validity_period(vek_der)?;
+    verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
 }
@@ -519,7 +590,12 @@ pub fn verify_vcek_tcb(
 /// `issuer_der`: DER-encoded issuing CA certificate (ARK — AMD CRLs are signed by the root).
 // INVARIANT CLASS: Correctness
 // INVARIANT: CRL signature verified against issuing CA before trusting revocation data.
-pub fn check_vcek_not_revoked(vcek_der: &[u8], crl_der: &[u8], issuer_der: &[u8]) -> Result<()> {
+pub fn check_vcek_not_revoked(
+    vcek_der: &[u8],
+    crl_der: &[u8],
+    issuer_der: &[u8],
+    now: i64,
+) -> Result<()> {
     // 1. Parse the issuing CA cert to extract its public key
     let (_, issuer_cert) = X509Certificate::from_der(issuer_der)
         .map_err(|e| AttestationError::CertChainError(format!("CRL issuer x509 parse: {e}")))?;
@@ -537,7 +613,7 @@ pub fn check_vcek_not_revoked(vcek_der: &[u8], crl_der: &[u8], issuer_der: &[u8]
     // newer list may have revoked. AMD CRLs always carry nextUpdate; one
     // without it has no defined shelf life, so it is rejected rather than
     // trusted forever.
-    let now = x509_parser::time::ASN1Time::now();
+    let now = crate::utils::asn1_time(now)?;
     if crl.last_update() > now {
         return Err(AttestationError::CertChainError(format!(
             "AMD CRL thisUpdate {} is in the future",
@@ -1061,7 +1137,7 @@ mod tests {
     // expected_launch_digest tests against the live Genoa v5 fixture.
 
     /// Cert provider that returns the bundled live Genoa VCEK from the
-    /// fixture. No network access, no CRL (so collateral_verified=false).
+    /// fixture. No network access, no CRL.
     struct StubCertProvider;
 
     #[async_trait::async_trait]
@@ -1080,7 +1156,7 @@ mod tests {
             _processor_gen: ProcessorGeneration,
         ) -> Result<(Vec<u8>, Vec<u8>)> {
             // Not used — the bare-metal SNP path uses bundled ARK/ASK directly.
-            Err(AttestationError::CertFetchError(
+            Err(AttestationError::CollateralUnavailable(
                 "stub provider does not serve full chain".to_string(),
             ))
         }
@@ -1098,19 +1174,20 @@ mod tests {
         }
     }
 
+    async fn verify(params: &SnpParams) -> Result<SnpResult> {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let ctx = Context::offline().with_cert_provider(StubCertProvider);
+        Snp::verify(&evidence, params, &ctx).await
+    }
+
     #[tokio::test]
     async fn test_verify_evidence_no_expected_launch_digest_yields_none() {
-        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let provider = StubCertProvider;
-        let r = verify_evidence(&evidence, &VerifyParams::default(), &provider)
+        let r = verify(&SnpParams::default())
             .await
             .expect("live v5 fixture should verify");
-        assert!(r.launch_digest_match.is_none(), "no expected_* → None");
-        assert!(r.mrtd_match.is_none(), "SNP never sets mrtd_match");
-        assert!(r.rtmr0_match.is_none(), "SNP never sets rtmrN_match");
-        assert!(r.rtmr1_match.is_none());
-        assert!(r.rtmr2_match.is_none());
-        assert!(r.rtmr3_match.is_none());
+        assert!(r.launch_digest_match.is_none(), "no pin → None");
+        assert!(r.min_tcb_met.is_none(), "no minimum → None");
+        assert!(r.passed());
     }
 
     #[tokio::test]
@@ -1119,16 +1196,52 @@ mod tests {
         let mut expected = [0u8; 48];
         expected.copy_from_slice(&report.measurement[..]);
 
-        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let provider = StubCertProvider;
-        let params = VerifyParams {
-            expected_launch_digest: Some(expected),
+        let params = SnpParams {
+            launch_digest: Some(expected),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider)
-            .await
-            .unwrap();
+        let r = verify(&params).await.unwrap();
         assert_eq!(r.launch_digest_match, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_report_and_host_data_mismatch_are_values() {
+        let params = SnpParams {
+            report_data: Some(vec![0xFF; 64]),
+            host_data: Some(vec![0xFF; 32]),
+            ..Default::default()
+        };
+        let r = verify(&params)
+            .await
+            .expect("binding mismatches are values, not errors");
+        assert_eq!(r.report_data_match, Some(false));
+        assert_eq!(r.host_data_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[tokio::test]
+    async fn test_min_tcb_below_floor_is_a_value() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut floor = snp_tcb(&report.reported_tcb);
+        let r = verify(&SnpParams {
+            min_tcb: Some(floor),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(r.min_tcb_met, Some(true));
+        assert_eq!(r.reported_tcb, floor);
+        assert!(r.passed());
+
+        floor.microcode += 1;
+        let r = verify(&SnpParams {
+            min_tcb: Some(floor),
+            ..Default::default()
+        })
+        .await
+        .expect("a TCB below the minimum is a value, not an error");
+        assert_eq!(r.min_tcb_met, Some(false));
+        assert!(!r.passed());
     }
 
     // ---------------------------------------------------------------
@@ -1192,6 +1305,10 @@ mod tests {
 
     const LEAF_SERIAL: &[u8] = &[0x01, 0x02, 0x03, 0x04];
 
+    fn now_secs() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
     fn valid_window() -> (OffsetDateTime, OffsetDateTime) {
         let now = OffsetDateTime::now_utc();
         (now - TimeDuration::days(1), now + TimeDuration::days(1))
@@ -1204,7 +1321,8 @@ mod tests {
             datetime!(2020-01-01 0:00 UTC),
             datetime!(2021-01-01 0:00 UTC),
         );
-        let err = verify_vek_validity_period(&leaf).expect_err("expired VEK must be rejected");
+        let err = verify_vek_validity_period(&leaf, now_secs())
+            .expect_err("expired VEK must be rejected");
         assert!(err.to_string().contains("expired"), "got: {err}");
     }
 
@@ -1215,7 +1333,8 @@ mod tests {
             datetime!(2100-01-01 0:00 UTC),
             datetime!(2101-01-01 0:00 UTC),
         );
-        let err = verify_vek_validity_period(&leaf).expect_err("future VEK must be rejected");
+        let err =
+            verify_vek_validity_period(&leaf, now_secs()).expect_err("future VEK must be rejected");
         assert!(err.to_string().contains("not yet valid"), "got: {err}");
     }
 
@@ -1223,7 +1342,7 @@ mod tests {
     fn test_vek_current_accepted() {
         let (not_before, not_after) = valid_window();
         let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        verify_vek_validity_period(&leaf).expect("current VEK must pass");
+        verify_vek_validity_period(&leaf, now_secs()).expect("current VEK must pass");
     }
 
     #[test]
@@ -1232,7 +1351,7 @@ mod tests {
         let (not_before, not_after) = valid_window();
         let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
         let crl = mint_crl(&issuer, Some(LEAF_SERIAL), not_before, not_after);
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("revoked serial must be rejected");
         assert!(err.to_string().contains("revoked"), "got: {err}");
     }
@@ -1243,7 +1362,7 @@ mod tests {
         let (not_before, not_after) = valid_window();
         let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
         let crl = mint_crl(&issuer, Some(&[0xEE; 4]), not_before, not_after);
-        check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+        check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
             .expect("fresh CRL not naming the serial must pass");
     }
 
@@ -1260,7 +1379,7 @@ mod tests {
             now - TimeDuration::days(30),
             now - TimeDuration::days(1),
         );
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("stale CRL must be rejected");
         assert!(err.to_string().contains("stale"), "got: {err}");
     }
@@ -1277,7 +1396,7 @@ mod tests {
             now + TimeDuration::days(1),
             now + TimeDuration::days(30),
         );
-        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der())
+        let err = check_vcek_not_revoked(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("future-dated CRL must be rejected");
         assert!(err.to_string().contains("future"), "got: {err}");
     }
@@ -1291,7 +1410,7 @@ mod tests {
         // An empty CRL signed by a key the verifier does not trust must not
         // clear the check — this is exactly the forged-empty-CRL bypass.
         let crl = mint_crl(&signer, None, not_before, not_after);
-        let err = check_vcek_not_revoked(&leaf, &crl, impostor.0.der())
+        let err = check_vcek_not_revoked(&leaf, &crl, impostor.0.der(), now_secs())
             .expect_err("CRL signed by the wrong issuer must be rejected");
         assert!(
             err.to_string().contains("signature verification failed"),
@@ -1312,38 +1431,9 @@ mod tests {
     }
 
     #[test]
-    fn test_enforce_min_tcb_at_floor_passes() {
+    fn test_min_tcb_fmc_required_but_absent_not_met() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let tcb = &report.reported_tcb;
-        let floor = SnpTcb {
-            bootloader: tcb.bootloader,
-            tee: tcb.tee,
-            snp: tcb.snp,
-            microcode: tcb.microcode,
-            fmc: None,
-        };
-        enforce_min_tcb(tcb, &floor).expect("reported TCB at the floor must pass");
-    }
-
-    #[test]
-    fn test_enforce_min_tcb_below_floor_rejected() {
-        let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let tcb = &report.reported_tcb;
-        let floor = SnpTcb {
-            bootloader: tcb.bootloader,
-            tee: tcb.tee,
-            snp: tcb.snp,
-            microcode: tcb.microcode + 1,
-            fmc: None,
-        };
-        let err = enforce_min_tcb(tcb, &floor).expect_err("below-floor TCB must be rejected");
-        assert!(err.to_string().contains("below minimum"), "got: {err}");
-    }
-
-    #[test]
-    fn test_enforce_min_tcb_fmc_required_but_absent_rejected() {
-        let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let tcb = &report.reported_tcb;
+        let tcb = &snp_tcb(&report.reported_tcb);
         assert!(tcb.fmc.is_none(), "Genoa reports carry no FMC");
         let floor = SnpTcb {
             bootloader: 0,
@@ -1352,23 +1442,23 @@ mod tests {
             microcode: 0,
             fmc: Some(1),
         };
-        enforce_min_tcb(tcb, &floor)
-            .expect_err("a floor requiring FMC must reject a report without it");
+        assert!(
+            !min_tcb_met(tcb, &floor),
+            "a floor requiring FMC must reject a report without it"
+        );
     }
 
     #[tokio::test]
     async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
         // Wrong digest must record Some(false) without failing verification.
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let provider = StubCertProvider;
-        let params = VerifyParams {
-            expected_launch_digest: Some([0xAA; 48]),
+        let ctx = Context::offline().with_cert_provider(StubCertProvider);
+        let params = SnpParams {
+            launch_digest: Some([0xAA; 48]),
             ..Default::default()
         };
-        let r = verify_evidence(&evidence, &params, &provider)
-            .await
-            .unwrap();
+        let r = Snp::verify(&evidence, &params, &ctx).await.unwrap();
         assert_eq!(r.launch_digest_match, Some(false));
-        assert!(r.signature_valid, "wrong digest should NOT fail signature");
+        assert!(!r.passed());
     }
 }

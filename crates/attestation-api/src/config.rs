@@ -150,6 +150,11 @@ pub struct AttestationConfig {
     pub platforms: Vec<String>,
     /// If false, requests with `allow_debug: true` are rejected.
     pub allow_debug: bool,
+    /// If false, requests whose `accepted_tcb_statuses` include a status Intel
+    /// does not consider valid (`Revoked`, `NoMatchingLevel`) are rejected.
+    pub allow_revoked_or_unlisted_tcb: bool,
+    /// If false, requests with `max_vmpl` above 0 are rejected.
+    pub allow_nonzero_vmpl: bool,
     /// TDX quote generation method: "auto", "vsock", or "configfs".
     /// - "auto": try vsock first (~2-4ms), fall back to ConfigFS TSM (~1015ms).
     /// - "vsock": direct AF_VSOCK to QGS only. Requires vhost-vsock-pci + QGS.
@@ -213,6 +218,8 @@ impl Default for AttestationConfig {
                 "gcp-tdx".to_string(),
             ],
             allow_debug: false,
+            allow_revoked_or_unlisted_tcb: false,
+            allow_nonzero_vmpl: false,
             tdx_quote_method: "auto".to_string(),
         }
     }

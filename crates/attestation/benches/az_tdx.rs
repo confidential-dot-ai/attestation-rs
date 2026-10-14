@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use attestation::types::VerifyParams;
+use attestation::{AzTdx, AzTdxParams, Context, Platform};
 
 static AZ_TDX_HCL_REPORT: &[u8] = include_bytes!("../test_data/az_tdx/hcl-report.bin");
 static AZ_TDX_EVIDENCE_JSON: &str = include_str!("../test_data/az_tdx/evidence-v1.json");
@@ -33,18 +33,15 @@ fn bench_full_pipeline(c: &mut Criterion) {
         serde_json::from_str(AZ_TDX_EVIDENCE_JSON).unwrap();
     let evidence: attestation::platforms::az_tdx::evidence::AzTdxEvidence =
         serde_json::from_value(envelope.evidence).unwrap();
-    let params = VerifyParams::default();
+    let params = AzTdxParams::default();
+    let ctx = Context::offline();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     c.bench_function("az_tdx/full_pipeline", |b| {
         b.to_async(&rt).iter(|| async {
-            let result = attestation::platforms::az_tdx::verify::verify_evidence(
-                black_box(&evidence),
-                black_box(&params),
-                None,
-            )
-            .await
-            .unwrap();
+            let result = AzTdx::verify(black_box(&evidence), black_box(&params), &ctx)
+                .await
+                .unwrap();
             black_box(&result);
         });
     });

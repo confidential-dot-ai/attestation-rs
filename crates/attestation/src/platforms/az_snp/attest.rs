@@ -51,7 +51,7 @@ pub fn is_available() -> bool {
 /// Convert a PEM-encoded certificate to DER bytes.
 fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
     let (_label, der) = pem_rfc7468::decode_vec(pem.as_bytes()).map_err(|e| {
-        AttestationError::CertFetchError(format!("failed to decode VCEK PEM: {}", e))
+        AttestationError::HardwareAccessFailed(format!("failed to decode VCEK PEM: {}", e))
     })?;
     Ok(der)
 }
@@ -85,7 +85,7 @@ async fn fetch_imds_certs(
             // safe to repeat.
             let transient = e.is_timeout() || e.is_connect() || e.is_request();
             (
-                AttestationError::CertFetchError(format!("IMDS request failed: {}", e)),
+                AttestationError::HardwareAccessFailed(format!("IMDS request failed: {}", e)),
                 transient,
             )
         })?;
@@ -95,14 +95,17 @@ async fn fetch_imds_certs(
         let retryable = status_is_retryable(status);
         let body = response.text().await.unwrap_or_default();
         return Err((
-            AttestationError::CertFetchError(format!("IMDS returned {}: {}", status, body)),
+            AttestationError::HardwareAccessFailed(format!("IMDS returned {}: {}", status, body)),
             retryable,
         ));
     }
 
     response.json().await.map_err(|e| {
         (
-            AttestationError::CertFetchError(format!("failed to parse IMDS cert response: {}", e)),
+            AttestationError::HardwareAccessFailed(format!(
+                "failed to parse IMDS cert response: {}",
+                e
+            )),
             false,
         )
     })
@@ -151,7 +154,7 @@ async fn get_imds_certs() -> Result<ImdsCertificates> {
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| AttestationError::CertFetchError(format!("build HTTP client: {}", e)))?;
+        .map_err(|e| AttestationError::HardwareAccessFailed(format!("build HTTP client: {}", e)))?;
 
     retry_transient(IMDS_ATTEMPTS, IMDS_RETRY_DELAY, || {
         fetch_imds_certs(&client)
@@ -219,14 +222,14 @@ mod tests {
 
     fn transient() -> (AttestationError, bool) {
         (
-            AttestationError::CertFetchError("IMDS unreachable".into()),
+            AttestationError::HardwareAccessFailed("IMDS unreachable".into()),
             true,
         )
     }
 
     fn fatal() -> (AttestationError, bool) {
         (
-            AttestationError::CertFetchError("IMDS returned 400".into()),
+            AttestationError::HardwareAccessFailed("IMDS returned 400".into()),
             false,
         )
     }

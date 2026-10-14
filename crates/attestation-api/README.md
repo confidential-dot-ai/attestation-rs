@@ -74,6 +74,9 @@ key_path = ""                   # Empty = ephemeral key
 [attestation]
 enabled = true                  # Set to false to disable /attest
 platforms = ["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"]
+allow_debug = false             # Accept policies with allow_debug = true
+allow_revoked_or_unlisted_tcb = false  # Accept "Revoked" or "NoMatchingLevel" in accepted_tcb_statuses
+allow_nonzero_vmpl = false      # Accept max_vmpl above 0
 ```
 
 ## Authentication
@@ -96,19 +99,53 @@ curl -X POST http://127.0.0.1:8400/attest \
 
 **Verify evidence and get a JWT:**
 
+`policies` lists the platforms you accept, each with its params (byte values
+in base64). Evidence for a platform without an entry is refused.
+
 ```bash
 curl -X POST http://127.0.0.1:8400/verify \
   -H "Content-Type: application/json" \
   -d '{
     "platform": "snp",
     "evidence": { ... },
-    "params": {
-      "expected_report_data": "AQIDBA==",
-      "allow_debug": false
+    "policies": {
+      "snp": { "report_data": "AQIDBA==", "launch_digest": "<48 bytes>" },
+      "tdx": { "report_data": "AQIDBA==", "mrtd": "<48 bytes>" }
     },
     "issue_token": true
   }'
 ```
+
+Params per platform: `tdx`, `az-tdx`, `gcp-tdx` take `report_data`,
+`init_data`, `mrtd`, `rtmr0`..`rtmr3`, `allow_debug`, `accepted_tcb_statuses`;
+`snp`, `az-snp`, `gcp-snp` take `report_data`, `host_data`, `launch_digest`,
+`allow_debug`, `min_tcb`, `max_vmpl`; `nvidia_gpu` takes `user_nonce`,
+`required`, `expected_archs`. A field the platform does not have is a `400`.
+
+The server sets floors: `allow_debug: true`, `max_vmpl` above 0, and a TCB
+status Intel does not consider valid (`"Revoked"`, `"NoMatchingLevel"`) in
+`accepted_tcb_statuses` are a `400` unless the matching `attestation.allow_*`
+option is enabled. `issue_token` requires `report_data` in the policy for the
+evidence's platform.
+
+A token alone is not fresh: anyone who can call `/verify` can replay old
+evidence with that evidence's own `report_data` and get a new token. A relying
+party must compare `policy.<platform>.report_data` in the token (`<platform>`
+is the token's `platform` claim) to the nonce it issued, and refuse the token
+if they differ.
+
+Responses:
+
+- `200` with `{ "result": ..., "passed": bool, "token"?: "..." }` for genuine
+  evidence. `passed` is true only when every rule held; the token is issued
+  only then. Its `result` claim is the result and its `policy` claim is the
+  `policies` it was evaluated against.
+- `400 bad_request` for a malformed body or invalid params.
+- `413 payload_too_large` for a body over 1 MiB.
+- `415 unsupported_media_type` without `Content-Type: application/json`.
+- `502 collateral_unavailable` when collateral could not be fetched (retry).
+- `422 platform_not_allowed` for evidence of a platform without a policy.
+- `422 verification_failed` for evidence that cannot be verified.
 
 ## Key Features
 

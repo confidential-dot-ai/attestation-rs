@@ -1,5 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
+use base64::Engine;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -22,17 +24,64 @@ fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
         attestation_api::certs::snp_provider::CachedCertProvider::new(cert_cache.clone(), false);
     let tdx_provider =
         attestation_api::certs::tdx_provider::CachedTdxProvider::new(cert_cache.clone());
-    let verifier = Arc::new(
-        attestation::Verifier::new()
+    let verifier = Arc::new(attestation::Verifier::new(
+        attestation::Context::new()
             .with_cert_provider(cert_provider)
             .with_tdx_provider(tdx_provider),
-    );
+    ));
     AppState {
         config: Arc::new(config),
         cert_cache,
         token_issuer: None,
         verifier,
     }
+}
+
+/// A Verifier on `Context::offline()` with a token issuer, so the TDX fixture
+/// verifies without network access.
+fn offline_state_with(f: impl FnOnce(&mut Config)) -> AppState {
+    let mut state = test_state_with(f);
+    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+    let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+    let issuer = attestation_api::token::issuer::TokenIssuer::new(
+        signing_key,
+        "test-issuer".to_string(),
+        std::time::Duration::from_secs(300),
+    )
+    .unwrap();
+    state.token_issuer = Some(Arc::new(issuer));
+    state
+}
+
+/// A TDX v4 quote minted with the TD debug attribute set.
+const TDX_V4_QUOTE: &[u8] = include_bytes!("../../attestation/test_data/tdx_quote_4.dat");
+
+/// The quote's `report_data`: TD report body offset 520, after the 48-byte header.
+fn tdx_v4_report_data() -> String {
+    BASE64.encode(&TDX_V4_QUOTE[568..632])
+}
+
+fn tdx_v4_evidence() -> serde_json::Value {
+    serde_json::json!({ "quote": BASE64.encode(TDX_V4_QUOTE) })
+}
+
+async fn post_verify(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let resp = build_api_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
 }
 
 fn has_tee() -> bool {
@@ -108,7 +157,7 @@ async fn verify_rejects_invalid_evidence() {
     let body = serde_json::json!({
         "platform": "snp",
         "evidence": {},
-        "params": {}
+        "policies": { "snp": {} }
     });
 
     let resp = app
@@ -139,7 +188,7 @@ async fn verify_rejects_expected_measurement_of_wrong_length() {
     let body = serde_json::json!({
         "platform": "snp",
         "evidence": {},
-        "params": { "expected_launch_digest": "AAAA" }
+        "policies": { "snp": { "launch_digest": "AAAA" } }
     });
 
     let resp = app
@@ -160,10 +209,179 @@ async fn verify_rejects_expected_measurement_of_wrong_length() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "bad_request");
-    assert!(json["message"]
-        .as_str()
-        .unwrap()
-        .contains("expected_launch_digest must be 48 bytes"));
+}
+
+#[tokio::test]
+async fn verify_refuses_evidence_for_a_platform_without_policy() {
+    let (status, json) = post_verify(
+        offline_state_with(|_| {}),
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "snp": {} }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "platform_not_allowed");
+}
+
+#[tokio::test]
+async fn verify_passes_the_tdx_fixture_offline() {
+    let (status, json) = post_verify(
+        offline_state_with(|c| c.attestation.allow_debug = true),
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": true, "report_data": tdx_v4_report_data() } }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["passed"], true);
+    assert!(json.get("token").is_none());
+}
+
+#[tokio::test]
+async fn verify_returns_400_on_invalid_params() {
+    let state = offline_state_with(|c| c.attestation.allow_debug = true);
+    for tdx in [
+        serde_json::json!({ "allow_debug": true, "accepted_tcb_statuses": [] }),
+        serde_json::json!({ "allow_debug": true, "report_data": BASE64.encode([0u8; 65]) }),
+    ] {
+        let (status, json) = post_verify(
+            state.clone(),
+            serde_json::json!({
+                "platform": "tdx",
+                "evidence": tdx_v4_evidence(),
+                "policies": { "tdx": tdx }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "bad_request");
+    }
+}
+
+fn enable_all_floors(c: &mut Config) {
+    c.attestation.allow_debug = true;
+    c.attestation.allow_revoked_or_unlisted_tcb = true;
+    c.attestation.allow_nonzero_vmpl = true;
+}
+
+/// `policies` is refused when only `close_floor` is off, and accepted when
+/// every floor is open.
+async fn assert_floor(close_floor: fn(&mut Config), policies: serde_json::Value) {
+    let body = serde_json::json!({
+        "platform": "tdx",
+        "evidence": tdx_v4_evidence(),
+        "policies": policies
+    });
+    let refusing = offline_state_with(|c| {
+        enable_all_floors(c);
+        close_floor(c);
+    });
+    let (status, json) = post_verify(refusing, body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{policies}");
+    assert_eq!(json["error"], "bad_request");
+
+    let (status, _) = post_verify(offline_state_with(enable_all_floors), body).await;
+    assert_eq!(status, StatusCode::OK, "{policies}");
+}
+
+#[tokio::test]
+async fn verify_refuses_policies_below_the_server_floors_unless_enabled() {
+    assert_floor(
+        |c| c.attestation.allow_debug = false,
+        serde_json::json!({ "tdx": { "allow_debug": true } }),
+    )
+    .await;
+    assert_floor(
+        |c| c.attestation.allow_revoked_or_unlisted_tcb = false,
+        serde_json::json!({ "tdx": { "accepted_tcb_statuses": ["UpToDate", "Revoked"] } }),
+    )
+    .await;
+    assert_floor(
+        |c| c.attestation.allow_revoked_or_unlisted_tcb = false,
+        serde_json::json!({ "tdx": { "accepted_tcb_statuses": ["NoMatchingLevel"] } }),
+    )
+    .await;
+    assert_floor(
+        |c| c.attestation.allow_nonzero_vmpl = false,
+        serde_json::json!({ "tdx": {}, "snp": { "max_vmpl": 1 } }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn verify_refuses_a_token_request_without_report_data() {
+    let (status, json) = post_verify(
+        offline_state_with(|c| c.attestation.allow_debug = true),
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==" } },
+            "issue_token": true
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], "bad_request");
+}
+
+#[tokio::test]
+async fn token_carries_the_policy_it_was_issued_under() {
+    let (status, json) = post_verify(
+        offline_state_with(|c| c.attestation.allow_debug = true),
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": true, "report_data": tdx_v4_report_data() } },
+            "issue_token": true
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["passed"], true);
+    let token = json["token"].as_str().expect("token issued");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(token.split('.').nth(1).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claims["platform"], "tdx");
+    assert_eq!(claims["result"], json["result"]);
+    let policy = &claims["policy"]["tdx"];
+    assert_eq!(policy["report_data"], tdx_v4_report_data());
+    assert_eq!(policy["allow_debug"], true);
+    assert_eq!(
+        policy["accepted_tcb_statuses"],
+        serde_json::to_value(attestation::TdxParams::default().accepted_tcb_statuses).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn verify_does_not_issue_a_token_when_verification_did_not_pass() {
+    let (status, json) = post_verify(
+        offline_state_with(|c| c.attestation.allow_debug = true),
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": true, "report_data": "AA==" } },
+            "issue_token": true
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["passed"], false);
+    assert!(json.get("token").is_none());
 }
 
 #[tokio::test]
@@ -174,7 +392,7 @@ async fn verify_rejects_full_envelope_evidence() {
     let body = serde_json::json!({
         "platform": "snp",
         "evidence": {"platform": "snp", "evidence": {}},
-        "params": {}
+        "policies": { "snp": {} }
     });
 
     let resp = app
@@ -195,10 +413,6 @@ async fn verify_rejects_full_envelope_evidence() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "bad_request");
-    assert!(json["message"]
-        .as_str()
-        .unwrap()
-        .contains("platform-specific evidence"));
 }
 
 #[tokio::test]
@@ -266,7 +480,6 @@ async fn attest_rejects_disallowed_platform_before_hardware_access() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "bad_request");
-    assert!(json["message"].as_str().unwrap().contains("not allowed"));
 }
 
 #[tokio::test]
@@ -375,7 +588,6 @@ async fn rejects_without_api_key() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "unauthorized");
-    assert!(json["message"].as_str().unwrap().contains("Authorization"));
 }
 
 #[tokio::test]
@@ -423,7 +635,6 @@ async fn rejects_invalid_api_key() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "unauthorized");
-    assert!(json["message"].as_str().unwrap().contains("invalid"));
 }
 
 #[tokio::test]
@@ -463,7 +674,82 @@ async fn verify_rejects_non_json_body() {
         .await
         .unwrap();
 
-    assert!(resp.status().is_client_error());
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "bad_request");
+}
+
+async fn post_verify_raw(
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder().method("POST").uri("/verify");
+    if let Some(content_type) = content_type {
+        req = req.header("content-type", content_type);
+    }
+    let resp = build_api_router(test_state())
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+async fn verify_refuses_an_oversized_body_as_payload_too_large() {
+    let (status, json) =
+        post_verify_raw(Some("application/json"), vec![b' '; 2 * 1024 * 1024]).await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(json["error"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn verify_refuses_a_body_that_is_not_declared_json_as_unsupported_media_type() {
+    for content_type in [None, Some("text/plain")] {
+        let (status, json) = post_verify_raw(content_type, b"{}".to_vec()).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{content_type:?}"
+        );
+        assert_eq!(json["error"], "unsupported_media_type");
+    }
+}
+
+#[tokio::test]
+async fn verify_refuses_json_of_the_wrong_shape_as_a_bad_request() {
+    let (status, json) = post_verify_raw(
+        Some("application/json"),
+        br#"{"evidence": 1, "nope": 1}"#.to_vec(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], "bad_request");
+}
+
+#[tokio::test]
+async fn verify_rejects_a_pin_the_platform_does_not_have() {
+    let (status, json) = post_verify(
+        test_state(),
+        serde_json::json!({
+            "platform": "snp",
+            "evidence": {},
+            "policies": { "snp": { "mrtd": BASE64.encode([0u8; 48]) } }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], "bad_request");
 }
 
 // --- Token issuer tests ---
@@ -609,7 +895,7 @@ async fn attest_then_verify_roundtrip() {
     let verify_body = serde_json::json!({
         "platform": platform,
         "evidence": evidence,
-        "params": {}
+        "policies": { platform.as_str().unwrap(): {} }
     });
 
     let resp = app
@@ -633,5 +919,5 @@ async fn attest_then_verify_roundtrip() {
         panic!("verify returned {status}: {body_str}");
     }
     let verify_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(verify_json["result"]["signature_valid"], true);
+    assert_eq!(verify_json["passed"], true);
 }

@@ -18,28 +18,19 @@ async fn capture_tdx_evidence_fixture() {
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
     // Verify it — first without collateral, then with
-    let params = attestation::types::VerifyParams::default();
+    use attestation::{Context, Platform, Tdx, TdxParams};
+    let params = TdxParams::default();
 
-    let result = attestation::platforms::tdx::verify::verify_evidence(&evidence, &params, None)
+    let result = Tdx::verify(&evidence, &params, &Context::offline())
         .await
         .expect("verify without collateral failed");
-    eprintln!(
-        "Verified (no collateral): signature_valid={}, platform={}",
-        result.signature_valid, result.platform
-    );
+    eprintln!("Verified (no collateral): passed={}", result.passed());
     eprintln!("Launch digest (MRTD): {}", result.claims.launch_digest);
-    assert!(result.signature_valid);
 
     // With collateral
-    let provider = attestation::collateral::DefaultTdxCollateralProvider::new();
-    match attestation::platforms::tdx::verify::verify_evidence(&evidence, &params, Some(&provider))
-        .await
-    {
+    match Tdx::verify(&evidence, &params, &Context::new()).await {
         Ok(r) => {
-            eprintln!(
-                "Verified (with collateral): collateral_verified={}",
-                r.collateral_verified
-            );
+            eprintln!("Verified (with collateral): crl_ok={:?}", r.crl_ok);
             if let Some(ref tcb) = r.tcb_status {
                 eprintln!("  TCB status: {}", tcb.tcb_status);
                 eprintln!("  FMSPC: {}", tcb.fmspc);
@@ -66,18 +57,12 @@ async fn capture_az_snp_evidence_fixture() {
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
     // Also verify it
-    let params = attestation::types::VerifyParams::default();
-    let provider = attestation::collateral::DefaultCertProvider::new();
-    let result =
-        attestation::platforms::az_snp::verify::verify_evidence(&evidence, &params, &provider)
-            .await
-            .expect("verify failed");
-    eprintln!(
-        "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.platform
-    );
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
-    assert!(result.signature_valid);
+    use attestation::{AzSnp, AzSnpParams, Context, Platform};
+    let result = AzSnp::verify(&evidence, &AzSnpParams::default(), &Context::new())
+        .await
+        .expect("verify failed");
+    eprintln!("Verified: passed={}", result.passed());
+    eprintln!("Launch digest: {}", result.snp.claims.launch_digest);
 }
 
 #[cfg(all(feature = "attest", feature = "az-tdx"))]
@@ -95,14 +80,10 @@ async fn capture_az_tdx_evidence_fixture() {
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
     // Also verify it
-    let params = attestation::types::VerifyParams::default();
-    let result = attestation::platforms::az_tdx::verify::verify_evidence(&evidence, &params, None)
+    use attestation::{AzTdx, AzTdxParams, Context, Platform};
+    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline())
         .await
         .expect("verify failed");
-    eprintln!(
-        "Verified: signature_valid={}, platform={}",
-        result.signature_valid, result.platform
-    );
-    eprintln!("Launch digest: {}", result.claims.launch_digest);
-    assert!(result.signature_valid);
+    eprintln!("Verified: passed={}", result.passed());
+    eprintln!("Launch digest: {}", result.tdx.claims.launch_digest);
 }

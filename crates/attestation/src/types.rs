@@ -55,6 +55,11 @@ pub struct AttestationEvidence {
     #[cfg(feature = "nvidia-gpu")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nvidia_gpu: Option<NvidiaGpuEvidenceBundle>,
+    /// Without the `nvidia-gpu` feature a bundle cannot be verified; it is
+    /// kept so the verifier refuses it instead of dropping it.
+    #[cfg(not(feature = "nvidia-gpu"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvidia_gpu: Option<serde_json::Value>,
 }
 
 impl std::fmt::Display for PlatformType {
@@ -71,51 +76,19 @@ impl std::fmt::Display for PlatformType {
     }
 }
 
-/// What the caller wants to check during verification.
-#[derive(Debug, Clone, Default)]
-pub struct VerifyParams {
-    /// If set, verifier checks that report_data in the quote matches this value.
-    pub expected_report_data: Option<Vec<u8>>,
-    /// If set, verifier checks init_data / host_data / MRCONFIGID binding.
-    pub expected_init_data_hash: Option<Vec<u8>>,
-    /// If true, allow guests launched with debug policy. Default: false.
-    pub allow_debug: bool,
-    /// If set, enforce minimum TCB version for SNP (each component must be >=).
-    pub min_tcb: Option<SnpTcb>,
-    /// Expected MRTD. Result surfaces in [`VerificationResult::mrtd_match`];
-    /// mismatch does not fail verification. TDX-only.
-    pub expected_mrtd: Option<[u8; 48]>,
-    /// Expected RTMR[0]. Result in [`VerificationResult::rtmr0_match`]; mismatch
-    /// does not fail verification. TDX-only.
-    pub expected_rtmr0: Option<[u8; 48]>,
-    /// Expected RTMR[1]. TDX-only.
-    pub expected_rtmr1: Option<[u8; 48]>,
-    /// Expected RTMR[2]. TDX-only.
-    pub expected_rtmr2: Option<[u8; 48]>,
-    /// Expected RTMR[3]. TDX-only.
-    pub expected_rtmr3: Option<[u8; 48]>,
-    /// Expected SNP launch digest (`report.measurement`). Result in
-    /// [`VerificationResult::launch_digest_match`]; mismatch does not fail
-    /// verification. SNP-only.
-    pub expected_launch_digest: Option<[u8; 48]>,
-    /// NVIDIA GPU verification parameters, applied when an envelope carries a
-    /// `gpu` bundle. Grouped behind a single feature gate (see
-    /// [`NvidiaGpuParams`]).
-    #[cfg(feature = "nvidia-gpu")]
-    pub nvidia_gpu: NvidiaGpuParams,
-}
-
-/// NVIDIA GPU verification parameters, grouped so the whole set sits behind one
-/// `nvidia-gpu` feature gate rather than gating each field individually.
+/// NVIDIA GPU verification parameters, applied when an envelope carries a GPU
+/// bundle.
 #[cfg(feature = "nvidia-gpu")]
 #[derive(Debug, Clone, Default)]
 pub struct NvidiaGpuParams {
     /// User nonce used to derive the GPU SPDM nonce. Required when verifying
-    /// an envelope that carries a `gpu` bundle.
+    /// an envelope that carries a `gpu` bundle, and must equal the platform
+    /// params' `report_data`.
     pub user_nonce: Option<Vec<u8>>,
     /// If true, reject envelopes that do not include an NVIDIA GPU bundle.
     pub required: bool,
-    /// Optional whitelist of acceptable GPU/switch architectures.
+    /// Optional allowlist of acceptable GPU/switch architectures. Result in
+    /// [`NvidiaGpuResult::archs_allowed`].
     pub expected_archs: Option<Vec<NvidiaGpuArch>>,
     /// Allowed nonce-binding algorithms. If `None`, only the default
     /// (`Concat { Sha256 }`) is accepted. Set explicitly to permit future
@@ -123,8 +96,9 @@ pub struct NvidiaGpuParams {
     pub allowed_bindings: Option<Vec<NvidiaGpuBinding>>,
     /// Per-device security policy applied to each NRAS submodule, independent of
     /// NRAS's opaque overall boolean. Defaults reject debug-enabled devices and
-    /// require secure boot, per-device report-nonce match, and a successful
-    /// measurement result. See [`NvidiaGpuDevicePolicy`].
+    /// require secure boot and a successful measurement result. Result in
+    /// [`NvidiaGpuResult::device_policy_met`]. A device whose SPDM report does
+    /// not match the nonce is an error, not a policy result.
     pub device_policy: NvidiaGpuDevicePolicy,
 }
 
@@ -142,15 +116,10 @@ pub struct NvidiaGpuParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NvidiaGpuDevicePolicy {
     /// If true, accept devices reporting `dbgstat != "disabled"`. Default false
-    /// (debug-enabled GPUs are rejected), mirroring [`VerifyParams::allow_debug`].
+    /// (debug-enabled GPUs fail the policy).
     pub allow_debug: bool,
     /// If true, require every device's `secboot` claim to be `true`. Default true.
     pub require_secboot: bool,
-    /// If true, require every device's
-    /// `x-nvidia-gpu-attestation-report-nonce-match` claim to be `true`. Default
-    /// true — gates per-device SPDM report-nonce binding in addition to the
-    /// overall `eat_nonce`.
-    pub require_nonce_match: bool,
     /// If true, require every device's `measres` claim to equal `"success"`.
     /// Default true.
     pub require_measres_success: bool,
@@ -162,59 +131,9 @@ impl Default for NvidiaGpuDevicePolicy {
         Self {
             allow_debug: false,
             require_secboot: true,
-            require_nonce_match: true,
             require_measres_success: true,
         }
     }
-}
-
-/// Result of verification — the caller decides pass/fail based on this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[must_use]
-pub struct VerificationResult {
-    /// Was the hardware signature on the evidence valid?
-    pub signature_valid: bool,
-    /// Which platform produced this evidence.
-    ///
-    /// For cloud-overlay platforms (`GcpSnp`, `GcpTdx`, `AzSnp`, `AzTdx`) this value is
-    /// derived from the attestation envelope header (an attester claim) rather
-    /// than a hardware-proven cloud-provider identity. Do not use this field
-    /// alone as a trust boundary — verify report fields instead.
-    pub platform: PlatformType,
-    /// Parsed, platform-normalized claims.
-    pub claims: Claims,
-    /// Did the report_data match expected (None if no expected value provided).
-    pub report_data_match: Option<bool>,
-    /// Did the init_data match expected (None if no expected value provided).
-    pub init_data_match: Option<bool>,
-    /// Whether collateral was available and all collateral checks passed
-    /// (CRL revocation, TCB status, QE identity). False when collateral was
-    /// unavailable or any collateral check was skipped.
-    #[serde(default)]
-    pub collateral_verified: bool,
-    /// Platform-specific collateral/TCB status details (TDX DCAP status, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tcb_status: Option<DcapVerificationStatus>,
-    /// MRTD compare result. `None` if no expected value was supplied.
-    /// Always `None` for SNP.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mrtd_match: Option<bool>,
-    /// RTMR[0] compare result. Always `None` for SNP.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmr0_match: Option<bool>,
-    /// RTMR[1] compare result. Always `None` for SNP.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmr1_match: Option<bool>,
-    /// RTMR[2] compare result. Always `None` for SNP.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmr2_match: Option<bool>,
-    /// RTMR[3] compare result. Always `None` for SNP.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rtmr3_match: Option<bool>,
-    /// SNP launch digest compare result. `None` if no expected value was
-    /// supplied. Always `None` for TDX.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launch_digest_match: Option<bool>,
 }
 
 /// Normalized claims extracted from evidence.
@@ -237,10 +156,6 @@ pub struct Claims {
     pub tcb: TcbInfo,
     /// All platform-specific claim fields as a JSON map.
     pub platform_data: serde_json::Value,
-    /// GPU claims aggregated from the optional NVIDIA bundle, if present.
-    #[cfg(feature = "nvidia-gpu")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nvidia_gpu: Option<NvidiaGpuClaims>,
 }
 
 /// TCB version information, varies by platform.
@@ -273,6 +188,8 @@ pub enum TdxTcbStatus {
     OutOfDate,
     OutOfDateConfigurationNeeded,
     Revoked,
+    /// The quote's TCB is below every level Intel lists for its platform.
+    NoMatchingLevel,
 }
 
 impl std::fmt::Display for TdxTcbStatus {
@@ -289,6 +206,7 @@ impl std::fmt::Display for TdxTcbStatus {
                 write!(f, "OutOfDateConfigurationNeeded")
             }
             TdxTcbStatus::Revoked => write!(f, "Revoked"),
+            TdxTcbStatus::NoMatchingLevel => write!(f, "NoMatchingLevel"),
         }
     }
 }
@@ -305,6 +223,10 @@ pub struct DcapVerificationStatus {
     /// Whether the TCB Info collateral has expired (nextUpdate in the past).
     #[serde(default)]
     pub collateral_expired: bool,
+    /// The Quoting Enclave's own TCB status, already combined into
+    /// `tcb_status` (`None` when the QE identity was not evaluated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qe_tcb_status: Option<TdxTcbStatus>,
 }
 
 /// AMD processor generation for SNP.
@@ -517,20 +439,43 @@ pub struct NvidiaGpuDeviceClaims {
     pub raw: serde_json::Value,
 }
 
-/// Aggregated GPU claims surfaced at the top level of `VerificationResult`.
+/// Aggregated GPU claims from NRAS.
 #[cfg(feature = "nvidia-gpu")]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NvidiaGpuClaims {
-    /// Always `true` when returned by `verify_bundle` (verification errors
-    /// if NRAS reports failure). Retained for serialization round-tripping.
+    /// NRAS's `x-nvidia-overall-att-result` across every arch group.
     pub overall_ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eat_nonce: Option<String>,
-    /// Always `true` when returned by `verify_bundle`. See `overall_ok`.
-    pub nonce_binding_ok: bool,
     pub devices: Vec<NvidiaGpuDeviceClaims>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub overall_raw: serde_json::Value,
+}
+
+/// Result of verifying an NVIDIA GPU bundle against [`NvidiaGpuParams`].
+#[cfg(feature = "nvidia-gpu")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct NvidiaGpuResult {
+    pub claims: NvidiaGpuClaims,
+    /// Every device's arch is in `expected_archs` (`None` if no allowlist).
+    pub archs_allowed: Option<bool>,
+    /// NRAS returned one device claim per device in the bundle.
+    pub device_count_match: bool,
+    /// Every device satisfied the [`NvidiaGpuDevicePolicy`].
+    pub device_policy_met: bool,
+}
+
+#[cfg(feature = "nvidia-gpu")]
+impl NvidiaGpuResult {
+    /// True when NRAS's overall result is true and every rule in the params
+    /// held.
+    pub fn passed(&self) -> bool {
+        self.claims.overall_ok
+            && self.archs_allowed != Some(false)
+            && self.device_count_match
+            && self.device_policy_met
+    }
 }
 
 /// Helper module for serializing Vec<u8> as hex strings.
