@@ -11,10 +11,21 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Dated, Dates, Refused};
+#[cfg(feature = "nvidia-gpu")]
+use super::NrasJwks;
+#[cfg(feature = "snp")]
+use super::{AmdCrl, AmdSigner, Vcek};
+use super::{Dates, Refused};
+#[cfg(feature = "tdx")]
+use super::{Fmspc, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
+#[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
+use super::{GceEndorsement, GceTee};
 use crate::error::{AttestationError, Result, Unavailable};
 #[cfg(feature = "snp")]
-use crate::types::{ProcessorGeneration, SnpTcb};
+use crate::types::{ProcessorGeneration as Gen, SnpTcb};
+
+/// A piece and what the verdict should say about it.
+type Got<T> = Result<(T, CollateralUsed)>;
 
 /// Where a piece of collateral used for a verdict came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +52,18 @@ pub struct CollateralUsed {
     pub version: Option<u64>,
     pub next_update: Option<i64>,
     pub current: bool,
+}
+
+impl CollateralUsed {
+    fn new(name: String, from: Source, dates: Dates, now: i64) -> Self {
+        Self {
+            name,
+            from,
+            version: dates.version,
+            next_update: dates.next_update,
+            current: dates.current(now),
+        }
+    }
 }
 
 /// What the store knows about a piece before it has it.
@@ -146,13 +169,12 @@ impl Store {
     }
 
     /// The piece at `url`, verified with `verify`, and what the verdict
-    /// should say about it at `now` (Unix seconds). `shared`: not one
-    /// machine's (see [`Spec`]); `named_by_evidence`: a vendor 404 refuses
-    /// the evidence. A copy that does not
-    /// verify is refused (`CertChainError`) when no good copy exists; no copy
-    /// anywhere is [`AttestationError::CollateralUnavailable`].
+    /// should say about it at `now` (Unix seconds); `dates` reads its window
+    /// and version. For `shared` and `named_by_evidence` see [`Spec`]. A copy that does not verify is
+    /// refused (`CertChainError`) when no good copy exists; no copy anywhere
+    /// is [`AttestationError::CollateralUnavailable`].
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    async fn get<T: Dated>(
+    async fn get<T: 'static>(
         &self,
         url: String,
         name: String,
@@ -163,7 +185,8 @@ impl Store {
             + Send
             + Sync
             + 'static,
-    ) -> Result<(T, CollateralUsed)> {
+        dates: fn(&T) -> Dates,
+    ) -> Got<T> {
         let (body, chain, from) = match self.held.get(&url) {
             Some((body, chain)) => (body.clone(), chain.clone(), Source::Held),
             None => {
@@ -174,11 +197,11 @@ impl Store {
                     named_by_evidence,
                     verify: Arc::new({
                         let verify = verify.clone();
-                        move |body, chain| verify(body, chain).map(|p| p.dates())
+                        move |body, chain| verify(body, chain).map(|p| dates(&p))
                     }),
                 };
                 let (entry, from) = self
-                    .entry(spec, now)
+                    .load(spec, now)
                     .await
                     .map_err(|e| e.into_error(&name))?;
                 (entry.body, entry.issuer_chain, from)
@@ -186,19 +209,12 @@ impl Store {
         };
         let piece =
             verify(&body, chain.as_deref()).map_err(|e| Failure::Refused(e).into_error(&name))?;
-        let dates = piece.dates();
-        let used = CollateralUsed {
-            name,
-            from,
-            version: dates.version,
-            next_update: dates.next_update,
-            current: dates.current(now),
-        };
+        let used = CollateralUsed::new(name, from, dates(&piece), now);
         Ok((piece, used))
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    async fn entry(&self, spec: Spec, now: i64) -> std::result::Result<(Entry, Source), Failure> {
+    async fn load(&self, spec: Spec, now: i64) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
             return native.entry(spec, now).await;
@@ -212,158 +228,100 @@ impl Store {
 
     /// The VCEK for a chip at a TCB.
     #[cfg(feature = "snp")]
-    pub async fn vcek(
-        &self,
-        generation: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        tcb: &SnpTcb,
-        now: i64,
-    ) -> Result<(super::Vcek, CollateralUsed)> {
+    pub async fn vcek(&self, gen: Gen, chip_id: &[u8; 64], tcb: &SnpTcb, now: i64) -> Got<Vcek> {
         let (chip_id, tcb) = (*chip_id, *tcb);
-        let name = format!(
-            "vcek {} {}",
-            generation.product_name().to_lowercase(),
-            hex::encode(&chip_id[..8])
-        );
-        self.get(
-            super::Vcek::url(generation, &chip_id, &tcb),
-            name,
-            (false, true),
-            now,
-            move |b, _| super::Vcek::verify(b, generation, &chip_id, &tcb),
-        )
-        .await
+        let name = format!("vcek {gen:?} {}", hex::encode(&chip_id[..8])).to_lowercase();
+        let verify = move |b: &[u8], _: Option<&str>| Vcek::verify(b, gen, &chip_id, &tcb);
+        let url = Vcek::url(gen, &chip_id, &tcb);
+        let dates = |v: &Vcek| Dates::window(v.not_before, v.not_after, None);
+        self.get(url, name, (false, true), now, verify, dates).await
     }
 
     /// AMD's CRL for a generation and signer.
     #[cfg(feature = "snp")]
-    pub async fn amd_crl(
-        &self,
-        generation: ProcessorGeneration,
-        signer: super::AmdSigner,
-        now: i64,
-    ) -> Result<(super::AmdCrl, CollateralUsed)> {
-        let mut name = format!("amd-crl {}", generation.product_name().to_lowercase());
-        if signer == super::AmdSigner::Asvk {
-            name.push_str(" vlek");
-        }
-        self.get(
-            super::AmdCrl::url(generation, signer),
-            name,
-            (true, false),
-            now,
-            move |b, _| super::AmdCrl::verify(b, generation, signer),
-        )
-        .await
+    pub async fn amd_crl(&self, gen: Gen, signer: AmdSigner, now: i64) -> Got<AmdCrl> {
+        let vlek = if signer == AmdSigner::Asvk {
+            " vlek"
+        } else {
+            ""
+        };
+        let name = format!("amd-crl {gen:?}{vlek}").to_lowercase();
+        let verify = move |b: &[u8], _: Option<&str>| AmdCrl::verify(b, gen, signer);
+        let url = AmdCrl::url(gen, signer);
+        let dates = |c: &AmdCrl| Dates::window(c.this_update, c.next_update, c.number);
+        self.get(url, name, (true, false), now, verify, dates).await
     }
 
     /// Intel's TCB Info for a platform.
     #[cfg(feature = "tdx")]
-    pub async fn tcb_info(
-        &self,
-        fmspc: &super::Fmspc,
-        now: i64,
-    ) -> Result<(super::TcbInfo, CollateralUsed)> {
+    pub async fn tcb_info(&self, fmspc: &Fmspc, now: i64) -> Got<TcbInfo> {
         let fmspc = *fmspc;
         let name = format!("tcb-info {}", hex::encode(fmspc));
-        self.get(
-            super::TcbInfo::url(&fmspc),
-            name,
-            (true, true),
-            now,
-            move |b, c| super::TcbInfo::verify(b, c, &fmspc),
-        )
-        .await
+        let verify = move |b: &[u8], c: Option<&str>| TcbInfo::verify(b, c, &fmspc);
+        let url = TcbInfo::url(&fmspc);
+        let dates =
+            |t: &TcbInfo| Dates::window(t.issue_date, t.next_update, Some(t.evaluation_number));
+        self.get(url, name, (true, true), now, verify, dates).await
     }
 
     /// Intel's TD QE Identity.
     #[cfg(feature = "tdx")]
-    pub async fn qe_identity(&self, now: i64) -> Result<(super::QeIdentity, CollateralUsed)> {
-        self.get(
-            super::QeIdentity::url(),
-            "qe-identity".into(),
-            (true, false),
-            now,
-            super::QeIdentity::verify,
-        )
-        .await
+    pub async fn qe_identity(&self, now: i64) -> Got<QeIdentity> {
+        let (url, name) = (QeIdentity::url(), "qe-identity".into());
+        let dates =
+            |q: &QeIdentity| Dates::window(q.issue_date, q.next_update, Some(q.evaluation_number));
+        self.get(url, name, (true, false), now, QeIdentity::verify, dates)
+            .await
     }
 
     /// The CRL of an Intel PCK CA.
     #[cfg(feature = "tdx")]
-    pub async fn pck_crl(
-        &self,
-        ca: super::PckCa,
-        now: i64,
-    ) -> Result<(super::PckCrl, CollateralUsed)> {
-        let name = format!("pck-crl {}", ca.name());
-        self.get(
-            super::PckCrl::url(ca),
-            name,
-            (true, false),
-            now,
-            move |b, c| super::PckCrl::verify(b, c, ca),
-        )
-        .await
+    pub async fn pck_crl(&self, ca: PckCa, now: i64) -> Got<PckCrl> {
+        let (url, name) = (PckCrl::url(ca), format!("pck-crl {}", ca.name()));
+        let verify = move |b: &[u8], c: Option<&str>| PckCrl::verify(b, c, ca);
+        let dates = |c: &PckCrl| Dates::window(c.this_update, c.next_update, c.number);
+        self.get(url, name, (true, false), now, verify, dates).await
     }
 
     /// The CRL of the Intel SGX Root CA.
     #[cfg(feature = "tdx")]
-    pub async fn root_crl(&self, now: i64) -> Result<(super::RootCrl, CollateralUsed)> {
-        self.get(
-            super::RootCrl::url(),
-            "root-crl".into(),
-            (true, false),
-            now,
-            |b, _| super::RootCrl::verify(b),
-        )
-        .await
+    pub async fn root_crl(&self, now: i64) -> Got<RootCrl> {
+        let (url, name) = (RootCrl::url(), "root-crl".into());
+        let verify = |b: &[u8], _: Option<&str>| RootCrl::verify(b);
+        let dates = |c: &RootCrl| Dates::window(c.this_update, c.next_update, c.number);
+        self.get(url, name, (true, false), now, verify, dates).await
     }
 
     /// Google's endorsement of a GCE firmware build.
     #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
-    pub async fn gce_endorsement(
-        &self,
-        tee: super::GceTee,
-        measurement: &[u8],
-        now: i64,
-    ) -> Result<(super::GceEndorsement, CollateralUsed)> {
-        let measurement = measurement.to_vec();
-        let kind = match tee {
-            super::GceTee::Tdx => "tdx",
-            super::GceTee::SevSnp => "sevsnp",
-        };
+    pub async fn gce_endorsement(&self, tee: GceTee, m: &[u8], now: i64) -> Got<GceEndorsement> {
+        let (url, m) = (GceEndorsement::url(tee, m), m.to_vec());
         let name = format!(
-            "gce-endorsement {kind} {}",
-            hex::encode(&measurement[..measurement.len().min(8)])
+            "gce-endorsement {tee:?} {}",
+            hex::encode(&m[..m.len().min(8)])
         );
-        let url = super::GceEndorsement::url(tee, &measurement);
-        self.get(url, name, (false, false), now, move |b, _| {
-            super::GceEndorsement::verify(b, tee, &measurement)
-        })
-        .await
+        let verify = move |b: &[u8], _: Option<&str>| GceEndorsement::verify(b, tee, &m);
+        let dates = |e: &GceEndorsement| Dates::window(e.not_before, e.not_after, None);
+        self.get(url, name.to_lowercase(), (false, false), now, verify, dates)
+            .await
     }
 
     /// The keys NRAS signs its tokens with.
     #[cfg(feature = "nvidia-gpu")]
-    pub async fn nras_jwks(&self, now: i64) -> Result<(super::NrasJwks, CollateralUsed)> {
-        self.get(
-            self.nras_jwks_url(),
-            "nras-jwks".into(),
-            (true, false),
-            now,
-            |b, _| super::NrasJwks::verify(b),
-        )
-        .await
+    pub async fn nras_jwks(&self, now: i64) -> Got<NrasJwks> {
+        let (url, name) = (self.nras_jwks_url(), "nras-jwks".into());
+        let verify = |b: &[u8], _: Option<&str>| NrasJwks::verify(b);
+        self.get(url, name, (true, false), now, verify, |_| Dates::default())
+            .await
     }
 
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) fn nras_jwks_url(&self) -> String {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(vendor) = self.vendor() {
-            return super::NrasJwks::url(&vendor.nras.gpu_url);
+            return NrasJwks::url(&vendor.nras.gpu_url);
         }
-        super::NrasJwks::url(crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL)
+        NrasJwks::url(crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL)
     }
 
     /// Refetch the piece at `url`, unless it was checked with the vendor in
@@ -433,13 +391,7 @@ impl Store {
         native
             .mem
             .iter()
-            .map(|(_, e)| CollateralUsed {
-                name: e.spec.name.clone(),
-                from: e.origin,
-                version: e.dates.version,
-                next_update: e.dates.next_update,
-                current: e.dates.current(now),
-            })
+            .map(|(_, e)| CollateralUsed::new(e.spec.name.clone(), e.origin, e.dates, now))
             .collect()
     }
 
