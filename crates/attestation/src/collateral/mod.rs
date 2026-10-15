@@ -5,10 +5,8 @@
 //! evidence names. The [`Store`] gets pieces from held copies, memory, disk
 //! and the vendors, and verifies each on the way in.
 
-#[cfg(feature = "snp")]
-mod amd;
 // Without a platform there is no piece to store.
-#[cfg_attr(
+#![cfg_attr(
     not(any(
         feature = "snp",
         feature = "tdx",
@@ -18,6 +16,9 @@ mod amd;
     )),
     allow(dead_code)
 )]
+
+#[cfg(feature = "snp")]
+mod amd;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod disk;
 #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
@@ -26,16 +27,6 @@ mod gce;
 mod intel;
 #[cfg(feature = "nvidia-gpu")]
 mod nvidia;
-#[cfg_attr(
-    not(any(
-        feature = "snp",
-        feature = "tdx",
-        feature = "gcp-tdx",
-        feature = "gcp-snp",
-        feature = "nvidia-gpu"
-    )),
-    allow(dead_code)
-)]
 mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod vendor;
@@ -52,16 +43,9 @@ pub use store::{CollateralUsed, Source, Store};
 
 /// Why a piece of collateral was refused: it does not parse, its signature
 /// does not verify, or it is not the piece the evidence names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct Refused(pub String);
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Refused {}
 
 impl From<crate::error::AttestationError> for Refused {
     fn from(e: crate::error::AttestationError) -> Self {
@@ -136,6 +120,20 @@ pub(crate) struct Dates {
 }
 
 impl Dates {
+    #[cfg(any(
+        feature = "snp",
+        feature = "tdx",
+        feature = "gcp-tdx",
+        feature = "gcp-snp"
+    ))]
+    pub fn window(this_update: i64, next_update: i64, version: Option<u64>) -> Self {
+        Self {
+            this_update: Some(this_update),
+            next_update: Some(next_update),
+            version,
+        }
+    }
+
     pub fn current(&self, now: i64) -> bool {
         !self.this_update.is_some_and(|t| now < t) && !self.next_update.is_some_and(|t| now > t)
     }
@@ -145,21 +143,6 @@ impl Dates {
     pub fn not_older_than(&self, other: &Dates) -> bool {
         (self.version, self.this_update) >= (other.version, other.this_update)
     }
-}
-
-/// What the store needs to know about every piece.
-#[cfg_attr(
-    not(any(
-        feature = "snp",
-        feature = "tdx",
-        feature = "gcp-tdx",
-        feature = "gcp-snp",
-        feature = "nvidia-gpu"
-    )),
-    allow(dead_code)
-)]
-pub(crate) trait Dated {
-    fn dates(&self) -> Dates;
 }
 
 /// Save a vendor response for `url` in a cache directory, as the store does

@@ -2,7 +2,7 @@
 
 use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 
-use super::{crl_number, AmdSigner, Dated, Dates, Refused};
+use super::{crl_number, AmdSigner, Refused};
 use crate::platforms::snp::certs;
 use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
 use crate::types::{ProcessorGeneration, SnpTcb};
@@ -125,26 +125,6 @@ impl AmdSigner {
         } else {
             AmdSigner::Ask
         })
-    }
-}
-
-impl Dated for Vcek {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.not_before),
-            next_update: Some(self.not_after),
-            version: None,
-        }
-    }
-}
-
-impl Dated for AmdCrl {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.this_update),
-            next_update: Some(self.next_update),
-            version: self.number,
-        }
     }
 }
 

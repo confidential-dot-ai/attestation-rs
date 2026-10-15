@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-use super::{Dated, Dates, Fmspc, PckCa, Refused};
+use super::{Fmspc, PckCa, Refused};
 use crate::platforms::tdx::dcap::{self, Signer};
 
 const INTEL_PCS: &str = "https://api.trustedservices.intel.com";
@@ -181,46 +181,6 @@ impl RootCrl {
             next_update,
             number,
         })
-    }
-}
-
-impl Dated for TcbInfo {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.issue_date),
-            next_update: Some(self.next_update),
-            version: Some(self.evaluation_number),
-        }
-    }
-}
-
-impl Dated for QeIdentity {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.issue_date),
-            next_update: Some(self.next_update),
-            version: Some(self.evaluation_number),
-        }
-    }
-}
-
-impl Dated for PckCrl {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.this_update),
-            next_update: Some(self.next_update),
-            version: self.number,
-        }
-    }
-}
-
-impl Dated for RootCrl {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.this_update),
-            next_update: Some(self.next_update),
-            version: self.number,
-        }
     }
 }
 

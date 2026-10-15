@@ -1,6 +1,6 @@
 //! Google's signed launch endorsements for GCE Confidential VM firmware.
 
-use super::{Dated, Dates, GceTee, Refused};
+use super::{GceTee, Refused};
 use crate::platforms::gcp_endorsement::{check_endorsement, GoldenMeasurement};
 
 const GCE_TCB_INTEGRITY: &str = "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm";
@@ -49,16 +49,6 @@ impl GceEndorsement {
             not_before,
             not_after,
         })
-    }
-}
-
-impl Dated for GceEndorsement {
-    fn dates(&self) -> Dates {
-        Dates {
-            this_update: Some(self.not_before),
-            next_update: Some(self.not_after),
-            version: None,
-        }
     }
 }
 

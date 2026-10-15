@@ -1,6 +1,6 @@
 //! NVIDIA's NRAS signing keys.
 
-use super::{Dated, Dates, Refused};
+use super::Refused;
 use crate::platforms::nvidia_gpu::provider::{jwks_url_for_endpoint, Jwks};
 
 /// The keys NVIDIA's NRAS signs its attestation tokens with.
@@ -24,12 +24,6 @@ impl NrasJwks {
             return Err("JWKS has no keys".into());
         }
         Ok(Self { jwks })
-    }
-}
-
-impl Dated for NrasJwks {
-    fn dates(&self) -> Dates {
-        Dates::default()
     }
 }
 
