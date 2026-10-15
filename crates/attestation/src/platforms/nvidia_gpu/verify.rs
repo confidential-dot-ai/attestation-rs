@@ -68,19 +68,13 @@ pub async fn gather_bundle(
 async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
     match store.vendor() {
         Some(vendor) => vendor.nras_attest(request).await,
-        None => Err(AttestationError::CollateralUnavailable {
-            collateral: "NRAS attestation".into(),
-            reason: crate::error::Unavailable::Offline,
-        }),
+        None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 async fn nras_attest(_store: &Store, _request: &NrasRequest) -> Result<serde_json::Value> {
-    Err(AttestationError::CollateralUnavailable {
-        collateral: "NRAS attestation".into(),
-        reason: crate::error::Unavailable::Offline,
-    })
+    Err(crate::error::Unavailable::offline().into_error("NRAS attestation"))
 }
 
 /// The `kid` a compact JWS names, if it can be read.

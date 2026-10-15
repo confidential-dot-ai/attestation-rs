@@ -24,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
-use crate::error::{AttestationError, Result, Unavailable};
+use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::snp::evidence::SnpEvidence;
@@ -98,17 +98,10 @@ impl Platform for GcpSnp {
             store.gce_endorsement(GceTee::SevSnp, &report.measurement, now)
         );
         let (snp, mut used) = snp?;
-        let endorsement = match endorsement {
-            Ok((endorsement, u)) => {
-                used.push(u);
-                Some(endorsement)
-            }
-            Err(AttestationError::CollateralUnavailable {
-                reason: Unavailable::NotFound { .. },
-                ..
-            }) => None,
-            Err(e) => return Err(e),
-        };
+        let endorsement = endorsement?.map(|(endorsement, u)| {
+            used.push(u);
+            endorsement
+        });
         Ok((GcpSnpCollateral { snp, endorsement }, used))
     }
 
@@ -146,6 +139,7 @@ mod tests {
     use crate::platforms::snp::verify::parse_report;
     use crate::testing;
     use crate::types::ProcessorGeneration;
+    use crate::AttestationError;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     const LIVE_REPORT_V5: &[u8] = include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");

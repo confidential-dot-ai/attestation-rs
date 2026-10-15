@@ -586,29 +586,6 @@ async fn attest_rejects_disallowed_platform_before_hardware_access() {
     assert_eq!(json["error"], "bad_request");
 }
 
-#[tokio::test]
-async fn certs_status_returns_ok() {
-    let state = test_state();
-    let app = build_api_router(state);
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/certs/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["collateral"], serde_json::json!([]));
-}
-
 // --- Attestation disabled tests ---
 
 #[tokio::test]
@@ -679,7 +656,7 @@ async fn rejects_without_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -704,7 +681,7 @@ async fn accepts_valid_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .header("authorization", "Bearer test-key-123")
                 .body(Body::empty())
                 .unwrap(),
@@ -712,7 +689,7 @@ async fn accepts_valid_api_key() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -725,7 +702,7 @@ async fn rejects_invalid_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .header("authorization", "Bearer wrong-key")
                 .body(Body::empty())
                 .unwrap(),
@@ -749,14 +726,14 @@ async fn no_auth_allows_all_requests() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // --- Input validation tests ---

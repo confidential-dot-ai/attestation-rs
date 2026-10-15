@@ -64,17 +64,12 @@ impl Vendor {
             Ok(raw) => return Ok(raw),
             Err(e) => e,
         };
-        let wait = match &err {
-            Unavailable::RateLimited {
-                retry_after: Some(s),
-            } if *s > MAX_RETRY_AFTER => return Err(err),
-            Unavailable::RateLimited {
-                retry_after: Some(s),
-            } => Duration::from_secs(*s),
-            Unavailable::RateLimited { retry_after: None } | Unavailable::Unreachable { .. } => {
-                retry_delay()
-            }
-            Unavailable::Status { status } if *status == 408 || *status >= 500 => retry_delay(),
+        let wait = match (err.status, err.retry_after) {
+            _ if err.not_found() => return Err(err),
+            (_, Some(s)) if s > MAX_RETRY_AFTER => return Err(err),
+            (_, Some(s)) => Duration::from_secs(s),
+            (None | Some(408 | 429), None) => retry_delay(),
+            (Some(s), None) if s >= 500 => retry_delay(),
             _ => return Err(err),
         };
         tokio::time::sleep(wait).await;
@@ -82,9 +77,7 @@ impl Vendor {
     }
 
     async fn get_once(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Unavailable> {
-        let unreachable = |e: reqwest::Error| Unavailable::Unreachable {
-            detail: e.to_string(),
-        };
+        let unreachable = |e: reqwest::Error| Unavailable::detail(format!("unreachable ({e})"));
         let response = self.client.get(url).send().await.map_err(unreachable)?;
         check_status(&response)?;
         let issuer_chain = ISSUER_CHAIN_HEADERS
@@ -104,19 +97,21 @@ fn check_status(response: &reqwest::Response) -> Result<(), Unavailable> {
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    match status {
-        200..=299 => Ok(()),
-        404 | 410 => Err(Unavailable::NotFound { status }),
-        429 => Err(Unavailable::RateLimited { retry_after }),
-        _ if retry_after.is_some() => Err(Unavailable::RateLimited { retry_after }),
-        _ => Err(Unavailable::Status { status }),
-    }
+    let detail = match (status, retry_after) {
+        (200..=299, _) => return Ok(()),
+        (404 | 410, _) => format!("not found (HTTP {status})"),
+        (_, Some(s)) => format!("HTTP {status}, retry after {s}s"),
+        _ => format!("HTTP {status}"),
+    };
+    Err(Unavailable {
+        status: Some(status),
+        retry_after,
+        detail,
+    })
 }
 
 async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, Unavailable> {
-    let too_large = || Unavailable::Unreachable {
-        detail: format!("body exceeds {MAX_BODY} bytes"),
-    };
+    let too_large = || Unavailable::detail(format!("body exceeds {MAX_BODY} bytes"));
     if response
         .content_length()
         .is_some_and(|l| l > MAX_BODY as u64)
@@ -127,9 +122,7 @@ async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, Unavailab
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| Unavailable::Unreachable {
-            detail: format!("body: {e}"),
-        })?
+        .map_err(|e| Unavailable::detail(format!("body: {e}")))?
     {
         if body.len() + chunk.len() > MAX_BODY {
             return Err(too_large());
@@ -210,22 +203,16 @@ impl Vendor {
         if let Some(key) = &self.nras.service_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
-        let unavailable = |reason| AttestationError::CollateralUnavailable {
-            collateral: "NRAS attestation".into(),
-            reason,
-        };
-        let response = req.send().await.map_err(|e| {
-            unavailable(Unavailable::Unreachable {
-                detail: e.to_string(),
-            })
-        })?;
+        let unavailable = |e: Unavailable| e.into_error("NRAS attestation");
+        let response = req
+            .send()
+            .await
+            .map_err(|e| unavailable(Unavailable::detail(format!("unreachable ({e})"))))?;
         let status = response.status();
         match check_status(&response) {
             Ok(()) => {}
-            Err(reason @ (Unavailable::RateLimited { .. } | Unavailable::Status { .. }))
-                if status.is_server_error() || status.as_u16() == 429 =>
-            {
-                return Err(unavailable(reason))
+            Err(e) if status.is_server_error() || status.as_u16() == 429 => {
+                return Err(unavailable(e))
             }
             Err(_) => {
                 let body = read_body(response).await.unwrap_or_default();

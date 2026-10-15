@@ -21,11 +21,6 @@ pub enum ApiError {
     #[error("invalid request: {0}")]
     Body(#[from] JsonRejection),
 
-    /// `/certs/refresh` could not refetch some collateral (the old copies
-    /// are kept).
-    #[error("{0}")]
-    RefreshFailed(String),
-
     #[error("token issuer not configured")]
     TokenNotConfigured,
 
@@ -66,7 +61,6 @@ impl IntoResponse for ApiError {
                 }
                 _ => (StatusCode::BAD_REQUEST, "bad_request"),
             },
-            ApiError::RefreshFailed(_) => (StatusCode::BAD_GATEWAY, "collateral_unavailable"),
             ApiError::TokenNotConfigured => (StatusCode::BAD_REQUEST, "token_not_configured"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
@@ -109,7 +103,8 @@ mod tests {
     async fn collateral_this_service_could_not_fetch_is_an_upstream_failure() {
         let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
             collateral: "amd-crl genoa".into(),
-            reason: attestation::Unavailable::Status { status: 503 },
+            retry_after: None,
+            detail: "HTTP 503".into(),
         })
         .into_response();
 
