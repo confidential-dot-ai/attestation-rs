@@ -10,7 +10,7 @@ use sev::parser::ByteParser;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{AmdCrl, AmdSigner, AmdVcek, Doc, DocKey, Provenance, Store};
+use crate::collateral::{AmdCrl, AmdSigner, CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::types::{Claims, PlatformType, ProcessorGeneration, SnpTcb};
@@ -152,16 +152,10 @@ pub(crate) fn snp_tcb(tcb: &sev::firmware::host::TcbVersion) -> SnpTcb {
 
 /// What SEV-SNP verification needs besides the evidence.
 pub struct SnpCollateral {
-    pub vek: Vek,
-    pub crl: Doc<AmdCrl>,
-}
-
-/// The key the report is signed with.
-pub enum Vek {
-    /// Carried in the evidence (VCEK or VLEK).
-    Inline(Vec<u8>),
-    /// Fetched from AMD KDS.
-    Fetched(Doc<AmdVcek>),
+    /// The VEK the report is signed with (DER): carried in the evidence (a
+    /// VCEK or VLEK), or the VCEK fetched from AMD KDS.
+    pub vek: Vec<u8>,
+    pub crl: AmdCrl,
 }
 
 impl SnpCollateral {
@@ -174,44 +168,31 @@ impl SnpCollateral {
         inline: Option<Vec<u8>>,
         store: &Store,
         now: i64,
-    ) -> Result<Self> {
-        match inline {
-            Some(der) => Ok(Self {
-                crl: store.get(AmdCrl::for_vek(gen, &der)?, now).await?,
-                vek: Vek::Inline(der),
-            }),
-            None => {
-                let crl = AmdCrl {
-                    generation: gen,
-                    signer: AmdSigner::Ask,
-                };
-                let (vcek, crl) = futures_util::join!(
-                    store.get(AmdVcek::for_report(report, gen)?, now),
-                    store.get(crl, now)
-                );
-                let vcek = vcek?;
-                check_report(report, &vcek.value, gen, now)?;
-                Ok(Self {
-                    vek: Vek::Fetched(vcek),
-                    crl: crl?,
-                })
-            }
+    ) -> Result<(Self, Vec<CollateralUsed>)> {
+        if let Some(vek) = inline {
+            let (crl, used) = store.amd_crl(gen, AmdSigner::of_vek(&vek)?, now).await?;
+            return Ok((Self { vek, crl }, vec![used]));
         }
-    }
-
-    fn vek(&self) -> &[u8] {
-        match &self.vek {
-            Vek::Inline(der) => der,
-            Vek::Fetched(doc) => &doc.value,
+        if report.chip_id.iter().all(|&b| b == 0) {
+            return Err(AttestationError::CertChainError(
+                "evidence carries no VEK and the report's CHIP_ID is masked".into(),
+            ));
         }
-    }
-
-    pub fn provenance(&self) -> Vec<Provenance> {
-        let mut docs = vec![self.crl.provenance()];
-        if let Vek::Fetched(vcek) = &self.vek {
-            docs.insert(0, vcek.provenance());
+        let tcb = snp_tcb(&report.reported_tcb);
+        if gen == ProcessorGeneration::Turin && tcb.fmc.is_none() {
+            return Err(AttestationError::QuoteParseFailed(
+                "Turin report missing FMC TCB field".into(),
+            ));
         }
-        docs
+        let (vcek, crl) = futures_util::join!(
+            store.vcek(gen, &report.chip_id, &tcb, now),
+            store.amd_crl(gen, AmdSigner::Ask, now)
+        );
+        let (vcek, vcek_used) = vcek?;
+        check_report(report, &vcek.der, gen, now)?;
+        let (crl, crl_used) = crl?;
+        let collateral = Self { vek: vcek.der, crl };
+        Ok((collateral, vec![vcek_used, crl_used]))
     }
 }
 
@@ -233,7 +214,11 @@ impl Platform for Snp {
     /// issuer. A report that carries its VEK is checked before anything is
     /// fetched; otherwise an unverified CHIP_ID names the VCEK to fetch, and
     /// the report is checked against it before the collateral is returned.
-    async fn gather(evidence: &SnpEvidence, store: &Store, now: i64) -> Result<SnpCollateral> {
+    async fn gather(
+        evidence: &SnpEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(SnpCollateral, Vec<CollateralUsed>)> {
         let (report, gen, inline) = genuine_report(evidence, now)?;
         SnpCollateral::gather(&report, gen, inline, store, now).await
     }
@@ -246,17 +231,13 @@ impl Platform for Snp {
     ) -> Result<SnpResult> {
         params.validate()?;
         let (_, report, gen) = parse_evidence(evidence)?;
-        let vek = collateral.vek();
+        let vek = &collateral.vek;
         check_report(&report, vek, gen, now)?;
 
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
         check_report_bindings(&mut result, &report, params)?;
         Ok(result)
-    }
-
-    fn provenance(collateral: &SnpCollateral) -> Vec<Provenance> {
-        collateral.provenance()
     }
 }
 
@@ -339,20 +320,19 @@ fn inline_vek(evidence: &SnpEvidence) -> Result<Option<Vec<u8>>> {
 /// was stored; here it must be the one for this VEK.
 pub(crate) fn vek_revoked(
     vek_der: &[u8],
-    crl: &Doc<AmdCrl>,
+    crl: &AmdCrl,
     processor_gen: ProcessorGeneration,
 ) -> Result<bool> {
-    let want = AmdCrl::for_vek(processor_gen, vek_der)?;
-    if crl.key != want {
+    let signer = AmdSigner::of_vek(vek_der)?;
+    if (crl.generation, crl.signer) != (processor_gen, signer) {
         return Err(AttestationError::CertChainError(format!(
-            "collateral has the {} CRL, the VEK needs {}",
-            DocKey::from(crl.key),
-            DocKey::from(want)
+            "collateral has the {:?} {:?} CRL, the VEK needs {processor_gen:?} {signer:?}",
+            crl.generation, crl.signer
         )));
     }
     let (_, issuer) = X509Certificate::from_der(vek_issuer(vek_der, processor_gen)?)
         .map_err(|e| AttestationError::CertChainError(format!("VEK issuer x509 parse: {e}")))?;
-    let (_, list) = CertificateRevocationList::from_der(&crl.value)
+    let (_, list) = CertificateRevocationList::from_der(&crl.der)
         .map_err(|e| AttestationError::CertChainError(format!("AMD CRL parse: {e}")))?;
     let revoked = list
         .iter_revoked_certificates()
@@ -1313,15 +1293,14 @@ mod tests {
         verify_vek_validity_period(&leaf, now_secs()).expect("current VEK must pass");
     }
 
-    fn genoa_crl(der: Vec<u8>) -> Doc<AmdCrl> {
-        Doc {
-            key: AmdCrl {
-                generation: ProcessorGeneration::Genoa,
-                signer: AmdSigner::Ask,
-            },
-            value: std::sync::Arc::new(der),
-            info: Default::default(),
-            source: crate::collateral::Source::Held,
+    fn genoa_crl(der: Vec<u8>) -> AmdCrl {
+        AmdCrl {
+            der,
+            generation: ProcessorGeneration::Genoa,
+            signer: AmdSigner::Ask,
+            this_update: 0,
+            next_update: 0,
+            number: None,
         }
     }
 
@@ -1340,19 +1319,17 @@ mod tests {
         );
         let gen = ProcessorGeneration::Genoa;
         assert!(vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(listing), gen).unwrap());
-        let amd = testing::raw("2026-10-14/amd_crl_genoa.der", None).body;
+        let amd = testing::raw("2026-10-14/amd_crl_genoa.der", None).0;
         assert!(!vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(amd), gen).unwrap());
     }
 
     #[test]
     fn a_crl_for_another_generation_or_signer_is_refused() {
         let mut crl = genoa_crl(Vec::new());
-        crl.key.generation = ProcessorGeneration::Milan;
+        crl.generation = ProcessorGeneration::Milan;
         assert!(vek_revoked(LIVE_VCEK_GENOA, &crl, ProcessorGeneration::Genoa).is_err());
-        crl.key = AmdCrl {
-            generation: ProcessorGeneration::Genoa,
-            signer: AmdSigner::Asvk,
-        };
+        crl.generation = ProcessorGeneration::Genoa;
+        crl.signer = AmdSigner::Asvk;
         assert!(vek_revoked(LIVE_VCEK_GENOA, &crl, ProcessorGeneration::Genoa).is_err());
     }
 

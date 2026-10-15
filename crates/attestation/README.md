@@ -103,7 +103,7 @@ if let PlatformResult::Tdx(result) = &verified.platform {
 | Evidence for a platform with no params in `Policies` | `Err(PlatformNotAllowed)` |
 | Bad signature, cert chain, QE binding, event log, GPU nonce binding (overall or per device) | `Err` |
 | Collateral could not be fetched (AMD KDS, Intel PCS, NRAS) | `Err(CollateralUnavailable)`, retryable |
-| A collateral document that is not the vendor's, or that the vendor does not publish for this chip or platform | `Err`, not retryable |
+| Collateral that is not the vendor's, or a VCEK or TCB Info the vendor does not publish for this chip or platform | `Err`, not retryable |
 | Measurement, RTMR, launch digest, `report_data` or init data mismatch | value: `*_match: Some(false)` |
 | Debug, VMPL, minimum TCB, TDX TCB status (including no matching level), revoked TDX PCK, GPU device policy | value |
 | A check you did not ask for | value: `None` |
@@ -120,13 +120,13 @@ let verifier = Verifier::new(Context::new().with_cache_dir("/var/cache/attestati
 let verified = verifier.verify(evidence_json, &policies).await?;
 ```
 
-A `Context` holds the collateral store: documents are fetched once, checked
-against the vendor roots compiled into the crate, kept in memory (and in
-`with_cache_dir`, if given), and refreshed near their nextUpdate.
-`Context::offline()` never touches the network: a document not held is
-`CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
+A `Context` holds the collateral store: each piece of collateral is fetched
+once, verified against the vendor roots compiled into the crate, kept in
+memory (and in `with_cache_dir`, if given) by its vendor URL, and refreshed
+near its nextUpdate. `Context::offline()` never touches the network: a piece
+not held is `CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
 certificate, CRL, collateral and token validity. A platform's
-`gather(evidence, ctx)` gets its collateral; its `verify(evidence, params,
+`gather(evidence, store, now)` gets its collateral; its `verify(evidence, params,
 collateral, now)` is pure.
 
 ### Attester (Guest-Side Agent)

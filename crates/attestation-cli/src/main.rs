@@ -614,11 +614,11 @@ async fn cmd_verify(args: VerifyArgs) {
         );
     }
     for c in &verified.collateral {
-        let p = &c.provenance;
-        let version = p.info.version.map(|v| format!(" v{v}")).unwrap_or_default();
+        let version = c.version.map(|v| format!(" v{v}")).unwrap_or_default();
+        let current = if c.current { "current" } else { "not current" };
         eprintln!(
-            "  Collateral: {}{version}, {:?} ({:?})",
-            p.document, c.status, p.source
+            "  Collateral: {}{version}, {current} ({:?})",
+            c.name, c.from
         );
     }
     eprintln!("  Passed: {passed}");

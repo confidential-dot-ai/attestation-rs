@@ -63,9 +63,9 @@ This writes an ES module and the `.wasm` binary to `pkg/`:
 - `pkg/attestation_wasm_bg.wasm` — the WASM blob
 
 Serve `pkg/` over HTTP (browsers won't load WASM from `file://`). WASM does
-no network or disk I/O, so the caller fetches the vendor documents the evidence
-needs and hands them over; each is checked against the vendor roots compiled
-into the verifier, exactly as on native:
+no network or disk I/O, so the caller fetches the vendor URLs the evidence
+needs and hands the responses over; each is verified against the vendor roots
+compiled into the verifier, exactly as on native:
 
 ```html
 <script type="module">
@@ -74,13 +74,15 @@ into the verifier, exactly as on native:
   await init(); // fetches and instantiates the .wasm blob
 
   // envelope: { platform, evidence } JSON string
-  const needed = JSON.parse(await collateral_needed(envelope));
+  const needed = JSON.parse(await collateral_needed(envelope)); // vendor URLs
+  const chainHeaders = ['TCB-Info-Issuer-Chain', 'SGX-Enclave-Identity-Issuer-Chain',
+    'SGX-PCK-CRL-Issuer-Chain'];
   const collateral = [];
-  for (const doc of needed) {
-    const resp = await fetch(doc.url); // AMD KDS, Intel PCS (via a proxy: no CORS)
-    const header = doc.issuer_chain_header && resp.headers.get(doc.issuer_chain_header);
+  for (const url of needed) {
+    const resp = await fetch(url); // AMD KDS, Intel PCS (via a proxy: no CORS)
+    const header = chainHeaders.map((h) => resp.headers.get(h)).find(Boolean);
     collateral.push({
-      key: doc.key,
+      url,
       body: btoa(String.fromCharCode(...new Uint8Array(await resp.arrayBuffer()))),
       issuer_chain: header ? decodeURIComponent(header) : undefined,
     });
@@ -95,8 +97,8 @@ into the verifier, exactly as on native:
 
 `evaluate(envelope, platforms, report_data, init_data, rtmr3, min_tcb,
 collateral)` throws only when the evidence cannot be evaluated (malformed, not
-genuine, platform not accepted, a needed document missing or not the
-vendor's); mismatches, policy flags and expired documents are fields, so the
+genuine, platform not accepted, needed collateral missing or not the
+vendor's); mismatches, policy flags and expired collateral are fields, so the
 caller must read `passed`.
 
 For a Node.js end-to-end example (generate live evidence, fetch its collateral,
@@ -147,22 +149,22 @@ them; an empty set is invalid params (`Err`).
 
 Collateral is what a verifier needs besides the evidence: AMD VCEKs and CRLs,
 Intel TCB Info, QE Identity and CRLs, Google's launch endorsements, NVIDIA's
-NRAS keys. The library fetches each document from its vendor, checks its
-signature against the roots compiled into the crate and that it is the
-document asked for, and keeps it: one store is shared by every
-`attestation::verify` call in the process. A document is replaced only by a
+NRAS keys. The library fetches each piece from its vendor, verifies its
+signature against the roots compiled into the crate and that it is the piece
+the evidence names, and keeps it by its vendor URL: one store is shared by
+every `attestation::verify` call in the process. A piece is replaced only by a
 valid copy that is not older, refetched when it nears its nextUpdate, and kept
-when a refetch fails. The CLI also saves documents in the user cache directory
-and reuses them in later runs; `--offline` uses only those.
+when a refetch fails. The CLI also saves collateral in the user cache directory
+and reuses it in later runs; `--offline` uses only that.
 
 - No copy anywhere is `CollateralUnavailable` (the only retryable error; it
-  names the document and why: unreachable, not found, rate limited with the
+  names the piece and why: unreachable, not found, rate limited with the
   vendor's Retry-After, or an HTTP status).
-- A document that is not the vendor's (bad signature, wrong document) is
+- A piece that is not the vendor's (bad signature, wrong piece) is
   refused like evidence that is not genuine, and so is a VCEK or TCB Info the
   vendor does not publish (404) for the chip or platform the evidence names.
-- A document past its nextUpdate is a value: the result lists every document
-  used (`collateral`), with its version, window, source and status, and
+- A piece past its nextUpdate is a value: the result lists every piece used
+  (`collateral`: `name`, `from`, `version`, `next_update`, `current`), and
   `passed()` is false unless all are current.
 
 SEV-SNP (`snp`, `gcp-snp`, `az-snp`) checks the VEK's issuing ASK/ASVK against

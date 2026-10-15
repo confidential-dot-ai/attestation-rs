@@ -6,7 +6,7 @@ use scroll::Pread;
 use serde::{Deserialize, Serialize};
 
 use crate::collateral::{
-    Doc, IntelPckCrl, IntelQeIdentity, IntelRootCrl, IntelTcbInfo, Provenance, Store,
+    CollateralUsed, Fmspc, PckCa, PckCrl, QeIdentity, RootCrl, Store, TcbInfo,
 };
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
@@ -461,10 +461,10 @@ impl TdxResult {
 /// What TDX verification needs besides the evidence: Intel's collateral for
 /// the quote's platform.
 pub struct TdxCollateral {
-    pub tcb_info: Doc<IntelTcbInfo>,
-    pub qe_identity: Doc<IntelQeIdentity>,
-    pub pck_crl: Doc<IntelPckCrl>,
-    pub root_crl: Doc<IntelRootCrl>,
+    pub tcb_info: TcbInfo,
+    pub qe_identity: QeIdentity,
+    pub pck_crl: PckCrl,
+    pub root_crl: RootCrl,
 }
 
 impl TdxCollateral {
@@ -475,37 +475,31 @@ impl TdxCollateral {
         quote: &TdxQuote,
         store: &Store,
         now: i64,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<CollateralUsed>)> {
         let pck = PckChain::of(quote_bytes, quote)?;
         let (tcb_info, qe_identity, pck_crl, root_crl) = futures_util::join!(
-            store.get(IntelTcbInfo { fmspc: pck.fmspc }, now),
-            store.get(IntelQeIdentity {}, now),
-            store.get(pck.crl, now),
-            store.get(IntelRootCrl {}, now)
+            store.tcb_info(&pck.fmspc, now),
+            store.qe_identity(now),
+            store.pck_crl(pck.ca, now),
+            store.root_crl(now)
         );
-        Ok(Self {
-            tcb_info: tcb_info?,
-            qe_identity: qe_identity?,
-            pck_crl: pck_crl?,
-            root_crl: root_crl?,
-        })
-    }
-
-    pub fn provenance(&self) -> Vec<Provenance> {
-        vec![
-            self.tcb_info.provenance(),
-            self.qe_identity.provenance(),
-            self.pck_crl.provenance(),
-            self.root_crl.provenance(),
-        ]
+        let ((tcb_info, u1), (qe_identity, u2), (pck_crl, u3), (root_crl, u4)) =
+            (tcb_info?, qe_identity?, pck_crl?, root_crl?);
+        let collateral = Self {
+            tcb_info,
+            qe_identity,
+            pck_crl,
+            root_crl,
+        };
+        Ok((collateral, vec![u1, u2, u3, u4]))
     }
 }
 
 /// What the quote's PCK chain says about which collateral applies.
 struct PckChain {
     der: Vec<Vec<u8>>,
-    fmspc: String,
-    crl: IntelPckCrl,
+    fmspc: Fmspc,
+    ca: PckCa,
 }
 
 impl PckChain {
@@ -515,7 +509,7 @@ impl PckChain {
         let der = super::dcap::parse_pem_to_der(auth.pck_cert_chain_pem)?;
         Ok(Self {
             fmspc: super::dcap::extract_fmspc_from_pck_der(&der)?,
-            crl: IntelPckCrl::for_pck_chain(&der)?,
+            ca: super::dcap::determine_ca_type_from_der(&der)?,
             der,
         })
     }
@@ -537,7 +531,11 @@ impl Platform for Tdx {
 
     /// The quote's signature and PCK chain are verified before anything is
     /// fetched, so a forged quote never names collateral.
-    async fn gather(evidence: &TdxEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+    async fn gather(
+        evidence: &TdxEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
         TdxCollateral::gather(&quote_bytes, &quote, store, now).await
     }
@@ -591,10 +589,6 @@ impl Platform for Tdx {
 
         check_collateral(&mut result, &quote_bytes, &quote, params, collateral, now)?;
         Ok(result)
-    }
-
-    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
-        collateral.provenance()
     }
 }
 
@@ -667,24 +661,24 @@ pub(crate) fn check_collateral(
     now: i64,
 ) -> Result<()> {
     let pck = PckChain::of(quote_bytes, quote)?;
-    if collateral.tcb_info.key.fmspc != pck.fmspc || collateral.pck_crl.key != pck.crl {
+    if collateral.tcb_info.fmspc != pck.fmspc || collateral.pck_crl.ca != pck.ca {
         return Err(AttestationError::CertChainError(
             "the collateral is not for this quote's platform".into(),
         ));
     }
-    let pck_revoked = super::dcap::cert_revoked_from_der(&pck.der, &collateral.pck_crl.value)?
-        || super::dcap::intermediate_ca_revoked_from_der(&pck.der, &collateral.root_crl.value)?;
+    let pck_revoked = super::dcap::cert_revoked_from_der(&pck.der, &collateral.pck_crl.der)?
+        || super::dcap::intermediate_ca_revoked_from_der(&pck.der, &collateral.root_crl.der)?;
 
     let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
     let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
     let mut status = super::dcap::evaluate_tcb_status(
-        &collateral.tcb_info.value,
+        &collateral.tcb_info.json,
         &quote.body.tee_tcb_svn,
         &pck.der,
         now,
     )?;
     let qe_status =
-        super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.value)?;
+        super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
     status.qe_tcb_status = Some(qe_status);
 

@@ -1,8 +1,12 @@
 //! Everything a platform verifier gets from outside: the collateral store
 //! and the evaluation time.
 
-use crate::collateral::{DocKey, Raw, Store};
+use crate::collateral::Store;
 use crate::error::{AttestationError, Result};
+
+/// A vendor response the caller already has: the URL it came from, the body,
+/// and the issuer chain Intel PCS sent in a header (PEM), if any.
+pub type HeldResponse = (String, Vec<u8>, Option<String>);
 
 /// The collateral store and evaluation time shared by every platform
 /// verifier. Construct once and reuse: the store keeps what it fetched.
@@ -14,7 +18,7 @@ pub struct Context {
 
 impl Context {
     /// Collateral from memory and the vendors, evaluated at the current time.
-    /// On wasm32 there is no network: only held collateral ([`Self::with_held`]).
+    /// On wasm32 there is no network: only held responses ([`Self::with_held`]).
     #[must_use]
     pub fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
@@ -25,7 +29,7 @@ impl Context {
     }
 
     /// No network: collateral only from what is held, in memory or on disk. A
-    /// document held nowhere is
+    /// piece held nowhere is
     /// [`CollateralUnavailable`](AttestationError::CollateralUnavailable).
     #[must_use]
     pub fn offline() -> Self {
@@ -36,15 +40,15 @@ impl Context {
         Self { store, time: None }
     }
 
-    /// Only `documents`: no memory, disk or network. The store records what
-    /// it was asked for and did not hold ([`Store::missing`]).
+    /// Only `responses`: no memory, disk or network. The store records the
+    /// URLs it was asked for and did not hold ([`Store::missing`]).
     #[must_use]
-    pub fn held(documents: impl IntoIterator<Item = (DocKey, Raw)>) -> Self {
+    pub fn held(responses: impl IntoIterator<Item = HeldResponse>) -> Self {
         Self {
             store: Store::held_only(),
             time: None,
         }
-        .with_held(documents)
+        .with_held(responses)
     }
 
     /// Keep collateral in `dir` across processes, and read it from there.
@@ -57,17 +61,17 @@ impl Context {
         self
     }
 
-    /// Use these vendor documents before any other source. Each is checked
+    /// Use these vendor responses before any other source. Each is verified
     /// like a fetched one.
     #[must_use]
-    pub fn with_held(mut self, documents: impl IntoIterator<Item = (DocKey, Raw)>) -> Self {
-        for (key, raw) in documents {
-            self.store.hold(key, raw);
+    pub fn with_held(mut self, responses: impl IntoIterator<Item = HeldResponse>) -> Self {
+        for (url, body, issuer_chain) in responses {
+            self.store.hold(url, body, issuer_chain);
         }
         self
     }
 
-    /// Fetch every vendor document from `{base}/{vendor host}/{path}`.
+    /// Fetch all collateral from `{base}/{vendor host}/{path}`.
     #[cfg(not(target_arch = "wasm32"))]
     #[doc(hidden)]
     #[must_use]

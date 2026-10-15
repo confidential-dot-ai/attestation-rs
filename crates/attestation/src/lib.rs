@@ -42,8 +42,6 @@
 use std::sync::OnceLock;
 
 pub mod collateral;
-
-use collateral::Provenance;
 pub mod context;
 pub mod error;
 pub mod platform;
@@ -54,9 +52,10 @@ pub mod utils;
 #[cfg(all(test, any(feature = "snp", feature = "tdx")))]
 mod testing;
 
-pub use context::Context;
+pub use collateral::CollateralUsed;
+pub use context::{Context, HeldResponse};
 pub use error::{AttestationError, Result, Unavailable};
-pub use platform::{CollateralUsed, Platform, PlatformResult, Policies, Verified};
+pub use platform::{Platform, PlatformResult, Policies, Verified};
 #[cfg(feature = "az-snp")]
 pub use platforms::az_snp::{AzSnp, AzSnpParams, AzSnpResult};
 #[cfg(feature = "az-tdx")]
@@ -372,14 +371,11 @@ impl Verifier {
         #[cfg(feature = "nvidia-gpu")]
         let (gpu, used) = match (envelope.nvidia_gpu, &policies.gpu) {
             (Some(bundle), Some(params)) => {
-                let collateral =
+                let (collateral, jwks) =
                     platforms::nvidia_gpu::gather_bundle(&bundle, params, self.ctx.store(), now)
                         .await?;
                 let gpu = platforms::nvidia_gpu::verify_bundle(&bundle, params, &collateral, now)?;
-                (
-                    Some(gpu),
-                    [used, vec![collateral.jwks.provenance()]].concat(),
-                )
+                (Some(gpu), [used, vec![jwks]].concat())
             }
             _ => (None, used),
         };
@@ -388,7 +384,7 @@ impl Verifier {
             platform,
             #[cfg(feature = "nvidia-gpu")]
             gpu,
-            collateral: CollateralUsed::at(used, now),
+            collateral: used,
         })
     }
 
@@ -399,7 +395,7 @@ impl Verifier {
         evidence: serde_json::Value,
         policies: &Policies,
         now: i64,
-    ) -> Result<(PlatformResult, Vec<Provenance>)> {
+    ) -> Result<(PlatformResult, Vec<CollateralUsed>)> {
         let store = self.ctx.store();
         match platform {
             #[cfg(feature = "snp")]
@@ -467,14 +463,14 @@ async fn run<P: Platform>(
     params: Option<&P::Params>,
     store: &collateral::Store,
     now: i64,
-) -> Result<(P::Result, Vec<Provenance>)> {
+) -> Result<(P::Result, Vec<CollateralUsed>)> {
     let params = params.ok_or_else(|| AttestationError::PlatformNotAllowed(P::KIND.to_string()))?;
     let evidence: P::Evidence = serde_json::from_value(evidence)
         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
     P::validate(params)?;
-    let collateral = P::gather(&evidence, store, now).await?;
+    let (collateral, used) = P::gather(&evidence, store, now).await?;
     let result = P::verify(&evidence, params, &collateral, now)?;
-    Ok((result, P::provenance(&collateral)))
+    Ok((result, used))
 }
 
 impl Default for Verifier {
@@ -486,7 +482,7 @@ impl Default for Verifier {
 /// Verify attestation evidence from a self-describing JSON envelope.
 ///
 /// Collateral comes from one store shared by every call in the process,
-/// which fetches each document from its vendor once and keeps it.
+/// which fetches each piece from its vendor once and keeps it.
 ///
 /// # Errors
 ///
@@ -594,8 +590,7 @@ mod tests {
         assert!(verified
             .collateral
             .iter()
-            .all(|c| c.status == collateral::Freshness::Current
-                && c.provenance.source == collateral::Source::Held));
+            .all(|c| c.current && c.from == collateral::Source::Held));
         assert!(verified.passed());
 
         // 2026-12-01: past the nextUpdate of all but the Root CA CRL.
@@ -608,10 +603,7 @@ mod tests {
             .await
             .expect("expired collateral is a value");
         assert!(verified.platform.passed());
-        let expired = verified
-            .collateral
-            .iter()
-            .filter(|c| c.status == collateral::Freshness::Expired);
+        let expired = verified.collateral.iter().filter(|c| !c.current);
         assert_eq!(expired.count(), 3);
         assert!(!verified.passed());
     }
@@ -624,7 +616,7 @@ mod tests {
         };
         let ctx = crate::testing::context(crate::testing::intel());
         let now = crate::testing::NOW;
-        let collateral = Tdx::gather(&evidence, ctx.store(), now).await.unwrap();
+        let (collateral, _) = Tdx::gather(&evidence, ctx.store(), now).await.unwrap();
         let answer = || {
             serde_json::to_value(
                 Tdx::verify(&evidence, &TdxParams::default(), &collateral, now).unwrap(),

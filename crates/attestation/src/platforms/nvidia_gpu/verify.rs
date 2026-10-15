@@ -3,7 +3,7 @@
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 
-use crate::collateral::{Doc, NrasJwks, Store};
+use crate::collateral::{CollateralUsed, NrasJwks, Store};
 use crate::error::{AttestationError, Result};
 use crate::platforms::nvidia_gpu::provider::{Jwks, NrasEvidenceEntry, NrasRequest};
 use crate::platforms::nvidia_gpu::{gpu_nonce, switch_nonce};
@@ -16,7 +16,7 @@ use crate::types::{
 /// each architecture group, and its signing keys.
 pub struct GpuCollateral {
     pub nras: std::collections::BTreeMap<NvidiaGpuArch, serde_json::Value>,
-    pub jwks: Doc<NrasJwks>,
+    pub jwks: NrasJwks,
 }
 
 /// Send each architecture group of the bundle to NRAS and get its signing
@@ -26,7 +26,7 @@ pub async fn gather_bundle(
     params: &NvidiaGpuParams,
     store: &Store,
     now: i64,
-) -> Result<GpuCollateral> {
+) -> Result<(GpuCollateral, CollateralUsed)> {
     let user_nonce = check_preconditions(bundle, params)?;
     let mut nras = std::collections::BTreeMap::new();
     for (arch, devices) in group_by_arch(bundle) {
@@ -44,23 +44,24 @@ pub async fn gather_bundle(
         };
         nras.insert(arch, nras_attest(store, &request).await?);
     }
-    let mut jwks = store.get(NrasJwks {}, now).await?;
-    let known = |jwks: &Doc<NrasJwks>| {
+    let mut jwks = store.nras_jwks(now).await?;
+    let known = |jwks: &NrasJwks| {
         nras.values().all(|response| {
             split_eat_response(response).is_ok_and(|(overall, subs)| {
                 std::iter::once(&overall)
                     .chain(subs.iter().map(|(_, t)| t))
                     .all(|t| {
-                        jwt_kid(t).is_none_or(|kid| jwks.value.keys.iter().any(|k| k.kid == kid))
+                        jwt_kid(t).is_none_or(|kid| jwks.jwks.keys.iter().any(|k| k.kid == kid))
                     })
             })
         })
     };
-    if !known(&jwks) {
-        store.refresh(&NrasJwks {}.into(), now).await?;
-        jwks = store.get(NrasJwks {}, now).await?;
+    if !known(&jwks.0) {
+        store.refresh(&store.nras_jwks_url(), now).await?;
+        jwks = store.nras_jwks(now).await?;
     }
-    Ok(GpuCollateral { nras, jwks })
+    let (jwks, used) = jwks;
+    Ok((GpuCollateral { nras, jwks }, used))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,7 +69,7 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
     match store.vendor() {
         Some(vendor) => vendor.nras_attest(request).await,
         None => Err(AttestationError::CollateralUnavailable {
-            document: "NRAS attestation".into(),
+            collateral: "NRAS attestation".into(),
             reason: crate::error::Unavailable::Offline,
         }),
     }
@@ -77,7 +78,7 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
 #[cfg(target_arch = "wasm32")]
 async fn nras_attest(_store: &Store, _request: &NrasRequest) -> Result<serde_json::Value> {
     Err(AttestationError::CollateralUnavailable {
-        document: "NRAS attestation".into(),
+        collateral: "NRAS attestation".into(),
         reason: crate::error::Unavailable::Offline,
     })
 }
@@ -134,7 +135,7 @@ pub fn verify_bundle(
             response,
             &arch_nonce(arch, user_nonce, bundle),
             params,
-            &collateral.jwks.value,
+            &collateral.jwks.jwks,
             now,
         )?;
         device_policy_met &= group.device_policy_met;

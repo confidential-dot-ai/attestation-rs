@@ -14,8 +14,8 @@ pub struct HealthResponse {
 
 #[derive(Serialize)]
 pub struct CacheStats {
-    /// Collateral documents held.
-    pub documents: u64,
+    /// Pieces of collateral held.
+    pub collateral: u64,
 }
 
 pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -33,7 +33,7 @@ pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
     };
 
     let cache_stats = CacheStats {
-        documents: state.verifier.context().store().count(),
+        collateral: state.verifier.context().store().count(),
     };
 
     Json(HealthResponse {

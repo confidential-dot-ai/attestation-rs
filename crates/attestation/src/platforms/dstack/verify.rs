@@ -32,7 +32,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{Provenance, Store};
+use crate::collateral::{CollateralUsed, Store};
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::tdx::verify::TdxCollateral;
@@ -100,7 +100,11 @@ impl Platform for Dstack {
         params.tdx.validate()
     }
 
-    async fn gather(evidence: &DstackEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+    async fn gather(
+        evidence: &DstackEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
         Tdx::gather(&tdx_evidence(evidence)?, store, now).await
     }
 
@@ -112,10 +116,6 @@ impl Platform for Dstack {
     ) -> Result<DstackResult> {
         let tdx = Tdx::verify(&tdx_evidence(evidence)?, &params.tdx, collateral, now)?;
         Ok(DstackResult { tdx })
-    }
-
-    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
-        collateral.provenance()
     }
 }
 

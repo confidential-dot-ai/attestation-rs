@@ -3,7 +3,7 @@
 // Live SNP attestation → WASM verification example.
 //
 // 1. Generates fresh attestation evidence with a report_data nonce (native)
-// 2. Asks the verifier which vendor documents the evidence needs, and fetches them
+// 2. Asks the verifier which vendor URLs the evidence needs, and fetches them
 // 3. Verifies the evidence and the report_data binding entirely in WASM
 //
 // Usage:
@@ -32,15 +32,20 @@ const envelope = execFileSync(
 
 const wasm = await import('./pkg/attestation_wasm.js');
 
-// Fetch what the evidence needs, keeping the issuer-chain header Intel sends.
+// Fetch the URLs the evidence needs, keeping the issuer-chain header Intel sends.
+const ISSUER_CHAIN_HEADERS = [
+  'TCB-Info-Issuer-Chain',
+  'SGX-Enclave-Identity-Issuer-Chain',
+  'SGX-PCK-CRL-Issuer-Chain',
+];
 const needed = JSON.parse(await wasm.collateral_needed(envelope));
 const collateral = [];
-for (const doc of needed) {
-  const resp = await fetch(doc.url);
-  if (!resp.ok) throw new Error(`${doc.url}: ${resp.status}`);
-  const header = doc.issuer_chain_header && resp.headers.get(doc.issuer_chain_header);
+for (const url of needed) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${url}: ${resp.status}`);
+  const header = ISSUER_CHAIN_HEADERS.map((h) => resp.headers.get(h)).find(Boolean);
   collateral.push({
-    key: doc.key,
+    url,
     body: Buffer.from(await resp.arrayBuffer()).toString('base64'),
     issuer_chain: header ? decodeURIComponent(header) : undefined,
   });

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{Provenance, Store};
+use crate::collateral::{CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::platforms::tdx::verify::{TdxCollateral, TdxQuote};
@@ -66,7 +66,11 @@ impl Platform for AzTdx {
     }
 
     /// The whole evidence verifies first; its TD quote names the collateral.
-    async fn gather(evidence: &AzTdxEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+    async fn gather(
+        evidence: &AzTdxEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
         let (quote_bytes, quote, _) = verify_evidence(evidence, &AzTdxParams::default(), now)?;
         TdxCollateral::gather(&quote_bytes, &quote, store, now).await
     }
@@ -87,10 +91,6 @@ impl Platform for AzTdx {
             now,
         )?;
         Ok(result)
-    }
-
-    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
-        collateral.provenance()
     }
 }
 

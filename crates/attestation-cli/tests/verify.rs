@@ -14,27 +14,21 @@ const GENOA_CRL: &[u8] =
 /// 2026-10-16T00:00:00Z, inside the CRL's window.
 const AT: &str = "1792108800";
 
-fn genoa_crl() -> (
-    attestation::collateral::DocKey,
-    attestation::collateral::Raw,
-) {
-    let crl = attestation::collateral::AmdCrl {
-        generation: attestation::ProcessorGeneration::Genoa,
-        signer: attestation::collateral::AmdSigner::Ask,
-    };
-    let raw = attestation::collateral::Raw {
-        body: GENOA_CRL.to_vec(),
-        issuer_chain: None,
-    };
-    (crl.into(), raw)
+/// AMD's Genoa CRL, as the vendor response for its URL.
+fn genoa_crl() -> attestation::HeldResponse {
+    let url = attestation::collateral::AmdCrl::url(
+        attestation::ProcessorGeneration::Genoa,
+        attestation::collateral::AmdSigner::Ask,
+    );
+    (url, GENOA_CRL.to_vec(), None)
 }
 
 fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
-    let (crl, raw) = genoa_crl();
-    attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &crl, &raw);
+    let (url, body, _) = genoa_crl();
+    attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &url, &body, None);
     let path = dir.join("evidence.json");
     std::fs::write(&path, evidence.to_string()).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
@@ -158,11 +152,11 @@ fn collateral_unavailable_exits_three() {
     assert!(out.stdout.is_empty(), "nothing was verified");
 }
 
-/// The verdict without where each document came from (the cache here, a
+/// The verdict without where each piece came from (the cache here, a
 /// held copy for the library).
 fn without_sources(mut json: serde_json::Value) -> serde_json::Value {
-    for doc in json["collateral"].as_array_mut().unwrap() {
-        doc.as_object_mut().unwrap().remove("source");
+    for piece in json["collateral"].as_array_mut().unwrap() {
+        piece.as_object_mut().unwrap().remove("from");
     }
     json
 }
@@ -235,7 +229,7 @@ fn run_online(evidence: serde_json::Value, base: &str) -> Output {
 
 #[cfg(feature = "test-vendor")]
 #[test]
-fn a_document_that_is_not_the_vendors_exits_one() {
+fn collateral_that_is_not_the_vendors_exits_one() {
     let mut crl = GENOA_CRL.to_vec();
     *crl.last_mut().unwrap() ^= 1;
     let out = run_online(evidence(), &vendor(200, crl));

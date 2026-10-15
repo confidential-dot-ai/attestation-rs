@@ -563,7 +563,7 @@ const FMSPC_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 4];
 /// Extract the FMSPC (Family-Model-Stepping-Platform-CustomSKU) from a PCK
 /// chain: a 6-byte value in the leaf's SGX extensions (OID
 /// 1.2.840.113741.1.13.1.4) that names the platform's TCB Info.
-pub fn extract_fmspc_from_pck_der(der_certs: &[Vec<u8>]) -> Result<String> {
+pub fn extract_fmspc_from_pck_der(der_certs: &[Vec<u8>]) -> Result<crate::collateral::Fmspc> {
     if der_certs.is_empty() {
         return Err(AttestationError::CertChainError(
             "no certificates found in PEM data".into(),
@@ -591,7 +591,7 @@ pub fn extract_fmspc_from_pck_der(der_certs: &[Vec<u8>]) -> Result<String> {
 }
 
 /// Parse the SGX extension ASN.1 blob and extract the FMSPC value.
-fn extract_fmspc_from_sgx_extension(data: &[u8]) -> Result<String> {
+fn extract_fmspc_from_sgx_extension(data: &[u8]) -> Result<crate::collateral::Fmspc> {
     let fmspc_oid = x509_parser::oid_registry::Oid::from(FMSPC_OID)
         .map_err(|e| AttestationError::CertChainError(format!("invalid FMSPC_OID: {e:?}")))?;
 
@@ -607,8 +607,8 @@ fn extract_fmspc_from_sgx_extension(data: &[u8]) -> Result<String> {
                     if *oid == fmspc_oid {
                         // The value is an OCTET STRING containing 6 bytes
                         if let BerObjectContent::OctetString(fmspc_bytes) = &inner[1].content {
-                            if fmspc_bytes.len() == 6 {
-                                return Ok(hex::encode(fmspc_bytes));
+                            if let Ok(fmspc) = <[u8; 6]>::try_from(*fmspc_bytes) {
+                                return Ok(fmspc);
                             }
                             return Err(AttestationError::CertChainError(format!(
                                 "FMSPC found but has unexpected length {} (expected 6)",
@@ -855,7 +855,7 @@ pub fn evaluate_tcb_status(
     }
 
     let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components_from_der(pck_der)?;
-    let fmspc = extract_fmspc_from_pck_der(pck_der)?;
+    let fmspc = hex::encode(extract_fmspc_from_pck_der(pck_der)?);
 
     // TCB level matching (follows Intel DCAP QVL algorithm).
     //
@@ -1029,6 +1029,7 @@ const QE_ISVPRODID_OFFSET: usize = 256;
 const QE_ISVSVN_OFFSET: usize = 258;
 
 /// Intel's published QE Identity, signature-checked and decoded.
+#[derive(Debug)]
 pub struct QeIdentity {
     mrsigner: Vec<u8>,
     isvprodid: u16,
@@ -1275,7 +1276,7 @@ pub(crate) fn check_crl(
     crl: &[u8],
     issuer_der: &[u8],
     label: &str,
-) -> Result<(Vec<u8>, crate::collateral::Info)> {
+) -> Result<(Vec<u8>, i64, i64, Option<u64>)> {
     let crl_der = normalize_crl_to_der(crl)?;
     let (rest, parsed) = CertificateRevocationList::from_der(&crl_der)
         .map_err(|e| AttestationError::CertChainError(format!("{label} parse: {e}")))?;
@@ -1314,12 +1315,9 @@ pub(crate) fn check_crl(
             "{label} has no nextUpdate; refusing a revocation list with no defined freshness"
         ))
     })?;
-    let info = crate::collateral::Info {
-        this_update: Some(parsed.last_update().timestamp()),
-        next_update: Some(next.timestamp()),
-        version: crate::collateral::document::crl_number(&parsed),
-    };
-    Ok((crl_der, info))
+    let this_update = parsed.last_update().timestamp();
+    let number = crate::collateral::crl_number(&parsed);
+    Ok((crl_der, this_update, next.timestamp(), number))
 }
 
 #[cfg(test)]
@@ -1469,9 +1467,7 @@ mod tests {
             "should extract FMSPC from v4 PCK cert: {:?}",
             result.err()
         );
-        let fmspc = result.unwrap();
-        // FMSPC is 6 bytes = 12 hex chars
-        assert_eq!(fmspc.len(), 12, "FMSPC should be 12 hex chars");
+        assert_eq!(result.unwrap().len(), 6);
     }
 
     #[test]
@@ -1485,8 +1481,7 @@ mod tests {
             "should extract FMSPC from v5 PCK cert: {:?}",
             result.err()
         );
-        let fmspc = result.unwrap();
-        assert_eq!(fmspc.len(), 12);
+        assert_eq!(result.unwrap().len(), 6);
     }
 
     #[test]

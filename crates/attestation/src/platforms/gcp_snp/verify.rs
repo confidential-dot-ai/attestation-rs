@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{Doc, GceEndorsement, GceTee, Provenance, Store};
+use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
 use crate::error::{AttestationError, Result, Unavailable};
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
@@ -87,26 +87,29 @@ impl Platform for GcpSnp {
     /// Google publishes one. A report that carries its VEK is checked first
     /// (as for Snp); one whose VCEK must be fetched is checked against it
     /// before the endorsement is looked at.
-    async fn gather(evidence: &SnpEvidence, store: &Store, now: i64) -> Result<GcpSnpCollateral> {
+    async fn gather(
+        evidence: &SnpEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(GcpSnpCollateral, Vec<CollateralUsed>)> {
         let (report, gen, inline) = genuine_report(evidence, now)?;
-        let key = GceEndorsement {
-            tee: GceTee::SevSnp,
-            measurement: hex::encode(report.measurement),
-        };
         let (snp, endorsement) = futures_util::join!(
             SnpCollateral::gather(&report, gen, inline, store, now),
-            store.get(key, now)
+            store.gce_endorsement(GceTee::SevSnp, &report.measurement, now)
         );
-        let snp = snp?;
+        let (snp, mut used) = snp?;
         let endorsement = match endorsement {
-            Ok(doc) => Some(doc),
+            Ok((endorsement, u)) => {
+                used.push(u);
+                Some(endorsement)
+            }
             Err(AttestationError::CollateralUnavailable {
                 reason: Unavailable::NotFound { .. },
                 ..
             }) => None,
             Err(e) => return Err(e),
         };
-        Ok(GcpSnpCollateral { snp, endorsement })
+        Ok((GcpSnpCollateral { snp, endorsement }, used))
     }
 
     fn verify(
@@ -119,19 +122,12 @@ impl Platform for GcpSnp {
         let report = gcp_endorsement::snp_report(evidence)?;
         let measurement = report.measurement.to_vec();
         let endorsement_match = collateral.endorsement.as_ref().is_some_and(|e| {
-            e.key.measurement == hex::encode(&measurement)
-                && gcp_endorsement::endorses_snp(&e.value, &measurement, report.policy.into())
+            gcp_endorsement::endorses_snp(&e.golden, &measurement, report.policy.into())
         });
         Ok(GcpSnpResult {
             snp,
             endorsement_match: Some(endorsement_match),
         })
-    }
-
-    fn provenance(collateral: &GcpSnpCollateral) -> Vec<Provenance> {
-        let mut docs = collateral.snp.provenance();
-        docs.extend(collateral.endorsement.as_ref().map(|e| e.provenance()));
-        docs
     }
 }
 
@@ -140,13 +136,12 @@ impl Platform for GcpSnp {
 /// measurement).
 pub struct GcpSnpCollateral {
     pub snp: SnpCollateral,
-    pub endorsement: Option<Doc<GceEndorsement>>,
+    pub endorsement: Option<GceEndorsement>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collateral::{DocKey, Raw};
     use crate::platforms::snp::evidence::SnpCertChain;
     use crate::platforms::snp::verify::parse_report;
     use crate::testing;
@@ -162,7 +157,8 @@ mod tests {
         let collateral = GcpSnpCollateral {
             snp: Snp::gather(evidence, ctx.store(), testing::NOW)
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
             endorsement: None,
         };
         GcpSnp::verify(evidence, params, &collateral, testing::NOW).unwrap()
@@ -212,17 +208,8 @@ mod tests {
         let envelope: serde_json::Value = serde_json::from_str(GCP_EVIDENCE).unwrap();
         let evidence: SnpEvidence = serde_json::from_value(envelope["evidence"].clone()).unwrap();
         let report = gcp_endorsement::snp_report(&evidence).unwrap();
-        let key = GceEndorsement {
-            tee: GceTee::SevSnp,
-            measurement: hex::encode(report.measurement),
-        };
-        let held: (DocKey, Raw) = (
-            key.into(),
-            Raw {
-                body: endorsement.to_vec(),
-                issuer_chain: None,
-            },
-        );
+        let url = GceEndorsement::url(GceTee::SevSnp, &report.measurement);
+        let held = (url, endorsement.to_vec(), None);
         testing::verify::<GcpSnp>(
             &evidence,
             &GcpSnpParams::default(),
