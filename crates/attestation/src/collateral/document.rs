@@ -261,6 +261,12 @@ impl DocKey {
         }
     }
 
+    /// True for documents about one machine or firmware build (a VCEK, an
+    /// endorsement) rather than shared by many.
+    pub fn per_machine(&self) -> bool {
+        matches!(self, DocKey::AmdVcek(_) | DocKey::GceEndorsement(_))
+    }
+
     /// The response header Intel PCS sends the document's issuer chain in.
     pub fn issuer_chain_header(&self) -> Option<&'static str> {
         match self {
@@ -270,7 +276,40 @@ impl DocKey {
             _ => None,
         }
     }
+
+    /// Check `raw` as this document. See [`Document::check`].
+    #[allow(unused_variables)]
+    pub(crate) fn check(&self, raw: &Raw) -> Result<(Checked, Info), String> {
+        #[allow(dead_code)]
+        fn erase<D: Document>(d: &D, raw: &Raw) -> Result<(Checked, Info), String> {
+            d.check(raw)
+                .map(|(v, info)| (std::sync::Arc::new(v) as Checked, info))
+        }
+        match self {
+            #[cfg(feature = "snp")]
+            DocKey::AmdVcek(k) => erase(k, raw),
+            #[cfg(feature = "snp")]
+            DocKey::AmdCrl(k) => erase(k, raw),
+            #[cfg(feature = "tdx")]
+            DocKey::IntelTcbInfo(k) => erase(k, raw),
+            #[cfg(feature = "tdx")]
+            DocKey::IntelQeIdentity(k) => erase(k, raw),
+            #[cfg(feature = "tdx")]
+            DocKey::IntelPckCrl(k) => erase(k, raw),
+            #[cfg(feature = "tdx")]
+            DocKey::IntelRootCrl(k) => erase(k, raw),
+            #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
+            DocKey::GceEndorsement(k) => erase(k, raw),
+            #[cfg(feature = "nvidia-gpu")]
+            DocKey::NrasJwks(k) => erase(k, raw),
+            #[allow(unreachable_patterns)]
+            _ => Err(format!("{self} is not compiled in")),
+        }
+    }
 }
+
+/// A checked document's value with its type erased.
+pub(crate) type Checked = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 impl fmt::Display for DocKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

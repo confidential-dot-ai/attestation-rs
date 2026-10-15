@@ -1,40 +1,53 @@
 use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
-use serde_json::Value;
+
+use attestation::collateral::{DocKey, Provenance, Store};
 
 use crate::error::ApiError;
 use crate::AppState;
 
 #[derive(Serialize)]
 pub struct CertStatusResponse {
-    pub snp_chains_cached: Vec<String>,
-    pub vcek_count: u64,
-    pub tdx_collateral_count: u64,
-    pub crl_status: Value,
+    /// The shared documents held (CRLs, TCB Info, QE Identity, NRAS keys),
+    /// each with its source, window and version.
+    pub documents: Vec<Provenance>,
+    /// How many per-machine documents are held; not which machines.
+    pub amd_vceks: usize,
+    pub gce_endorsements: usize,
+}
+
+impl CertStatusResponse {
+    fn of(store: &Store) -> Self {
+        let (per_machine, documents): (Vec<_>, Vec<_>) = store
+            .documents()
+            .into_iter()
+            .partition(|p| p.document.per_machine());
+        let amd_vceks = per_machine
+            .iter()
+            .filter(|p| matches!(p.document, DocKey::AmdVcek(_)))
+            .count();
+        Self {
+            documents,
+            amd_vceks,
+            gce_endorsements: per_machine.len() - amd_vceks,
+        }
+    }
 }
 
 pub async fn status(State(state): State<AppState>) -> Json<CertStatusResponse> {
-    let cache = &state.cert_cache;
-    Json(CertStatusResponse {
-        snp_chains_cached: cache.cached_chain_names().await,
-        vcek_count: cache.vcek_entry_count(),
-        tdx_collateral_count: cache.tdx_entry_count(),
-        crl_status: cache.crl_status_json().await,
-    })
+    Json(CertStatusResponse::of(state.verifier.context().store()))
 }
 
+/// Refetch the shared documents held, each at most once every few minutes.
+/// A document is replaced only by a valid copy that is not older; one whose
+/// refetch fails keeps its current copy.
 pub async fn refresh(State(state): State<AppState>) -> Result<Json<CertStatusResponse>, ApiError> {
-    state
-        .cert_cache
-        .refresh_all()
-        .await
-        .map_err(|e| ApiError::CertFetch(e.to_string()))?;
-
-    Ok(Json(CertStatusResponse {
-        snp_chains_cached: state.cert_cache.cached_chain_names().await,
-        vcek_count: state.cert_cache.vcek_entry_count(),
-        tdx_collateral_count: state.cert_cache.tdx_entry_count(),
-        crl_status: state.cert_cache.crl_status_json().await,
-    }))
+    let ctx = state.verifier.context();
+    let failures = ctx.store().refresh_all(ctx.now()).await;
+    if !failures.is_empty() {
+        let failures: Vec<String> = failures.iter().map(ToString::to_string).collect();
+        return Err(ApiError::RefreshFailed(failures.join("; ")));
+    }
+    Ok(Json(CertStatusResponse::of(ctx.store())))
 }

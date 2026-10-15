@@ -44,7 +44,6 @@ az-snp-attest = ["attest", "az-snp"] # Compatibility alias; use `attest` + `az-s
 az-tdx-attest = ["attest", "az-tdx"] # Compatibility alias; use `attest` + `az-tdx`.
 
 [dependencies]
-async-trait = "0.1"
 base64 = "0.22"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -56,6 +55,7 @@ log = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
 cfg-if = "1"
 subtle = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await-macro"] }
 
 # Crypto
 p256 = { version = "0.13", features = ["ecdsa"] }
@@ -89,6 +89,9 @@ pem = "3.0.6"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
+moka = { version = "0.12", features = ["future"] }
+backon = { version = "1", default-features = false, features = ["std", "tokio-sleep"] }
+tempfile = "3"
 
 # Guest-side attestation crates — Linux-only (require TEE hardware / vTPM)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -96,7 +99,6 @@ az-cvm-vtpm = { version = "0.8.1", default-features = false, features = ["attest
 nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev = "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
 getrandom = { version = "0.2", features = ["js"] }
 # `wasmbind` routes `chrono::Utc::now()` through `js_sys::Date` on
 # wasm32-unknown-unknown. Without it chrono falls back to `SystemTime::now()`,
@@ -119,7 +121,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
-async-trait = "0.1"
 tempfile = "3"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
 time = { version = "0.3", features = ["std", "macros"] }

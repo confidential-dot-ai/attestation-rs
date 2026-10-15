@@ -1,5 +1,36 @@
 use thiserror::Error;
 
+/// Why a collateral document could not be had.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum Unavailable {
+    /// No connection, a timeout, or a body that was cut off.
+    Unreachable { detail: String },
+    /// The vendor has no such document (404, 410).
+    NotFound { status: u16 },
+    /// The vendor asked to be called later (429, or a Retry-After).
+    RateLimited { retry_after: Option<u64> },
+    /// Any other HTTP status.
+    Status { status: u16 },
+    /// Fetching is off and no copy is held.
+    Offline,
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unavailable::Unreachable { detail } => write!(f, "unreachable ({detail})"),
+            Unavailable::NotFound { status } => write!(f, "not found (HTTP {status})"),
+            Unavailable::RateLimited {
+                retry_after: Some(s),
+            } => write!(f, "rate limited, retry after {s}s"),
+            Unavailable::RateLimited { retry_after: None } => f.write_str("rate limited"),
+            Unavailable::Status { status } => write!(f, "HTTP {status}"),
+            Unavailable::Offline => f.write_str("not held, and fetching is off"),
+        }
+    }
+}
+
 /// Unified error type for all attestation operations.
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -31,10 +62,13 @@ pub enum AttestationError {
     CertChainError(String),
 
     /// Collateral the verifier needed (certificates, CRLs, TCB info, NRAS
-    /// results) could not be fetched. The only retryable error: the evidence
-    /// was not judged.
-    #[error("collateral unavailable: {0}")]
-    CollateralUnavailable(String),
+    /// results) is held nowhere and could not be fetched. The only retryable
+    /// error: the evidence was not judged.
+    #[error("collateral unavailable: {document}: {reason}")]
+    CollateralUnavailable {
+        document: String,
+        reason: Unavailable,
+    },
 
     #[error("quote parsing failed: {0}")]
     QuoteParseFailed(String),
@@ -123,7 +157,18 @@ impl AttestationError {
     /// not fetch what it needed, so retrying may succeed. Every other error is
     /// final for the given evidence and params.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, AttestationError::CollateralUnavailable(_))
+        matches!(self, AttestationError::CollateralUnavailable { .. })
+    }
+
+    /// Seconds the vendor asked to wait before retrying, when it said.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            AttestationError::CollateralUnavailable {
+                reason: Unavailable::RateLimited { retry_after },
+                ..
+            } => *retry_after,
+            _ => None,
+        }
     }
 
     /// True when the caller's params cannot be applied: fixing the params,

@@ -79,12 +79,20 @@ let verified = attestation::verify(evidence_json, &Policies::all().with_report_d
 
 Each platform has its own params and result (`TdxParams`/`TdxResult`,
 `SnpParams`/`SnpResult`, `AzTdxParams`, `AzSnpParams`, `GcpTdxParams`,
-`GcpSnpParams`, `DstackParams`). If you know the platform, call it directly:
+`GcpSnpParams`, `DstackParams`). To accept one platform only, give params
+for it alone, and read its result from `verified.platform`:
 
 ```rust
-use attestation::{Context, Platform, Tdx};
+use attestation::{PlatformResult, Policies, TdxParams};
 
-let result = Tdx::verify(&evidence, &params, &Context::new()).await?;
+let policies = Policies {
+    tdx: Some(TdxParams::default()),
+    ..Default::default()
+};
+let verified = attestation::verify(evidence_json, &policies).await?;
+if let PlatformResult::Tdx(result) = &verified.platform {
+    println!("TCB status: {:?}", result.tcb_status);
+}
 ```
 
 ### What is an error
@@ -95,6 +103,7 @@ let result = Tdx::verify(&evidence, &params, &Context::new()).await?;
 | Evidence for a platform with no params in `Policies` | `Err(PlatformNotAllowed)` |
 | Bad signature, cert chain, QE binding, event log, GPU nonce binding (overall or per device) | `Err` |
 | Collateral could not be fetched (AMD KDS, Intel PCS, NRAS) | `Err(CollateralUnavailable)`, retryable |
+| A collateral document that is not the vendor's, or that the vendor does not publish for this chip or platform | `Err`, not retryable |
 | Measurement, RTMR, launch digest, `report_data` or init data mismatch | value: `*_match: Some(false)` |
 | Debug, VMPL, minimum TCB, TDX TCB status (including no matching level), revoked TDX PCK, GPU device policy | value |
 | A check you did not ask for | value: `None` |
@@ -102,24 +111,23 @@ let result = Tdx::verify(&evidence, &params, &Context::new()).await?;
 `passed()` is true only when every rule in the params held. Results are
 `#[must_use]`.
 
-### Custom Providers and Time
+### Collateral and Time
 
 ```rust
 use attestation::{Context, Verifier};
 
-let verifier = Verifier::new(
-    Context::new()
-        .with_cert_provider(my_cert_provider)
-        .with_tdx_provider(my_tdx_provider),
-);
+let verifier = Verifier::new(Context::new().with_cache_dir("/var/cache/attestation"));
 let verified = verifier.verify(evidence_json, &policies).await?;
 ```
 
-`Context::offline()` never touches the network: checks that need fetched
-collateral (TDX CRLs, TCB status and QE identity) are skipped and their fields
-stay `None`, and evidence that cannot be verified without a fetch (SNP
-without an inline VEK, an NVIDIA GPU bundle) is `CollateralUnavailable`. `Context::at(unix_seconds)` fixes the
-time used for certificate, CRL and token validity.
+A `Context` holds the collateral store: documents are fetched once, checked
+against the vendor roots compiled into the crate, kept in memory (and in
+`with_cache_dir`, if given), and refreshed near their nextUpdate.
+`Context::offline()` never touches the network: a document not held is
+`CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
+certificate, CRL, collateral and token validity. A platform's
+`gather(evidence, ctx)` gets its collateral; its `verify(evidence, params,
+collateral, now)` is pure.
 
 ### Attester (Guest-Side Agent)
 

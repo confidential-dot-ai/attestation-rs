@@ -3,11 +3,38 @@
 use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 
 use super::document::{crl_number, AmdCrl, AmdSigner, AmdVcek, Document, Info, Raw};
+use crate::error::{AttestationError, Result};
 use crate::platforms::snp::certs;
-use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
+use crate::platforms::snp::verify::{
+    check_vek_binding, snp_tcb, verify_cert_chain, verify_crl_signature,
+};
+use crate::types::ProcessorGeneration;
 
 impl AmdVcek {
-    fn chip_id_bytes(&self) -> Result<[u8; 64], String> {
+    /// The VCEK that signed `report`, named by its CHIP_ID and reported TCB.
+    pub fn for_report(
+        report: &sev::firmware::guest::AttestationReport,
+        generation: ProcessorGeneration,
+    ) -> Result<Self> {
+        if report.chip_id.iter().all(|&b| b == 0) {
+            return Err(AttestationError::CertChainError(
+                "evidence carries no VEK and the report's CHIP_ID is masked".into(),
+            ));
+        }
+        let tcb = snp_tcb(&report.reported_tcb);
+        if generation == ProcessorGeneration::Turin && tcb.fmc.is_none() {
+            return Err(AttestationError::QuoteParseFailed(
+                "Turin report missing FMC TCB field".into(),
+            ));
+        }
+        Ok(Self {
+            generation,
+            chip_id: hex::encode(report.chip_id),
+            tcb,
+        })
+    }
+
+    fn chip_id_bytes(&self) -> std::result::Result<[u8; 64], String> {
         hex::decode(&self.chip_id)
             .ok()
             .and_then(|b| <[u8; 64]>::try_from(b).ok())
@@ -20,7 +47,7 @@ impl Document for AmdVcek {
     type Value = Vec<u8>;
 
     /// Issued by the bundled ASK of the generation, for this chip and TCB.
-    fn check(&self, raw: &Raw) -> Result<(Vec<u8>, Info), String> {
+    fn check(&self, raw: &Raw) -> std::result::Result<(Vec<u8>, Info), String> {
         let der = &raw.body;
         let gen = self.generation;
         verify_cert_chain(certs::get_ark(gen), certs::get_ask(gen), der)
@@ -49,7 +76,7 @@ impl Document for AmdCrl {
 
     /// Signed by the bundled ARK of the generation; AMD lists the
     /// ARK-issued ASKs and ASVKs in it.
-    fn check(&self, raw: &Raw) -> Result<(Vec<u8>, Info), String> {
+    fn check(&self, raw: &Raw) -> std::result::Result<(Vec<u8>, Info), String> {
         let der = &raw.body;
         let (rest, crl) =
             CertificateRevocationList::from_der(der).map_err(|e| format!("AMD CRL: {e}"))?;
@@ -81,10 +108,7 @@ impl Document for AmdCrl {
 impl AmdCrl {
     /// The CRL that can revoke `vek_der`'s issuer: the ASVK's for a VLEK,
     /// the ASK's for a VCEK.
-    pub fn for_vek(
-        generation: crate::types::ProcessorGeneration,
-        vek_der: &[u8],
-    ) -> crate::error::Result<Self> {
+    pub fn for_vek(generation: ProcessorGeneration, vek_der: &[u8]) -> Result<Self> {
         let signer = if crate::platforms::snp::verify::is_vlek_cert(vek_der)? {
             AmdSigner::Asvk
         } else {
@@ -98,7 +122,7 @@ impl AmdCrl {
 mod tests {
     use super::*;
     use crate::collateral::document::Freshness;
-    use crate::types::{ProcessorGeneration, SnpTcb};
+    use crate::types::SnpTcb;
 
     const DIR: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

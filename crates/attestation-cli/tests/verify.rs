@@ -1,5 +1,6 @@
 //! `attestation-cli verify` on real SEV-SNP evidence (a Genoa report), run
-//! offline so the tests never touch the network.
+//! offline with AMD's Genoa CRL in the cache, so the tests never touch the
+//! network.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use std::process::{Command, Output};
@@ -8,17 +9,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const REPORT: &[u8] = include_bytes!("../../attestation/test_data/snp/live-report-v5-genoa.bin");
 const VCEK: &[u8] = include_bytes!("../../attestation/test_data/snp/live-vcek-genoa.der");
 
+const GENOA_CRL: &[u8] =
+    include_bytes!("../../attestation/test_data/collateral/2026-10-14/amd_crl_genoa.der");
+/// 2026-10-16T00:00:00Z, inside the CRL's window.
+const AT: &str = "1792108800";
+
 fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("cli-verify-{}-{n}.json", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
+    let crl = attestation::collateral::AmdCrl {
+        generation: attestation::ProcessorGeneration::Genoa,
+        signer: attestation::collateral::AmdSigner::Ask,
+    };
+    let raw = attestation::collateral::Raw {
+        body: GENOA_CRL.to_vec(),
+        issuer_chain: None,
+    };
+    attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &crl.into(), &raw);
+    let path = dir.join("evidence.json");
     std::fs::write(&path, evidence.to_string()).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
-        .args(["verify", "--offline", "--evidence", path.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", &dir)
+        .args(["verify", "--offline", "--at", AT, "--evidence"])
+        .arg(&path)
         .args(args)
         .output()
         .unwrap();
-    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir_all(&dir).ok();
     out
 }
 
@@ -95,16 +113,6 @@ fn usage_errors_exit_two() {
             "snp",
             "--expected-pcr",
             &format!("4={}", "aa".repeat(32)),
-        ],
-        &["--platform", "snp", "--fetch-gcp-endorsement"],
-        &[
-            "--platform",
-            "snp",
-            "--gcp-endorsement",
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../attestation/test_data/gcp_snp/endorsement-0e017d2f.binarypb"
-            ),
         ],
         &["--expected-pcr", &format!("24={}", "aa".repeat(32))],
         &[

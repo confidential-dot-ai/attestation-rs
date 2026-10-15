@@ -47,7 +47,7 @@
 //! ## Endpoints
 //!
 //! Defaults match NVIDIA's production deployment and can be overridden via
-//! [`DefaultNrasProvider::with_urls`] or environment variables
+//! [`crate::Context::with_nras_urls`] or environment variables
 //! `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`. The relying-party usage of NRAS
 //! is governed by NVIDIA's attestation T&C; see README.
 
@@ -59,10 +59,8 @@ pub mod verify;
 #[cfg(all(feature = "nvidia-gpu-attest", target_os = "linux"))]
 pub mod attest;
 
-pub use provider::{
-    jwks_url_for_endpoint, DefaultNrasProvider, Jwks, JwksKey, NrasProvider, NrasRequest,
-};
-pub use verify::verify_bundle;
+pub use provider::{jwks_url_for_endpoint, Jwks, JwksKey, NrasRequest};
+pub use verify::{gather_bundle, verify_bundle, GpuCollateral};
 
 use crate::error::{AttestationError, Result};
 use crate::types::{NvidiaGpuBinding, NvidiaGpuHashAlgo};

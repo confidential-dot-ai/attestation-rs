@@ -21,8 +21,10 @@ pub enum ApiError {
     #[error("invalid request: {0}")]
     Body(#[from] JsonRejection),
 
-    #[error("cert fetch failed: {0}")]
-    CertFetch(String),
+    /// `/certs/refresh` could not refetch some documents (the old copies
+    /// are kept).
+    #[error("{0}")]
+    RefreshFailed(String),
 
     #[error("token issuer not configured")]
     TokenNotConfigured,
@@ -42,7 +44,7 @@ impl IntoResponse for ApiError {
         let (status, error_key) = match &self {
             // Collateral this service could not fetch, so it is the upstream that
             // failed and not the submitted evidence. Retryable.
-            ApiError::Verification(AttestationError::CollateralUnavailable(_)) => {
+            ApiError::Verification(AttestationError::CollateralUnavailable { .. }) => {
                 (StatusCode::BAD_GATEWAY, "collateral_unavailable")
             }
             ApiError::Verification(e) if e.is_invalid_params() => {
@@ -64,7 +66,7 @@ impl IntoResponse for ApiError {
                 }
                 _ => (StatusCode::BAD_REQUEST, "bad_request"),
             },
-            ApiError::CertFetch(_) => (StatusCode::BAD_GATEWAY, "cert_fetch_failed"),
+            ApiError::RefreshFailed(_) => (StatusCode::BAD_GATEWAY, "collateral_unavailable"),
             ApiError::TokenNotConfigured => (StatusCode::BAD_REQUEST, "token_not_configured"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
@@ -105,10 +107,10 @@ mod tests {
 
     #[tokio::test]
     async fn collateral_this_service_could_not_fetch_is_an_upstream_failure() {
-        let resp = ApiError::Verification(AttestationError::CollateralUnavailable(
-            "cached VCEK fetch: error sending request for url (https://kdsintf.amd.com/vcek/v1/Genoa/…)"
-                .to_string(),
-        ))
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            document: "AMD CRL Genoa Ask".into(),
+            reason: attestation::Unavailable::Status { status: 503 },
+        })
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);

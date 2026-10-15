@@ -541,8 +541,7 @@ pub fn compute_body_end(quote_bytes: &[u8], quote_version: QuoteVersion) -> Resu
 /// 3. Verify QE report signature with PCK leaf key
 /// 4. Verify QE report binding (attestation key bound into QE report)
 ///
-/// Revocation is collateral, checked separately
-/// ([`TdxCollateralProvider::pck_revoked`](crate::collateral::TdxCollateralProvider::pck_revoked)).
+/// Revocation is collateral, checked separately (Intel's PCK and Root CA CRLs).
 pub fn verify_dcap_chain(quote_bytes: &[u8], quote_version: QuoteVersion, now: i64) -> Result<()> {
     let body_end = compute_body_end(quote_bytes, quote_version)?;
     let auth = parse_auth_data(quote_bytes, body_end)?;
@@ -561,17 +560,9 @@ const SGX_EXTENSIONS_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1];
 /// FMSPC OID: 1.2.840.113741.1.13.1.4
 const FMSPC_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 4];
 
-/// Extract the FMSPC (Family-Model-Stepping-Platform-CustomSKU) from a PCK leaf cert.
-///
-/// The FMSPC is a 6-byte value embedded in the SGX extensions of the PCK certificate,
-/// under OID 1.2.840.113741.1.13.1.4. It identifies the platform for TCB Info lookup.
-pub fn extract_fmspc_from_pck(pem_data: &[u8]) -> Result<String> {
-    let der_certs = parse_pem_to_der(pem_data)?;
-    extract_fmspc_from_pck_der(&der_certs)
-}
-
-/// Extract the FMSPC from pre-parsed DER certificate chain.
-/// See [`extract_fmspc_from_pck`] for details.
+/// Extract the FMSPC (Family-Model-Stepping-Platform-CustomSKU) from a PCK
+/// chain: a 6-byte value in the leaf's SGX extensions (OID
+/// 1.2.840.113741.1.13.1.4) that names the platform's TCB Info.
 pub fn extract_fmspc_from_pck_der(der_certs: &[Vec<u8>]) -> Result<String> {
     if der_certs.is_empty() {
         return Err(AttestationError::CertChainError(
@@ -689,15 +680,6 @@ struct TcbComponentsJson {
 #[derive(Debug, serde::Deserialize)]
 struct SvnComponent {
     svn: u8,
-}
-
-/// Extract SGX TCB component SVNs from the PCK cert's SGX extensions.
-///
-/// The PCK certificate contains 16 TCB component SVNs under OID
-/// 1.2.840.113741.1.13.1.2.{1..16} and a PCESVN under 1.2.840.113741.1.13.1.2.17.
-fn extract_pck_tcb_components(pem_data: &[u8]) -> Result<([u8; 16], u16)> {
-    let der_certs = parse_pem_to_der(pem_data)?;
-    extract_pck_tcb_components_from_der(&der_certs)
 }
 
 fn extract_pck_tcb_components_from_der(der_certs: &[Vec<u8>]) -> Result<([u8; 16], u16)> {
@@ -840,30 +822,20 @@ pub fn verify_tcb_info_signature(
     Ok(())
 }
 
-/// Evaluate TCB status for a TDX quote against Intel TCB Info collateral.
+/// Evaluate TCB status for a TDX quote against Intel TCB Info collateral
+/// whose signature has been checked ([`crate::collateral::IntelTcbInfo`]).
 ///
 /// Matches the quote's TCB SVNs against the TCB levels from Intel PCS,
 /// returning the status and any security advisories.
 ///
-/// `tcb_info_json`: raw JSON response from Intel PCS v4 `/tcb` endpoint.
 /// `tee_tcb_svn`: 16-byte TEE TCB SVN from the TDX quote body.
-/// `pck_pem`: PCK cert chain PEM (for extracting SGX TCB components).
-/// `signing_certs_pem`: optional PEM-encoded TCB signing certificate chain
-/// from the `TCB-Info-Issuer-Chain` response header. When provided, the
-/// Intel signature on the TCB Info is verified before use.
+/// `pck_der`: the quote's PCK chain (for the SGX TCB components and FMSPC).
 pub fn evaluate_tcb_status(
     tcb_info_json: &[u8],
     tee_tcb_svn: &[u8; 16],
-    pck_pem: &[u8],
-    signing_certs_pem: Option<&[u8]>,
+    pck_der: &[Vec<u8>],
     now: i64,
 ) -> Result<DcapVerificationStatus> {
-    if let Some(certs_pem) = signing_certs_pem {
-        verify_tcb_info_signature(tcb_info_json, certs_pem, now)?;
-    } else {
-        log::warn!("TCB Info signing chain not available; skipping signature verification on TCB collateral");
-    }
-
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
 
@@ -882,8 +854,8 @@ pub fn evaluate_tcb_status(
         log::warn!("TCB Info collateral has expired (nextUpdate in the past)");
     }
 
-    let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components(pck_pem)?;
-    let fmspc = extract_fmspc_from_pck(pck_pem)?;
+    let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components_from_der(pck_der)?;
+    let fmspc = extract_fmspc_from_pck_der(pck_der)?;
 
     // TCB level matching (follows Intel DCAP QVL algorithm).
     //
@@ -978,41 +950,31 @@ fn parse_tcb_status(s: &str) -> Result<TdxTcbStatus> {
         "OutOfDate" => Ok(TdxTcbStatus::OutOfDate),
         "OutOfDateConfigurationNeeded" => Ok(TdxTcbStatus::OutOfDateConfigurationNeeded),
         "Revoked" => Ok(TdxTcbStatus::Revoked),
-        _ => Err(AttestationError::CollateralUnavailable(format!(
+        _ => Err(AttestationError::CertChainError(format!(
             "unknown TCB status in Intel collateral: {s}"
         ))),
     }
 }
 
-/// Determine the CA type ("platform" or "processor") from the PCK issuer CN.
-///
-/// Intel PCK certificates are issued either by "Intel SGX PCK Platform CA"
-/// or "Intel SGX PCK Processor CA". The CA type is needed to fetch the
-/// correct CRL from Intel PCS.
-pub fn determine_ca_type(pck_pem: &[u8]) -> Result<String> {
-    let der_certs = parse_pem_to_der(pck_pem)?;
-    determine_ca_type_from_der(&der_certs)
+/// The Intel CA that issued the PCK leaf of `der_certs`, from its issuer
+/// name ("Intel SGX PCK Platform CA" or "... Processor CA").
+pub fn determine_ca_type_from_der(der_certs: &[Vec<u8>]) -> Result<crate::collateral::PckCa> {
+    let leaf = der_certs
+        .first()
+        .ok_or_else(|| AttestationError::CertChainError("no certificates found".into()))?;
+    let (_, cert) = X509Certificate::from_der(leaf)
+        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
+    pck_ca(&cert.issuer().to_string())
 }
 
-/// Determine the CA type from pre-parsed DER certificate chain.
-/// See [`determine_ca_type`] for details.
-pub fn determine_ca_type_from_der(der_certs: &[Vec<u8>]) -> Result<String> {
-    if der_certs.is_empty() {
-        return Err(AttestationError::CertChainError(
-            "no certificates found".into(),
-        ));
-    }
-    let (_, cert) = X509Certificate::from_der(&der_certs[0])
-        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
-
-    let issuer = format!("{}", cert.issuer());
-    if issuer.contains("Platform") {
-        Ok("platform".to_string())
-    } else if issuer.contains("Processor") {
-        Ok("processor".to_string())
+fn pck_ca(name: &str) -> Result<crate::collateral::PckCa> {
+    if name.contains("PCK Platform CA") {
+        Ok(crate::collateral::PckCa::Platform)
+    } else if name.contains("PCK Processor CA") {
+        Ok(crate::collateral::PckCa::Processor)
     } else {
         Err(AttestationError::CertChainError(format!(
-            "unrecognized PCK issuer CA type: {issuer}"
+            "{name} is not an Intel PCK CA"
         )))
     }
 }
@@ -1249,17 +1211,8 @@ fn normalize_crl_to_der(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// True when the Intermediate CA (Platform or Processor CA) is listed in the
-/// Root CA CRL.
-///
-/// `pck_pem`: PCK cert chain PEM data (leaf, intermediate, root).
-/// `root_ca_crl_der`: DER-encoded Root CA CRL from Intel PCS.
-pub fn intermediate_ca_revoked(pck_pem: &[u8], root_ca_crl_der: &[u8]) -> Result<bool> {
-    let der_certs = parse_pem_to_der(pck_pem)?;
-    intermediate_ca_revoked_from_der(&der_certs, root_ca_crl_der)
-}
-
-/// [`intermediate_ca_revoked`] on a pre-parsed DER certificate chain.
+/// True when the PCK chain's intermediate CA (Platform or Processor CA) is
+/// listed in the Root CA CRL.
 pub fn intermediate_ca_revoked_from_der(
     der_certs: &[Vec<u8>],
     root_ca_crl_der: &[u8],
@@ -1286,16 +1239,7 @@ pub fn intermediate_ca_revoked_from_der(
     Ok(revoked)
 }
 
-/// True when the PCK leaf certificate is listed in the CRL.
-///
-/// `pck_pem`: PCK cert chain PEM data.
-/// `crl_der`: DER-encoded CRL (from Intel PCS PCK CRL endpoint).
-pub fn cert_revoked(pck_pem: &[u8], crl_der: &[u8]) -> Result<bool> {
-    let der_certs = parse_pem_to_der(pck_pem)?;
-    cert_revoked_from_der(&der_certs, crl_der)
-}
-
-/// [`cert_revoked`] on a pre-parsed DER certificate chain.
+/// True when the PCK leaf certificate is listed in the PCK CRL.
 pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bool> {
     if der_certs.is_empty() {
         return Err(AttestationError::CertChainError(
@@ -1376,26 +1320,6 @@ pub(crate) fn check_crl(
         version: crate::collateral::document::crl_number(&parsed),
     };
     Ok((crl_der, info))
-}
-
-/// [`check_crl`], and current at `at` (`thisUpdate <= at <= nextUpdate`).
-pub fn verify_crl(
-    crl: &[u8],
-    issuer_der: &[u8],
-    at: x509_parser::time::ASN1Time,
-    label: &str,
-) -> Result<Vec<u8>> {
-    let (crl_der, info) = check_crl(crl, issuer_der, label)?;
-    let at = at.timestamp();
-    match info.freshness(at) {
-        crate::collateral::Freshness::NotYetValid => Err(AttestationError::CertChainError(
-            format!("{label} thisUpdate is after the verification time {at}"),
-        )),
-        crate::collateral::Freshness::Expired => Err(AttestationError::CertChainError(format!(
-            "{label} is stale: nextUpdate is before the verification time {at}"
-        ))),
-        crate::collateral::Freshness::Current => Ok(crl_der),
-    }
 }
 
 #[cfg(test)]
@@ -1538,7 +1462,8 @@ mod tests {
     fn test_extract_fmspc_from_pck_v4() {
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).unwrap();
-        let result = extract_fmspc_from_pck(auth.pck_cert_chain_pem);
+        let result =
+            extract_fmspc_from_pck_der(&parse_pem_to_der(auth.pck_cert_chain_pem).unwrap());
         assert!(
             result.is_ok(),
             "should extract FMSPC from v4 PCK cert: {:?}",
@@ -1553,7 +1478,8 @@ mod tests {
     fn test_extract_fmspc_from_pck_v5() {
         let body_end = body_end_v5();
         let auth = parse_auth_data(V5_QUOTE, body_end).unwrap();
-        let result = extract_fmspc_from_pck(auth.pck_cert_chain_pem);
+        let result =
+            extract_fmspc_from_pck_der(&parse_pem_to_der(auth.pck_cert_chain_pem).unwrap());
         assert!(
             result.is_ok(),
             "should extract FMSPC from v5 PCK cert: {:?}",
@@ -1567,7 +1493,9 @@ mod tests {
     fn test_extract_pck_tcb_components_v4() {
         let body_end = body_end_v4();
         let auth = parse_auth_data(V4_QUOTE, body_end).unwrap();
-        let result = extract_pck_tcb_components(auth.pck_cert_chain_pem);
+        let result = extract_pck_tcb_components_from_der(
+            &parse_pem_to_der(auth.pck_cert_chain_pem).unwrap(),
+        );
         assert!(
             result.is_ok(),
             "should extract PCK TCB components: {:?}",
@@ -1616,7 +1544,10 @@ mod tests {
         let single_cert_pem = &pem_str[..first_cert_end];
 
         let bogus_crl = vec![0x30, 0x00];
-        let result = intermediate_ca_revoked(single_cert_pem.as_bytes(), &bogus_crl);
+        let result = intermediate_ca_revoked_from_der(
+            &parse_pem_to_der(single_cert_pem.as_bytes()).unwrap(),
+            &bogus_crl,
+        );
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(err.contains("at least 2 certs"), "error: {err}");
@@ -1689,7 +1620,7 @@ mod tests {
     fn qe_status_with_levels(levels: serde_json::Value) -> Result<TdxTcbStatus> {
         const QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
         const IDENTITY: &[u8] =
-            include_bytes!("../../../test_data/collateral/2026-10-05/td_qe_identity.json");
+            include_bytes!("../../../test_data/collateral/2026-10-14/td_qe_identity.json");
         let quote = super::super::verify::parse_tdx_quote(QUOTE).unwrap();
         let auth =
             parse_auth_data(QUOTE, compute_body_end(QUOTE, quote.quote_version).unwrap()).unwrap();
@@ -1716,7 +1647,7 @@ mod tests {
         );
         assert!(matches!(
             qe_status_with_levels(serde_json::json!([level(4, "SomethingNew")])),
-            Err(AttestationError::CollateralUnavailable(_))
+            Err(AttestationError::CertChainError(_))
         ));
     }
 

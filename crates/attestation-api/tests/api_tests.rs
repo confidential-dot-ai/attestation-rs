@@ -5,7 +5,6 @@ use base64::Engine;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use attestation_api::certs::cache::CertCache;
 use attestation_api::config::Config;
 use attestation_api::server::{build_api_router, build_router};
 use attestation_api::AppState;
@@ -19,31 +18,82 @@ fn test_state() -> AppState {
 fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
-    let cert_cache = Arc::new(CertCache::new(&Default::default()));
-    let cert_provider = attestation_api::certs::snp_provider::CachedCertProvider::new(
-        cert_cache.clone(),
-        !config.certs.skip_snp_crl,
-    );
-    let tdx_provider =
-        attestation_api::certs::tdx_provider::CachedTdxProvider::new(cert_cache.clone());
-    let verifier = Arc::new(attestation::Verifier::new(
-        attestation::Context::new()
-            .with_cert_provider(cert_provider)
-            .with_tdx_provider(tdx_provider),
-    ));
     AppState {
         config: Arc::new(config),
-        cert_cache,
         token_issuer: None,
-        verifier,
+        verifier: Arc::new(attestation::Verifier::new(attestation::Context::new())),
     }
 }
 
-/// A Verifier on `Context::offline()` with a token issuer, so the TDX fixture
-/// verifies without network access.
+/// A verifier that holds Intel's collateral for the TDX fixtures and Google's
+/// endorsement of the GCP TDX quote's firmware, evaluated while they are
+/// current, and fetches nothing.
+fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
+    use attestation::collateral::*;
+    const DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../attestation/test_data/collateral/2026-10-14/"
+    );
+    let raw = |file: &str, chain: Option<&str>| Raw {
+        body: std::fs::read(format!("{DIR}{file}")).unwrap(),
+        issuer_chain: chain.map(|c| std::fs::read_to_string(format!("{DIR}{c}")).unwrap()),
+    };
+    let signing = Some("tcb_signing_chain.pem");
+    let tcb_info = |fmspc: &str| {
+        let key = IntelTcbInfo {
+            fmspc: fmspc.into(),
+        };
+        (key.into(), raw(&format!("tcb_info_{fmspc}.json"), signing))
+    };
+    let endorsement = GceEndorsement {
+        tee: GceTee::Tdx,
+        measurement: "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5".into(),
+    };
+    let held: Vec<(DocKey, Raw)> = vec![
+        tcb_info("50806f000000"),
+        tcb_info("00806f050000"),
+        (
+            IntelQeIdentity {}.into(),
+            raw("td_qe_identity.json", signing),
+        ),
+        (
+            IntelPckCrl {
+                ca: PckCa::Platform,
+            }
+            .into(),
+            raw("pck_crl_platform.der", Some("pck_crl_platform_chain.pem")),
+        ),
+        (
+            IntelPckCrl {
+                ca: PckCa::Processor,
+            }
+            .into(),
+            raw("pck_crl_processor.pem", Some("pck_crl_processor_chain.pem")),
+        ),
+        (IntelRootCrl {}.into(), raw("root_ca_crl.der", None)),
+        (
+            endorsement.into(),
+            Raw {
+                body: endorsement_body.to_vec(),
+                issuer_chain: None,
+            },
+        ),
+    ];
+    // 2026-10-16T00:00:00Z.
+    let ctx = attestation::Context::offline()
+        .with_held(held)
+        .at(1_792_108_800)
+        .unwrap();
+    Arc::new(attestation::Verifier::new(ctx))
+}
+
+const GCP_ENDORSEMENT: &[u8] =
+    include_bytes!("../../attestation/test_data/gcp_tdx/endorsement-c1ee9c16.binarypb");
+
+/// A verifier that holds the fixtures' collateral, with a token issuer.
 fn offline_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut state = test_state_with(f);
-    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+    state.verifier = held_verifier(GCP_ENDORSEMENT);
     let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
     let issuer = attestation_api::token::issuer::TokenIssuer::new(
         signing_key,
@@ -386,44 +436,29 @@ async fn verify_does_not_issue_a_token_when_verification_did_not_pass() {
     assert!(json.get("token").is_none());
 }
 
-// The real GCP TDX quote against Google's endorsement of its OVMF build and of
-// another build.
+// The real GCP TDX quote with Google's endorsement of its OVMF build, and
+// with another build's endorsement in its place.
 #[tokio::test]
 async fn verify_checks_gcp_launch_endorsement() {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
-    const ENDORSEMENT: &[u8] =
-        include_bytes!("../../attestation/test_data/gcp_tdx/endorsement-c1ee9c16.binarypb");
     const OTHER_BUILD: &[u8] =
         include_bytes!("../../attestation/test_data/gcp_snp/endorsement-0e017d2f.binarypb");
+    let body = serde_json::json!({
+        "platform": "gcp-tdx",
+        "evidence": { "quote": BASE64.encode(QUOTE) },
+        "policies": { "gcp-tdx": {} },
+    });
     let mut state = test_state();
-    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+    state.verifier = held_verifier(GCP_ENDORSEMENT);
+    let (status, json) = post_verify(state.clone(), body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["result"]["endorsement_match"], true);
+    assert_eq!(json["passed"], true);
 
-    for (endorsement, endorsed) in [(ENDORSEMENT, true), (OTHER_BUILD, false)] {
-        let body = serde_json::json!({
-            "platform": "gcp-tdx",
-            "evidence": { "quote": BASE64.encode(QUOTE) },
-            "policies": { "gcp-tdx": { "endorsement": BASE64.encode(endorsement) } },
-        });
-        let resp = build_api_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/verify")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["result"]["endorsement_match"], endorsed);
-        assert_eq!(json["passed"], endorsed);
-    }
+    state.verifier = held_verifier(OTHER_BUILD);
+    let (status, json) = post_verify(state, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "verification_failed");
 }
 
 #[tokio::test]
@@ -433,7 +468,7 @@ async fn verify_accepts_mrtd_in_allowed_set() {
     const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
     const MRTD: &str = "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5";
     let mut state = test_state();
-    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+    state.verifier = held_verifier(GCP_ENDORSEMENT);
 
     for (allowed, passed) in [
         (vec![[0xAA; 48].to_vec(), hex::decode(MRTD).unwrap()], true),
@@ -584,7 +619,7 @@ async fn certs_status_returns_ok() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["vcek_count"], 0);
+    assert_eq!(json["documents"], serde_json::json!([]));
 }
 
 // --- Attestation disabled tests ---

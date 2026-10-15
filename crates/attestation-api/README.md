@@ -18,8 +18,8 @@ A REST API service for generating and verifying Trusted Execution Environment (T
 | `GET` | `/platform` | Detect TEE platform |
 | `POST` | `/attest` | Generate attestation evidence (requires `attestation.enabled = true`) |
 | `POST` | `/verify` | Verify evidence, optionally issue a JWT |
-| `GET` | `/certs/status` | Certificate cache status |
-| `POST` | `/certs/refresh` | Force certificate refresh |
+| `GET` | `/certs/status` | Shared collateral documents held (source, window, version) and how many VCEKs and endorsements |
+| `POST` | `/certs/refresh` | Refetch the shared documents not checked in the last 5 minutes (replaced only by a valid, not older copy); `502 collateral_unavailable` names any that failed |
 | `GET` | `/token/jwks` | JWKS for issued attestation JWTs |
 
 ## Quick Start
@@ -43,7 +43,7 @@ docker build .
 
 ## Configuration
 
-Configuration is TOML-based. See `config.example.toml` for all options.
+Configuration is TOML-based. See `config.example.toml` for all options. An unknown key is a startup error that names it, so a misspelt or removed option (for example the old `vcek_ttl_hours` or `skip_snp_crl`) is never silently ignored.
 
 ```toml
 [server]
@@ -58,13 +58,8 @@ key_path = ""
 api_keys = []                   # Bearer tokens; empty = no auth (warning logged)
 
 [certs]
-cache_max_entries = 1024
-vcek_ttl_hours = 24
-chain_ttl_hours = 168           # 7 days
-crl_refresh_hours = 6
-tdx_collateral_ttl_hours = 24
-prefetch_chains = ["milan"]
-skip_snp_crl = false            # true = do not check the AMD CRL (see below)
+nras_gpu_url = ""               # Empty = NV_NRAS_GPU_URL, else NVIDIA's endpoint
+nras_switch_url = ""
 
 [token]
 enabled = false
@@ -88,13 +83,14 @@ When `auth.api_keys` contains one or more Bearer tokens, all endpoints except `/
 
 The `/attest` endpoint is available when `attestation.enabled = true` (the default). Set it to `false` on verification-only deployments. The `attestation.platforms` list controls which platforms the service is allowed to generate evidence for.
 
-## SEV-SNP revocation
+## Collateral
 
-`/verify` checks SEV-SNP evidence against the AMD KDS CRL for the processor
-generation. A CRL that cannot be fetched is `502 collateral_unavailable`, never
-a pass. Setting `certs.skip_snp_crl = true` turns the check off: the CRL is
-never fetched and `crl_ok` is `null`. The cost is that evidence whose AMD
-ASK/ASVK has been revoked still passes and can get a token.
+The service verifies with one in-memory collateral store for its lifetime:
+AMD, Intel, Google and NVIDIA documents are fetched on first use, checked
+against the vendor roots compiled into the library, kept, and refetched near
+their nextUpdate (a failed refetch keeps the current copy). A document held
+nowhere and not fetchable is `502 collateral_unavailable`; a document that is not the vendor's is `422
+verification_failed`.
 
 ## Usage Examples
 
@@ -131,8 +127,7 @@ Params per platform: `tdx`, `az-tdx`, `gcp-tdx` take `report_data`,
 allowed values);
 `snp`, `az-snp`, `gcp-snp` take `report_data`, `host_data`, `launch_digest`,
 `allow_debug`, `min_tcb`, `max_vmpl`; `az-tdx` and `az-snp` also take `pcrs`
-(`{ "<index>": "<32 bytes>" }`, index 0-23, each index once); `gcp-tdx` and
-`gcp-snp` also take `endorsement` (Google's launch endorsement, base64);
+(`{ "<index>": "<32 bytes>" }`, index 0-23, each index once);
 `nvidia_gpu` takes `user_nonce`,
 `required`, `expected_archs`. A field the platform does not have is a `400`.
 
@@ -163,7 +158,7 @@ Responses:
 
 ## Key Features
 
-- **Certificate caching** — Multi-layer async cache (Moka) with configurable TTLs and background refresh
+- **Collateral** — One in-memory store of checked vendor documents, shared by all requests
 - **JWT issuance** — Optional ES256 token generation after successful verification
 - **TLS support** — Optional HTTPS with configurable cert/key paths
 - **Load testing** — Built-in load test binary (`cargo run -p attestation-api --release --bin loadtest`)

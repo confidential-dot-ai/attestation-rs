@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 use super::document::{
-    Document, Info, IntelPckCrl, IntelQeIdentity, IntelRootCrl, IntelTcbInfo, PckCa, Raw,
+    Document, Info, IntelPckCrl, IntelQeIdentity, IntelRootCrl, IntelTcbInfo, Raw,
 };
 use crate::platforms::tdx::dcap::{self, Signer};
 
@@ -121,21 +121,16 @@ impl Document for IntelRootCrl {
 impl IntelPckCrl {
     /// The CRL of the CA that issued the PCK leaf in `pck_chain_der`.
     pub fn for_pck_chain(pck_chain_der: &[Vec<u8>]) -> crate::error::Result<Self> {
-        let leaf = pck_chain_der.first().ok_or_else(|| {
-            crate::error::AttestationError::CertChainError("empty PCK chain".into())
-        })?;
-        let ca = match dcap::determine_ca_type_from_der(std::slice::from_ref(leaf))?.as_str() {
-            "platform" => PckCa::Platform,
-            _ => PckCa::Processor,
-        };
-        Ok(Self { ca })
+        Ok(Self {
+            ca: dcap::determine_ca_type_from_der(pck_chain_der)?,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collateral::document::Freshness;
+    use crate::collateral::document::{Freshness, PckCa};
 
     const DIR: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

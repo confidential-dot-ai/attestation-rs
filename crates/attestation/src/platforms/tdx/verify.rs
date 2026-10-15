@@ -5,8 +5,9 @@ use scroll::Pread;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::TdxCollateralProvider;
-use crate::context::Context;
+use crate::collateral::{
+    Doc, IntelPckCrl, IntelQeIdentity, IntelRootCrl, IntelTcbInfo, Provenance, Store,
+};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::types::{Claims, DcapVerificationStatus, PlatformType, TdxTcbStatus};
@@ -455,23 +456,69 @@ impl TdxResult {
             self.tcb_status_accepted,
         ]) && (!self.debug || self.allow_debug)
     }
+}
 
-    /// Record evaluated DCAP collateral and whether the params accept its
-    /// TCB status.
-    pub fn set_collateral(&mut self, collateral: TdxCollateral, params: &TdxParams) {
-        let status = collateral.tcb;
-        self.tcb_status_accepted = Some(params.accepted_tcb_statuses.contains(&status.tcb_status));
-        self.tcb_status = Some(status);
-        self.crl_ok = Some(!collateral.pck_revoked);
+/// What TDX verification needs besides the evidence: Intel's collateral for
+/// the quote's platform.
+pub struct TdxCollateral {
+    pub tcb_info: Doc<IntelTcbInfo>,
+    pub qe_identity: Doc<IntelQeIdentity>,
+    pub pck_crl: Doc<IntelPckCrl>,
+    pub root_crl: Doc<IntelRootCrl>,
+}
+
+impl TdxCollateral {
+    /// Gather the collateral for a quote whose signature and PCK chain have
+    /// already been verified.
+    pub(crate) async fn gather(
+        quote_bytes: &[u8],
+        quote: &TdxQuote,
+        store: &Store,
+        now: i64,
+    ) -> Result<Self> {
+        let pck = PckChain::of(quote_bytes, quote)?;
+        let (tcb_info, qe_identity, pck_crl, root_crl) = futures_util::join!(
+            store.get(IntelTcbInfo { fmspc: pck.fmspc }, now),
+            store.get(IntelQeIdentity {}, now),
+            store.get(pck.crl, now),
+            store.get(IntelRootCrl {}, now)
+        );
+        Ok(Self {
+            tcb_info: tcb_info?,
+            qe_identity: qe_identity?,
+            pck_crl: pck_crl?,
+            root_crl: root_crl?,
+        })
+    }
+
+    pub fn provenance(&self) -> Vec<Provenance> {
+        vec![
+            self.tcb_info.provenance(),
+            self.qe_identity.provenance(),
+            self.pck_crl.provenance(),
+            self.root_crl.provenance(),
+        ]
     }
 }
 
-/// What Intel's DCAP collateral says about a genuine quote.
-#[derive(Debug, Clone)]
-pub struct TdxCollateral {
-    pub tcb: DcapVerificationStatus,
-    /// The PCK certificate or its issuing CA is listed in Intel's CRLs.
-    pub pck_revoked: bool,
+/// What the quote's PCK chain says about which collateral applies.
+struct PckChain {
+    der: Vec<Vec<u8>>,
+    fmspc: String,
+    crl: IntelPckCrl,
+}
+
+impl PckChain {
+    fn of(quote_bytes: &[u8], quote: &TdxQuote) -> Result<Self> {
+        let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
+        let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
+        let der = super::dcap::parse_pem_to_der(auth.pck_cert_chain_pem)?;
+        Ok(Self {
+            fmspc: super::dcap::extract_fmspc_from_pck_der(&der)?,
+            crl: IntelPckCrl::for_pck_chain(&der)?,
+            der,
+        })
+    }
 }
 
 /// Bare-metal Intel TDX (DCAP quote, optional CC event log).
@@ -482,22 +529,28 @@ impl Platform for Tdx {
     type Evidence = TdxEvidence;
     type Params = TdxParams;
     type Result = TdxResult;
+    type Collateral = TdxCollateral;
 
-    /// When the context has a TDX collateral provider, performs full DCAP
-    /// collateral verification: PCK CRL revocation check, TCB status
-    /// evaluation, and QE Identity verification. Offline, these are skipped.
-    async fn verify(
+    fn validate(params: &TdxParams) -> Result<()> {
+        params.validate()
+    }
+
+    /// The quote's signature and PCK chain are verified before anything is
+    /// fetched, so a forged quote never names collateral.
+    async fn gather(evidence: &TdxEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+        let (quote_bytes, quote) = genuine_quote(evidence, now)?;
+        TdxCollateral::gather(&quote_bytes, &quote, store, now).await
+    }
+
+    fn verify(
         evidence: &TdxEvidence,
         params: &TdxParams,
-        ctx: &Context,
+        collateral: &TdxCollateral,
+        now: i64,
     ) -> Result<TdxResult> {
         params.validate()?;
-        crate::utils::check_field_size("quote", evidence.quote.len())?;
-        let quote_bytes = BASE64
-            .decode(&evidence.quote)
-            .map_err(|e| AttestationError::EvidenceDeserialize(format!("quote base64: {e}")))?;
-
-        let (quote, mut result) = verify_quote(&quote_bytes, params, ctx)?;
+        let quote_bytes = decode_quote(evidence)?;
+        let (quote, mut result) = verify_quote(&quote_bytes, params, now)?;
 
         result.report_data_match = params
             .report_data
@@ -536,9 +589,30 @@ impl Platform for Tdx {
             )?;
         }
 
-        check_collateral(&mut result, &quote_bytes, &quote, params, ctx).await?;
+        check_collateral(&mut result, &quote_bytes, &quote, params, collateral, now)?;
         Ok(result)
     }
+
+    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
+        collateral.provenance()
+    }
+}
+
+/// The quote, once its signature and PCK chain (at `now`) have verified:
+/// the checks that need no collateral.
+pub(crate) fn genuine_quote(evidence: &TdxEvidence, now: i64) -> Result<(Vec<u8>, TdxQuote)> {
+    let quote_bytes = decode_quote(evidence)?;
+    let quote = parse_tdx_quote(&quote_bytes)?;
+    verify_quote_signature(&quote_bytes, &quote)?;
+    super::dcap::verify_dcap_chain(&quote_bytes, quote.quote_version, now)?;
+    Ok((quote_bytes, quote))
+}
+
+fn decode_quote(evidence: &TdxEvidence) -> Result<Vec<u8>> {
+    crate::utils::check_field_size("quote", evidence.quote.len())?;
+    BASE64
+        .decode(&evidence.quote)
+        .map_err(|e| AttestationError::EvidenceDeserialize(format!("quote base64: {e}")))
 }
 
 /// Verify a TD quote (signature, DCAP chain) and evaluate the params' quote
@@ -549,11 +623,11 @@ impl Platform for Tdx {
 pub(crate) fn verify_quote(
     quote_bytes: &[u8],
     params: &TdxParams,
-    ctx: &Context,
+    now: i64,
 ) -> Result<(TdxQuote, TdxResult)> {
     let quote = parse_tdx_quote(quote_bytes)?;
     verify_quote_signature(quote_bytes, &quote)?;
-    super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, ctx.now())?;
+    super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, now)?;
 
     let body = &quote.body;
     let compare = |allowed: &Option<Vec<[u8; 48]>>, actual: &[u8; 48]| {
@@ -580,89 +654,44 @@ pub(crate) fn verify_quote(
     Ok((quote, result))
 }
 
-/// Evaluate DCAP collateral into `result` when the context has a provider.
-/// Call it last, after the evidence is known to be genuine, so forged
-/// evidence is never reported as retryable.
-pub(crate) async fn check_collateral(
+/// Evaluate Intel's collateral for a genuine quote into `result`: PCK
+/// revocation, the TCB status (the platform's combined with the QE's), and
+/// whether the params accept it. A QE that is not Intel's (MRSIGNER,
+/// ISVPRODID, MISCSELECT, ATTRIBUTES) is an error about the quote.
+pub(crate) fn check_collateral(
     result: &mut TdxResult,
     quote_bytes: &[u8],
     quote: &TdxQuote,
     params: &TdxParams,
-    ctx: &Context,
-) -> Result<()> {
-    if let Some(provider) = ctx.tdx_collateral() {
-        let collateral = verify_collateral(quote_bytes, quote, provider, ctx.now()).await?;
-        result.set_collateral(collateral, params);
-    } else {
-        log::warn!("TDX collateral provider not available; skipping CRL, TCB status, and QE Identity checks");
-    }
-    Ok(())
-}
-
-/// Run the DCAP collateral checks (PCK CRL revocation, TCB status, TD-QE
-/// identity) on an already parsed quote and return what they found. Whether
-/// that is acceptable is the caller's policy ([`TdxResult::set_collateral`]).
-/// The TCB status combines the platform's and the QE's.
-///
-/// Collateral that cannot be fetched, parsed or verified is
-/// [`AttestationError::CollateralUnavailable`]. A QE that is not Intel's
-/// (MRSIGNER, ISVPRODID, MISCSELECT, ATTRIBUTES) is an error about the quote.
-///
-/// The PCK chain and QE report are taken from the quote as authentic: call
-/// this only after the quote itself has verified. It exists so a caller can
-/// attribute failures to the collateral without verifying the evidence twice.
-pub async fn verify_collateral(
-    quote_bytes: &[u8],
-    quote: &TdxQuote,
-    provider: &dyn TdxCollateralProvider,
+    collateral: &TdxCollateral,
     now: i64,
-) -> Result<TdxCollateral> {
+) -> Result<()> {
+    let pck = PckChain::of(quote_bytes, quote)?;
+    if collateral.tcb_info.key.fmspc != pck.fmspc || collateral.pck_crl.key != pck.crl {
+        return Err(AttestationError::CertChainError(
+            "the collateral is not for this quote's platform".into(),
+        ));
+    }
+    let pck_revoked = super::dcap::cert_revoked_from_der(&pck.der, &collateral.pck_crl.value)?
+        || super::dcap::intermediate_ca_revoked_from_der(&pck.der, &collateral.root_crl.value)?;
+
     let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
     let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
-
-    let pck_revoked = provider
-        .pck_revoked(auth.pck_cert_chain_pem)
-        .await
-        .map_err(unusable)?;
-
-    // TCB status evaluation
-    let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
-    let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
-    let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
     let mut status = super::dcap::evaluate_tcb_status(
-        &tcb_info_json,
+        &collateral.tcb_info.value,
         &quote.body.tee_tcb_svn,
-        auth.pck_cert_chain_pem,
-        tcb_signing_chain.as_deref(),
+        &pck.der,
         now,
-    )
-    .map_err(unusable)?;
-
-    // QE Identity verification (TDX uses TD_QE, not SGX QE)
-    let qe_identity_json = provider.get_td_qe_identity().await?;
-    let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
-    if let Some(chain) = qe_signing_chain.as_deref() {
-        super::dcap::verify_qe_identity_signature(&qe_identity_json, chain, now)
-            .map_err(unusable)?;
-    }
-    let qe_identity = super::dcap::parse_qe_identity(&qe_identity_json).map_err(unusable)?;
-    let qe_status = super::dcap::check_qe_report(auth.qe_report_body, &qe_identity)?;
+    )?;
+    let qe_status =
+        super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.value)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
     status.qe_tcb_status = Some(qe_status);
 
-    Ok(TdxCollateral {
-        tcb: status,
-        pck_revoked,
-    })
-}
-
-/// Fetched collateral that does not parse or verify was not usefully
-/// obtained.
-fn unusable(e: AttestationError) -> AttestationError {
-    match e {
-        AttestationError::CollateralUnavailable(_) => e,
-        other => AttestationError::CollateralUnavailable(format!("Intel collateral: {other}")),
-    }
+    result.tcb_status_accepted = Some(params.accepted_tcb_statuses.contains(&status.tcb_status));
+    result.tcb_status = Some(status);
+    result.crl_ok = Some(!pck_revoked);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -852,7 +881,7 @@ mod tests {
         // v4 fixture has debug bit set: genuine evidence, so Ok, but it fails
         // the default policy (allow_debug = false).
         let evidence = make_tdx_evidence(V4_QUOTE);
-        let r = verify(&evidence, &TdxParams::default(), false)
+        let r = verify(&evidence, &TdxParams::default())
             .await
             .expect("a debug TD is still genuine evidence");
         assert!(r.debug);
@@ -869,7 +898,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert!(r.debug);
         assert!(r.passed(), "debug TD with allow_debug should pass");
     }
@@ -951,105 +980,10 @@ mod tests {
         }
     }
 
-    /// Verify through the platform contract, offline or with the fixture
-    /// collateral provider.
-    async fn verify(
-        evidence: &TdxEvidence,
-        params: &TdxParams,
-        with_collateral: bool,
-    ) -> Result<TdxResult> {
-        let ctx = if with_collateral {
-            Context::offline().with_tdx_provider(FixtureCollateralProvider::new())
-        } else {
-            Context::offline()
-        };
-        Tdx::verify(evidence, params, &ctx).await
+    /// Verify through the platform contract with the fixture collateral.
+    async fn verify(evidence: &TdxEvidence, params: &TdxParams) -> Result<TdxResult> {
+        crate::testing::verify::<Tdx>(evidence, params, crate::testing::intel()).await
     }
-
-    // ---------------------------------------------------------------
-    // Fixture-backed collateral provider for testing the full DCAP
-    // collateral path (TCB info, QE identity, CRL checks).
-    //
-    // Collateral files were captured from Intel PCS v4 and stored in
-    // test_data/collateral/. The signing chains and CRLs have long
-    // validity, but TCB Info `nextUpdate` will eventually expire.
-    // `evaluate_tcb_status` surfaces that as `collateral_expired: true`
-    // rather than a hard failure, so the tests remain valid.
-    // ---------------------------------------------------------------
-
-    const TCB_INFO_V4: &[u8] =
-        include_bytes!("../../../test_data/collateral/tcb_info_50806f000000.json");
-    const TCB_INFO_V5: &[u8] =
-        include_bytes!("../../../test_data/collateral/tcb_info_90c06f000000.json");
-    const TCB_SIGNING_CHAIN: &[u8] =
-        include_bytes!("../../../test_data/collateral/tcb_signing_chain.pem");
-    const TD_QE_IDENTITY: &[u8] =
-        include_bytes!("../../../test_data/collateral/td_qe_identity.json");
-    const QE_IDENTITY_SIGNING_CHAIN: &[u8] =
-        include_bytes!("../../../test_data/collateral/qe_identity_signing_chain.pem");
-    const PCK_CRL_DER: &[u8] = include_bytes!("../../../test_data/collateral/pck_crl_platform.der");
-    const ROOT_CA_CRL_DER: &[u8] = include_bytes!("../../../test_data/collateral/root_ca_crl.der");
-
-    struct FixtureCollateralProvider {
-        fmspc_tcb_info: std::collections::HashMap<String, Vec<u8>>,
-    }
-
-    impl FixtureCollateralProvider {
-        fn new() -> Self {
-            let mut map = std::collections::HashMap::new();
-            map.insert("50806f000000".to_string(), TCB_INFO_V4.to_vec());
-            map.insert("90c06f000000".to_string(), TCB_INFO_V5.to_vec());
-            Self {
-                fmspc_tcb_info: map,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TdxCollateralProvider for FixtureCollateralProvider {
-        async fn get_tcb_info(&self, fmspc: &str) -> crate::error::Result<Vec<u8>> {
-            self.fmspc_tcb_info.get(fmspc).cloned().ok_or_else(|| {
-                AttestationError::CollateralUnavailable(format!(
-                    "no fixture TCB info for FMSPC {fmspc}"
-                ))
-            })
-        }
-
-        async fn get_qe_identity(&self) -> crate::error::Result<Vec<u8>> {
-            Err(AttestationError::CollateralUnavailable(
-                "fixture provider only has TD QE identity, not SGX QE identity".into(),
-            ))
-        }
-
-        async fn get_td_qe_identity(&self) -> crate::error::Result<Vec<u8>> {
-            Ok(TD_QE_IDENTITY.to_vec())
-        }
-
-        async fn get_root_ca_crl(&self) -> crate::error::Result<Vec<u8>> {
-            Ok(ROOT_CA_CRL_DER.to_vec())
-        }
-
-        async fn get_pck_crl(&self, _ca: &str) -> crate::error::Result<Vec<u8>> {
-            Ok(PCK_CRL_DER.to_vec())
-        }
-
-        async fn get_tcb_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(TCB_SIGNING_CHAIN.to_vec()))
-        }
-
-        async fn get_qe_identity_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(QE_IDENTITY_SIGNING_CHAIN.to_vec()))
-        }
-
-        async fn get_td_qe_identity_signing_chain(&self) -> crate::error::Result<Option<Vec<u8>>> {
-            Ok(Some(QE_IDENTITY_SIGNING_CHAIN.to_vec()))
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Tdx::verify tests — each test runs both without collateral
-    // (None) and with the fixture provider to cover both paths.
-    // ---------------------------------------------------------------
 
     #[tokio::test]
     async fn test_verify_evidence_v4_no_expected_report_data() {
@@ -1060,24 +994,8 @@ mod tests {
             ..Default::default()
         };
 
-        // Without collateral
-        let result = verify(&evidence, &params, false).await;
-        assert!(result.is_ok(), "verify should succeed: {:?}", result.err());
-        let r = result.unwrap();
-        assert!(
-            r.report_data_match.is_none(),
-            "should be None when no expected value"
-        );
-        assert_eq!(r.crl_ok, None, "no provider means no collateral");
-
-        // With collateral
-        let result = verify(&evidence, &params, true).await;
-        assert!(
-            result.is_ok(),
-            "verify with collateral should succeed: {:?}",
-            result.err()
-        );
-        let r = result.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
+        assert!(r.report_data_match.is_none(), "no expected value → None");
         assert_eq!(r.crl_ok, Some(true), "collateral should be evaluated");
         assert!(r.tcb_status.is_some(), "tcb_status should be populated");
     }
@@ -1093,7 +1011,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = verify(&evidence, &params, false).await;
+        let result = verify(&evidence, &params).await;
         assert!(
             result.is_ok(),
             "verify with matching report_data should succeed: {:?}",
@@ -1101,7 +1019,7 @@ mod tests {
         );
         assert_eq!(result.unwrap().report_data_match, Some(true));
 
-        let result = verify(&evidence, &params, true).await;
+        let result = verify(&evidence, &params).await;
         assert!(
             result.is_ok(),
             "verify with collateral + matching report_data should succeed: {:?}",
@@ -1121,7 +1039,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false)
+        let r = verify(&evidence, &params)
             .await
             .expect("a report_data mismatch is a value, not an error");
         assert_eq!(r.report_data_match, Some(false));
@@ -1138,7 +1056,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = verify(&evidence, &params, false).await;
+        let result = verify(&evidence, &params).await;
         assert!(
             result.is_ok(),
             "v5 verify with matching report_data should succeed: {:?}",
@@ -1162,7 +1080,7 @@ mod tests {
             report_data: Some(vec![0x00; 64]),
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert_eq!(r.report_data_match, Some(false));
         assert!(!r.passed());
     }
@@ -1176,7 +1094,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let result = verify(&evidence, &params, false).await;
+        let result = verify(&evidence, &params).await;
         assert!(result.is_err(), "65-byte report_data should be rejected");
     }
 
@@ -1191,7 +1109,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert!(r.mrtd_match.is_none(), "no mrtd pin → None");
         assert_eq!(r.rtmr_match, [None; 4], "no rtmr pins → None");
         assert!(r.passed());
@@ -1206,7 +1124,7 @@ mod tests {
             mrtd: Some(vec![quote.body.mr_td]),
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert_eq!(r.mrtd_match, Some(true));
     }
 
@@ -1219,7 +1137,7 @@ mod tests {
             mrtd: Some(vec![[0xAA; 48]]),
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert_eq!(r.mrtd_match, Some(false));
         assert!(!r.passed());
     }
@@ -1234,7 +1152,7 @@ mod tests {
             rtmr: [Some(vec![quote.body.rtmr_0]), None, None, None],
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert_eq!(r.rtmr_match, [Some(true), None, None, None]);
     }
 
@@ -1253,7 +1171,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let r = verify(&evidence, &params, false).await.unwrap();
+        let r = verify(&evidence, &params).await.unwrap();
         assert_eq!(r.rtmr_match, [Some(true), Some(false), None, Some(true)]);
         assert!(!r.passed());
     }
@@ -1265,7 +1183,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let r = verify(&evidence, &accepted, true).await.unwrap();
+        let r = verify(&evidence, &accepted).await.unwrap();
         let status = r
             .tcb_status
             .as_ref()
@@ -1282,7 +1200,7 @@ mod tests {
                 .collect(),
             ..accepted
         };
-        let r = verify(&evidence, &refused, true).await.unwrap();
+        let r = verify(&evidence, &refused).await.unwrap();
         assert_eq!(r.tcb_status_accepted, Some(false));
         assert!(!r.passed());
     }
@@ -1294,7 +1212,7 @@ mod tests {
             allow_debug: true,
             ..Default::default()
         };
-        let err = verify(&make_tdx_evidence(V4_QUOTE), &params, false)
+        let err = verify(&make_tdx_evidence(V4_QUOTE), &params)
             .await
             .expect_err("an empty accepted set cannot be satisfied");
         assert!(matches!(err, AttestationError::InvalidParams(_)));
@@ -1311,7 +1229,7 @@ mod tests {
                 ..Default::default()
             };
             let evidence = evidence.clone();
-            async move { verify(&evidence, &params, false).await }
+            async move { verify(&evidence, &params).await }
         };
 
         let r = verify_with(vec![[0xAA; 48], mrtd]).await.unwrap();

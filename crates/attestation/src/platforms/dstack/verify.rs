@@ -6,7 +6,7 @@
 //! - TDX quote ECDSA P-256 signature (hardware-rooted)
 //! - PCK certificate chain up to Intel SGX Root CA
 //! - QE report signature and binding
-//! - QE Identity against Intel PCS (when collateral provider is available)
+//! - QE Identity against Intel's collateral
 //! - TCB status evaluation and CRL revocation checks
 //! - `report_data` binding (when `TdxParams::report_data` is set)
 //! - `mr_config_id` binding (when `TdxParams::init_data` is set)
@@ -32,9 +32,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{Provenance, Store};
 use crate::error::Result;
 use crate::platform::Platform;
+use crate::platforms::tdx::verify::TdxCollateral;
 use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
 use crate::types::PlatformType;
 
@@ -93,23 +94,39 @@ impl Platform for Dstack {
     type Evidence = DstackEvidence;
     type Params = DstackParams;
     type Result = DstackResult;
+    type Collateral = TdxCollateral;
 
-    async fn verify(
+    fn validate(params: &DstackParams) -> Result<()> {
+        params.tdx.validate()
+    }
+
+    async fn gather(evidence: &DstackEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+        Tdx::gather(&tdx_evidence(evidence)?, store, now).await
+    }
+
+    fn verify(
         evidence: &DstackEvidence,
         params: &DstackParams,
-        ctx: &Context,
+        collateral: &TdxCollateral,
+        now: i64,
     ) -> Result<DstackResult> {
-        crate::utils::check_field_size("quote", evidence.quote.len())?;
-
-        // dstack's event_log is in a different format than the CC eventlog
-        // from ACPI CCEL, so it is not passed through to TDX verification.
-        let tdx_evidence = crate::platforms::tdx::evidence::TdxEvidence {
-            quote: normalize_quote_to_base64(&evidence.quote),
-            cc_eventlog: None,
-        };
-        let tdx = Tdx::verify(&tdx_evidence, &params.tdx, ctx).await?;
+        let tdx = Tdx::verify(&tdx_evidence(evidence)?, &params.tdx, collateral, now)?;
         Ok(DstackResult { tdx })
     }
+
+    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
+        collateral.provenance()
+    }
+}
+
+/// dstack's event_log is in a different format than the CC eventlog from
+/// ACPI CCEL, so it is not passed through to TDX verification.
+fn tdx_evidence(evidence: &DstackEvidence) -> Result<crate::platforms::tdx::evidence::TdxEvidence> {
+    crate::utils::check_field_size("quote", evidence.quote.len())?;
+    Ok(crate::platforms::tdx::evidence::TdxEvidence {
+        quote: normalize_quote_to_base64(&evidence.quote),
+        cc_eventlog: None,
+    })
 }
 
 #[cfg(test)]

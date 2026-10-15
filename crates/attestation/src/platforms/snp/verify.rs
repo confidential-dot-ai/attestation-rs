@@ -10,8 +10,7 @@ use sev::parser::ByteParser;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::CertProvider;
-use crate::context::Context;
+use crate::collateral::{AmdCrl, AmdSigner, AmdVcek, Doc, DocKey, Provenance, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::types::{Claims, PlatformType, ProcessorGeneration, SnpTcb};
@@ -91,8 +90,8 @@ pub struct SnpResult {
     pub reported_tcb: SnpTcb,
     /// `reported_tcb` is at or above `min_tcb` (`None` if no minimum given).
     pub min_tcb_met: Option<bool>,
-    /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` when no
-    /// CRL was checked: offline, or a provider without CRLs).
+    /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` only on
+    /// results not from [`Snp::verify`]).
     pub crl_ok: Option<bool>,
 }
 
@@ -151,6 +150,71 @@ pub(crate) fn snp_tcb(tcb: &sev::firmware::host::TcbVersion) -> SnpTcb {
     }
 }
 
+/// What SEV-SNP verification needs besides the evidence.
+pub struct SnpCollateral {
+    pub vek: Vek,
+    pub crl: Doc<AmdCrl>,
+}
+
+/// The key the report is signed with.
+pub enum Vek {
+    /// Carried in the evidence (VCEK or VLEK).
+    Inline(Vec<u8>),
+    /// Fetched from AMD KDS.
+    Fetched(Doc<AmdVcek>),
+}
+
+impl SnpCollateral {
+    /// The collateral for `report`, which has verified against `inline`
+    /// when the evidence carries its VEK; a fetched VCEK is checked against
+    /// the report here.
+    pub(crate) async fn gather(
+        report: &AttestationReport,
+        gen: ProcessorGeneration,
+        inline: Option<Vec<u8>>,
+        store: &Store,
+        now: i64,
+    ) -> Result<Self> {
+        match inline {
+            Some(der) => Ok(Self {
+                crl: store.get(AmdCrl::for_vek(gen, &der)?, now).await?,
+                vek: Vek::Inline(der),
+            }),
+            None => {
+                let crl = AmdCrl {
+                    generation: gen,
+                    signer: AmdSigner::Ask,
+                };
+                let (vcek, crl) = futures_util::join!(
+                    store.get(AmdVcek::for_report(report, gen)?, now),
+                    store.get(crl, now)
+                );
+                let vcek = vcek?;
+                check_report(report, &vcek.value, gen, now)?;
+                Ok(Self {
+                    vek: Vek::Fetched(vcek),
+                    crl: crl?,
+                })
+            }
+        }
+    }
+
+    fn vek(&self) -> &[u8] {
+        match &self.vek {
+            Vek::Inline(der) => der,
+            Vek::Fetched(doc) => &doc.value,
+        }
+    }
+
+    pub fn provenance(&self) -> Vec<Provenance> {
+        let mut docs = vec![self.crl.provenance()];
+        if let Vek::Fetched(vcek) = &self.vek {
+            docs.insert(0, vcek.provenance());
+        }
+        docs
+    }
+}
+
 /// Bare-metal AMD SEV-SNP.
 pub struct Snp;
 
@@ -159,106 +223,144 @@ impl Platform for Snp {
     type Evidence = SnpEvidence;
     type Params = SnpParams;
     type Result = SnpResult;
+    type Collateral = SnpCollateral;
 
-    async fn verify(
+    fn validate(params: &SnpParams) -> Result<()> {
+        params.validate()
+    }
+
+    /// The VEK (unless the evidence carries it) and the AMD CRL for its
+    /// issuer. A report that carries its VEK is checked before anything is
+    /// fetched; otherwise an unverified CHIP_ID names the VCEK to fetch, and
+    /// the report is checked against it before the collateral is returned.
+    async fn gather(evidence: &SnpEvidence, store: &Store, now: i64) -> Result<SnpCollateral> {
+        let (report, gen, inline) = genuine_report(evidence, now)?;
+        SnpCollateral::gather(&report, gen, inline, store, now).await
+    }
+
+    fn verify(
         evidence: &SnpEvidence,
         params: &SnpParams,
-        ctx: &Context,
+        collateral: &SnpCollateral,
+        now: i64,
     ) -> Result<SnpResult> {
         params.validate()?;
-        let now = ctx.now();
-        let cert_provider = ctx.cert_provider();
+        let (_, report, gen) = parse_evidence(evidence)?;
+        let vek = collateral.vek();
+        check_report(&report, vek, gen, now)?;
 
-        // 0. Input size validation
-        crate::utils::check_field_size("attestation_report", evidence.attestation_report.len())?;
-
-        // 1. Decode the attestation report
-        let report_bytes = BASE64
-            .decode(&evidence.attestation_report)
-            .map_err(|e| AttestationError::EvidenceDeserialize(format!("base64 decode: {e}")))?;
-
-        // 2. Parse with sev crate
-        let report = AttestationReport::from_bytes(&report_bytes)
-            .map_err(|e| AttestationError::QuoteParseFailed(format!("SNP report parse: {e}")))?;
-
-        // 3. Version check
-        if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
-            return Err(AttestationError::UnsupportedReportVersion {
-                version: report.version,
-                min: MIN_REPORT_VERSION,
-                max: MAX_REPORT_VERSION,
-            });
-        }
-
-        // 4. Determine processor generation
-        // v3+ reports are required to have CPUID fields; treat None as a spec violation.
-        let cpuid_fam = match report.cpuid_fam_id {
-            Some(v) => v,
-            None if report.version >= 3 => {
-                return Err(AttestationError::QuoteParseFailed(
-                    "v3+ SNP report missing cpuid_fam_id field".to_string(),
-                ));
-            }
-            None => 0,
-        };
-        let cpuid_mod = match report.cpuid_mod_id {
-            Some(v) => v,
-            None if report.version >= 3 => {
-                return Err(AttestationError::QuoteParseFailed(
-                    "v3+ SNP report missing cpuid_mod_id field".to_string(),
-                ));
-            }
-            None => 0,
-        };
-        let processor_gen =
-            ProcessorGeneration::from_cpuid(cpuid_fam, cpuid_mod).ok_or_else(|| {
-                AttestationError::QuoteParseFailed(format!(
-                    "unknown processor: family=0x{cpuid_fam:02X}, model=0x{cpuid_mod:02X}"
-                ))
-            })?;
-
-        // 5. Resolve VEK cert (VCEK or VLEK)
-        let vcek_der = resolve_vcek(evidence, &report, processor_gen, cert_provider).await?;
-
-        // 6. VEK endorsement: chain to the bundled AMD roots (VLEK
-        // auto-detected), validity period, chip-id/TCB OIDs against the report
-        verify_vek_endorsement(&report, &vcek_der, processor_gen, now)?;
-
-        // 7. Verify report signature against VEK
-        let vek = Certificate::from_der(&vcek_der).map_err(|e| {
-            AttestationError::CertChainError(format!("VEK to sev Certificate: {e}"))
-        })?;
-        (&vek, &report)
-            .verify()
-            .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
-
-        // 8. CRL revocation check (if the provider supplies a CRL), only once
-        // the evidence is known to be genuine, so a forged report is never
-        // reported as retryable. A CRL the provider could not fetch is
-        // CollateralUnavailable.
-        let crl_ok = match cert_provider.get_snp_crl(processor_gen).await? {
-            Some(crl_der) => Some(check_vek_against_crl(
-                &vcek_der,
-                &crl_der,
-                processor_gen,
-                now,
-            )?),
-            None => {
-                log::warn!(
-                    "snp: CRL data not available from cert provider; skipping revocation check"
-                );
-                None
-            }
-        };
-
-        // 9. The params' rules: VMPL, debug, minimum TCB, launch digest
-        let mut result = evaluate_report(&report, params, crl_ok);
-
-        // 10. report_data and HOST_DATA bindings
+        let revoked = vek_revoked(vek, &collateral.crl, gen)?;
+        let mut result = evaluate_report(&report, params, Some(!revoked));
         check_report_bindings(&mut result, &report, params)?;
-
         Ok(result)
     }
+
+    fn provenance(collateral: &SnpCollateral) -> Vec<Provenance> {
+        collateral.provenance()
+    }
+}
+
+/// Decode and parse the report, check its version, and find its generation.
+fn parse_evidence(
+    evidence: &SnpEvidence,
+) -> Result<(Vec<u8>, AttestationReport, ProcessorGeneration)> {
+    crate::utils::check_field_size("attestation_report", evidence.attestation_report.len())?;
+    let report_bytes = BASE64
+        .decode(&evidence.attestation_report)
+        .map_err(|e| AttestationError::EvidenceDeserialize(format!("base64 decode: {e}")))?;
+    let report = parse_report(&report_bytes)?;
+    if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
+        return Err(AttestationError::UnsupportedReportVersion {
+            version: report.version,
+            min: MIN_REPORT_VERSION,
+            max: MAX_REPORT_VERSION,
+        });
+    }
+    // v3+ reports carry the CPUID fields.
+    let (Some(family), Some(model)) = (report.cpuid_fam_id, report.cpuid_mod_id) else {
+        return Err(AttestationError::QuoteParseFailed(
+            "v3+ SNP report missing CPUID fields".to_string(),
+        ));
+    };
+    let gen = ProcessorGeneration::from_cpuid(family, model).ok_or_else(|| {
+        AttestationError::QuoteParseFailed(format!(
+            "unknown processor: family=0x{family:02X}, model=0x{model:02X}"
+        ))
+    })?;
+    Ok((report_bytes, report, gen))
+}
+
+/// The report, its generation and the VEK it carries (if any), once the
+/// report has verified against that VEK: the checks that need no collateral.
+pub(crate) fn genuine_report(
+    evidence: &SnpEvidence,
+    now: i64,
+) -> Result<(AttestationReport, ProcessorGeneration, Option<Vec<u8>>)> {
+    let (_, report, gen) = parse_evidence(evidence)?;
+    let inline = inline_vek(evidence)?;
+    if let Some(vek) = &inline {
+        check_report(&report, vek, gen, now)?;
+    }
+    Ok((report, gen, inline))
+}
+
+/// The VEK chains to the bundled AMD roots (VLEK auto-detected), is valid at
+/// `now` and names the report's chip and TCB, and it signed the report.
+fn check_report(
+    report: &AttestationReport,
+    vek: &[u8],
+    gen: ProcessorGeneration,
+    now: i64,
+) -> Result<()> {
+    verify_vek_endorsement(report, vek, gen, now)?;
+    let cert = Certificate::from_der(vek)
+        .map_err(|e| AttestationError::CertChainError(format!("VEK to sev Certificate: {e}")))?;
+    (&cert, report)
+        .verify()
+        .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))
+}
+
+fn inline_vek(evidence: &SnpEvidence) -> Result<Option<Vec<u8>>> {
+    evidence
+        .cert_chain
+        .as_ref()
+        .map(|chain| {
+            BASE64
+                .decode(&chain.vcek)
+                .map_err(|e| AttestationError::CertChainError(format!("VCEK base64: {e}")))
+        })
+        .transpose()
+}
+
+/// Whether `crl` revokes the AMD certificate that issued `vek_der` (its ASK,
+/// or ASVK for a VLEK). AMD CRLs are signed by the ARK and list the
+/// ARK-issued ASKs and ASVKs; every VEK carries serial 0, so the entry that
+/// can revoke a VEK is its issuer's. The CRL's signature was checked when it
+/// was stored; here it must be the one for this VEK.
+pub(crate) fn vek_revoked(
+    vek_der: &[u8],
+    crl: &Doc<AmdCrl>,
+    processor_gen: ProcessorGeneration,
+) -> Result<bool> {
+    let want = AmdCrl::for_vek(processor_gen, vek_der)?;
+    if crl.key != want {
+        return Err(AttestationError::CertChainError(format!(
+            "collateral has the {} CRL, the VEK needs {}",
+            DocKey::from(crl.key),
+            DocKey::from(want)
+        )));
+    }
+    let (_, issuer) = X509Certificate::from_der(vek_issuer(vek_der, processor_gen)?)
+        .map_err(|e| AttestationError::CertChainError(format!("VEK issuer x509 parse: {e}")))?;
+    let (_, list) = CertificateRevocationList::from_der(&crl.value)
+        .map_err(|e| AttestationError::CertChainError(format!("AMD CRL parse: {e}")))?;
+    let revoked = list
+        .iter_revoked_certificates()
+        .any(|r| r.raw_serial() == issuer.raw_serial());
+    if revoked {
+        log::warn!("{} is listed in the AMD CRL", issuer.subject());
+    }
+    Ok(revoked)
 }
 
 /// Compare the report's `report_data` and HOST_DATA with the params (each
@@ -296,52 +398,6 @@ pub fn min_tcb_met(tcb: &SnpTcb, min_tcb: &SnpTcb) -> bool {
         || tcb.snp < min_tcb.snp
         || tcb.microcode < min_tcb.microcode
         || fmc_below)
-}
-
-/// Resolve the VCEK certificate - either from evidence or from cert provider.
-async fn resolve_vcek(
-    evidence: &SnpEvidence,
-    report: &AttestationReport,
-    processor_gen: ProcessorGeneration,
-    cert_provider: &dyn CertProvider,
-) -> Result<Vec<u8>> {
-    if let Some(chain) = &evidence.cert_chain {
-        // VCEK provided in evidence
-        let vcek = BASE64
-            .decode(&chain.vcek)
-            .map_err(|e| AttestationError::CertChainError(format!("VCEK base64: {e}")))?;
-        Ok(vcek)
-    } else {
-        // Guard: all-zeros chip_id means MASK_CHIP_ID was set, can't fetch from KDS
-        if report.chip_id.iter().all(|&b| b == 0) {
-            return Err(AttestationError::CertChainError(
-                "evidence carries no VEK and chip_id is all zeros in attestation report. \
-                 Confirm that MASK_CHIP_ID is set to 0 to request VCEK from KDS."
-                    .to_string(),
-            ));
-        }
-        // Fetch from cert provider using report's TCB
-        let tcb = SnpTcb {
-            bootloader: report.reported_tcb.bootloader,
-            tee: report.reported_tcb.tee,
-            snp: report.reported_tcb.snp,
-            microcode: report.reported_tcb.microcode,
-            fmc: if processor_gen == ProcessorGeneration::Turin {
-                Some(report.reported_tcb.fmc.ok_or_else(|| {
-                    AttestationError::QuoteParseFailed(
-                        "Turin report missing FMC TCB field".to_string(),
-                    )
-                })?)
-            } else {
-                None
-            },
-        };
-        let mut chip_id = [0u8; 64];
-        chip_id.copy_from_slice(&report.chip_id[..]);
-        cert_provider
-            .get_snp_vcek(processor_gen, &chip_id, &tcb)
-            .await
-    }
 }
 
 /// Verify the AMD certificate chain: ARK (self-signed) -> ASK -> VCEK.
@@ -616,99 +672,6 @@ pub fn check_vek_binding(
     Ok(())
 }
 
-/// Check the AMD certificate that issued a VEK against an AMD KDS CRL.
-/// Returns `Ok(false)` when the CRL revokes it.
-///
-/// AMD CRLs are signed by the ARK and list revoked ARK-issued certificates:
-/// ASKs and ASVKs. Every VCEK/VLEK carries serial 0 and is issued by the
-/// ASK/ASVK, so the entry that can revoke a VEK is its issuer's serial. The
-/// issuer (ASK, or ASVK for a VLEK) and the ARK are the bundled ones for
-/// `processor_gen`, the same chain [`verify_cert_chain`] validates.
-///
-/// A CRL that cannot be parsed, is not signed by the ARK, or is outside its
-/// thisUpdate/nextUpdate window at `now` (Unix seconds) was not usefully
-/// obtained: [`AttestationError::CollateralUnavailable`]. Only "the issuer is
-/// listed" is a value.
-pub fn check_vek_against_crl(
-    vek_der: &[u8],
-    crl_der: &[u8],
-    processor_gen: ProcessorGeneration,
-    now: i64,
-) -> Result<bool> {
-    let ark_der = super::certs::get_ark(processor_gen);
-    let issuer_der = vek_issuer(vek_der, processor_gen)?;
-    let listed = crl_lists(issuer_der, crl_der, ark_der, now).map_err(|e| match e {
-        AttestationError::CollateralUnavailable(_) => e,
-        other => AttestationError::CollateralUnavailable(format!("AMD CRL: {other}")),
-    })?;
-    Ok(!listed)
-}
-
-/// Whether a CRL from `issuer_der` lists `cert_der`.
-///
-/// Verifies the CRL's own signature against the issuer and its
-/// thisUpdate/nextUpdate window before trusting the revocation list. Without
-/// this an attacker could supply a forged or stale empty CRL to bypass
-/// revocation checks.
-// INVARIANT CLASS: Correctness
-// INVARIANT: CRL signature verified against issuing CA before trusting revocation data.
-fn crl_lists(cert_der: &[u8], crl_der: &[u8], issuer_der: &[u8], now: i64) -> Result<bool> {
-    // 1. Parse the issuing CA cert to extract its public key
-    let (_, issuer_cert) = X509Certificate::from_der(issuer_der)
-        .map_err(|e| AttestationError::CertChainError(format!("CRL issuer x509 parse: {e}")))?;
-
-    // 2. Parse the CRL
-    let (_, crl) = CertificateRevocationList::from_der(crl_der)
-        .map_err(|e| AttestationError::CertChainError(format!("AMD CRL parse: {e}")))?;
-
-    // 3. Verify CRL signature against the issuing CA's public key.
-    // We use our own implementation because x509-parser's verify_signature
-    // doesn't support RSA-PSS (used by Milan ASK for CRL signing).
-    verify_crl_signature(&crl, crl_der, &issuer_cert)?;
-
-    // 3b. Freshness: a genuine but stale CRL must not vouch for a certificate
-    // that a newer list may have revoked. AMD CRLs always carry nextUpdate;
-    // one without it has no defined shelf life, so it is rejected rather than
-    // trusted forever.
-    let now = crate::utils::asn1_time(now)?;
-    if crl.last_update() > now {
-        return Err(AttestationError::CollateralUnavailable(format!(
-            "AMD CRL thisUpdate {} is in the future",
-            crl.last_update()
-        )));
-    }
-    match crl.next_update() {
-        None => {
-            return Err(AttestationError::CertChainError(
-                "AMD CRL has no nextUpdate; refusing a revocation list with no defined freshness"
-                    .into(),
-            ));
-        }
-        Some(next_update) if next_update < now => {
-            return Err(AttestationError::CollateralUnavailable(format!(
-                "AMD CRL is stale: nextUpdate {next_update} has passed; fetch a current CRL"
-            )));
-        }
-        Some(_) => {}
-    }
-
-    // 4. Check serial number against revocation list
-    let (_, cert) = X509Certificate::from_der(cert_der)
-        .map_err(|e| AttestationError::CertChainError(format!("x509 parse for CRL: {e}")))?;
-    let cert_serial = cert.raw_serial();
-    let revoked = crl
-        .iter_revoked_certificates()
-        .any(|revoked| revoked.raw_serial() == cert_serial);
-    if revoked {
-        log::warn!(
-            "{} (serial {}) is listed in the AMD CRL",
-            cert.subject(),
-            cert.raw_serial_as_string()
-        );
-    }
-    Ok(revoked)
-}
-
 /// Extract the TBSCertList raw DER bytes from a CRL DER blob.
 ///
 /// A CRL in DER is: SEQUENCE { TBSCertList, signatureAlgorithm, signatureValue }
@@ -813,6 +776,7 @@ pub fn parse_report(report_bytes: &[u8]) -> Result<AttestationReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
     use der::Decode;
 
     // Load real test fixtures at compile time
@@ -1151,80 +1115,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore] // Requires network access
-    async fn test_crl_signature_verification_milan() {
-        let client = reqwest::Client::new();
-        let url = crate::collateral::snp_crl_url(ProcessorGeneration::Milan);
-        let resp = client.get(&url).send().await.unwrap();
-        let crl_der = resp.bytes().await.unwrap().to_vec();
-
-        // AMD CRLs are signed by the ARK (root), not the ASK
-        let ark_der = super::super::certs::get_ark(ProcessorGeneration::Milan);
-        let (_, ark_cert) = X509Certificate::from_der(ark_der).unwrap();
-        let (_, crl) = CertificateRevocationList::from_der(&crl_der).unwrap();
-
-        eprintln!("CRL sig algo OID: {}", crl.signature_algorithm.algorithm);
-        eprintln!("CRL issuer: {}", crl.issuer());
-
-        let result = verify_crl_signature(&crl, &crl_der, &ark_cert);
-        assert!(
-            result.is_ok(),
-            "Milan CRL sig verify failed: {:?}",
-            result.err()
-        );
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires network access
-    async fn test_crl_signature_verification_genoa() {
-        let client = reqwest::Client::new();
-        let url = crate::collateral::snp_crl_url(ProcessorGeneration::Genoa);
-        let resp = client.get(&url).send().await.unwrap();
-        let crl_der = resp.bytes().await.unwrap().to_vec();
-
-        // AMD CRLs are signed by the ARK (root), not the ASK
-        let ark_der = super::super::certs::get_ark(ProcessorGeneration::Genoa);
-        let (_, ark_cert) = X509Certificate::from_der(ark_der).unwrap();
-        let (_, crl) = CertificateRevocationList::from_der(&crl_der).unwrap();
-
-        eprintln!("CRL sig algo OID: {}", crl.signature_algorithm.algorithm);
-
-        let result = verify_crl_signature(&crl, &crl_der, &ark_cert);
-        assert!(
-            result.is_ok(),
-            "Genoa CRL sig verify failed: {:?}",
-            result.err()
-        );
-    }
-
     // expected_launch_digest tests against the live Genoa v5 fixture.
-
-    /// Cert provider that returns the bundled live Genoa VCEK from the
-    /// fixture. No network access, no CRL.
-    struct StubCertProvider;
-
-    #[async_trait::async_trait]
-    impl crate::collateral::CertProvider for StubCertProvider {
-        async fn get_snp_vcek(
-            &self,
-            _processor_gen: ProcessorGeneration,
-            _chip_id: &[u8; 64],
-            _reported_tcb: &SnpTcb,
-        ) -> Result<Vec<u8>> {
-            Ok(LIVE_VCEK_GENOA.to_vec())
-        }
-
-        async fn get_snp_cert_chain(
-            &self,
-            _processor_gen: ProcessorGeneration,
-        ) -> Result<(Vec<u8>, Vec<u8>)> {
-            // Not used — the bare-metal SNP path uses bundled ARK/ASK directly.
-            Err(AttestationError::CollateralUnavailable(
-                "stub provider does not serve full chain".to_string(),
-            ))
-        }
-    }
 
     fn make_snp_evidence_with_vcek(report: &[u8], vcek_der: &[u8]) -> SnpEvidence {
         use crate::platforms::snp::evidence::SnpCertChain;
@@ -1238,45 +1129,23 @@ mod tests {
         }
     }
 
-    /// A provider whose AMD CRL fetch fails.
-    struct CrlUnreachable;
-
-    #[async_trait::async_trait]
-    impl crate::collateral::CertProvider for CrlUnreachable {
-        async fn get_snp_vcek(
-            &self,
-            _: ProcessorGeneration,
-            _: &[u8; 64],
-            _: &SnpTcb,
-        ) -> Result<Vec<u8>> {
-            Ok(LIVE_VCEK_GENOA.to_vec())
-        }
-
-        async fn get_snp_cert_chain(&self, _: ProcessorGeneration) -> Result<(Vec<u8>, Vec<u8>)> {
-            unreachable!("the bare-metal SNP path uses the bundled chain")
-        }
-
-        async fn get_snp_crl(&self, _: ProcessorGeneration) -> Result<Option<Vec<u8>>> {
-            Err(AttestationError::CollateralUnavailable(
-                "unreachable".into(),
-            ))
-        }
-    }
-
     #[tokio::test]
-    async fn test_crl_fetch_failure_is_collateral_unavailable() {
+    async fn a_crl_held_nowhere_is_collateral_unavailable() {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let ctx = Context::offline().with_cert_provider(CrlUnreachable);
-        let err = Snp::verify(&evidence, &SnpParams::default(), &ctx)
+        let err = testing::verify::<Snp>(&evidence, &SnpParams::default(), vec![])
             .await
-            .expect_err("the CRL was needed and could not be fetched");
+            .expect_err("the CRL was needed and is held nowhere");
         assert!(err.is_retryable());
     }
 
     async fn verify(params: &SnpParams) -> Result<SnpResult> {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let ctx = Context::offline().with_cert_provider(StubCertProvider);
-        Snp::verify(&evidence, params, &ctx).await
+        testing::verify::<Snp>(
+            &evidence,
+            params,
+            vec![testing::amd_crl(ProcessorGeneration::Genoa)],
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1444,32 +1313,47 @@ mod tests {
         verify_vek_validity_period(&leaf, now_secs()).expect("current VEK must pass");
     }
 
-    #[test]
-    fn test_crl_revoked_serial_is_listed() {
-        let issuer = mint_issuer("TEST-ARK");
-        let (not_before, not_after) = valid_window();
-        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        let crl = mint_crl(&issuer, Some(LEAF_SERIAL), not_before, not_after);
-        assert!(
-            crl_lists(&leaf, &crl, issuer.0.der(), now_secs()).unwrap(),
-            "a revoked serial is reported, not an error"
-        );
+    fn genoa_crl(der: Vec<u8>) -> Doc<AmdCrl> {
+        Doc {
+            key: AmdCrl {
+                generation: ProcessorGeneration::Genoa,
+                signer: AmdSigner::Ask,
+            },
+            value: std::sync::Arc::new(der),
+            info: Default::default(),
+            source: crate::collateral::Source::Held,
+        }
     }
 
     #[test]
-    fn test_crl_revoking_bundled_ask_is_listed() {
+    fn a_crl_listing_the_veks_ask_revokes_it() {
         // AMD CRLs list ASK/ASVK serials; a VEK is revoked through its issuer.
         let ask = super::super::certs::get_ask(ProcessorGeneration::Genoa);
         let (_, ask_cert) = X509Certificate::from_der(ask).unwrap();
         let issuer = mint_issuer("TEST-ARK");
         let (this_update, next_update) = valid_window();
-        let crl = mint_crl(
+        let listing = mint_crl(
             &issuer,
             Some(ask_cert.raw_serial()),
             this_update,
             next_update,
         );
-        assert!(crl_lists(ask, &crl, issuer.0.der(), now_secs()).unwrap());
+        let gen = ProcessorGeneration::Genoa;
+        assert!(vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(listing), gen).unwrap());
+        let amd = testing::raw("2026-10-14/amd_crl_genoa.der", None).body;
+        assert!(!vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(amd), gen).unwrap());
+    }
+
+    #[test]
+    fn a_crl_for_another_generation_or_signer_is_refused() {
+        let mut crl = genoa_crl(Vec::new());
+        crl.key.generation = ProcessorGeneration::Milan;
+        assert!(vek_revoked(LIVE_VCEK_GENOA, &crl, ProcessorGeneration::Genoa).is_err());
+        crl.key = AmdCrl {
+            generation: ProcessorGeneration::Genoa,
+            signer: AmdSigner::Asvk,
+        };
+        assert!(vek_revoked(LIVE_VCEK_GENOA, &crl, ProcessorGeneration::Genoa).is_err());
     }
 
     #[test]
@@ -1479,68 +1363,6 @@ mod tests {
         assert!(evaluate_report(&report, &params, Some(true)).passed());
         assert!(evaluate_report(&report, &params, None).passed());
         assert!(!evaluate_report(&report, &params, Some(false)).passed());
-    }
-
-    #[test]
-    fn test_crl_fresh_nonrevoked_accepted() {
-        let issuer = mint_issuer("TEST-ARK");
-        let (not_before, not_after) = valid_window();
-        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        let crl = mint_crl(&issuer, Some(&[0xEE; 4]), not_before, not_after);
-        assert!(!crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
-            .expect("fresh CRL not naming the serial must pass"));
-    }
-
-    #[test]
-    fn test_crl_stale_rejected() {
-        let issuer = mint_issuer("TEST-ARK");
-        let (not_before, not_after) = valid_window();
-        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        let now = OffsetDateTime::now_utc();
-        // nextUpdate already passed: a genuine but stale list must not vouch.
-        let crl = mint_crl(
-            &issuer,
-            None,
-            now - TimeDuration::days(30),
-            now - TimeDuration::days(1),
-        );
-        let err = crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
-            .expect_err("stale CRL must be rejected");
-        assert!(err.is_retryable(), "a stale CRL needs a fresh fetch: {err}");
-    }
-
-    #[test]
-    fn test_crl_from_future_rejected() {
-        let issuer = mint_issuer("TEST-ARK");
-        let (not_before, not_after) = valid_window();
-        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        let now = OffsetDateTime::now_utc();
-        let crl = mint_crl(
-            &issuer,
-            None,
-            now + TimeDuration::days(1),
-            now + TimeDuration::days(30),
-        );
-        let err = crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
-            .expect_err("future-dated CRL must be rejected");
-        assert!(err.to_string().contains("future"), "got: {err}");
-    }
-
-    #[test]
-    fn test_crl_wrong_issuer_rejected() {
-        let signer = mint_issuer("TEST-ARK");
-        let impostor = mint_issuer("OTHER-ARK");
-        let (not_before, not_after) = valid_window();
-        let leaf = mint_leaf(LEAF_SERIAL, not_before, not_after);
-        // An empty CRL signed by a key the verifier does not trust must not
-        // clear the check — this is exactly the forged-empty-CRL bypass.
-        let crl = mint_crl(&signer, None, not_before, not_after);
-        let err = crl_lists(&leaf, &crl, impostor.0.der(), now_secs())
-            .expect_err("CRL signed by the wrong issuer must be rejected");
-        assert!(
-            err.to_string().contains("signature verification failed"),
-            "got: {err}"
-        );
     }
 
     #[test]
@@ -1576,13 +1398,11 @@ mod tests {
     #[tokio::test]
     async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
         // Wrong digest must record Some(false) without failing verification.
-        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let ctx = Context::offline().with_cert_provider(StubCertProvider);
         let params = SnpParams {
             launch_digest: Some(vec![[0xAA; 48]]),
             ..Default::default()
         };
-        let r = Snp::verify(&evidence, &params, &ctx).await.unwrap();
+        let r = verify(&params).await.unwrap();
         assert_eq!(r.launch_digest_match, Some(false));
         assert!(!r.passed());
     }

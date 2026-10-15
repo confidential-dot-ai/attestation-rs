@@ -16,7 +16,9 @@ use std::path::Path;
 
 use base64::Engine;
 
-use attestation::{AzTdx, AzTdxParams, Context, Platform, Policies, TdxParams};
+use attestation::{
+    AzTdxParams, AzTdxResult, Context, PlatformResult, Policies, TdxParams, Verifier,
+};
 
 fn nonce_params(nonce: &[u8]) -> AzTdxParams {
     AzTdxParams {
@@ -25,6 +27,25 @@ fn nonce_params(nonce: &[u8]) -> AzTdxParams {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+/// Verify as az-tdx through the public verifier, collateral from the vendors.
+async fn verify(
+    evidence: &attestation::platforms::az_tdx::evidence::AzTdxEvidence,
+    params: &AzTdxParams,
+) -> attestation::Result<AzTdxResult> {
+    let envelope = serde_json::json!({ "platform": "az-tdx", "evidence": evidence });
+    let policies = Policies {
+        az_tdx: Some(params.clone()),
+        ..Policies::default()
+    };
+    let verified = Verifier::new(Context::new())
+        .verify(envelope.to_string().as_bytes(), &policies)
+        .await?;
+    match verified.platform {
+        PlatformResult::AzTdx(r) => Ok(r),
+        other => panic!("verified as {}", other.platform()),
     }
 }
 
@@ -191,7 +212,7 @@ async fn test_az_tdx_attest_then_verify_roundtrip() {
         .expect("generate_evidence() should succeed");
 
     // Verify without expected values (just check structure)
-    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline()).await;
+    let result = verify(&evidence, &AzTdxParams::default()).await;
 
     assert!(
         result.is_ok(),
@@ -231,7 +252,7 @@ async fn test_az_tdx_verify_with_expected_nonce() {
         .expect("generate_evidence() should succeed");
 
     // Verify with correct nonce (unpadded — TPM stores the raw qualifying data)
-    let result = AzTdx::verify(&evidence, &nonce_params(nonce), &Context::offline()).await;
+    let result = verify(&evidence, &nonce_params(nonce)).await;
 
     assert!(
         result.is_ok(),
@@ -300,7 +321,7 @@ async fn test_az_tdx_cross_process_serialization() {
         serde_json::from_str(&json_back).unwrap();
 
     // Verify the deserialized evidence
-    let result = AzTdx::verify(&evidence_back, &AzTdxParams::default(), &Context::offline()).await;
+    let result = verify(&evidence_back, &AzTdxParams::default()).await;
 
     assert!(
         result.is_ok(),
@@ -371,13 +392,9 @@ async fn test_az_tdx_wrong_nonce_fails_verification() {
         .expect("generate_evidence() should succeed");
 
     // Verify with WRONG nonce — a mismatch, not an error
-    let result = AzTdx::verify(
-        &evidence,
-        &nonce_params(b"wrong-nonce-value!!"),
-        &Context::offline(),
-    )
-    .await
-    .expect("a wrong nonce is a value, not an error");
+    let result = verify(&evidence, &nonce_params(b"wrong-nonce-value!!"))
+        .await
+        .expect("a wrong nonce is a value, not an error");
 
     assert_eq!(result.tdx.report_data_match, Some(false));
     assert!(!result.passed());
@@ -470,7 +487,7 @@ async fn test_az_tdx_empty_nonce_roundtrip() {
         .expect("generate_evidence() with empty nonce should succeed");
 
     // Verify without expected_report_data (don't check nonce)
-    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline())
+    let result = verify(&evidence, &AzTdxParams::default())
         .await
         .expect("verify() with empty nonce evidence should succeed");
 
@@ -492,7 +509,7 @@ async fn test_az_tdx_32_byte_nonce() {
         .expect("generate_evidence() with 32-byte nonce should succeed");
 
     // Verify with matching nonce
-    let result = AzTdx::verify(&evidence, &nonce_params(&nonce), &Context::offline())
+    let result = verify(&evidence, &nonce_params(&nonce))
         .await
         .expect("verify() with 32-byte nonce should succeed");
 

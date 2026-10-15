@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{Provenance, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
+use crate::platforms::tdx::verify::{TdxCollateral, TdxQuote};
 use crate::platforms::tdx::{verify as tdx_verify, TdxParams, TdxResult};
 use crate::platforms::tpm_common;
 use crate::types::PlatformType;
@@ -58,79 +59,107 @@ impl Platform for AzTdx {
     type Evidence = AzTdxEvidence;
     type Params = AzTdxParams;
     type Result = AzTdxResult;
+    type Collateral = TdxCollateral;
 
-    /// When the context has a TDX collateral provider, performs full DCAP
-    /// collateral verification; offline, CRL/TCB/QE Identity checks are skipped.
-    async fn verify(
+    fn validate(params: &AzTdxParams) -> Result<()> {
+        params.validate()
+    }
+
+    /// The whole evidence verifies first; its TD quote names the collateral.
+    async fn gather(evidence: &AzTdxEvidence, store: &Store, now: i64) -> Result<TdxCollateral> {
+        let (quote_bytes, quote, _) = verify_evidence(evidence, &AzTdxParams::default(), now)?;
+        TdxCollateral::gather(&quote_bytes, &quote, store, now).await
+    }
+
+    fn verify(
         evidence: &AzTdxEvidence,
         params: &AzTdxParams,
-        ctx: &Context,
+        collateral: &TdxCollateral,
+        now: i64,
     ) -> Result<AzTdxResult> {
-        params.validate()?;
-        let pcrs = &params.pcrs;
-        let params = &params.tdx;
-        if evidence.version != 1 {
-            return Err(AttestationError::EvidenceDeserialize(format!(
-                "unsupported az_tdx evidence version: {}",
-                evidence.version
-            )));
-        }
-
-        // Input size validation
-        crate::utils::check_field_size("hcl_report", evidence.hcl_report.len())?;
-        crate::utils::check_field_size("td_quote", evidence.td_quote.len())?;
-        crate::utils::check_field_size("tpm_quote.signature", evidence.tpm_quote.signature.len())?;
-        crate::utils::check_field_size("tpm_quote.message", evidence.tpm_quote.message.len())?;
-
-        // Decode
-        let hcl_report_bytes = decode_base64url(&evidence.hcl_report).map_err(|e| {
-            AttestationError::EvidenceDeserialize(format!("HCL report base64: {e}"))
-        })?;
-        let hcl = tpm_common::parse_hcl_report(&hcl_report_bytes)?;
-        if hcl.report_type != tpm_common::HCL_REPORT_TYPE_TDX {
-            return Err(AttestationError::QuoteParseFailed(format!(
-                "HCL report_type is {} (expected {} for TDX)",
-                hcl.report_type,
-                tpm_common::HCL_REPORT_TYPE_TDX
-            )));
-        }
-        let td_quote_bytes = decode_base64url(&evidence.td_quote)
-            .map_err(|e| AttestationError::EvidenceDeserialize(format!("TD quote base64: {e}")))?;
-        let (tpm_sig, tpm_msg, tpm_pcrs) = tpm_common::decode_tpm_quote(&evidence.tpm_quote)?;
-
-        // TPM layer
-        //
-        // Verification order safety:
-        // 1. TPM sig uses the AK (attestation key) extracted from var_data in the HCL
-        //    report — an attacker cannot substitute a different AK without forging the
-        //    TPM signature (RSA-2048 with the TPM's internal signing key).
-        // 2. HCL binding then confirms var_data is bound to the TEE report via
-        //    report_data[..32] == SHA-256(var_data).
-        // 3. The TEE report itself is signed by Intel's QE (DCAP chain for TDX).
-        // Trust chain: TEE report → var_data → AK → TPM quote → nonce
-        tpm_common::verify_tpm_signature(&tpm_sig, &tpm_msg, &hcl.var_data)?;
-        if params.report_data.is_none() {
-            log::warn!("az-tdx: no report_data provided; TPM nonce binding will not be verified");
-        }
-        let report_data_match =
-            tpm_common::check_report_data(&tpm_msg, params.report_data.as_deref())?;
-        tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
-        let pcrs_match = tpm_common::check_pcrs(&tpm_msg, &tpm_pcrs, pcrs)?;
-
-        // TDX DCAP layer: signature, chain, and the quote rules
-        let (tdx_quote, mut tdx) = tdx_verify::verify_quote(&td_quote_bytes, params, ctx)?;
-
-        // Bindings
-        tpm_common::verify_hcl_var_data_binding(&tdx_quote.body.report_data, &hcl.var_data)?;
-        tdx.report_data_match = report_data_match;
-        tdx.init_data_match =
-            tpm_common::check_init_data(&tpm_msg, &tpm_pcrs, params.init_data.as_deref())?;
-        tdx.claims = tpm_common::tpm_claims(tdx.claims, &tpm_pcrs, &tpm_msg);
-
-        // Collateral last, once the evidence is known to be genuine.
-        tdx_verify::check_collateral(&mut tdx, &td_quote_bytes, &tdx_quote, params, ctx).await?;
-        Ok(AzTdxResult { tdx, pcrs_match })
+        let (quote_bytes, quote, mut result) = verify_evidence(evidence, params, now)?;
+        tdx_verify::check_collateral(
+            &mut result.tdx,
+            &quote_bytes,
+            &quote,
+            &params.tdx,
+            collateral,
+            now,
+        )?;
+        Ok(result)
     }
+
+    fn provenance(collateral: &TdxCollateral) -> Vec<Provenance> {
+        collateral.provenance()
+    }
+}
+
+/// Everything but the collateral: the vTPM quote, the TD quote and their
+/// binding, and the params' rules.
+fn verify_evidence(
+    evidence: &AzTdxEvidence,
+    params: &AzTdxParams,
+    now: i64,
+) -> Result<(Vec<u8>, TdxQuote, AzTdxResult)> {
+    params.validate()?;
+    let pcrs = &params.pcrs;
+    let params = &params.tdx;
+    if evidence.version != 1 {
+        return Err(AttestationError::EvidenceDeserialize(format!(
+            "unsupported az_tdx evidence version: {}",
+            evidence.version
+        )));
+    }
+
+    // Input size validation
+    crate::utils::check_field_size("hcl_report", evidence.hcl_report.len())?;
+    crate::utils::check_field_size("td_quote", evidence.td_quote.len())?;
+    crate::utils::check_field_size("tpm_quote.signature", evidence.tpm_quote.signature.len())?;
+    crate::utils::check_field_size("tpm_quote.message", evidence.tpm_quote.message.len())?;
+
+    // Decode
+    let hcl_report_bytes = decode_base64url(&evidence.hcl_report)
+        .map_err(|e| AttestationError::EvidenceDeserialize(format!("HCL report base64: {e}")))?;
+    let hcl = tpm_common::parse_hcl_report(&hcl_report_bytes)?;
+    if hcl.report_type != tpm_common::HCL_REPORT_TYPE_TDX {
+        return Err(AttestationError::QuoteParseFailed(format!(
+            "HCL report_type is {} (expected {} for TDX)",
+            hcl.report_type,
+            tpm_common::HCL_REPORT_TYPE_TDX
+        )));
+    }
+    let td_quote_bytes = decode_base64url(&evidence.td_quote)
+        .map_err(|e| AttestationError::EvidenceDeserialize(format!("TD quote base64: {e}")))?;
+    let (tpm_sig, tpm_msg, tpm_pcrs) = tpm_common::decode_tpm_quote(&evidence.tpm_quote)?;
+
+    // TPM layer
+    //
+    // Verification order safety:
+    // 1. TPM sig uses the AK (attestation key) extracted from var_data in the HCL
+    //    report — an attacker cannot substitute a different AK without forging the
+    //    TPM signature (RSA-2048 with the TPM's internal signing key).
+    // 2. HCL binding then confirms var_data is bound to the TEE report via
+    //    report_data[..32] == SHA-256(var_data).
+    // 3. The TEE report itself is signed by Intel's QE (DCAP chain for TDX).
+    // Trust chain: TEE report → var_data → AK → TPM quote → nonce
+    tpm_common::verify_tpm_signature(&tpm_sig, &tpm_msg, &hcl.var_data)?;
+    if params.report_data.is_none() {
+        log::warn!("az-tdx: no report_data provided; TPM nonce binding will not be verified");
+    }
+    let report_data_match = tpm_common::check_report_data(&tpm_msg, params.report_data.as_deref())?;
+    tpm_common::verify_tpm_pcrs(&tpm_msg, &tpm_pcrs)?;
+    let pcrs_match = tpm_common::check_pcrs(&tpm_msg, &tpm_pcrs, pcrs)?;
+
+    // TDX DCAP layer: signature, chain, and the quote rules
+    let (tdx_quote, mut tdx) = tdx_verify::verify_quote(&td_quote_bytes, params, now)?;
+
+    // Bindings
+    tpm_common::verify_hcl_var_data_binding(&tdx_quote.body.report_data, &hcl.var_data)?;
+    tdx.report_data_match = report_data_match;
+    tdx.init_data_match =
+        tpm_common::check_init_data(&tpm_msg, &tpm_pcrs, params.init_data.as_deref())?;
+    tdx.claims = tpm_common::tpm_claims(tdx.claims, &tpm_pcrs, &tpm_msg);
+    Ok((td_quote_bytes, tdx_quote, AzTdxResult { tdx, pcrs_match }))
 }
 
 #[cfg(test)]
@@ -171,10 +200,7 @@ mod tests {
             td_quote: BASE64URL.encode([0u8; 100]),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx));
+        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
         assert!(result.is_err());
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -192,10 +218,7 @@ mod tests {
             td_quote: "AAAA".to_string(),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx));
+        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
         assert!(result.is_err());
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -215,10 +238,7 @@ mod tests {
             td_quote: BASE64URL.encode([0u8; 100]),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx));
+        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
         assert!(result.is_err());
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -238,10 +258,7 @@ mod tests {
             td_quote: BASE64URL.encode([0u8; 100]),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx));
+        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
         assert!(result.is_err());
         let err = format!("{:?}", result.err().unwrap());
         assert!(
@@ -384,7 +401,7 @@ mod tests {
             };
             let evidence = evidence.clone();
             async move {
-                AzTdx::verify(&evidence, &params, &Context::offline())
+                crate::testing::verify::<AzTdx>(&evidence, &params, crate::testing::intel())
                     .await
                     .unwrap()
             }
