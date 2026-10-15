@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use backon::{ExponentialBuilder, Retryable};
-
 use super::document::{DocKey, Raw};
 use crate::error::Unavailable;
 
@@ -13,6 +11,8 @@ const MAX_BODY: usize = 5 * 1024 * 1024;
 /// The longest Retry-After waited out inside one call; a longer one is
 /// returned to the caller.
 const MAX_RETRY_AFTER: u64 = 5;
+/// Wait before the one retry: 200 ms plus up to 200 ms of jitter.
+const RETRY_DELAY_MS: u64 = 200;
 
 pub(crate) struct Vendor {
     client: reqwest::Client,
@@ -65,26 +65,25 @@ impl Vendor {
         let url = key.url();
         let url = self.url(url);
         let header = key.issuer_chain_header();
-        (|| self.get_once(&url, header))
-            .retry(
-                ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_millis(200))
-                    .with_max_delay(Duration::from_secs(2))
-                    .with_max_times(1)
-                    .with_jitter(),
-            )
-            .when(|e| match e {
-                Unavailable::Unreachable { .. } | Unavailable::RateLimited { .. } => true,
-                Unavailable::Status { status } => *status == 408 || *status >= 500,
-                Unavailable::NotFound { .. } | Unavailable::Offline => false,
-            })
-            .adjust(|e, backoff| match e {
-                Unavailable::RateLimited {
-                    retry_after: Some(s),
-                } => backoff.and((*s <= MAX_RETRY_AFTER).then(|| Duration::from_secs(*s))),
-                _ => backoff,
-            })
-            .await
+        let err = match self.get_once(&url, header).await {
+            Ok(raw) => return Ok(raw),
+            Err(e) => e,
+        };
+        let wait = match &err {
+            Unavailable::RateLimited {
+                retry_after: Some(s),
+            } if *s > MAX_RETRY_AFTER => return Err(err),
+            Unavailable::RateLimited {
+                retry_after: Some(s),
+            } => Duration::from_secs(*s),
+            Unavailable::RateLimited { retry_after: None } | Unavailable::Unreachable { .. } => {
+                retry_delay()
+            }
+            Unavailable::Status { status } if *status == 408 || *status >= 500 => retry_delay(),
+            _ => return Err(err),
+        };
+        tokio::time::sleep(wait).await;
+        self.get_once(&url, header).await
     }
 
     async fn get_once(&self, url: &str, header: Option<&str>) -> Result<Raw, Unavailable> {
@@ -244,6 +243,13 @@ impl Vendor {
         serde_json::from_slice(&body)
             .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))
     }
+}
+
+fn retry_delay() -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    Duration::from_millis(RETRY_DELAY_MS + u64::from(nanos) % RETRY_DELAY_MS)
 }
 
 #[cfg(test)]
