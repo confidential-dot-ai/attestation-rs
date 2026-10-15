@@ -490,9 +490,15 @@ async fn vendor(
     let counter = hits.clone();
     tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {
-            let mut buf = vec![0; 8192];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            let line = String::from_utf8_lossy(&buf[..n]);
+            let mut buf = Vec::new();
+            let mut chunk = [0; 1024];
+            while !buf.windows(2).any(|w| w == b"\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let line = String::from_utf8_lossy(&buf);
             let line = line.lines().next().unwrap_or_default();
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (status, body) = routes
