@@ -1067,6 +1067,7 @@ const QE_ISVPRODID_OFFSET: usize = 256;
 const QE_ISVSVN_OFFSET: usize = 258;
 
 /// Intel's published QE Identity, signature-checked and decoded.
+#[derive(Debug)]
 pub struct QeIdentity {
     mrsigner: Vec<u8>,
     isvprodid: u16,
@@ -1331,7 +1332,7 @@ pub(crate) fn check_crl(
     crl: &[u8],
     issuer_der: &[u8],
     label: &str,
-) -> Result<(Vec<u8>, crate::collateral::Info)> {
+) -> Result<(Vec<u8>, i64, i64, Option<u64>)> {
     let crl_der = normalize_crl_to_der(crl)?;
     let (rest, parsed) = CertificateRevocationList::from_der(&crl_der)
         .map_err(|e| AttestationError::CertChainError(format!("{label} parse: {e}")))?;
@@ -1370,12 +1371,9 @@ pub(crate) fn check_crl(
             "{label} has no nextUpdate; refusing a revocation list with no defined freshness"
         ))
     })?;
-    let info = crate::collateral::Info {
-        this_update: Some(parsed.last_update().timestamp()),
-        next_update: Some(next.timestamp()),
-        version: crate::collateral::document::crl_number(&parsed),
-    };
-    Ok((crl_der, info))
+    let this_update = parsed.last_update().timestamp();
+    let number = crate::collateral::crl_number(&parsed);
+    Ok((crl_der, this_update, next.timestamp(), number))
 }
 
 /// [`check_crl`], and current at `at` (`thisUpdate <= at <= nextUpdate`).
@@ -1385,16 +1383,18 @@ pub fn verify_crl(
     at: x509_parser::time::ASN1Time,
     label: &str,
 ) -> Result<Vec<u8>> {
-    let (crl_der, info) = check_crl(crl, issuer_der, label)?;
+    let (crl_der, this_update, next_update, _) = check_crl(crl, issuer_der, label)?;
     let at = at.timestamp();
-    match info.freshness(at) {
-        crate::collateral::Freshness::NotYetValid => Err(AttestationError::CertChainError(
-            format!("{label} thisUpdate is after the verification time {at}"),
-        )),
-        crate::collateral::Freshness::Expired => Err(AttestationError::CertChainError(format!(
+    if at < this_update {
+        Err(AttestationError::CertChainError(format!(
+            "{label} thisUpdate is after the verification time {at}"
+        )))
+    } else if at > next_update {
+        Err(AttestationError::CertChainError(format!(
             "{label} is stale: nextUpdate is before the verification time {at}"
-        ))),
-        crate::collateral::Freshness::Current => Ok(crl_der),
+        )))
+    } else {
+        Ok(crl_der)
     }
 }
 

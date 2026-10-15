@@ -1,8 +1,8 @@
 #![no_main]
 
 use attestation::collateral::{
-    AmdCrl, AmdSigner, AmdVcek, Document, GceEndorsement, GceTee, IntelPckCrl, IntelQeIdentity,
-    IntelRootCrl, IntelTcbInfo, NrasJwks, PckCa, Raw,
+    AmdCrl, AmdSigner, GceEndorsement, GceTee, NrasJwks, PckCa, PckCrl, QeIdentity, RootCrl,
+    TcbInfo, Vcek,
 };
 use attestation::types::{ProcessorGeneration, SnpTcb};
 use libfuzzer_sys::fuzz_target;
@@ -11,7 +11,7 @@ const TCB_CHAIN: &str = include_str!("../../test_data/collateral/2026-10-14/tcb_
 const PCK_CHAIN: &str =
     include_str!("../../test_data/collateral/2026-10-14/pck_crl_platform_chain.pem");
 
-/// The genuine documents a parser may accept (the seed corpus).
+/// The genuine pieces a verifier may accept (the seed corpus).
 const GENUINE: &[&[u8]] = &[
     include_bytes!("../../test_data/collateral/2026-10-14/amd_crl_milan.der"),
     include_bytes!("../../test_data/collateral/2026-10-14/tcb_info_70a06d070000.json"),
@@ -27,7 +27,7 @@ const GENUINE: &[&[u8]] = &[
     include_bytes!("../../test_data/collateral/2026-10-14/root_ca_crl.der"),
 ];
 
-/// The bytes are the genuine document, or encode the same signed content:
+/// The bytes are the genuine piece, or encode the same signed content:
 /// PEM whitespace, JSON whitespace outside the signed body, and the hex case
 /// of an Intel signature are not signed.
 fn same_signed_content(genuine: &[u8], data: &[u8]) -> bool {
@@ -44,14 +44,10 @@ fn same_signed_content(genuine: &[u8], data: &[u8]) -> bool {
         || der(genuine).is_some_and(|g| der(data) == Some(g))
 }
 
-// Every document parser over the same bytes, with and without a genuine
-// issuer chain: none may panic, and none may accept bytes that are not a
-// genuine document.
+// Every verify fn over the same bytes, with and without a genuine issuer
+// chain: none may panic, and none may accept bytes that are not a genuine
+// piece.
 fuzz_target!(|data: &[u8]| {
-    let raw = |chain: Option<&str>| Raw {
-        body: data.to_vec(),
-        issuer_chain: chain.map(str::to_string),
-    };
     let tcb = SnpTcb {
         bootloader: 10,
         tee: 0,
@@ -60,39 +56,17 @@ fuzz_target!(|data: &[u8]| {
         fmc: None,
     };
     let refused = [
-        AmdVcek {
-            generation: ProcessorGeneration::Genoa,
-            chip_id: "00".repeat(64),
-            tcb,
-        }
-        .check(&raw(None))
-        .is_err(),
-        AmdCrl {
-            generation: ProcessorGeneration::Milan,
-            signer: AmdSigner::Ask,
-        }
-        .check(&raw(None))
-        .is_err(),
-        IntelTcbInfo {
-            fmspc: "70a06d070000".into(),
-        }
-        .check(&raw(Some(TCB_CHAIN)))
-        .is_err(),
-        IntelQeIdentity {}.check(&raw(Some(TCB_CHAIN))).is_err(),
-        IntelPckCrl { ca: PckCa::Platform }
-            .check(&raw(Some(PCK_CHAIN)))
-            .is_err(),
-        IntelRootCrl {}.check(&raw(None)).is_err(),
-        GceEndorsement {
-            tee: GceTee::Tdx,
-            measurement: "00".repeat(48),
-        }
-        .check(&raw(None))
-        .is_err(),
+        Vcek::verify(data, ProcessorGeneration::Genoa, &[0; 64], &tcb).is_err(),
+        AmdCrl::verify(data, ProcessorGeneration::Milan, AmdSigner::Ask).is_err(),
+        TcbInfo::verify(data, Some(TCB_CHAIN), &[0x70, 0xa0, 0x6d, 0x07, 0, 0]).is_err(),
+        QeIdentity::verify(data, Some(TCB_CHAIN)).is_err(),
+        PckCrl::verify(data, Some(PCK_CHAIN), PckCa::Platform).is_err(),
+        RootCrl::verify(data).is_err(),
+        GceEndorsement::verify(data, GceTee::Tdx, &[0; 48]).is_err(),
     ];
     assert!(
         refused.iter().all(|r| *r) || GENUINE.iter().any(|g| same_signed_content(g, data)),
         "fuzzed bytes were accepted"
     );
-    let _ = NrasJwks {}.check(&raw(None));
+    let _ = NrasJwks::verify(data);
 });
