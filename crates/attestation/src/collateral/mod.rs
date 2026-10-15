@@ -1,3 +1,21 @@
+//! Collateral: the vendor-signed documents a verifier needs besides the
+//! evidence.
+
+#[cfg(feature = "snp")]
+mod amd;
+pub(crate) mod document;
+#[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
+mod gce;
+#[cfg(feature = "tdx")]
+mod intel;
+#[cfg(feature = "nvidia-gpu")]
+mod nvidia;
+
+pub use document::{
+    AmdCrl, AmdSigner, AmdVcek, DocKey, Document, Freshness, GceEndorsement, GceTee, Info,
+    IntelPckCrl, IntelQeIdentity, IntelRootCrl, IntelTcbInfo, NrasJwks, PckCa, Raw,
+};
+
 use std::time::Duration;
 
 use async_trait::async_trait;

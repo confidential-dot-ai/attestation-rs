@@ -28,6 +28,11 @@ const INTEL_SGX_ROOT_CA_PUB_DER: &[u8] = &[
     0xc9, 0x88, 0xe5, 0x05, 0xa9, 0x53, 0x55, 0x8c, 0x45, 0x3f, 0x6b, 0x09, 0x04, 0xae, 0x73, 0x94,
 ];
 
+/// The Intel SGX Root CA certificate, from
+/// <https://certificates.trustedservices.intel.com/Intel_SGX_Provisioning_Certification_RootCA.cer>.
+/// Its key is [`INTEL_SGX_ROOT_CA_PUB_DER`]; it issues the Root CA CRL.
+pub(crate) const INTEL_SGX_ROOT_CA: &[u8] = include_bytes!("../../../certs/intel/sgx-root-ca.der");
+
 /// QE (Quoting Enclave) report body size in bytes.
 const QE_REPORT_BODY_SIZE: usize = 384;
 
@@ -290,9 +295,13 @@ pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> 
 /// Validates:
 ///   - Root CA public key matches hardcoded Intel trust anchor
 ///   - Root CA self-signs correctly
-///   - Signing cert is signed by Root CA
+///   - Signing cert is signed by Root CA and is `signer`
 ///   - Both certificates are within their validity periods
-pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> {
+pub fn verify_signing_cert_chain(
+    pem_data: &[u8],
+    now: i64,
+    signer: Signer,
+) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
     })?;
@@ -329,6 +338,7 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingK
 
     // Verify signing cert is signed by Root CA
     verify_cert_signature(&signing_cert, &root_pub_key, "TCB Signing cert")?;
+    signer.check(&der_certs[0])?;
 
     // Verify validity periods
     for (der, label) in [
@@ -339,6 +349,44 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingK
     }
 
     extract_p256_pub_key(&signing_cert.pub_key_bytes, "TCB Signing")
+}
+
+/// The Intel certificate that must sign a PCS document: the TCB Signing
+/// certificate (TCB Info, QE Identity) or a PCK CA (its CRL).
+#[derive(Debug, Clone, Copy)]
+pub enum Signer {
+    TcbSigning,
+    PckCa(crate::collateral::PckCa),
+}
+
+impl Signer {
+    /// The certificate's exact common name, and whether it is a CA.
+    fn role(self) -> (&'static str, bool) {
+        use crate::collateral::PckCa;
+        match self {
+            Signer::TcbSigning => ("Intel SGX TCB Signing", false),
+            Signer::PckCa(PckCa::Platform) => ("Intel SGX PCK Platform CA", true),
+            Signer::PckCa(PckCa::Processor) => ("Intel SGX PCK Processor CA", true),
+        }
+    }
+
+    fn check(self, der: &[u8]) -> Result<()> {
+        let (_, cert) = X509Certificate::from_der(der)
+            .map_err(|e| AttestationError::CertChainError(format!("signer x509 parse: {e}")))?;
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok());
+        let ca = matches!(cert.basic_constraints(), Ok(Some(bc)) if bc.value.ca);
+        let (want_cn, want_ca) = self.role();
+        if cn != Some(want_cn) || ca != want_ca {
+            return Err(AttestationError::CertChainError(format!(
+                "signer is {cn:?} (CA: {ca}), not {want_cn}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Minimal X.509 certificate data needed for chain verification.
@@ -780,7 +828,7 @@ pub fn verify_tcb_info_signature(
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info signature parse: {e}")))?;
 
     // Verify the signing cert chain roots to Intel SGX Root CA (2-cert chain)
-    let signing_key = verify_signing_cert_chain(signing_certs_pem, now)?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem, now, Signer::TcbSigning)?;
 
     // RawValue preserves the exact bytes Intel signed — no re-serialization.
     signing_key
@@ -1029,41 +1077,42 @@ pub struct QeIdentity {
     tcb_levels: Vec<QeIdentityTcbLevel>,
 }
 
-/// Parse Intel's QE Identity and, when `signing_certs_pem` (the
-/// `SGX-Enclave-Identity-Issuer-Chain` response header) is given, verify its
-/// signature first. Errors here are about the collateral, not the quote.
-pub fn parse_qe_identity(
+/// Verify Intel's ECDSA signature on a QE Identity against its issuer chain
+/// (the `SGX-Enclave-Identity-Issuer-Chain` response header), with the
+/// chain's certificates valid at `at`.
+pub fn verify_qe_identity_signature(
     qe_identity_json: &[u8],
-    signing_certs_pem: Option<&[u8]>,
-    now: i64,
-) -> Result<QeIdentity> {
+    signing_certs_pem: &[u8],
+    at: i64,
+) -> Result<()> {
     let envelope: QeIdentityEnvelope<'_> =
         serde_json::from_slice(qe_identity_json).map_err(|e| {
             AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
         })?;
+    let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+    })?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
+        AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
+    })?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem, at, Signer::TcbSigning)?;
+    // RawValue preserves the exact bytes Intel signed — no re-serialization.
+    signing_key
+        .verify(envelope.enclave_identity.get().as_bytes(), &signature)
+        .map_err(|e| {
+            AttestationError::CertChainError(format!(
+                "QE Identity signature verification failed: {e}"
+            ))
+        })
+}
 
-    if let Some(certs_pem) = signing_certs_pem {
-        // Verify Intel ECDSA P-256 signature on the enclaveIdentity JSON
-        let sig_bytes = hex::decode(&envelope.signature).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature hex decode: {e}"))
+/// Parse Intel's QE Identity. Its signature is checked separately
+/// ([`verify_qe_identity_signature`]).
+pub fn parse_qe_identity(qe_identity_json: &[u8]) -> Result<QeIdentity> {
+    let envelope: QeIdentityEnvelope<'_> =
+        serde_json::from_slice(qe_identity_json).map_err(|e| {
+            AttestationError::CertChainError(format!("QE Identity envelope parse: {e}"))
         })?;
-        let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
-            AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
-        })?;
-
-        let signing_key = verify_signing_cert_chain(certs_pem, now)?;
-
-        // RawValue preserves the exact bytes Intel signed — no re-serialization.
-        signing_key
-            .verify(envelope.enclave_identity.get().as_bytes(), &signature)
-            .map_err(|e| {
-                AttestationError::CertChainError(format!(
-                    "QE Identity signature verification failed: {e}"
-                ))
-            })?;
-    } else {
-        log::warn!("QE Identity signing chain not available; skipping signature verification on QE Identity collateral");
-    }
 
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
         .map_err(|e| AttestationError::CertChainError(format!("QE Identity fields parse: {e}")))?;
@@ -1273,17 +1322,16 @@ pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bo
 /// ecdsa-with-SHA256, the only algorithm Intel signs SGX/TDX CRLs with.
 const OID_ECDSA_WITH_SHA256: &str = "1.2.840.10045.4.3.2";
 
-/// Verify an Intel CRL before its revocation entries are trusted: issued by
-/// `issuer_der` (name and ECDSA P-256 signature) and current at `at`
-/// (`thisUpdate <= at <= nextUpdate`, `nextUpdate` required). Accepts DER or
-/// PEM and returns the DER, so callers check revocation against the exact
-/// bytes that were verified.
-pub fn verify_crl(
+/// Check an Intel CRL before its revocation entries are trusted: issued by
+/// `issuer_der` (name and ECDSA P-256 signature), with a nextUpdate. Accepts
+/// DER or PEM and returns the DER, so callers check revocation against the
+/// exact bytes that were verified, with the CRL's thisUpdate, nextUpdate and
+/// CRL Number.
+pub(crate) fn check_crl(
     crl: &[u8],
     issuer_der: &[u8],
-    at: x509_parser::time::ASN1Time,
     label: &str,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, crate::collateral::Info)> {
     let crl_der = normalize_crl_to_der(crl)?;
     let (rest, parsed) = CertificateRevocationList::from_der(&crl_der)
         .map_err(|e| AttestationError::CertChainError(format!("{label} parse: {e}")))?;
@@ -1304,7 +1352,8 @@ pub fn verify_crl(
     }
 
     let alg = parsed.signature_algorithm.algorithm.to_id_string();
-    if alg != OID_ECDSA_WITH_SHA256 {
+    if alg != OID_ECDSA_WITH_SHA256 || parsed.signature_algorithm != parsed.tbs_cert_list.signature
+    {
         return Err(AttestationError::CertChainError(format!(
             "{label} signature algorithm {alg} is not ecdsa-with-SHA256"
         )));
@@ -1316,21 +1365,36 @@ pub fn verify_crl(
         .map_err(|e| {
             AttestationError::CertChainError(format!("{label} signature verification: {e}"))
         })?;
-
-    if parsed.last_update() > at {
-        return Err(AttestationError::CertChainError(format!(
-            "{label} thisUpdate {} is after the verification time {at}",
-            parsed.last_update()
-        )));
-    }
-    match parsed.next_update() {
-        None => Err(AttestationError::CertChainError(format!(
+    let next = parsed.next_update().ok_or_else(|| {
+        AttestationError::CertChainError(format!(
             "{label} has no nextUpdate; refusing a revocation list with no defined freshness"
+        ))
+    })?;
+    let info = crate::collateral::Info {
+        this_update: Some(parsed.last_update().timestamp()),
+        next_update: Some(next.timestamp()),
+        version: crate::collateral::document::crl_number(&parsed),
+    };
+    Ok((crl_der, info))
+}
+
+/// [`check_crl`], and current at `at` (`thisUpdate <= at <= nextUpdate`).
+pub fn verify_crl(
+    crl: &[u8],
+    issuer_der: &[u8],
+    at: x509_parser::time::ASN1Time,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let (crl_der, info) = check_crl(crl, issuer_der, label)?;
+    let at = at.timestamp();
+    match info.freshness(at) {
+        crate::collateral::Freshness::NotYetValid => Err(AttestationError::CertChainError(
+            format!("{label} thisUpdate is after the verification time {at}"),
+        )),
+        crate::collateral::Freshness::Expired => Err(AttestationError::CertChainError(format!(
+            "{label} is stale: nextUpdate is before the verification time {at}"
         ))),
-        Some(next) if next < at => Err(AttestationError::CertChainError(format!(
-            "{label} is stale: nextUpdate {next} is before the verification time {at}"
-        ))),
-        Some(_) => Ok(crl_der),
+        crate::collateral::Freshness::Current => Ok(crl_der),
     }
 }
 
@@ -1597,7 +1661,7 @@ mod tests {
         let two_cert_pem = &pem_str[..second_end];
 
         // This should fail because the 2nd cert (intermediate) is not the Root CA
-        let result = verify_signing_cert_chain(two_cert_pem.as_bytes(), now());
+        let result = verify_signing_cert_chain(two_cert_pem.as_bytes(), now(), Signer::TcbSigning);
         assert!(
             result.is_err(),
             "intermediate CA should not be accepted as Intel Root CA"
@@ -1631,7 +1695,7 @@ mod tests {
             parse_auth_data(QUOTE, compute_body_end(QUOTE, quote.quote_version).unwrap()).unwrap();
         let mut json: serde_json::Value = serde_json::from_slice(IDENTITY).unwrap();
         json["enclaveIdentity"]["tcbLevels"] = levels;
-        let identity = parse_qe_identity(&serde_json::to_vec(&json).unwrap(), None, 0).unwrap();
+        let identity = parse_qe_identity(&serde_json::to_vec(&json).unwrap()).unwrap();
         check_qe_report(auth.qe_report_body, &identity)
     }
 

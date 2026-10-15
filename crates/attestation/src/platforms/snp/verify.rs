@@ -141,7 +141,7 @@ pub fn evaluate_report(
     }
 }
 
-fn snp_tcb(tcb: &sev::firmware::host::TcbVersion) -> SnpTcb {
+pub(crate) fn snp_tcb(tcb: &sev::firmware::host::TcbVersion) -> SnpTcb {
     SnpTcb {
         bootloader: tcb.bootloader,
         tee: tcb.tee,
@@ -476,7 +476,21 @@ fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
     None
 }
 
-/// Verify VCEK certificate TCB extensions match the SNP attestation report.
+/// Verify that a VEK certificate was issued for the report's chip and TCB.
+pub fn verify_vcek_tcb(
+    report: &AttestationReport,
+    vcek_der: &[u8],
+    processor_gen: ProcessorGeneration,
+) -> Result<()> {
+    check_vek_binding(
+        vcek_der,
+        &report.chip_id,
+        &snp_tcb(&report.reported_tcb),
+        processor_gen,
+    )
+}
+
+/// Verify that a VEK certificate's TCB extensions name `chip_id` and `tcb`.
 ///
 /// - For "VCEK" certificates: validates chip_id and TCB SPL exact equality.
 /// - For "VLEK" certificates: skips chip_id check, only validates TCB SPLs.
@@ -484,9 +498,10 @@ fn get_oid_octets(ext_value: &[u8]) -> Option<&[u8]> {
 /// `processor_gen` gates the chip_id comparison: only Turin uses a short
 /// (8-byte + zero-pad) HW_ID, so the short-prefix path is taken there alone.
 /// Milan/Genoa must match the full 64-byte chip_id exactly.
-pub fn verify_vcek_tcb(
-    report: &AttestationReport,
+pub fn check_vek_binding(
     vcek_der: &[u8],
+    chip_id: &[u8; 64],
+    tcb: &SnpTcb,
     processor_gen: ProcessorGeneration,
 ) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(vcek_der)
@@ -521,8 +536,7 @@ pub fn verify_vcek_tcb(
         let chip_id_bytes = get_oid_octets(ext.value).ok_or_else(|| {
             AttestationError::TcbMismatch("VCEK HW_ID OID has unparseable value".to_string())
         })?;
-        // report.chip_id is always a fixed [u8; 64].
-        let report_chip_id = &report.chip_id[..];
+        let report_chip_id = &chip_id[..];
         let prefix_len = chip_id_bytes.len();
 
         let ok = if processor_gen == ProcessorGeneration::Turin {
@@ -549,10 +563,10 @@ pub fn verify_vcek_tcb(
 
     // Validate TCB SPL values (exact equality)
     let checks: &[(&str, u8, &str)] = &[
-        (LOADER_SPL_OID, report.reported_tcb.bootloader, "bootloader"),
-        (TEE_SPL_OID, report.reported_tcb.tee, "tee"),
-        (SNP_SPL_OID, report.reported_tcb.snp, "snp"),
-        (UCODE_SPL_OID, report.reported_tcb.microcode, "microcode"),
+        (LOADER_SPL_OID, tcb.bootloader, "bootloader"),
+        (TEE_SPL_OID, tcb.tee, "tee"),
+        (SNP_SPL_OID, tcb.snp, "snp"),
+        (UCODE_SPL_OID, tcb.microcode, "microcode"),
     ];
 
     for &(oid_str, expected, name) in checks {
@@ -576,7 +590,7 @@ pub fn verify_vcek_tcb(
     }
 
     // Turin processors have an additional FMC SPL OID
-    if let Some(fmc_expected) = report.reported_tcb.fmc {
+    if let Some(fmc_expected) = tcb.fmc {
         if let Some(ext) = cert
             .extensions()
             .iter()
@@ -725,11 +739,17 @@ fn extract_tbs_from_crl_der(crl_der: &[u8]) -> Result<&[u8]> {
 /// - ECDSA P-384 SHA-384 (Genoa/Turin ASK)
 // INVARIANT CLASS: Correctness
 // INVARIANT: CRL must be signed by the issuing CA. No shortcuts.
-fn verify_crl_signature(
+pub(crate) fn verify_crl_signature(
     crl: &CertificateRevocationList,
     crl_der: &[u8],
     issuer_cert: &X509Certificate,
 ) -> Result<()> {
+    // The outer algorithm is not signed; it must repeat the signed one.
+    if crl.signature_algorithm != crl.tbs_cert_list.signature {
+        return Err(AttestationError::CertChainError(
+            "CRL signature algorithm differs from the signed one".into(),
+        ));
+    }
     let sig_alg_oid = crl.signature_algorithm.algorithm.to_string();
     let tbs_der = extract_tbs_from_crl_der(crl_der)?;
     let sig_value = crl.signature_value.as_ref();

@@ -116,20 +116,29 @@ impl TdxGolden {
 /// endorsement is a caller param, so one that does not verify is
 /// [`AttestationError::InvalidParams`].
 pub fn verify_endorsement(endorsement: &[u8], now: i64) -> Result<GoldenMeasurement> {
-    check_endorsement(endorsement, now).map_err(|reason| {
+    let (golden, (not_before, not_after)) = check_endorsement(endorsement).map_err(|reason| {
         AttestationError::InvalidParams(format!("GCE launch endorsement: {reason}"))
-    })
+    })?;
+    if !(not_before..=not_after).contains(&now) {
+        return Err(AttestationError::InvalidParams(format!(
+            "GCE launch endorsement: signing cert is not valid at {now} (valid {not_before}..{not_after})"
+        )));
+    }
+    Ok(golden)
 }
 
-fn check_endorsement(
+/// Checks an endorsement's signature, signer role and provenance, and returns
+/// its golden measurement with the window (Unix seconds) in which both the
+/// signing cert and the root are valid.
+pub(crate) fn check_endorsement(
     endorsement: &[u8],
-    now: i64,
-) -> std::result::Result<GoldenMeasurement, String> {
+) -> std::result::Result<(GoldenMeasurement, (i64, i64)), String> {
     let golden_bytes = last_bytes(endorsement, 1)?.ok_or("no serialized_uefi_golden")?;
     let signature = last_bytes(endorsement, 2)?.ok_or("no signature")?;
     let cert = last_bytes(golden_bytes, 4)?.ok_or("no signing cert")?;
     let signature = Signature::try_from(signature).map_err(|e| format!("signature: {e}"))?;
-    VerifyingKey::<Sha256>::new(signer_key(cert, now)?)
+    let (key, window) = signer_key(cert)?;
+    VerifyingKey::<Sha256>::new(key)
         .verify(golden_bytes, &signature)
         .map_err(|_| "signature does not verify")?;
 
@@ -140,7 +149,7 @@ fn check_endorsement(
     {
         return Err("missing provenance (cl_spec or commit)".into());
     }
-    Ok(golden)
+    Ok((golden, window))
 }
 
 /// The last value of length-delimited field `number` in `message`.
@@ -155,8 +164,9 @@ fn last_bytes(message: &[u8], number: u64) -> std::result::Result<Option<&[u8]>,
 }
 
 /// Checks the signing certificate against the pinned root and the signer
-/// role, and returns its key.
-fn signer_key(cert_der: &[u8], now: i64) -> std::result::Result<RsaPublicKey, String> {
+/// role, and returns its key and the window in which it and the root are
+/// valid.
+fn signer_key(cert_der: &[u8]) -> std::result::Result<(RsaPublicKey, (i64, i64)), String> {
     let root =
         Certificate::from_der(GCE_TCB_ROOT).map_err(|e| format!("bundled GCE-cc-tcb-root: {e}"))?;
     let cert = Certificate::from_der(cert_der).map_err(|e| format!("cert: {e}"))?;
@@ -173,20 +183,17 @@ fn signer_key(cert_der: &[u8], now: i64) -> std::result::Result<RsaPublicKey, St
     VerifyingKey::<Sha256>::new(rsa_key(&root)?)
         .verify(&tbs, &cert_signature)
         .map_err(|_| "cert is not signed by GCE-cc-tcb-root")?;
+    let unix = |t: x509_cert::time::Time| {
+        i64::try_from(t.to_unix_duration().as_secs()).unwrap_or(i64::MAX)
+    };
+    let mut window = (i64::MIN, i64::MAX);
     for c in [&root, &cert] {
         let validity = &c.tbs_certificate.validity;
-        let not_before = validity.not_before.to_unix_duration().as_secs();
-        let not_after = validity.not_after.to_unix_duration().as_secs();
-        let valid = u64::try_from(now).is_ok_and(|now| (not_before..=not_after).contains(&now));
-        if !valid {
-            return Err(format!(
-                "cert {} is not valid at {now} (valid {not_before}..{not_after})",
-                c.tbs_certificate.subject
-            ));
-        }
+        window.0 = window.0.max(unix(validity.not_before));
+        window.1 = window.1.min(unix(validity.not_after));
     }
     check_signer_role(&cert.tbs_certificate)?;
-    rsa_key(&cert)
+    Ok((rsa_key(&cert)?, window))
 }
 
 /// The cert must be signed with RSASSA-PSS over SHA-256, MGF1-SHA-256 and a

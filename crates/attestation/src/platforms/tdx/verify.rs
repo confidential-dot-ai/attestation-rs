@@ -641,9 +641,11 @@ pub async fn verify_collateral(
     // QE Identity verification (TDX uses TD_QE, not SGX QE)
     let qe_identity_json = provider.get_td_qe_identity().await?;
     let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
-    let qe_identity =
-        super::dcap::parse_qe_identity(&qe_identity_json, qe_signing_chain.as_deref(), now)
+    if let Some(chain) = qe_signing_chain.as_deref() {
+        super::dcap::verify_qe_identity_signature(&qe_identity_json, chain, now)
             .map_err(unusable)?;
+    }
+    let qe_identity = super::dcap::parse_qe_identity(&qe_identity_json).map_err(unusable)?;
     let qe_status = super::dcap::check_qe_report(auth.qe_report_body, &qe_identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
     status.qe_tcb_status = Some(qe_status);

@@ -9,7 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-attestation = { path = "..", default-features = false, features = ["gcp-tdx", "gcp-snp"] }
+serde_json = { version = "1", features = ["raw_value"] }
+hex = "0.4"
+pem = "3"
+attestation = { path = "..", default-features = false, features = ["snp", "tdx", "gcp-tdx", "gcp-snp", "nvidia-gpu"] }
 
 # Not part of the repository workspace.
 [workspace]
@@ -18,6 +21,13 @@ members = ["."]
 [[bin]]
 name = "gcp_endorsement"
 path = "fuzz_targets/gcp_endorsement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collateral_documents"
+path = "fuzz_targets/collateral_documents.rs"
 test = false
 doc = false
 bench = false

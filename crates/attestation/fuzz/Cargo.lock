@@ -109,7 +109,10 @@ name = "attestation-fuzz"
 version = "0.0.0"
 dependencies = [
  "attestation",
+ "hex",
  "libfuzzer-sys",
+ "pem",
+ "serde_json",
 ]
 
 [[package]]
