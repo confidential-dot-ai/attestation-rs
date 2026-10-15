@@ -1026,9 +1026,9 @@ mod tests {
         .await;
         let ctx = Context::new()
             .with_vendor_base(&v.base)
-            .with_recheck(Duration::from_millis(300));
+            .with_recheck(Duration::from_secs(2));
         tcb_info(&ctx, NOW).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(2100)).await;
         // A day before nextUpdate: due for refresh.
         let (info, _) = ctx.store().tcb_info(&FMSPC, NOW).await.unwrap();
         let ending = info.next_update - 3600;
