@@ -21,7 +21,7 @@ pub enum ApiError {
     #[error("invalid request: {0}")]
     Body(#[from] JsonRejection),
 
-    /// `/certs/refresh` could not refetch some documents (the old copies
+    /// `/certs/refresh` could not refetch some collateral (the old copies
     /// are kept).
     #[error("{0}")]
     RefreshFailed(String),
@@ -108,7 +108,7 @@ mod tests {
     #[tokio::test]
     async fn collateral_this_service_could_not_fetch_is_an_upstream_failure() {
         let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
-            document: "AMD CRL Genoa Ask".into(),
+            collateral: "amd-crl genoa".into(),
             reason: attestation::Unavailable::Status { status: 503 },
         })
         .into_response();

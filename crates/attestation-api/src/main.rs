@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // One collateral store for the process: every document is fetched once,
+    // One collateral store for the process: every piece is fetched once,
     // checked, and kept until a newer one replaces it.
     let gpu_url = resolve_nras_gpu_url(&config.certs);
     let switch_url = resolve_nras_switch_url(&config.certs);

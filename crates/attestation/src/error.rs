@@ -1,12 +1,12 @@
 use thiserror::Error;
 
-/// Why a collateral document could not be had.
+/// Why a piece of collateral could not be had.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum Unavailable {
     /// No connection, a timeout, or a body that was cut off.
     Unreachable { detail: String },
-    /// The vendor has no such document (404, 410).
+    /// The vendor does not publish it (404, 410).
     NotFound { status: u16 },
     /// The vendor asked to be called later (429, or a Retry-After).
     RateLimited { retry_after: Option<u64> },
@@ -64,9 +64,9 @@ pub enum AttestationError {
     /// Collateral the verifier needed (certificates, CRLs, TCB info, NRAS
     /// results) is held nowhere and could not be fetched. The only retryable
     /// error: the evidence was not judged.
-    #[error("collateral unavailable: {document}: {reason}")]
+    #[error("collateral unavailable: {collateral}: {reason}")]
     CollateralUnavailable {
-        document: String,
+        collateral: String,
         reason: Unavailable,
     },
 

@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{Doc, GceEndorsement, GceTee, Provenance, Store};
+use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
 use crate::error::{AttestationError, Result, Unavailable};
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
@@ -83,26 +83,29 @@ impl Platform for GcpTdx {
 
     /// The Tdx collateral and Google's endorsement for the MRTD, if Google
     /// publishes one, fetched once the quote has verified (as for Tdx).
-    async fn gather(evidence: &TdxEvidence, store: &Store, now: i64) -> Result<GcpTdxCollateral> {
+    async fn gather(
+        evidence: &TdxEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(GcpTdxCollateral, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
-        let key = GceEndorsement {
-            tee: GceTee::Tdx,
-            measurement: hex::encode(quote.body.mr_td),
-        };
         let (tdx, endorsement) = futures_util::join!(
             TdxCollateral::gather(&quote_bytes, &quote, store, now),
-            store.get(key, now)
+            store.gce_endorsement(GceTee::Tdx, &quote.body.mr_td, now)
         );
-        let tdx = tdx?;
+        let (tdx, mut used) = tdx?;
         let endorsement = match endorsement {
-            Ok(doc) => Some(doc),
+            Ok((endorsement, u)) => {
+                used.push(u);
+                Some(endorsement)
+            }
             Err(AttestationError::CollateralUnavailable {
                 reason: Unavailable::NotFound { .. },
                 ..
             }) => None,
             Err(e) => return Err(e),
         };
-        Ok(GcpTdxCollateral { tdx, endorsement })
+        Ok((GcpTdxCollateral { tdx, endorsement }, used))
     }
 
     fn verify(
@@ -114,20 +117,14 @@ impl Platform for GcpTdx {
         let tdx = Tdx::verify(evidence, &params.tdx, &collateral.tdx, now)?;
 
         let measurement = gcp_endorsement::tdx_mrtd(evidence)?.to_vec();
-        let endorsement_match = collateral.endorsement.as_ref().is_some_and(|e| {
-            e.key.measurement == hex::encode(&measurement)
-                && gcp_endorsement::endorses_tdx(&e.value, &measurement)
-        });
+        let endorsement_match = collateral
+            .endorsement
+            .as_ref()
+            .is_some_and(|e| gcp_endorsement::endorses_tdx(&e.golden, &measurement));
         Ok(GcpTdxResult {
             tdx,
             endorsement_match: Some(endorsement_match),
         })
-    }
-
-    fn provenance(collateral: &GcpTdxCollateral) -> Vec<Provenance> {
-        let mut docs = collateral.tdx.provenance();
-        docs.extend(collateral.endorsement.as_ref().map(|e| e.provenance()));
-        docs
     }
 }
 
@@ -136,13 +133,12 @@ impl Platform for GcpTdx {
 /// measurement).
 pub struct GcpTdxCollateral {
     pub tdx: TdxCollateral,
-    pub endorsement: Option<Doc<GceEndorsement>>,
+    pub endorsement: Option<GceEndorsement>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collateral::{DocKey, Raw};
     use crate::platforms::tdx::verify::parse_tdx_quote;
     use crate::testing;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -163,20 +159,11 @@ mod tests {
     }
 
     async fn verify(endorsement: &[u8], params: &GcpTdxParams) -> Result<GcpTdxResult> {
-        let key = GceEndorsement {
-            tee: GceTee::Tdx,
-            measurement: hex::encode(parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body.mr_td),
-        };
-        let held: (DocKey, Raw) = (
-            key.into(),
-            Raw {
-                body: endorsement.to_vec(),
-                issuer_chain: None,
-            },
-        );
-        let mut docs = testing::intel();
-        docs.push(held);
-        testing::verify::<GcpTdx>(&evidence(), params, docs).await
+        let mrtd = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body.mr_td;
+        let url = GceEndorsement::url(GceTee::Tdx, &mrtd);
+        let mut held = testing::intel();
+        held.push((url, endorsement.to_vec(), None));
+        testing::verify::<GcpTdx>(&evidence(), params, held).await
     }
 
     #[tokio::test]
@@ -214,7 +201,8 @@ mod tests {
         let collateral = GcpTdxCollateral {
             tdx: Tdx::gather(&evidence(), ctx.store(), testing::NOW)
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
             endorsement: None,
         };
         let r = GcpTdx::verify(

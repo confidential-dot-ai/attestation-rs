@@ -1,8 +1,7 @@
-//! Fetching documents from the vendors over HTTPS.
+//! Fetching collateral from the vendors over HTTPS.
 
 use std::time::Duration;
 
-use super::document::{DocKey, Raw};
 use crate::error::Unavailable;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -13,6 +12,13 @@ const MAX_BODY: usize = 5 * 1024 * 1024;
 const MAX_RETRY_AFTER: u64 = 5;
 /// Wait before the one retry: 200 ms plus up to 200 ms of jitter.
 const RETRY_DELAY_MS: u64 = 200;
+/// The response headers Intel PCS sends a TCB Info's, QE Identity's or PCK
+/// CRL's issuer chain in.
+const ISSUER_CHAIN_HEADERS: [&str; 3] = [
+    "TCB-Info-Issuer-Chain",
+    "SGX-Enclave-Identity-Issuer-Chain",
+    "SGX-PCK-CRL-Issuer-Chain",
+];
 
 pub(crate) struct Vendor {
     client: reqwest::Client,
@@ -49,23 +55,12 @@ impl Vendor {
         }
     }
 
-    /// GET the document, retrying once on network errors, 408, 429 and 5xx
-    /// (honouring a short Retry-After), never on 404/410. A hung vendor
-    /// costs about 10 s.
-    pub(crate) async fn fetch(&self, key: &DocKey) -> Result<Raw, Unavailable> {
-        #[cfg(feature = "nvidia-gpu")]
-        let url = match key {
-            DocKey::NrasJwks(_) => {
-                crate::platforms::nvidia_gpu::provider::jwks_url_for_endpoint(&self.nras.gpu_url)
-                    .unwrap_or_else(|_| key.url())
-            }
-            _ => key.url(),
-        };
-        #[cfg(not(feature = "nvidia-gpu"))]
-        let url = key.url();
-        let url = self.url(url);
-        let header = key.issuer_chain_header();
-        let err = match self.get_once(&url, header).await {
+    /// GET `url` and the issuer chain Intel PCS sends in a header, retrying
+    /// once on network errors, 408, 429 and 5xx (honouring a short
+    /// Retry-After), never on 404/410. A hung vendor costs about 10 s.
+    pub(crate) async fn fetch(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Unavailable> {
+        let url = self.url(url.to_string());
+        let err = match self.get_once(&url).await {
             Ok(raw) => return Ok(raw),
             Err(e) => e,
         };
@@ -83,21 +78,22 @@ impl Vendor {
             _ => return Err(err),
         };
         tokio::time::sleep(wait).await;
-        self.get_once(&url, header).await
+        self.get_once(&url).await
     }
 
-    async fn get_once(&self, url: &str, header: Option<&str>) -> Result<Raw, Unavailable> {
+    async fn get_once(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Unavailable> {
         let unreachable = |e: reqwest::Error| Unavailable::Unreachable {
             detail: e.to_string(),
         };
         let response = self.client.get(url).send().await.map_err(unreachable)?;
         check_status(&response)?;
-        let issuer_chain = header
-            .and_then(|h| response.headers().get(h))
+        let issuer_chain = ISSUER_CHAIN_HEADERS
+            .iter()
+            .find_map(|h| response.headers().get(*h))
             .and_then(|v| v.to_str().ok())
             .map(percent_decode);
         let body = read_body(response).await?;
-        Ok(Raw { body, issuer_chain })
+        Ok((body, issuer_chain))
     }
 }
 
@@ -215,7 +211,7 @@ impl Vendor {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
         let unavailable = |reason| AttestationError::CollateralUnavailable {
-            document: "NRAS attestation".into(),
+            collateral: "NRAS attestation".into(),
             reason,
         };
         let response = req.send().await.map_err(|e| {

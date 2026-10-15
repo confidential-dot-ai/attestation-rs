@@ -18,8 +18,8 @@ A REST API service for generating and verifying Trusted Execution Environment (T
 | `GET` | `/platform` | Detect TEE platform |
 | `POST` | `/attest` | Generate attestation evidence (requires `attestation.enabled = true`) |
 | `POST` | `/verify` | Verify evidence, optionally issue a JWT |
-| `GET` | `/certs/status` | Shared collateral documents held (source, window, version) and how many VCEKs and endorsements |
-| `POST` | `/certs/refresh` | Refetch the shared documents not checked in the last 5 minutes (replaced only by a valid, not older copy); `502 collateral_unavailable` names any that failed |
+| `GET` | `/certs/status` | Shared collateral held (name, source, version, nextUpdate) and how many VCEKs and endorsements |
+| `POST` | `/certs/refresh` | Refetch the shared collateral not checked in the last 5 minutes (replaced only by a valid, not older copy); `502 collateral_unavailable` names any that failed |
 | `GET` | `/token/jwks` | JWKS for issued attestation JWTs |
 
 ## Quick Start
@@ -86,10 +86,10 @@ The `/attest` endpoint is available when `attestation.enabled = true` (the defau
 ## Collateral
 
 The service verifies with one in-memory collateral store for its lifetime:
-AMD, Intel, Google and NVIDIA documents are fetched on first use, checked
+AMD, Intel, Google and NVIDIA collateral is fetched on first use, checked
 against the vendor roots compiled into the library, kept, and refetched near
-their nextUpdate (a failed refetch keeps the current copy). A document held
-nowhere and not fetchable is `502 collateral_unavailable`; a document that is not the vendor's is `422
+its nextUpdate (a failed refetch keeps the current copy). A piece held
+nowhere and not fetchable is `502 collateral_unavailable`; a piece that is not the vendor's is `422
 verification_failed`.
 
 ## Usage Examples
@@ -158,7 +158,7 @@ Responses:
 
 ## Key Features
 
-- **Collateral** — One in-memory store of checked vendor documents, shared by all requests
+- **Collateral** — One in-memory store of verified vendor collateral, shared by all requests
 - **JWT issuance** — Optional ES256 token generation after successful verification
 - **TLS support** — Optional HTTPS with configurable cert/key paths
 - **Load testing** — Built-in load test binary (`cargo run -p attestation-api --release --bin loadtest`)

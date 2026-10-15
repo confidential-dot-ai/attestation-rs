@@ -13,7 +13,7 @@ use std::future::Future;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{Freshness, Provenance, Store};
+use crate::collateral::{CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::types::{Claims, PlatformType};
 
@@ -48,13 +48,13 @@ pub trait Platform {
     fn validate(params: &Self::Params) -> Result<()>;
 
     /// Get the collateral `evidence` needs from `store`, at `now` (Unix
-    /// seconds). Checks that need no collateral run first; the store is the
-    /// only I/O.
+    /// seconds), and what the verdict should say about each piece. Checks
+    /// that need no collateral run first; the store is the only I/O.
     fn gather(
         evidence: &Self::Evidence,
         store: &Store,
         now: i64,
-    ) -> impl Future<Output = Result<Self::Collateral>> + Send;
+    ) -> impl Future<Output = Result<(Self::Collateral, Vec<CollateralUsed>)>> + Send;
 
     /// Verify `evidence` and evaluate every rule in `params`, at `now` (Unix
     /// seconds). Pure: no network, no cache, no clock.
@@ -67,9 +67,6 @@ pub trait Platform {
         collateral: &Self::Collateral,
         now: i64,
     ) -> Result<Self::Result>;
-
-    /// The documents in `collateral`.
-    fn provenance(collateral: &Self::Collateral) -> Vec<Provenance>;
 }
 
 /// The platforms a caller accepts, each with its params. Evidence for a
@@ -316,45 +313,20 @@ pub struct Verified {
     #[cfg(feature = "nvidia-gpu")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<NvidiaGpuResult>,
-    /// Every collateral document the verdict used.
+    /// Every piece of collateral the verdict used.
     #[serde(default)]
     pub collateral: Vec<CollateralUsed>,
 }
 
-/// A collateral document a verdict used: which, from where, its version and
-/// window, and whether it was current at the evaluation time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CollateralUsed {
-    #[serde(flatten)]
-    pub provenance: Provenance,
-    pub status: Freshness,
-}
-
-impl CollateralUsed {
-    pub(crate) fn at(provenance: Vec<Provenance>, now: i64) -> Vec<Self> {
-        provenance
-            .into_iter()
-            .map(|p| Self {
-                status: p.info.freshness(now),
-                provenance: p,
-            })
-            .collect()
-    }
-}
-
 impl Verified {
     /// True when the platform result and the GPU result (if any) both
-    /// passed, and every collateral document was current.
+    /// passed, and every piece of collateral was current.
     pub fn passed(&self) -> bool {
         #[cfg(feature = "nvidia-gpu")]
         if self.gpu.as_ref().is_some_and(|gpu| !gpu.passed()) {
             return false;
         }
-        self.platform.passed()
-            && self
-                .collateral
-                .iter()
-                .all(|c| c.status == Freshness::Current)
+        self.platform.passed() && self.collateral.iter().all(|c| c.current)
     }
 }
 

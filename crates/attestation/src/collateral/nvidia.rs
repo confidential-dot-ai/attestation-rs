@@ -1,20 +1,35 @@
 //! NVIDIA's NRAS signing keys.
 
-use super::document::{Document, Info, NrasJwks, Raw};
-use crate::platforms::nvidia_gpu::provider::Jwks;
+use super::{Dated, Dates, Refused};
+use crate::platforms::nvidia_gpu::provider::{jwks_url_for_endpoint, Jwks};
 
-impl Document for NrasJwks {
-    type Value = Jwks;
+/// The keys NVIDIA's NRAS signs its attestation tokens with.
+#[derive(Debug, Clone)]
+pub struct NrasJwks {
+    pub jwks: Jwks,
+}
+
+impl NrasJwks {
+    /// The key set of the NRAS at `nras_url`.
+    pub fn url(nras_url: &str) -> String {
+        jwks_url_for_endpoint(nras_url).unwrap_or_else(|_| nras_url.to_string())
+    }
 
     /// A key set with at least one key. The set is not signed itself: each
     /// key is trusted only through its `x5c` chain to the pinned NVIDIA
     /// anchor, which is checked when a token is verified with it.
-    fn check(&self, raw: &Raw) -> Result<(Jwks, Info), String> {
-        let jwks: Jwks = serde_json::from_slice(&raw.body).map_err(|e| format!("JWKS: {e}"))?;
+    pub fn verify(json: &[u8]) -> Result<Self, Refused> {
+        let jwks: Jwks = serde_json::from_slice(json).map_err(|e| format!("JWKS: {e}"))?;
         if jwks.keys.is_empty() {
             return Err("JWKS has no keys".into());
         }
-        Ok((jwks, Info::default()))
+        Ok(Self { jwks })
+    }
+}
+
+impl Dated for NrasJwks {
+    fn dates(&self) -> Dates {
+        Dates::default()
     }
 }
 
@@ -25,14 +40,9 @@ mod tests {
     #[test]
     fn the_nras_key_set_parses_and_garbage_is_refused() {
         let body = include_bytes!("../../test_data/collateral/2026-10-14/nras_jwks.json");
-        let raw = |body: &[u8]| Raw {
-            body: body.to_vec(),
-            issuer_chain: None,
-        };
-        let (jwks, _) = NrasJwks {}.check(&raw(body)).unwrap();
-        assert!(!jwks.keys.is_empty());
+        assert!(!NrasJwks::verify(body).unwrap().jwks.keys.is_empty());
         for bad in [&b""[..], b"{\"keys\":[]}", b"<html>"] {
-            assert!(NrasJwks {}.check(&raw(bad)).is_err());
+            assert!(NrasJwks::verify(bad).is_err());
         }
     }
 }

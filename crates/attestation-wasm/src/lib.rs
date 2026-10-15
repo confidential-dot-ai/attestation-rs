@@ -1,24 +1,25 @@
 //! The verifier for browsers and other JS runtimes. WASM does no network or
-//! disk I/O, so the caller fetches the vendor documents the evidence needs
-//! ([`collateral_needed`]) and hands them to [`evaluate`], which checks each
-//! one exactly as the native verifier does.
+//! disk I/O, so the caller fetches the vendor URLs the evidence needs
+//! ([`collateral_needed`]) and hands the responses to [`evaluate`], which
+//! verifies each piece of collateral exactly as the native verifier does.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
-use attestation::collateral::{DocKey, Raw};
 use attestation::types::{PlatformType, SnpTcb};
 use attestation::{
     AttestationError, AzSnpParams, AzTdxParams, Context, GcpSnpParams, GcpTdxParams, Policies,
     SnpParams, TdxParams, Verifier,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 /// Why a call failed. Thrown as a JS `Error` with this `kind`, named like
 /// the API's error keys:
-/// - `collateral_unavailable`: a document is missing; fetch and retry.
+/// - `collateral_unavailable`: a piece of collateral is missing; fetch and
+///   retry.
 /// - `bad_request`: the call's arguments or params cannot be applied.
 /// - `platform_not_allowed`: the evidence is for a platform not accepted.
-/// - `verification_failed`: the evidence, or a document, is not genuine.
+/// - `verification_failed`: the evidence, or its collateral, is not genuine.
 #[derive(Debug)]
 struct Failure {
     kind: &'static str,
@@ -58,33 +59,24 @@ impl From<Failure> for JsValue {
     }
 }
 
-/// A document the evidence needs, and where its vendor publishes it.
-#[derive(Serialize)]
-struct Needed {
-    key: DocKey,
-    url: String,
-    /// The response header carrying the document's issuer chain (Intel),
-    /// to pass back as `issuer_chain`.
-    issuer_chain_header: Option<&'static str>,
-}
-
-/// A fetched document: `key` as listed by [`collateral_needed`], the body
-/// base64, and the issuer-chain header value when there is one.
+/// A vendor response: the URL [`collateral_needed`] listed, the body
+/// base64, and the URL-decoded value of the `*-Issuer-Chain` header Intel
+/// PCS sends with TCB Info, QE Identity and PCK CRLs.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Held {
-    key: DocKey,
-    #[serde(flatten)]
-    raw: Raw,
+    url: String,
+    body: String,
+    #[serde(default)]
+    issuer_chain: Option<String>,
 }
 
-/// The vendor documents needed to verify `envelope_json` (an
-/// `{ platform, evidence }` envelope), as a JSON array of `{ key, url,
-/// issuer_chain_header }`. Fetch each `url` and pass the results to
-/// [`evaluate`] as `{ key, body (base64), issuer_chain }`.
+/// The vendor URLs to fetch to verify `envelope_json` (an `{ platform,
+/// evidence }` envelope), as a JSON array of strings. Fetch each and pass the
+/// responses to [`evaluate`] as `{ url, body (base64), issuer_chain }`.
 ///
 /// Evidence that is malformed or not genuine throws (see [`Failure`]): it
-/// never names documents to fetch.
+/// never names collateral to fetch.
 #[wasm_bindgen]
 pub async fn collateral_needed(envelope_json: String) -> Result<String, JsValue> {
     Ok(collateral_needed_impl(&envelope_json).await?)
@@ -99,18 +91,8 @@ async fn collateral_needed_impl(envelope_json: &str) -> Result<String, Failure> 
         Err(e) if !e.is_retryable() => return Err(e.into()),
         _ => {}
     }
-    let needed: Vec<Needed> = verifier
-        .context()
-        .store()
-        .missing()
-        .into_iter()
-        .map(|key| Needed {
-            url: key.url(),
-            issuer_chain_header: key.issuer_chain_header(),
-            key,
-        })
-        .collect();
-    Ok(serde_json::to_string(&needed).expect("documents serialize"))
+    let needed = verifier.context().store().missing();
+    Ok(serde_json::to_string(&needed).expect("URLs serialize"))
 }
 
 /// Evaluate attestation evidence from a self-describing envelope with the
@@ -127,13 +109,14 @@ async fn collateral_needed_impl(envelope_json: &str) -> Result<String, Failure> 
 /// - `expected_rtmr3`: optional 48 bytes the TD's RTMR[3] must equal (TDX
 ///   platforms)
 /// - `min_tcb_json`: optional minimum SNP TCB policy (`SnpTcb` JSON)
-/// - `collateral_json`: the documents [`collateral_needed`] listed, fetched
+/// - `collateral_json`: the responses for the URLs [`collateral_needed`]
+///   listed
 ///
 /// Returns the `Verified` result as JSON with `passed`. Throws (see
 /// [`Failure`]) when the evidence cannot be evaluated: malformed, not
-/// genuine, platform not accepted, invalid params, a needed document
-/// missing, or a document that is not the vendor's. Mismatches, policy
-/// flags and expired documents are values: read `passed`.
+/// genuine, platform not accepted, invalid params, needed collateral
+/// missing, or collateral that is not the vendor's. Mismatches, policy
+/// flags and expired collateral are values: read `passed`.
 #[wasm_bindgen]
 pub async fn evaluate(
     envelope_json: String,
@@ -229,7 +212,14 @@ async fn evaluate_impl(
     let policies = request.policies().map_err(Failure::bad_request)?;
     let held: Vec<Held> = serde_json::from_str(collateral_json)
         .map_err(|e| Failure::bad_request(format!("collateral deserialize: {e}")))?;
-    let ctx = Context::held(held.into_iter().map(|h| (h.key, h.raw)));
+    let mut responses = Vec::with_capacity(held.len());
+    for h in held {
+        let body = BASE64
+            .decode(&h.body)
+            .map_err(|e| Failure::bad_request(format!("{}: body base64: {e}", h.url)))?;
+        responses.push((h.url, body, h.issuer_chain));
+    }
+    let ctx = Context::held(responses);
     let ctx = match now {
         Some(t) => ctx.at(t)?,
         None => ctx,
@@ -248,7 +238,6 @@ async fn evaluate_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../attestation/test_data/");
     /// 2026-10-16T00:00:00Z: the fixture collateral is current.
@@ -282,7 +271,7 @@ mod tests {
 
     /// Fetch what `collateral_needed` lists from the fixtures, by URL.
     async fn fetch(envelope: &str) -> String {
-        let needed: Vec<serde_json::Value> =
+        let needed: Vec<String> =
             serde_json::from_str(&collateral_needed_impl(envelope).await.unwrap()).unwrap();
         let file = |url: &str| -> (&str, Option<&str>) {
             match url {
@@ -297,16 +286,16 @@ mod tests {
                     ("pck_crl_platform.pem", Some("pck_crl_platform_chain.pem"))
                 }
                 u if u.ends_with("IntelSGXRootCA.der") => ("root_ca_crl.der", None),
-                other => panic!("unexpected document {other}"),
+                other => panic!("unexpected URL {other}"),
             }
         };
         let held: Vec<serde_json::Value> = needed
             .iter()
-            .map(|n| {
-                let (body, chain) = file(n["url"].as_str().unwrap());
+            .map(|url| {
+                let (body, chain) = file(url);
                 let dir = "collateral/2026-10-14/";
                 serde_json::json!({
-                    "key": n["key"],
+                    "url": url,
                     "body": BASE64.encode(read(&format!("{dir}{body}"))),
                     "issuer_chain": chain.map(|c| String::from_utf8(read(&format!("{dir}{c}"))).unwrap()),
                 })
@@ -323,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tdx_needs_four_intel_documents_and_passes_with_them() {
+    async fn tdx_needs_four_intel_pieces_and_passes_with_them() {
         let needed: Vec<serde_json::Value> =
             serde_json::from_str(&collateral_needed_impl(&tdx_envelope()).await.unwrap()).unwrap();
         assert_eq!(needed.len(), 4);
@@ -367,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forged_evidence_throws_and_names_no_documents() {
+    async fn forged_evidence_throws_and_names_no_collateral() {
         let mut quote = read("tdx_quote_00a06d080000.dat");
         quote[48 + 520] ^= 1;
         let forged = serde_json::json!({

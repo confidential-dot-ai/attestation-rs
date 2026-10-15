@@ -34,49 +34,36 @@ fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
         env!("CARGO_MANIFEST_DIR"),
         "/../attestation/test_data/collateral/2026-10-14/"
     );
-    let raw = |file: &str, chain: Option<&str>| Raw {
-        body: std::fs::read(format!("{DIR}{file}")).unwrap(),
-        issuer_chain: chain.map(|c| std::fs::read_to_string(format!("{DIR}{c}")).unwrap()),
+    let held = |url: String, file: &str, chain: Option<&str>| {
+        let body = std::fs::read(format!("{DIR}{file}")).unwrap();
+        let chain = chain.map(|c| std::fs::read_to_string(format!("{DIR}{c}")).unwrap());
+        (url, body, chain)
     };
     let signing = Some("tcb_signing_chain.pem");
     let tcb_info = |fmspc: &str| {
-        let key = IntelTcbInfo {
-            fmspc: fmspc.into(),
-        };
-        (key.into(), raw(&format!("tcb_info_{fmspc}.json"), signing))
+        let url = TcbInfo::url(&hex::decode(fmspc).unwrap().try_into().unwrap());
+        held(url, &format!("tcb_info_{fmspc}.json"), signing)
     };
-    let endorsement = GceEndorsement {
-        tee: GceTee::Tdx,
-        measurement: "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5".into(),
-    };
-    let held: Vec<(DocKey, Raw)> = vec![
+    let mrtd = hex::decode("c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5").unwrap();
+    let held = vec![
         tcb_info("50806f000000"),
         tcb_info("00806f050000"),
-        (
-            IntelQeIdentity {}.into(),
-            raw("td_qe_identity.json", signing),
+        held(QeIdentity::url(), "td_qe_identity.json", signing),
+        held(
+            PckCrl::url(PckCa::Platform),
+            "pck_crl_platform.der",
+            Some("pck_crl_platform_chain.pem"),
         ),
-        (
-            IntelPckCrl {
-                ca: PckCa::Platform,
-            }
-            .into(),
-            raw("pck_crl_platform.der", Some("pck_crl_platform_chain.pem")),
+        held(
+            PckCrl::url(PckCa::Processor),
+            "pck_crl_processor.pem",
+            Some("pck_crl_processor_chain.pem"),
         ),
+        held(RootCrl::url(), "root_ca_crl.der", None),
         (
-            IntelPckCrl {
-                ca: PckCa::Processor,
-            }
-            .into(),
-            raw("pck_crl_processor.pem", Some("pck_crl_processor_chain.pem")),
-        ),
-        (IntelRootCrl {}.into(), raw("root_ca_crl.der", None)),
-        (
-            endorsement.into(),
-            Raw {
-                body: endorsement_body.to_vec(),
-                issuer_chain: None,
-            },
+            GceEndorsement::url(GceTee::Tdx, &mrtd),
+            endorsement_body.to_vec(),
+            None,
         ),
     ];
     // 2026-10-16T00:00:00Z.
@@ -619,7 +606,7 @@ async fn certs_status_returns_ok() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["documents"], serde_json::json!([]));
+    assert_eq!(json["collateral"], serde_json::json!([]));
 }
 
 // --- Attestation disabled tests ---

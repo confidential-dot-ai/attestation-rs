@@ -18,7 +18,7 @@ async fn verify(platform: &str, evidence: &impl serde::Serialize) {
         verified.platform.claims().launch_digest
     );
     for c in &verified.collateral {
-        eprintln!("  {} {:?}", c.provenance.document, c.status);
+        eprintln!("  {} current={}", c.name, c.current);
     }
 }
 

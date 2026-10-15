@@ -1,19 +1,22 @@
-//! The store: the only place collateral is fetched, checked and kept.
+//! The store: the only place collateral is fetched, verified and kept.
 //!
-//! Every document comes in through [`DocKey::check`] (signature against the
-//! compiled-in roots, binding to its key), whatever the source: held by the
-//! caller, memory, disk, or the vendor. In memory it is kept until a newer
-//! valid copy replaces it; a failed refetch keeps the old copy.
+//! Every piece comes in through its `verify` (signature against the
+//! compiled-in roots, binding to what the evidence names), whatever the
+//! source: held by the caller, memory, disk, or the vendor. The cache is keyed
+//! by the vendor URL. In memory a piece is kept until a newer valid copy
+//! replaces it; a failed refetch keeps the old copy.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use super::document::{Checked, DocKey, Document, Info, Raw};
+use super::{Dated, Dates, Refused};
 use crate::error::{AttestationError, Result, Unavailable};
+#[cfg(feature = "snp")]
+use crate::types::{ProcessorGeneration, SnpTcb};
 
-/// Where a document used for a verdict came from.
+/// Where a piece of collateral used for a verdict came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -28,89 +31,92 @@ pub enum Source {
     Vendor,
 }
 
-/// A checked document. Only the store makes one, so every `Doc` a verifier
-/// sees went through [`Document::check`].
-pub struct Doc<D: Document> {
-    pub(crate) key: D,
-    pub(crate) value: Arc<D::Value>,
-    pub(crate) info: Info,
-    pub(crate) source: Source,
-}
-
-/// What a verdict used: a document, where it came from, and its window.
+/// A piece of collateral a verdict used: which, from where, its version and
+/// nextUpdate, and whether it was current at the evaluation time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Provenance {
-    #[serde(flatten)]
-    pub document: DocKey,
-    pub source: Source,
-    #[serde(flatten)]
-    pub info: Info,
+pub struct CollateralUsed {
+    /// For example `amd-crl genoa`, `tcb-info 70a06d070000`.
+    pub name: String,
+    pub from: Source,
+    pub version: Option<u64>,
+    pub next_update: Option<i64>,
+    pub current: bool,
 }
 
-impl<D: Document> Doc<D> {
-    /// The checked document.
-    pub fn value(&self) -> &D::Value {
-        &self.value
-    }
-
-    pub fn provenance(&self) -> Provenance {
-        Provenance {
-            document: self.key.clone().into(),
-            source: self.source,
-            info: self.info,
-        }
-    }
+/// What the store knows about a piece before it has it.
+#[derive(Clone)]
+struct Spec {
+    url: String,
+    name: String,
+    /// Shared by many machines (refreshed by `refresh_all`), not one
+    /// machine's VCEK or one firmware's endorsement.
+    shared: bool,
+    /// The evidence names it: a vendor 404 means the evidence is at fault.
+    named_by_evidence: bool,
+    verify: VerifyFn,
 }
+
+/// A piece's `verify` with its identity bound: body and issuer chain in,
+/// dates out.
+type VerifyFn =
+    Arc<dyn Fn(&[u8], Option<&str>) -> std::result::Result<Dates, Refused> + Send + Sync>;
 
 #[derive(Clone)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct Entry {
-    raw: Raw,
-    value: Checked,
-    info: Info,
+    spec: Spec,
+    body: Vec<u8>,
+    issuer_chain: Option<String>,
+    dates: Dates,
     origin: Source,
     #[cfg(not(target_arch = "wasm32"))]
     checked_at: std::time::Instant,
 }
 
 #[derive(Clone)]
-enum LoadError {
+enum Failure {
     Unavailable(Unavailable),
-    Refused(String),
+    Refused(Refused),
 }
 
-impl LoadError {
-    fn into_error(self, key: &DocKey) -> AttestationError {
+impl Failure {
+    fn into_error(self, name: &str) -> AttestationError {
         match self {
-            LoadError::Unavailable(reason) => AttestationError::CollateralUnavailable {
-                document: key.to_string(),
+            Failure::Unavailable(reason) => AttestationError::CollateralUnavailable {
+                collateral: name.to_string(),
                 reason,
             },
-            LoadError::Refused(why) => {
-                AttestationError::CertChainError(format!("{key} refused: {why}"))
+            Failure::Refused(why) => {
+                AttestationError::CertChainError(format!("{name} refused: {why}"))
             }
         }
     }
 }
 
-fn check(key: &DocKey, raw: Raw, origin: Source) -> std::result::Result<Entry, LoadError> {
-    let (value, info) = key.check(&raw).map_err(LoadError::Refused)?;
+fn check(
+    spec: &Spec,
+    body: Vec<u8>,
+    issuer_chain: Option<String>,
+    origin: Source,
+) -> std::result::Result<Entry, Failure> {
+    let dates = (spec.verify)(&body, issuer_chain.as_deref()).map_err(Failure::Refused)?;
     Ok(Entry {
-        raw,
-        value,
-        info,
+        spec: spec.clone(),
+        body,
+        issuer_chain,
+        dates,
         origin,
         #[cfg(not(target_arch = "wasm32"))]
         checked_at: std::time::Instant::now(),
     })
 }
 
-/// Collateral documents for verifiers, from held copies, memory, disk and
-/// the vendors.
+/// Collateral for verifiers, from held copies, memory, disk and the vendors.
 pub struct Store {
-    held: HashMap<DocKey, Raw>,
-    /// What a held-only store was asked for and did not hold.
-    missing: Mutex<Vec<DocKey>>,
+    /// Vendor responses supplied by the caller, by URL.
+    held: HashMap<String, (Vec<u8>, Option<String>)>,
+    /// The URLs a held-only store was asked for and did not hold.
+    missing: Mutex<Vec<String>>,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<native::Native>,
 }
@@ -126,72 +132,254 @@ impl Store {
         }
     }
 
-    pub(crate) fn hold(&mut self, key: DocKey, raw: Raw) {
-        self.held.insert(key, raw);
+    pub(crate) fn hold(&mut self, url: String, body: Vec<u8>, issuer_chain: Option<String>) {
+        self.held.insert(url, (body, issuer_chain));
     }
 
-    /// The documents a held-only store was asked for and did not hold, each
-    /// once. A store with memory or a network records nothing.
-    pub fn missing(&self) -> Vec<DocKey> {
+    /// The vendor URLs a held-only store was asked for and did not hold,
+    /// each once. A store with memory or a network records nothing.
+    pub fn missing(&self) -> Vec<String> {
         self.missing
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// The checked document `key`, judged at `now` (Unix seconds) for
-    /// refreshes. A copy that does not check is refused (`CertChainError`)
-    /// when no good copy exists; no copy anywhere is
-    /// [`AttestationError::CollateralUnavailable`].
-    pub async fn get<D: Document>(&self, key: D, now: i64) -> Result<Doc<D>> {
-        let k: DocKey = key.clone().into();
-        let (entry, source) = self.entry(&k, now).await.map_err(|e| e.into_error(&k))?;
-        let value = entry
-            .value
-            .downcast::<D::Value>()
-            .map_err(|_| AttestationError::Other(anyhow::anyhow!("{k}: wrong document type")))?;
-        Ok(Doc {
-            key,
-            value,
-            info: entry.info,
-            source,
-        })
-    }
-
-    /// Refetch `key`, unless it was checked with the vendor in the last
-    /// few minutes; replace the copy in memory only with a valid copy that
-    /// is not older. `Err` says why the refetch failed (the old copy, if
-    /// any, is kept).
+    /// The piece at `url`, verified with `verify`, and what the verdict
+    /// should say about it at `now` (Unix seconds). `shared`: not one
+    /// machine's (see [`Spec`]); `named_by_evidence`: a vendor 404 refuses
+    /// the evidence. A copy that does not
+    /// verify is refused (`CertChainError`) when no good copy exists; no copy
+    /// anywhere is [`AttestationError::CollateralUnavailable`].
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    pub async fn refresh(&self, key: &DocKey, now: i64) -> Result<()> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(native) = &self.native {
-            return match native.refresh(key, true, now).await {
-                (_, _, Some(e)) => Err(e.into_error(key)),
-                _ => Ok(()),
-            };
-        }
-        Err(LoadError::Unavailable(Unavailable::Offline).into_error(key))
-    }
-
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    async fn entry(
+    async fn get<T: Dated>(
         &self,
-        key: &DocKey,
+        url: String,
+        name: String,
+        (shared, named_by_evidence): (bool, bool),
         now: i64,
-    ) -> std::result::Result<(Entry, Source), LoadError> {
-        if let Some(raw) = self.held.get(key) {
-            return check(key, raw.clone(), Source::Held).map(|e| (e, Source::Held));
-        }
+        verify: impl Fn(&[u8], Option<&str>) -> std::result::Result<T, Refused>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<(T, CollateralUsed)> {
+        let (body, chain, from) = match self.held.get(&url) {
+            Some((body, chain)) => (body.clone(), chain.clone(), Source::Held),
+            None => {
+                let spec = Spec {
+                    url,
+                    name: name.clone(),
+                    shared,
+                    named_by_evidence,
+                    verify: Arc::new({
+                        let verify = verify.clone();
+                        move |body, chain| verify(body, chain).map(|p| p.dates())
+                    }),
+                };
+                let (entry, from) = self
+                    .entry(spec, now)
+                    .await
+                    .map_err(|e| e.into_error(&name))?;
+                (entry.body, entry.issuer_chain, from)
+            }
+        };
+        let piece =
+            verify(&body, chain.as_deref()).map_err(|e| Failure::Refused(e).into_error(&name))?;
+        let dates = piece.dates();
+        let used = CollateralUsed {
+            name,
+            from,
+            version: dates.version,
+            next_update: dates.next_update,
+            current: dates.current(now),
+        };
+        Ok((piece, used))
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    async fn entry(&self, spec: Spec, now: i64) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            return native.entry(key, now).await;
+            return native.entry(spec, now).await;
         }
         let mut missing = self.missing.lock().unwrap_or_else(|e| e.into_inner());
-        if !missing.contains(key) {
-            missing.push(key.clone());
+        if !missing.contains(&spec.url) {
+            missing.push(spec.url);
         }
-        Err(LoadError::Unavailable(Unavailable::Offline))
+        Err(Failure::Unavailable(Unavailable::Offline))
+    }
+
+    /// The VCEK for a chip at a TCB.
+    #[cfg(feature = "snp")]
+    pub async fn vcek(
+        &self,
+        generation: ProcessorGeneration,
+        chip_id: &[u8; 64],
+        tcb: &SnpTcb,
+        now: i64,
+    ) -> Result<(super::Vcek, CollateralUsed)> {
+        let (chip_id, tcb) = (*chip_id, *tcb);
+        let name = format!(
+            "vcek {} {}",
+            generation.product_name().to_lowercase(),
+            hex::encode(&chip_id[..8])
+        );
+        self.get(
+            super::Vcek::url(generation, &chip_id, &tcb),
+            name,
+            (false, true),
+            now,
+            move |b, _| super::Vcek::verify(b, generation, &chip_id, &tcb),
+        )
+        .await
+    }
+
+    /// AMD's CRL for a generation and signer.
+    #[cfg(feature = "snp")]
+    pub async fn amd_crl(
+        &self,
+        generation: ProcessorGeneration,
+        signer: super::AmdSigner,
+        now: i64,
+    ) -> Result<(super::AmdCrl, CollateralUsed)> {
+        let mut name = format!("amd-crl {}", generation.product_name().to_lowercase());
+        if signer == super::AmdSigner::Asvk {
+            name.push_str(" vlek");
+        }
+        self.get(
+            super::AmdCrl::url(generation, signer),
+            name,
+            (true, false),
+            now,
+            move |b, _| super::AmdCrl::verify(b, generation, signer),
+        )
+        .await
+    }
+
+    /// Intel's TCB Info for a platform.
+    #[cfg(feature = "tdx")]
+    pub async fn tcb_info(
+        &self,
+        fmspc: &super::Fmspc,
+        now: i64,
+    ) -> Result<(super::TcbInfo, CollateralUsed)> {
+        let fmspc = *fmspc;
+        let name = format!("tcb-info {}", hex::encode(fmspc));
+        self.get(
+            super::TcbInfo::url(&fmspc),
+            name,
+            (true, true),
+            now,
+            move |b, c| super::TcbInfo::verify(b, c, &fmspc),
+        )
+        .await
+    }
+
+    /// Intel's TD QE Identity.
+    #[cfg(feature = "tdx")]
+    pub async fn qe_identity(&self, now: i64) -> Result<(super::QeIdentity, CollateralUsed)> {
+        self.get(
+            super::QeIdentity::url(),
+            "qe-identity".into(),
+            (true, false),
+            now,
+            super::QeIdentity::verify,
+        )
+        .await
+    }
+
+    /// The CRL of an Intel PCK CA.
+    #[cfg(feature = "tdx")]
+    pub async fn pck_crl(
+        &self,
+        ca: super::PckCa,
+        now: i64,
+    ) -> Result<(super::PckCrl, CollateralUsed)> {
+        let name = format!("pck-crl {}", ca.name());
+        self.get(
+            super::PckCrl::url(ca),
+            name,
+            (true, false),
+            now,
+            move |b, c| super::PckCrl::verify(b, c, ca),
+        )
+        .await
+    }
+
+    /// The CRL of the Intel SGX Root CA.
+    #[cfg(feature = "tdx")]
+    pub async fn root_crl(&self, now: i64) -> Result<(super::RootCrl, CollateralUsed)> {
+        self.get(
+            super::RootCrl::url(),
+            "root-crl".into(),
+            (true, false),
+            now,
+            |b, _| super::RootCrl::verify(b),
+        )
+        .await
+    }
+
+    /// Google's endorsement of a GCE firmware build.
+    #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
+    pub async fn gce_endorsement(
+        &self,
+        tee: super::GceTee,
+        measurement: &[u8],
+        now: i64,
+    ) -> Result<(super::GceEndorsement, CollateralUsed)> {
+        let measurement = measurement.to_vec();
+        let kind = match tee {
+            super::GceTee::Tdx => "tdx",
+            super::GceTee::SevSnp => "sevsnp",
+        };
+        let name = format!(
+            "gce-endorsement {kind} {}",
+            hex::encode(&measurement[..measurement.len().min(8)])
+        );
+        let url = super::GceEndorsement::url(tee, &measurement);
+        self.get(url, name, (false, false), now, move |b, _| {
+            super::GceEndorsement::verify(b, tee, &measurement)
+        })
+        .await
+    }
+
+    /// The keys NRAS signs its tokens with.
+    #[cfg(feature = "nvidia-gpu")]
+    pub async fn nras_jwks(&self, now: i64) -> Result<(super::NrasJwks, CollateralUsed)> {
+        self.get(
+            self.nras_jwks_url(),
+            "nras-jwks".into(),
+            (true, false),
+            now,
+            |b, _| super::NrasJwks::verify(b),
+        )
+        .await
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) fn nras_jwks_url(&self) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(vendor) = self.vendor() {
+            return super::NrasJwks::url(&vendor.nras.gpu_url);
+        }
+        super::NrasJwks::url(crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL)
+    }
+
+    /// Refetch the piece at `url`, unless it was checked with the vendor in
+    /// the last few minutes; replace the copy in memory only with a valid
+    /// copy that is not older. `Err` says why the refetch failed (the old
+    /// copy, if any, is kept). A piece not in memory is left alone.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    pub async fn refresh(&self, url: &str, now: i64) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = &self.native {
+            return match native.refresh_url(url, true, now).await {
+                Some((name, e)) => Err(e.into_error(&name)),
+                None => Ok(()),
+            };
+        }
+        Err(Failure::Unavailable(Unavailable::Offline).into_error(url))
     }
 }
 
@@ -215,42 +403,47 @@ impl Store {
         self.native.as_ref()?.vendor.as_ref()
     }
 
-    /// [`Self::refresh`] every shared document in memory (CRLs, TCB Info,
-    /// QE Identity, the NRAS key set; not per-machine VCEKs or
-    /// endorsements), a few at a time. Returns the failures.
+    /// [`Self::refresh`] every shared piece in memory (CRLs, TCB Info, QE
+    /// Identity, the NRAS key set; not per-machine VCEKs or endorsements),
+    /// a few at a time. Returns the failures.
     pub async fn refresh_all(&self, now: i64) -> Vec<AttestationError> {
         use futures_util::StreamExt;
-        let keys: Vec<DocKey> = self
-            .documents()
-            .into_iter()
-            .map(|p| p.document)
-            .filter(|k| !k.per_machine())
+        let Some(native) = &self.native else {
+            return Vec::new();
+        };
+        let urls: Vec<String> = native
+            .mem
+            .iter()
+            .filter(|(_, e)| e.spec.shared)
+            .map(|(url, _)| (*url).clone())
             .collect();
-        futures_util::stream::iter(keys)
-            .map(|k| async move { self.refresh(&k, now).await })
+        futures_util::stream::iter(urls)
+            .map(|url| async move { self.refresh(&url, now).await })
             .buffer_unordered(4)
             .filter_map(|r| async { r.err() })
             .collect()
             .await
     }
 
-    /// Every document held in memory.
-    pub fn documents(&self) -> Vec<Provenance> {
+    /// Every piece held in memory, judged at `now`.
+    pub fn collateral(&self, now: i64) -> Vec<CollateralUsed> {
         let Some(native) = &self.native else {
             return Vec::new();
         };
         native
             .mem
             .iter()
-            .map(|(key, e)| Provenance {
-                document: (*key).clone(),
-                source: e.origin,
-                info: e.info,
+            .map(|(_, e)| CollateralUsed {
+                name: e.spec.name.clone(),
+                from: e.origin,
+                version: e.dates.version,
+                next_update: e.dates.next_update,
+                current: e.dates.current(now),
             })
             .collect()
     }
 
-    /// About how many documents are held in memory.
+    /// About how many pieces are held in memory.
     pub fn count(&self) -> u64 {
         self.native.as_ref().map_or(0, |n| n.mem.entry_count())
     }
@@ -266,16 +459,16 @@ mod native {
     use crate::collateral::disk::Disk;
     use crate::collateral::vendor::Vendor;
 
-    /// Refetch a document this long before its nextUpdate.
+    /// Refetch a piece this long before its nextUpdate.
     const REFRESH_AHEAD: i64 = 24 * 3600;
-    /// Refetch a document without a nextUpdate (the NRAS key set) this often.
+    /// Refetch a piece without a nextUpdate (the NRAS key set) this often.
     const MAX_AGE: Duration = Duration::from_secs(3600);
 
     pub(crate) struct Native {
-        pub(super) mem: moka::future::Cache<DocKey, Entry>,
+        pub(super) mem: moka::future::Cache<String, Entry>,
         pub(crate) disk: Option<Disk>,
         pub(crate) vendor: Option<Vendor>,
-        /// Do not ask the vendor about one document more often than this.
+        /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
     }
 
@@ -289,33 +482,28 @@ mod native {
             }
         }
 
-        /// Close to (or past) its nextUpdate at `now`.
-        fn ending(info: &Info, now: i64) -> bool {
-            info.next_update
-                .is_some_and(|next| now >= next - REFRESH_AHEAD)
-        }
-
         /// Whether to ask the vendor about `entry` again: never within
-        /// `recheck` of the last time; otherwise when it is ending (or, for
-        /// the key set, old), or always when `force`d.
+        /// `recheck` of the last time; otherwise when it is within a day of
+        /// its nextUpdate (or, for the key set, old), or always when
+        /// `force`d.
         fn due(&self, entry: &Entry, now: i64, force: bool) -> bool {
             let age = entry.checked_at.elapsed();
             age >= self.recheck
                 && (force
-                    || match entry.info.next_update {
-                        Some(_) => Self::ending(&entry.info, now),
+                    || match entry.dates.next_update {
+                        Some(next) => now >= next - REFRESH_AHEAD,
                         None => age >= MAX_AGE,
                     })
         }
 
         pub(super) async fn entry(
             &self,
-            key: &DocKey,
+            spec: Spec,
             now: i64,
-        ) -> std::result::Result<(Entry, Source), LoadError> {
-            match self.mem.get(key).await {
+        ) -> std::result::Result<(Entry, Source), Failure> {
+            match self.mem.get(&spec.url).await {
                 Some(entry) if self.due(&entry, now, false) => {
-                    let (held, replaced, _) = self.refresh(key, false, now).await;
+                    let (held, replaced, _) = self.refresh(&spec, false, now).await;
                     let source = if replaced {
                         Source::Vendor
                     } else {
@@ -326,7 +514,7 @@ mod native {
                 Some(entry) => Ok((entry, Source::Memory)),
                 None => self
                     .mem
-                    .try_get_with(key.clone(), self.load(key, now))
+                    .try_get_with(spec.url.clone(), self.load(&spec, now))
                     .await
                     .map(|e| {
                         let origin = e.origin;
@@ -336,56 +524,61 @@ mod native {
             }
         }
 
-        async fn fetch(&self, key: &DocKey) -> std::result::Result<Entry, LoadError> {
+        async fn fetch(&self, spec: &Spec) -> std::result::Result<Entry, Failure> {
             let vendor = self
                 .vendor
                 .as_ref()
-                .ok_or(LoadError::Unavailable(Unavailable::Offline))?;
-            let raw = vendor.fetch(key).await.map_err(|e| match (key, e) {
+                .ok_or(Failure::Unavailable(Unavailable::Offline))?;
+            let (body, chain) = vendor.fetch(&spec.url).await.map_err(|e| match e {
                 // The vendor does not know the chip or platform the evidence
                 // names: the evidence is at fault, retrying will not help.
-                (
-                    DocKey::AmdVcek(_) | DocKey::IntelTcbInfo(_),
-                    e @ (Unavailable::NotFound { .. } | Unavailable::Status { status: 400 }),
-                ) => LoadError::Refused(format!("the vendor does not publish it ({e})")),
-                (_, e) => LoadError::Unavailable(e),
+                e @ (Unavailable::NotFound { .. } | Unavailable::Status { status: 400 })
+                    if spec.named_by_evidence =>
+                {
+                    Failure::Refused(Refused(format!("the vendor does not publish it ({e})")))
+                }
+                e => Failure::Unavailable(e),
             })?;
-            check(key, raw, Source::Vendor)
+            check(spec, body, chain, Source::Vendor)
         }
 
-        fn store(&self, key: &DocKey, entry: &Entry) {
+        fn store(&self, entry: &Entry) {
             if let Some(disk) = &self.disk {
-                disk.write(key, &entry.raw);
+                disk.write(&entry.spec.url, &entry.body, entry.issuer_chain.as_deref());
             }
         }
 
         /// A miss: the disk copy if it is current, else the vendor's, else
         /// the disk copy anyway.
-        async fn load(&self, key: &DocKey, now: i64) -> std::result::Result<Entry, LoadError> {
-            let on_disk = self
-                .disk
-                .as_ref()
-                .and_then(|d| d.read(key))
-                .and_then(|raw| match check(key, raw, Source::Disk) {
-                    Ok(e) => Some(e),
-                    Err(LoadError::Refused(why)) => {
-                        log::warn!("collateral cache: ignoring {key}: {why}");
-                        None
-                    }
-                    Err(LoadError::Unavailable(_)) => None,
-                });
+        async fn load(&self, spec: &Spec, now: i64) -> std::result::Result<Entry, Failure> {
+            let on_disk =
+                self.disk
+                    .as_ref()
+                    .and_then(|d| d.read(&spec.url))
+                    .and_then(
+                        |(body, chain)| match check(spec, body, chain, Source::Disk) {
+                            Ok(e) => Some(e),
+                            Err(_) => {
+                                log::warn!(
+                                    "collateral cache: ignoring {}: it does not verify",
+                                    spec.name
+                                );
+                                None
+                            }
+                        },
+                    );
             // A current disk copy is served as is: a process that only loads
             // (the CLI) would otherwise ask the vendor on every run near
             // nextUpdate. Refresh-ahead applies once it is in memory.
             if let Some(e) = &on_disk {
-                if e.info.freshness(now) == crate::collateral::Freshness::Current {
+                if e.dates.current(now) {
                     return Ok(e.clone());
                 }
             }
-            match (self.fetch(key).await, on_disk) {
-                (Ok(new), Some(old)) if !new.info.not_older_than(&old.info) => Ok(old),
+            match (self.fetch(spec).await, on_disk) {
+                (Ok(new), Some(old)) if !new.dates.not_older_than(&old.dates) => Ok(old),
                 (Ok(new), _) => {
-                    self.store(key, &new);
+                    self.store(&new);
                     Ok(new)
                 }
                 (Err(_), Some(old)) => Ok(old),
@@ -393,33 +586,46 @@ mod native {
             }
         }
 
-        /// Refetch `key` when [`Self::due`] and replace the held copy with it
-        /// when it checks and is not older. Concurrent refreshes of one key
-        /// run one at a time. Returns the copy now held, whether it was
-        /// replaced, and why a fetch failed.
-        pub(super) async fn refresh(
+        /// [`Self::refresh`] the piece in memory at `url`. Returns its name
+        /// and why the fetch failed, if it did.
+        pub(super) async fn refresh_url(
             &self,
-            key: &DocKey,
+            url: &str,
             force: bool,
             now: i64,
-        ) -> (Option<Entry>, bool, Option<LoadError>) {
+        ) -> Option<(String, Failure)> {
+            let spec = self.mem.get(url).await?.spec;
+            let (_, _, failure) = self.refresh(&spec, force, now).await;
+            failure.map(|f| (spec.name, f))
+        }
+
+        /// Refetch the piece when [`Self::due`] and replace the held copy
+        /// with it when it verifies and is not older. Concurrent refreshes of
+        /// one piece run one at a time. Returns the copy now held, whether it
+        /// was replaced, and why a fetch failed.
+        async fn refresh(
+            &self,
+            spec: &Spec,
+            force: bool,
+            now: i64,
+        ) -> (Option<Entry>, bool, Option<Failure>) {
             let failure = Mutex::new(None);
             let replaced = Mutex::new(false);
             let result = self
                 .mem
-                .entry(key.clone())
+                .entry(spec.url.clone())
                 .and_compute_with(|current| async {
                     let current = current.map(|e| e.into_value());
                     if current.as_ref().is_some_and(|c| !self.due(c, now, force)) {
                         return Op::Nop;
                     }
-                    match self.fetch(key).await {
+                    match self.fetch(spec).await {
                         Ok(new)
                             if current
                                 .as_ref()
-                                .is_none_or(|c| new.info.not_older_than(&c.info)) =>
+                                .is_none_or(|c| new.dates.not_older_than(&c.dates)) =>
                         {
-                            self.store(key, &new);
+                            self.store(&new);
                             *replaced.lock().unwrap() = true;
                             Op::Put(new)
                         }
@@ -457,7 +663,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::collateral::{IntelPckCrl, IntelQeIdentity, IntelTcbInfo, PckCa, Source};
+    use crate::collateral::{PckCa, Source, TcbInfo};
     use crate::context::Context;
     use crate::testing::{raw, NOW};
 
@@ -516,19 +722,15 @@ mod tests {
     /// A PCS reply for a TCB Info or QE Identity fixture: body plus its
     /// issuer chain header.
     fn pcs(file: &str) -> Reply {
-        let doc = raw(file, Some(CHAIN));
-        let header = doc
-            .issuer_chain
-            .unwrap()
-            .replace('\n', "%0A")
-            .replace(' ', "%20");
+        let (body, chain) = raw(file, Some(CHAIN));
+        let header = chain.unwrap().replace('\n', "%0A").replace(' ', "%20");
         (
             200,
             vec![
                 ("TCB-Info-Issuer-Chain", header.clone()),
                 ("SGX-Enclave-Identity-Issuer-Chain", header),
             ],
-            doc.body,
+            body,
         )
     }
 
@@ -536,21 +738,28 @@ mod tests {
         (code, headers, Vec::new())
     }
 
-    fn tcb_info() -> IntelTcbInfo {
-        IntelTcbInfo {
-            fmspc: "70a06d070000".into(),
-        }
+    const FMSPC: crate::collateral::Fmspc = [0x70, 0xa0, 0x6d, 0x07, 0x00, 0x00];
+
+    /// TCB Info for [`FMSPC`]: its version and source.
+    async fn tcb_info(ctx: &Context, now: i64) -> Result<(Option<u64>, Source)> {
+        let (_, used) = ctx.store().tcb_info(&FMSPC, now).await?;
+        Ok((used.version, used.from))
     }
 
-    /// A store fetching from `v` that may ask it about a document any time.
+    async fn qe_identity(ctx: &Context) -> Result<(Option<u64>, Source)> {
+        let (_, used) = ctx.store().qe_identity(NOW).await?;
+        Ok((used.version, used.from))
+    }
+
+    fn tcb_info_url() -> String {
+        TcbInfo::url(&FMSPC)
+    }
+
+    /// A store fetching from `v` that may ask it about a piece any time.
     fn ctx(v: &Vendor) -> Context {
         Context::new()
             .with_vendor_base(&v.base)
             .with_recheck(Duration::ZERO)
-    }
-
-    fn version(doc: &Doc<IntelTcbInfo>) -> Option<u64> {
-        doc.info.version
     }
 
     #[tokio::test]
@@ -561,20 +770,17 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        let gets = (0..20).map(|_| ctx.store().get(tcb_info(), NOW));
+        let gets = (0..20).map(|_| tcb_info(&ctx, NOW));
         for doc in futures_util::future::join_all(gets).await {
-            assert_eq!(doc.unwrap().info.version, Some(20));
+            assert_eq!(doc.unwrap().0, Some(20));
         }
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            ctx.store().get(tcb_info(), NOW).await.unwrap().source,
-            Source::Memory
-        );
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().1, Source::Memory);
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn a_document_past_next_update_is_refetched_and_a_failed_refetch_keeps_it() {
+    async fn a_piece_past_next_update_is_refetched_and_a_failed_refetch_keeps_it() {
         let v = vendor(
             vec![
                 pcs("2026-10-14/td_qe_identity_2026-03-16_eval18_expired.json"),
@@ -586,16 +792,16 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        let old = ctx.store().get(IntelQeIdentity {}, NOW).await.unwrap();
-        assert_eq!(old.info.version, Some(18));
+        let old = qe_identity(&ctx).await.unwrap();
+        assert_eq!(old.0, Some(18));
         // Past nextUpdate: refetched, the vendor fails (two tries), the
         // old copy is served.
-        let kept = ctx.store().get(IntelQeIdentity {}, NOW).await.unwrap();
-        assert_eq!((kept.info.version, kept.source), (Some(18), Source::Memory));
+        let kept = qe_identity(&ctx).await.unwrap();
+        assert_eq!((kept.0, kept.1), (Some(18), Source::Memory));
         assert_eq!(v.hits.load(Ordering::SeqCst), 3);
         // Still due: refetched again, and replaced.
-        let new = ctx.store().get(IntelQeIdentity {}, NOW).await.unwrap();
-        assert_eq!((new.info.version, new.source), (Some(20), Source::Vendor));
+        let new = qe_identity(&ctx).await.unwrap();
+        assert_eq!((new.0, new.1), (Some(20), Source::Vendor));
     }
 
     #[tokio::test]
@@ -609,16 +815,10 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        assert_eq!(
-            version(&ctx.store().get(tcb_info(), NOW).await.unwrap()),
-            Some(22)
-        );
-        ctx.store().refresh(&tcb_info().into(), NOW).await.unwrap();
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(22));
+        ctx.store().refresh(&tcb_info_url(), NOW).await.unwrap();
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            version(&ctx.store().get(tcb_info(), NOW).await.unwrap()),
-            Some(22)
-        );
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(22));
     }
 
     #[tokio::test]
@@ -629,7 +829,7 @@ mod tests {
             .replacen("\"UpToDate\"", "\"OutOfDate\"", 1)
             .into_bytes();
         let v = vendor(vec![bad.clone()], Duration::ZERO).await;
-        let err = ctx(&v).store().get(tcb_info(), NOW).await.err().unwrap();
+        let err = tcb_info(&ctx(&v), NOW).await.err().unwrap();
         assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
         assert!(!err.is_retryable());
 
@@ -639,41 +839,33 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        ctx.store().get(tcb_info(), NOW).await.unwrap();
-        assert!(ctx.store().refresh(&tcb_info().into(), NOW).await.is_err());
+        tcb_info(&ctx, NOW).await.unwrap();
+        assert!(ctx.store().refresh(&tcb_info_url(), NOW).await.is_err());
         assert_eq!(ctx.store().refresh_all(NOW).await.len(), 1);
-        assert_eq!(
-            version(&ctx.store().get(tcb_info(), NOW).await.unwrap()),
-            Some(20)
-        );
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(20));
     }
 
     #[tokio::test]
     async fn not_found_is_not_retried_and_5xx_is() {
         for (code, hits) in [(404, 1), (410, 1), (503, 2), (500, 2), (408, 2), (403, 1)] {
             let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
-            let err = ctx(&v)
-                .store()
-                .get(IntelQeIdentity {}, NOW)
-                .await
-                .err()
-                .unwrap();
+            let err = qe_identity(&ctx(&v)).await.err().unwrap();
             assert!(err.is_retryable(), "{code}: {err}");
             assert_eq!(v.hits.load(Ordering::SeqCst), hits, "{code}");
         }
     }
 
     #[tokio::test]
-    async fn a_document_the_evidence_names_and_the_vendor_does_not_know_is_refused() {
+    async fn a_piece_the_evidence_names_and_the_vendor_does_not_know_is_refused() {
         for code in [404, 410] {
             let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
-            let err = ctx(&v).store().get(tcb_info(), NOW).await.err().unwrap();
+            let err = tcb_info(&ctx(&v), NOW).await.err().unwrap();
             assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
         }
         #[cfg(feature = "snp")]
         for code in [400, 404] {
             let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
-            let err = ctx(&v).store().get(vcek(), NOW).await.err().unwrap();
+            let err = vcek(&ctx(&v)).await.err().unwrap();
             assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
             assert_eq!(v.hits.load(Ordering::SeqCst), 1);
         }
@@ -690,7 +882,7 @@ mod tests {
         )
         .await;
         let start = Instant::now();
-        ctx(&v).store().get(tcb_info(), NOW).await.unwrap();
+        tcb_info(&ctx(&v), NOW).await.unwrap();
         assert!(start.elapsed() >= Duration::from_secs(1));
 
         let v = vendor(
@@ -698,7 +890,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let err = ctx(&v).store().get(tcb_info(), NOW).await.err().unwrap();
+        let err = tcb_info(&ctx(&v), NOW).await.err().unwrap();
         assert_eq!(err.retry_after(), Some(120));
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
@@ -711,7 +903,7 @@ mod tests {
         )
         .await;
         let start = Instant::now();
-        let err = ctx(&v).store().get(tcb_info(), NOW).await.err().unwrap();
+        let err = tcb_info(&ctx(&v), NOW).await.err().unwrap();
         let took = start.elapsed();
         assert!(err.is_retryable(), "{err}");
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
@@ -728,18 +920,18 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let err = ctx(&v).store().get(tcb_info(), NOW).await.err().unwrap();
+        let err = tcb_info(&ctx(&v), NOW).await.err().unwrap();
         assert_eq!(err.retry_after(), Some(1));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
     }
 
-    /// The single file the store keeps `dir`'s one document in.
+    /// The single file the store keeps `dir`'s one piece in.
     fn only_file(dir: &std::path::Path) -> std::path::PathBuf {
         let files: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
-        assert_eq!(files.len(), 1, "one file per document, no temporary files");
+        assert_eq!(files.len(), 1, "one file per piece, no temporary files");
         files[0].clone()
     }
 
@@ -756,13 +948,9 @@ mod tests {
         )
         .await;
         let online = || ctx(&v).with_cache_dir(dir.path());
-        online().store().get(tcb_info(), NOW).await.unwrap();
-        let doc = offline(dir.path())
-            .store()
-            .get(tcb_info(), NOW)
-            .await
-            .unwrap();
-        assert_eq!((doc.info.version, doc.source), (Some(20), Source::Disk));
+        tcb_info(&online(), NOW).await.unwrap();
+        let doc = tcb_info(&offline(dir.path()), NOW).await.unwrap();
+        assert_eq!((doc.0, doc.1), (Some(20), Source::Disk));
 
         let file = only_file(dir.path());
         let good = std::fs::read(&file).unwrap();
@@ -775,16 +963,11 @@ mod tests {
             vec![b' '; 9 << 20],
         ] {
             std::fs::write(&file, corrupt).unwrap();
-            let err = offline(dir.path())
-                .store()
-                .get(tcb_info(), NOW)
-                .await
-                .err()
-                .unwrap();
+            let err = tcb_info(&offline(dir.path()), NOW).await.err().unwrap();
             assert!(err.is_retryable(), "{err}");
         }
-        let doc = online().store().get(tcb_info(), NOW).await.unwrap();
-        assert_eq!(doc.source, Source::Vendor);
+        let doc = tcb_info(&online(), NOW).await.unwrap();
+        assert_eq!(doc.1, Source::Vendor);
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(only_file(dir.path())).unwrap(), good);
     }
@@ -800,12 +983,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        ctx(&v)
-            .with_cache_dir(&dir)
-            .store()
-            .get(tcb_info(), NOW)
-            .await
-            .unwrap();
+        tcb_info(&ctx(&v).with_cache_dir(&dir), NOW).await.unwrap();
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&only_file(&dir)), 0o600);
@@ -814,19 +992,13 @@ mod tests {
     #[tokio::test]
     async fn a_current_disk_copy_is_served_without_asking_the_vendor() {
         let dir = tempfile::tempdir().unwrap();
-        let (key, raw) = (
-            tcb_info().into(),
-            raw("2026-10-14/tcb_info_70a06d070000.json", Some(CHAIN)),
-        );
-        crate::collateral::save_to_cache_dir(dir.path(), &key, &raw);
+        let (body, chain) = raw("2026-10-14/tcb_info_70a06d070000.json", Some(CHAIN));
+        crate::collateral::save_to_cache_dir(dir.path(), &tcb_info_url(), &body, chain.as_deref());
         let v = vendor(vec![status(503, vec![])], Duration::ZERO).await;
-        let doc = ctx(&v)
-            .with_cache_dir(dir.path())
-            .store()
-            .get(tcb_info(), NOW)
+        let doc = tcb_info(&ctx(&v).with_cache_dir(dir.path()), NOW)
             .await
             .unwrap();
-        assert_eq!(doc.source, Source::Disk);
+        assert_eq!(doc.1, Source::Disk);
         assert_eq!(v.hits.load(Ordering::SeqCst), 0);
     }
 
@@ -834,24 +1006,19 @@ mod tests {
     async fn a_stale_disk_copy_is_served_when_the_vendor_fails() {
         let dir = tempfile::tempdir().unwrap();
         let expired = "2026-10-14/td_qe_identity_2026-03-16_eval18_expired.json";
-        crate::collateral::save_to_cache_dir(
-            dir.path(),
-            &IntelQeIdentity {}.into(),
-            &raw(expired, Some(CHAIN)),
-        );
+        let (body, chain) = raw(expired, Some(CHAIN));
+        let url = crate::collateral::QeIdentity::url();
+        crate::collateral::save_to_cache_dir(dir.path(), &url, &body, chain.as_deref());
         let v = vendor(vec![status(503, vec![])], Duration::ZERO).await;
-        let doc = ctx(&v)
-            .with_cache_dir(dir.path())
-            .store()
-            .get(IntelQeIdentity {}, NOW)
+        let doc = qe_identity(&ctx(&v).with_cache_dir(dir.path()))
             .await
             .unwrap();
-        assert_eq!((doc.info.version, doc.source), (Some(18), Source::Disk));
+        assert_eq!((doc.0, doc.1), (Some(18), Source::Disk));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn callers_of_a_document_due_for_refresh_wait_for_one_fetch() {
+    async fn callers_of_a_piece_due_for_refresh_wait_for_one_fetch() {
         let v = vendor(
             vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
             Duration::from_millis(200),
@@ -860,19 +1027,12 @@ mod tests {
         let ctx = Context::new()
             .with_vendor_base(&v.base)
             .with_recheck(Duration::from_millis(300));
-        ctx.store().get(tcb_info(), NOW).await.unwrap();
+        tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
         // A day before nextUpdate: due for refresh.
-        let ending = ctx
-            .store()
-            .get(tcb_info(), NOW)
-            .await
-            .unwrap()
-            .info
-            .next_update
-            .unwrap()
-            - 3600;
-        let gets = (0..20).map(|_| ctx.store().get(tcb_info(), ending));
+        let (info, _) = ctx.store().tcb_info(&FMSPC, NOW).await.unwrap();
+        let ending = info.next_update - 3600;
+        let gets = (0..20).map(|_| tcb_info(&ctx, ending));
         for doc in futures_util::future::join_all(gets).await {
             doc.unwrap();
         }
@@ -889,45 +1049,48 @@ mod tests {
         let ctx = Context::new()
             .with_vendor_base(&v.base)
             .with_recheck(Duration::from_secs(300));
-        ctx.store().get(tcb_info(), NOW).await.unwrap();
+        tcb_info(&ctx, NOW).await.unwrap();
         for _ in 0..5 {
-            ctx.store().refresh(&tcb_info().into(), NOW).await.unwrap();
+            ctx.store().refresh(&tcb_info_url(), NOW).await.unwrap();
             assert!(ctx.store().refresh_all(NOW).await.is_empty());
         }
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(feature = "snp")]
-    fn vcek() -> crate::collateral::AmdVcek {
-        crate::collateral::AmdVcek {
-            generation: crate::types::ProcessorGeneration::Genoa,
-            chip_id: "b5f9a4c8280e63c97d288db6648577dc2b848884aa682d7a227ba40e50deb2b0\
-                      d112b599d87aaccda78d06f4254b1e81c4d953ef3c699db39d4e06013e9fa4ce"
-                .into(),
-            tcb: crate::types::SnpTcb {
-                bootloader: 10,
-                tee: 0,
-                snp: 27,
-                microcode: 28,
-                fmc: None,
-            },
-        }
+    async fn vcek(ctx: &Context) -> Result<(crate::collateral::Vcek, CollateralUsed)> {
+        let chip_id: [u8; 64] = hex::decode(
+            "b5f9a4c8280e63c97d288db6648577dc2b848884aa682d7a227ba40e50deb2b0\
+             d112b599d87aaccda78d06f4254b1e81c4d953ef3c699db39d4e06013e9fa4ce",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let tcb = crate::types::SnpTcb {
+            bootloader: 10,
+            tee: 0,
+            snp: 27,
+            microcode: 28,
+            fmc: None,
+        };
+        let genoa = crate::types::ProcessorGeneration::Genoa;
+        ctx.store().vcek(genoa, &chip_id, &tcb, NOW).await
     }
 
     #[cfg(feature = "snp")]
     #[tokio::test]
-    async fn refresh_all_leaves_per_machine_documents_alone() {
+    async fn refresh_all_leaves_per_machine_pieces_alone() {
         let v = vendor(
             vec![
-                (200, vec![], raw("2026-10-14/amd_vcek_genoa.der", None).body),
+                (200, vec![], raw("2026-10-14/amd_vcek_genoa.der", None).0),
                 pcs("2026-10-14/tcb_info_70a06d070000.json"),
             ],
             Duration::ZERO,
         )
         .await;
         let ctx = ctx(&v);
-        ctx.store().get(vcek(), NOW).await.unwrap();
-        ctx.store().get(tcb_info(), NOW).await.unwrap();
+        vcek(&ctx).await.unwrap();
+        tcb_info(&ctx, NOW).await.unwrap();
         assert!(ctx.store().refresh_all(NOW).await.is_empty());
         assert_eq!(v.hits.load(Ordering::SeqCst), 3);
     }
@@ -936,12 +1099,7 @@ mod tests {
     async fn offline_without_a_copy_is_unavailable_offline() {
         let err = Context::offline()
             .store()
-            .get(
-                IntelPckCrl {
-                    ca: PckCa::Platform,
-                },
-                NOW,
-            )
+            .pck_crl(PckCa::Platform, NOW)
             .await
             .err()
             .unwrap();
@@ -958,11 +1116,11 @@ mod tests {
     async fn only_a_held_only_store_records_what_it_was_missing() {
         let held = Context::held([]);
         for _ in 0..3 {
-            let _ = held.store().get(tcb_info(), NOW).await;
+            let _ = tcb_info(&held, NOW).await;
         }
-        assert_eq!(held.store().missing(), vec![tcb_info().into()]);
+        assert_eq!(held.store().missing(), vec![tcb_info_url()]);
         let native = Context::offline();
-        let _ = native.store().get(tcb_info(), NOW).await;
+        let _ = tcb_info(&native, NOW).await;
         assert!(native.store().missing().is_empty());
     }
 }

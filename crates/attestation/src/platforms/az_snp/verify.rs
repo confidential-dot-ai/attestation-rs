@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{AmdCrl, Doc, Provenance, Store};
+use crate::collateral::{AmdCrl, AmdSigner, CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::platforms::snp::{SnpParams, SnpResult};
@@ -65,7 +65,7 @@ pub struct VerifiedReport {
 /// What az-snp verification needs besides the evidence: the AMD CRL (the
 /// VCEK comes in the evidence).
 pub struct AzSnpCollateral {
-    pub crl: Doc<AmdCrl>,
+    pub crl: AmdCrl,
 }
 
 /// Azure SEV-SNP: an SNP report wrapped in an HCL report, bound to a vTPM quote.
@@ -83,12 +83,15 @@ impl Platform for AzSnp {
     }
 
     /// The whole evidence verifies first; its VCEK names the CRL.
-    async fn gather(evidence: &AzSnpEvidence, store: &Store, now: i64) -> Result<AzSnpCollateral> {
+    async fn gather(
+        evidence: &AzSnpEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(AzSnpCollateral, Vec<CollateralUsed>)> {
         let verified = verify_report(evidence, &AzSnpParams::default(), now)?;
-        let crl = AmdCrl::for_vek(verified.matched_gen, &verified.vcek_der)?;
-        Ok(AzSnpCollateral {
-            crl: store.get(crl, now).await?,
-        })
+        let signer = AmdSigner::of_vek(&verified.vcek_der)?;
+        let (crl, used) = store.amd_crl(verified.matched_gen, signer, now).await?;
+        Ok((AzSnpCollateral { crl }, vec![used]))
     }
 
     fn verify(
@@ -106,10 +109,6 @@ impl Platform for AzSnp {
         let mut result = verified.result;
         result.snp.crl_ok = Some(!revoked);
         Ok(result)
-    }
-
-    fn provenance(collateral: &AzSnpCollateral) -> Vec<Provenance> {
-        vec![collateral.crl.provenance()]
     }
 }
 
