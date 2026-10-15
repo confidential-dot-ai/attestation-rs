@@ -617,6 +617,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pure_verify_gives_the_same_answer_every_time() {
+        let evidence = platforms::tdx::evidence::TdxEvidence {
+            quote: base64::engine::general_purpose::STANDARD.encode(V5_QUOTE),
+            cc_eventlog: None,
+        };
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let collateral = Tdx::gather(&evidence, ctx.store(), now).await.unwrap();
+        let answer = || {
+            serde_json::to_value(
+                Tdx::verify(&evidence, &TdxParams::default(), &collateral, now).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = answer();
+        assert!((0..10).all(|_| answer() == first));
+    }
+
+    #[tokio::test]
     async fn evidence_for_a_platform_without_policy_is_refused() {
         let err = verifier()
             .verify(&tdx_envelope(), &Policies::default())

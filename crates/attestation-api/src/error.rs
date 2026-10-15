@@ -84,12 +84,21 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
 
+        let retry_after = match &self {
+            ApiError::Verification(inner) => inner.retry_after(),
+            _ => None,
+        };
         let body = ErrorBody {
             error: error_key,
             message,
         };
-
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -114,7 +123,21 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(resp.headers().get("retry-after").is_none());
         assert_eq!(error_key(resp).await, "collateral_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_vendor_retry_after_is_passed_on() {
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            document: "Intel TCB Info 70a06d070000".into(),
+            reason: attestation::Unavailable::RateLimited {
+                retry_after: Some(120),
+            },
+        })
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["retry-after"], "120");
     }
 
     #[tokio::test]

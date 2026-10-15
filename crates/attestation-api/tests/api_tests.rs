@@ -462,6 +462,177 @@ async fn verify_checks_gcp_launch_endorsement() {
 }
 
 #[tokio::test]
+async fn collateral_held_nowhere_is_a_502() {
+    let mut state = test_state();
+    state.verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+    let (status, json) = post_verify(
+        state,
+        serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": false } },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(json["error"], "collateral_unavailable");
+}
+
+/// A vendor on localhost: each request gets the reply of the first route
+/// whose path fragment its request line contains, else 404. Counts requests.
+async fn vendor(
+    routes: Vec<(&'static str, u16, Vec<u8>)>,
+) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = vec![0; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let line = String::from_utf8_lossy(&buf[..n]);
+            let line = line.lines().next().unwrap_or_default();
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (status, body) = routes
+                .iter()
+                .find(|(path, _, _)| line.contains(path))
+                .map_or((404, &[][..]), |(_, s, b)| (*s, &b[..]));
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+        }
+    });
+    (base, hits)
+}
+
+const SNP_REPORT: &[u8] =
+    include_bytes!("../../attestation/test_data/snp/live-report-v5-genoa.bin");
+const SNP_VCEK: &[u8] = include_bytes!("../../attestation/test_data/snp/live-vcek-genoa.der");
+const GENOA_CRL: &[u8] =
+    include_bytes!("../../attestation/test_data/collateral/2026-10-14/amd_crl_genoa.der");
+
+/// A state whose verifier fetches from the vendor at `base`, at a time the
+/// fixture CRL is current.
+fn online_state(base: &str) -> AppState {
+    let mut state = test_state();
+    let ctx = attestation::Context::new()
+        .with_vendor_base(base)
+        .at(1_792_108_800)
+        .unwrap();
+    state.verifier = Arc::new(attestation::Verifier::new(ctx));
+    state
+}
+
+/// The Genoa SEV-SNP evidence, with or without its VCEK inline.
+fn snp_body(with_vcek: bool) -> serde_json::Value {
+    let mut evidence = serde_json::json!({ "attestation_report": BASE64.encode(SNP_REPORT) });
+    if with_vcek {
+        evidence["cert_chain"] = serde_json::json!({ "vcek": BASE64.encode(SNP_VCEK) });
+    }
+    serde_json::json!({
+        "platform": "snp",
+        "evidence": evidence,
+        "policies": { "snp": {} },
+    })
+}
+
+#[tokio::test]
+async fn a_document_that_is_not_the_vendors_is_a_422() {
+    let mut crl = GENOA_CRL.to_vec();
+    *crl.last_mut().unwrap() ^= 1;
+    let (base, _) = vendor(vec![("/crl", 200, crl)]).await;
+    let (status, json) = post_verify(online_state(&base), snp_body(true)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "verification_failed");
+}
+
+#[tokio::test]
+async fn a_vcek_the_vendor_does_not_publish_is_a_422() {
+    let (base, _) = vendor(vec![("/crl", 200, GENOA_CRL.to_vec())]).await;
+    let (status, json) = post_verify(online_state(&base), snp_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "verification_failed");
+}
+
+async fn send(state: AppState, method: &str, uri: &str) -> serde_json::Value {
+    let resp = build_api_router(state)
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn certs_status_counts_vceks_and_refresh_respects_the_recheck_interval() {
+    let (base, hits) = vendor(vec![
+        ("/crl", 200, GENOA_CRL.to_vec()),
+        ("/vcek/v1/Genoa/", 200, SNP_VCEK.to_vec()),
+    ])
+    .await;
+    let state = online_state(&base);
+    let (status, _) = post_verify(state.clone(), snp_body(false)).await;
+    assert_eq!(status, StatusCode::OK);
+    let fetched = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(fetched, 2);
+
+    let status = send(state.clone(), "GET", "/certs/status").await;
+    assert_eq!(status["amd_vceks"], 1);
+    let documents = status["documents"].as_array().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["document"], "amd-crl");
+
+    for _ in 0..3 {
+        send(state.clone(), "POST", "/certs/refresh").await;
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), fetched);
+}
+
+#[tokio::test]
+async fn the_answer_is_the_librarys() {
+    const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
+    let evidence = serde_json::json!({ "quote": BASE64.encode(QUOTE) });
+    let mut state = test_state();
+    state.verifier = held_verifier(GCP_ENDORSEMENT);
+    let (status, json) = post_verify(
+        state,
+        serde_json::json!({
+            "platform": "gcp-tdx",
+            "evidence": evidence,
+            "policies": { "gcp-tdx": {} },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let envelope = serde_json::json!({ "platform": "gcp-tdx", "evidence": evidence });
+    let policies = attestation::Policies {
+        gcp_tdx: Some(Default::default()),
+        ..Default::default()
+    };
+    let lib = held_verifier(GCP_ENDORSEMENT)
+        .verify(envelope.to_string().as_bytes(), &policies)
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::to_value(&lib).unwrap());
+    assert_eq!(json["passed"], lib.passed());
+}
+
+#[tokio::test]
 async fn verify_accepts_mrtd_in_allowed_set() {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     // A real GCP TDX quote; it verifies offline (no collateral fetch).

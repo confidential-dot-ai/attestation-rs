@@ -61,6 +61,8 @@ jobs:
       # because it links the NVIDIA SDK and libnvat evidence collector.
       - run: cargo clippy -p attestation-cli --features attest,nvidia-gpu --all-targets -- -D warnings
       - run: cargo test -p attestation-cli --features attest,nvidia-gpu
+      # Exit codes against a fake vendor (the test-vendor seam, never released).
+      - run: cargo test -p attestation-cli --features test-vendor
       - name: Check released GPU verification flags
         shell: bash
         run: |

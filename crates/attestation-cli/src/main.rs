@@ -565,6 +565,11 @@ async fn cmd_verify(args: VerifyArgs) {
         Some(t) => ctx.at(t).unwrap_or_else(|e| usage_error(&e.to_string())),
         None => ctx,
     };
+    #[cfg(feature = "test-vendor")]
+    let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
+        Ok(base) => ctx.with_vendor_base(&base),
+        Err(_) => ctx,
+    };
     let verifier = attestation::Verifier::new(match cache_dir() {
         Some(dir) => ctx.with_cache_dir(dir),
         None => ctx,
@@ -606,6 +611,14 @@ async fn cmd_verify(args: VerifyArgs) {
             gpu.claims.overall_ok,
             gpu.passed(),
             gpu.claims.devices.len()
+        );
+    }
+    for c in &verified.collateral {
+        let p = &c.provenance;
+        let version = p.info.version.map(|v| format!(" v{v}")).unwrap_or_default();
+        eprintln!(
+            "  Collateral: {}{version}, {:?} ({:?})",
+            p.document, c.status, p.source
         );
     }
     eprintln!("  Passed: {passed}");
