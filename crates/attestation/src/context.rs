@@ -71,9 +71,9 @@ impl Context {
         self
     }
 
-    /// Fetch all collateral from `{base}/{vendor host}/{path}`.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[doc(hidden)]
+    /// Fetch all collateral from `{base}/{vendor host}/{path}`, plain HTTP
+    /// allowed. Only for tests.
+    #[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
     #[must_use]
     pub fn with_vendor_base(mut self, base: &str) -> Self {
         if let Some(native) = self.store.native_mut() {

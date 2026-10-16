@@ -25,6 +25,8 @@ dstack = ["tdx"]       # dstack proxies TDX quotes via Unix socket
 # Verification is pure JWS (ES384) + JSON parsing, so it works on any target
 # including wasm32.
 nvidia-gpu = []
+# Tests only: `Context::with_vendor_base` reroutes vendor fetches, plain HTTP allowed.
+test-vendor = []
 # `nvidia-gpu-attest` pulls in NVIDIA's official Rust attestation SDK
 # (nv-attestation-sdk). Build prereqs documented in README.md.
 nvidia-gpu-attest = ["nvidia-gpu", "dep:nv-attestation-sdk"]

@@ -23,6 +23,7 @@ const ISSUER_CHAIN_HEADERS: [&str; 3] = [
 pub(crate) struct Vendor {
     client: reqwest::Client,
     /// Test seam: fetch `{base}/{host}/{path}` instead of `https://{host}/{path}`.
+    #[cfg(any(test, feature = "test-vendor"))]
     base: Option<String>,
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) nras: Nras,
@@ -35,24 +36,33 @@ impl Vendor {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(REQUEST_TIMEOUT)
+                .https_only(cfg!(not(any(test, feature = "test-vendor"))))
                 .build()
                 .expect("HTTP client with static config"),
+            #[cfg(any(test, feature = "test-vendor"))]
             base: None,
             #[cfg(feature = "nvidia-gpu")]
             nras: Nras::from_env(),
         }
     }
 
+    #[cfg(any(test, feature = "test-vendor"))]
     pub(crate) fn with_base(mut self, base: &str) -> Self {
         self.base = Some(base.trim_end_matches('/').to_string());
         self
     }
 
+    #[cfg(any(test, feature = "test-vendor"))]
     fn url(&self, url: String) -> String {
         match (&self.base, url.strip_prefix("https://")) {
             (Some(base), Some(rest)) => format!("{base}/{rest}"),
             _ => url,
         }
+    }
+
+    #[cfg(not(any(test, feature = "test-vendor")))]
+    fn url(&self, url: String) -> String {
+        url
     }
 
     /// GET `url` and the issuer chain Intel PCS sends in a header, retrying
