@@ -76,7 +76,8 @@ struct Held {
 /// responses to [`evaluate`] as `{ url, body (base64), issuer_chain }`.
 ///
 /// Evidence that is malformed or not genuine throws (see [`Failure`]): it
-/// never names collateral to fetch.
+/// never names collateral to fetch. The exception is SNP evidence without a
+/// VEK: its VCEK is named from the unverified report and checked once held.
 #[wasm_bindgen]
 pub async fn collateral_needed(envelope_json: String) -> Result<String, JsValue> {
     Ok(collateral_needed_impl(&envelope_json).await?)
