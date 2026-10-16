@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::{refused, Collateral, Dates, Fmspc, PckCa};
 use crate::error::Result;
-use crate::platforms::tdx::dcap::{self, Signer};
+use crate::platforms::tdx::dcap;
 
 const INTEL_PCS: &str = "https://api.trustedservices.intel.com";
 const INTEL_CERTS: &str = "https://certificates.trustedservices.intel.com";
@@ -194,7 +194,7 @@ impl Collateral for PckCrl {
             .first()
             .ok_or_else(|| refused("empty issuer chain"))?;
         let (der, this_update, next_update, number) = dcap::check_crl(crl, issuer, "PCK CRL")?;
-        dcap::verify_signing_cert_chain(pem, this_update, Signer::PckCa(ca))?;
+        dcap::verify_signing_cert_chain(pem, this_update, ca.signer())?;
         Ok(Self {
             der,
             ca,
@@ -405,7 +405,7 @@ mod tests {
     fn the_bundled_root_is_the_pinned_root() {
         // verify_signing_cert_chain pins the root key; the bundled root is
         // the certificate that chain ends in.
-        assert!(dcap::verify_signing_cert_chain(&file(CHAIN), NOW, Signer::TcbSigning).is_ok());
+        assert!(dcap::verify_signing_cert_chain(&file(CHAIN), NOW, dcap::TCB_SIGNING).is_ok());
         let chain = dcap::parse_pem_to_der(&file(CHAIN)).unwrap();
         assert_eq!(chain[1], dcap::INTEL_SGX_ROOT_CA);
     }
@@ -415,11 +415,11 @@ mod tests {
         let tcb = file(CHAIN);
         let platform = file(PLATFORM_CHAIN);
         let check = |pem: &[u8], signer| dcap::verify_signing_cert_chain(pem, NOW, signer).is_ok();
-        assert!(check(&tcb, Signer::TcbSigning));
-        assert!(!check(&tcb, Signer::PckCa(PckCa::Platform)));
-        assert!(check(&platform, Signer::PckCa(PckCa::Platform)));
-        assert!(!check(&platform, Signer::PckCa(PckCa::Processor)));
-        assert!(!check(&platform, Signer::TcbSigning));
+        assert!(check(&tcb, dcap::TCB_SIGNING));
+        assert!(!check(&tcb, PckCa::Platform.signer()));
+        assert!(check(&platform, PckCa::Platform.signer()));
+        assert!(!check(&platform, PckCa::Processor.signer()));
+        assert!(!check(&platform, dcap::TCB_SIGNING));
     }
 
     #[test]

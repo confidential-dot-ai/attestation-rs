@@ -295,13 +295,9 @@ pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> 
 /// Validates:
 ///   - Root CA public key matches hardcoded Intel trust anchor
 ///   - Root CA self-signs correctly
-///   - Signing cert is signed by Root CA and is `signer`
+///   - Signing cert is signed by Root CA and its common name is `signer`
 ///   - Both certificates are within their validity periods
-pub fn verify_signing_cert_chain(
-    pem_data: &[u8],
-    now: i64,
-    signer: Signer,
-) -> Result<VerifyingKey> {
+pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Result<VerifyingKey> {
     let pem_str = std::str::from_utf8(pem_data).map_err(|e| {
         AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
     })?;
@@ -338,7 +334,7 @@ pub fn verify_signing_cert_chain(
 
     // Verify signing cert is signed by Root CA
     verify_cert_signature(&signing_cert, &root_pub_key, "TCB Signing cert")?;
-    signer.check(&der_certs[0])?;
+    check_signer(&der_certs[0], signer)?;
 
     // Verify validity periods
     for (der, label) in [
@@ -351,42 +347,26 @@ pub fn verify_signing_cert_chain(
     extract_p256_pub_key(&signing_cert.pub_key_bytes, "TCB Signing")
 }
 
-/// The Intel certificate that must sign a PCS document: the TCB Signing
-/// certificate (TCB Info, QE Identity) or a PCK CA (its CRL).
-#[derive(Debug, Clone, Copy)]
-pub enum Signer {
-    TcbSigning,
-    PckCa(crate::collateral::PckCa),
-}
+/// The Intel certificate that signs TCB Info and QE Identity.
+pub const TCB_SIGNING: &str = "Intel SGX TCB Signing";
 
-impl Signer {
-    /// The certificate's exact common name, and whether it is a CA.
-    fn role(self) -> (&'static str, bool) {
-        use crate::collateral::PckCa;
-        match self {
-            Signer::TcbSigning => ("Intel SGX TCB Signing", false),
-            Signer::PckCa(PckCa::Platform) => ("Intel SGX PCK Platform CA", true),
-            Signer::PckCa(PckCa::Processor) => ("Intel SGX PCK Processor CA", true),
-        }
+/// Refuse a signing certificate whose common name is not `signer`: any
+/// certificate under the Intel root would otherwise do, including a single
+/// CPU's PCK certificate.
+fn check_signer(der: &[u8], signer: &str) -> Result<()> {
+    let (_, cert) = X509Certificate::from_der(der)
+        .map_err(|e| AttestationError::CertChainError(format!("signer x509 parse: {e}")))?;
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok());
+    if cn != Some(signer) {
+        return Err(AttestationError::CertChainError(format!(
+            "signer is {cn:?}, not {signer}"
+        )));
     }
-
-    fn check(self, der: &[u8]) -> Result<()> {
-        let (_, cert) = X509Certificate::from_der(der)
-            .map_err(|e| AttestationError::CertChainError(format!("signer x509 parse: {e}")))?;
-        let cn = cert
-            .subject()
-            .iter_common_name()
-            .next()
-            .and_then(|cn| cn.as_str().ok());
-        let ca = matches!(cert.basic_constraints(), Ok(Some(bc)) if bc.value.ca);
-        let (want_cn, want_ca) = self.role();
-        if cn != Some(want_cn) || ca != want_ca {
-            return Err(AttestationError::CertChainError(format!(
-                "signer is {cn:?} (CA: {ca}), not {want_cn}"
-            )));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Minimal X.509 certificate data needed for chain verification.
@@ -810,7 +790,7 @@ pub fn verify_tcb_info_signature(
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info signature parse: {e}")))?;
 
     // Verify the signing cert chain roots to Intel SGX Root CA (2-cert chain)
-    let signing_key = verify_signing_cert_chain(signing_certs_pem, now, Signer::TcbSigning)?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem, now, TCB_SIGNING)?;
 
     // RawValue preserves the exact bytes Intel signed — no re-serialization.
     signing_key
@@ -1058,7 +1038,7 @@ pub fn verify_qe_identity_signature(
     let signature = Signature::from_slice(&sig_bytes).map_err(|e| {
         AttestationError::CertChainError(format!("QE Identity signature parse: {e}"))
     })?;
-    let signing_key = verify_signing_cert_chain(signing_certs_pem, at, Signer::TcbSigning)?;
+    let signing_key = verify_signing_cert_chain(signing_certs_pem, at, TCB_SIGNING)?;
     // RawValue preserves the exact bytes Intel signed — no re-serialization.
     signing_key
         .verify(envelope.enclave_identity.get().as_bytes(), &signature)
@@ -1587,7 +1567,7 @@ mod tests {
         let two_cert_pem = &pem_str[..second_end];
 
         // This should fail because the 2nd cert (intermediate) is not the Root CA
-        let result = verify_signing_cert_chain(two_cert_pem.as_bytes(), now(), Signer::TcbSigning);
+        let result = verify_signing_cert_chain(two_cert_pem.as_bytes(), now(), TCB_SIGNING);
         assert!(
             result.is_err(),
             "intermediate CA should not be accepted as Intel Root CA"
