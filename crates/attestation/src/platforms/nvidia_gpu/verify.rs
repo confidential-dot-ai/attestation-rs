@@ -3,7 +3,7 @@
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 
-use crate::collateral::{CollateralUsed, NrasJwks, Store};
+use crate::collateral::{Collateral, CollateralUsed, NrasJwks, Store};
 use crate::error::{AttestationError, Result};
 use crate::platforms::nvidia_gpu::provider::{Jwks, NrasEvidenceEntry, NrasRequest};
 use crate::platforms::nvidia_gpu::{gpu_nonce, switch_nonce};
@@ -59,6 +59,12 @@ pub async fn gather_bundle(
     if !known(&jwks.0) {
         store.refresh::<NrasJwks>(&store.nras_url(), now).await?;
         jwks = store.get::<NrasJwks>(&store.nras_url(), now).await?;
+        if !known(&jwks.0) {
+            return Err(crate::error::Unavailable::detail(
+                "NRAS signed with a key it has not published yet",
+            )
+            .into_error(&NrasJwks::name(&store.nras_url())));
+        }
     }
     let (jwks, used) = jwks;
     Ok((GpuCollateralSet { nras, jwks }, used))

@@ -859,6 +859,47 @@ mod tests {
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn a_token_under_a_key_not_yet_published_is_retryable() {
+        use crate::types::{
+            NvidiaGpuArch, NvidiaGpuDeviceEvidence, NvidiaGpuEvidenceBundle, NvidiaGpuParams,
+        };
+        use base64::Engine;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"kid":"next"}"#);
+        let eat = serde_json::json!([["JWT", format!("{header}.e30.sig")], {}]);
+        let (jwks, _) = raw("2026-10-14/nras_jwks.json", None);
+        let v = vendor(
+            vec![
+                (200, vec![], eat.to_string().into_bytes()),
+                (200, vec![], jwks),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = Context::new()
+            .with_vendor_base(&v.base)
+            .with_recheck(Duration::from_secs(300));
+        let bundle = NvidiaGpuEvidenceBundle {
+            devices: vec![NvidiaGpuDeviceEvidence {
+                arch: NvidiaGpuArch::Hopper,
+                uuid: "GPU-0".into(),
+                evidence_b64: String::new(),
+                cert_chain_b64: String::new(),
+            }],
+            binding: Default::default(),
+        };
+        let params = NvidiaGpuParams {
+            user_nonce: Some(vec![7; 32]),
+            ..Default::default()
+        };
+        let err = crate::platforms::nvidia_gpu::gather_bundle(&bundle, &params, ctx.store(), NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.is_retryable(), "{err}");
+    }
+
     #[cfg(feature = "snp")]
     async fn vcek(ctx: &Context) -> Result<(crate::collateral::Vcek, CollateralUsed)> {
         let chip_id: [u8; 64] = hex::decode(
