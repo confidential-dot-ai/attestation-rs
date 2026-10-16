@@ -295,11 +295,9 @@ mod tests {
         let ctx = Context::offline();
 
         let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
-        assert!(result.is_err(), "short HCL report should fail");
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("too short"),
-            "error should mention too short: {err}"
+            matches!(result, Err(AttestationError::QuoteParseFailed(_))),
+            "{result:?}"
         );
     }
 
@@ -316,11 +314,9 @@ mod tests {
         let ctx = Context::offline();
 
         let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("base64") || err.contains("Base64"),
-            "error: {err}"
+            matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
+            "{result:?}"
         );
     }
 

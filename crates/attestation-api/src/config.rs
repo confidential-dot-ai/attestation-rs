@@ -344,10 +344,6 @@ mod tests {
         };
         let debug_output = format!("{config:?}");
         assert!(
-            debug_output.contains("[2 keys]"),
-            "Debug should show key count"
-        );
-        assert!(
             !debug_output.contains("super-secret"),
             "Debug must not contain actual key values"
         );

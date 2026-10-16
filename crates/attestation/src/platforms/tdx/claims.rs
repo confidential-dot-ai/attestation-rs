@@ -70,12 +70,9 @@ mod tests {
 
         // launch_digest is hex of mr_td
         assert_eq!(claims.launch_digest, hex::encode(quote.body.mr_td));
-        assert!(!claims.launch_digest.is_empty());
-        // mr_td starts with 0x70, 0x5e => "705e..."
-        assert!(
-            claims.launch_digest.starts_with("705e"),
-            "launch_digest should start with 705e, got: {}",
-            &claims.launch_digest[..8]
+        assert_eq!(
+            claims.launch_digest,
+            "705ee9381b8633a9fbe532b52345e8433343d2868959f57889d84ca377c395b689cac1599ccea1b7d420483a9ce5f031"
         );
 
         // report_data should be 64 bytes
@@ -106,12 +103,16 @@ mod tests {
 
         // RTMR values should be present as hex strings
         let rtmr0 = claims.platform_data["rtmr_0"].as_str().unwrap();
-        assert_eq!(rtmr0.len(), 96); // 48 bytes = 96 hex chars
-        assert!(rtmr0.starts_with("e940"));
+        assert_eq!(
+            rtmr0,
+            "e940da7c2712d2790e2961e00484f4fa8e6f9eed71361655ae22699476b14f9e63867eb41edd4b480fef0c59f496b288"
+        );
 
         let rtmr1 = claims.platform_data["rtmr_1"].as_str().unwrap();
-        assert_eq!(rtmr1.len(), 96);
-        assert!(rtmr1.starts_with("559c"));
+        assert_eq!(
+            rtmr1,
+            "559cfcf42716ed6c40a48a73d5acb7da255435012f0a9f00fbe8c1c57612ede486a5684c4c9ff3ddf52315fcdca3a596"
+        );
 
         // RTMR 2 and 3 should be all zeroes
         let rtmr2 = claims.platform_data["rtmr_2"].as_str().unwrap();
@@ -128,11 +129,9 @@ mod tests {
 
         // launch_digest is hex of mr_td
         assert_eq!(claims.launch_digest, hex::encode(quote.body.mr_td));
-        // mr_td starts with 0xdf, 0xba => "dfba..."
-        assert!(
-            claims.launch_digest.starts_with("dfba"),
-            "launch_digest should start with dfba, got: {}",
-            &claims.launch_digest[..8]
+        assert_eq!(
+            claims.launch_digest,
+            "dfba221b48a22af8511542ee796603f37382800840dcd978703909bf8e64d4c8a1e9de86e7c9638bfcba422f3886400a"
         );
 
         // report_data should be 64 bytes

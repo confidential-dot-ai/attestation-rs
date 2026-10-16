@@ -1553,9 +1553,10 @@ mod tests {
 
         let bogus_crl = vec![0x30, 0x00];
         let result = intermediate_ca_revoked(single_cert_pem.as_bytes(), &bogus_crl);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.unwrap_err());
-        assert!(err.contains("at least 2 certs"), "error: {err}");
+        assert!(
+            matches!(result, Err(AttestationError::CertChainError(_))),
+            "{result:?}"
+        );
     }
 
     #[test]

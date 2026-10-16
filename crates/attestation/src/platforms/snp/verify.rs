@@ -1400,9 +1400,14 @@ mod tests {
             datetime!(2020-01-01 0:00 UTC),
             datetime!(2021-01-01 0:00 UTC),
         );
+        let in_window = datetime!(2020-06-01 0:00 UTC).unix_timestamp();
+        verify_vek_validity_period(&leaf, in_window).expect("valid inside its window");
         let err = verify_vek_validity_period(&leaf, now_secs())
             .expect_err("expired VEK must be rejected");
-        assert!(err.to_string().contains("expired"), "got: {err}");
+        assert!(
+            matches!(err, AttestationError::CertChainError(_)),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1412,9 +1417,14 @@ mod tests {
             datetime!(2100-01-01 0:00 UTC),
             datetime!(2101-01-01 0:00 UTC),
         );
+        let in_window = datetime!(2100-06-01 0:00 UTC).unix_timestamp();
+        verify_vek_validity_period(&leaf, in_window).expect("valid inside its window");
         let err =
             verify_vek_validity_period(&leaf, now_secs()).expect_err("future VEK must be rejected");
-        assert!(err.to_string().contains("not yet valid"), "got: {err}");
+        assert!(
+            matches!(err, AttestationError::CertChainError(_)),
+            "{err:?}"
+        );
     }
 
     #[test]

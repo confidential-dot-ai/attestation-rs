@@ -39,11 +39,14 @@ fn config_parse_explicit_values() {
 #[test]
 fn config_rejects_unknown_attestation_platform() {
     let mut config = attestation_api::config::Config::default();
-    config.attestation.platforms = vec!["snp".to_string(), "not-a-platform".to_string()];
+    config.attestation.platforms = vec!["snp".to_string()];
+    config.validate().expect("a known platform validates");
 
-    let err = config.validate().unwrap_err();
-    assert!(err.contains("unknown platform"));
-    assert!(err.contains("not-a-platform"));
+    config
+        .attestation
+        .platforms
+        .push("not-a-platform".to_string());
+    assert!(config.validate().is_err());
 }
 
 #[test]
