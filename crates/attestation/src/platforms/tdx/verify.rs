@@ -666,6 +666,16 @@ pub(crate) fn check_collateral(
             "the collateral is not for this quote's platform".into(),
         ));
     }
+    for signer in [&collateral.tcb_info.signer, &collateral.qe_identity.signer] {
+        if super::dcap::cert_revoked_from_der(
+            std::slice::from_ref(signer),
+            &collateral.root_crl.der,
+        )? {
+            return Err(AttestationError::CertChainError(
+                "Intel revoked the TCB Signing certificate".into(),
+            ));
+        }
+    }
     let pck_revoked = super::dcap::cert_revoked_from_der(&pck.der, &collateral.pck_crl.der)?
         || super::dcap::intermediate_ca_revoked_from_der(&pck.der, &collateral.root_crl.der)?;
 
@@ -691,6 +701,62 @@ pub(crate) fn check_collateral(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collateral_signed_by_a_revoked_tcb_signing_certificate_is_refused() {
+        let quote_bytes = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+        let quote = parse_tdx_quote(quote_bytes).unwrap();
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let (mut set, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
+        let check = |set: &TdxCollateralSet| {
+            let mut result = verify_quote(quote_bytes, &TdxParams::default(), now)
+                .unwrap()
+                .1;
+            check_collateral(
+                &mut result,
+                quote_bytes,
+                &quote,
+                &TdxParams::default(),
+                set,
+                now,
+            )
+        };
+        assert!(check(&set).is_ok());
+
+        let (_, signer) =
+            <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(
+                &set.tcb_info.signer,
+            )
+            .unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let crl = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2027, 1, 1),
+            crl_number: rcgen::SerialNumber::from(2u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from_slice(signer.raw_serial()),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }],
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&ca, &key)
+        .unwrap();
+        set.root_crl.der = crl.der().to_vec();
+        assert!(matches!(
+            check(&set),
+            Err(AttestationError::CertChainError(_))
+        ));
+    }
 
     // Load real test fixtures at compile time
     const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
