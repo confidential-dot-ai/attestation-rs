@@ -157,7 +157,7 @@ impl Dates {
 
 /// Save a vendor response for `url` in a cache directory, as the store does
 /// after a fetch. For tests of programs that read the cache.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
 #[doc(hidden)]
 pub fn save_to_cache_dir(
     dir: &std::path::Path,

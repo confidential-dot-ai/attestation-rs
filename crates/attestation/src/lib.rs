@@ -38,6 +38,9 @@
 //! let evidence_json = attestation::attest(platform, b"nonce", &attestation::AttestOptions::default()).await?;
 //! ```
 
+#[cfg(all(feature = "test-vendor", not(debug_assertions)))]
+compile_error!("the test-vendor feature is for tests and must not be built in release");
+
 #[cfg(all(feature = "attest", target_os = "linux"))]
 use std::sync::OnceLock;
 
