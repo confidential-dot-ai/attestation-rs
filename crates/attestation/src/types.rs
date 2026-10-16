@@ -259,7 +259,7 @@ impl ProcessorGeneration {
 }
 
 /// SNP TCB version components (used for KDS URL construction and TCB checks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SnpTcb {
     pub bootloader: u8,
     pub tee: u8,

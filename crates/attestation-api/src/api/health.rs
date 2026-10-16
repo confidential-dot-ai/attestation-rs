@@ -14,9 +14,8 @@ pub struct HealthResponse {
 
 #[derive(Serialize)]
 pub struct CacheStats {
-    pub vcek_entries: u64,
-    pub chain_entries: u64,
-    pub last_crl_refresh: Option<String>,
+    /// Pieces of collateral held.
+    pub collateral: u64,
 }
 
 pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -33,11 +32,8 @@ pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
         }
     };
 
-    let cache = &state.cert_cache;
     let cache_stats = CacheStats {
-        vcek_entries: cache.vcek_entry_count(),
-        chain_entries: cache.chain_entry_count(),
-        last_crl_refresh: cache.last_crl_refresh().await.map(|t| t.to_rfc3339()),
+        collateral: state.verifier.context().store().count(),
     };
 
     Json(HealthResponse {

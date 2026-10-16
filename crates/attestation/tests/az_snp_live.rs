@@ -16,7 +16,28 @@ use std::path::Path;
 
 use base64::Engine;
 
-use attestation::{AzSnp, AzSnpParams, Context, Platform, SnpParams};
+use attestation::{
+    AzSnpParams, AzSnpResult, Context, PlatformResult, Policies, SnpParams, Verifier,
+};
+
+/// Verify as az-snp through the public verifier, collateral from the vendors.
+async fn verify(
+    evidence: &attestation::platforms::az_snp::evidence::AzSnpEvidence,
+    params: &AzSnpParams,
+) -> attestation::Result<AzSnpResult> {
+    let envelope = serde_json::json!({ "platform": "az-snp", "evidence": evidence });
+    let policies = Policies {
+        az_snp: Some(params.clone()),
+        ..Policies::default()
+    };
+    let verified = Verifier::new(Context::new())
+        .verify(envelope.to_string().as_bytes(), &policies)
+        .await?;
+    match verified.platform {
+        PlatformResult::AzSnp(r) => Ok(r),
+        other => panic!("verified as {}", other.platform()),
+    }
+}
 
 /// Helper: check if we're running on an Azure SNP CVM with the required tools.
 fn is_az_snp_cvm() -> bool {
@@ -171,7 +192,7 @@ async fn test_az_snp_attest_then_verify_roundtrip() {
         .expect("generate_evidence() should succeed");
 
     // Verify without expected values (just check structure)
-    let result = AzSnp::verify(&evidence, &AzSnpParams::default(), &Context::new()).await;
+    let result = verify(&evidence, &AzSnpParams::default()).await;
 
     assert!(
         result.is_ok(),
@@ -221,7 +242,7 @@ async fn test_az_snp_verify_with_expected_nonce() {
         ..Default::default()
     };
 
-    let result = AzSnp::verify(&evidence, &params, &Context::new())
+    let result = verify(&evidence, &params)
         .await
         .expect("verify should succeed");
 
@@ -301,7 +322,7 @@ async fn test_az_snp_cross_process_serialization() {
         serde_json::from_str(&json_back).unwrap();
 
     // Verify the deserialized evidence
-    let result = AzSnp::verify(&evidence_back, &AzSnpParams::default(), &Context::new()).await;
+    let result = verify(&evidence_back, &AzSnpParams::default()).await;
 
     assert!(
         result.is_ok(),

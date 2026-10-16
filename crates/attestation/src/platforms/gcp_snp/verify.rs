@@ -23,11 +23,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{CollateralUsed, GceEndorsement, Store};
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::snp::evidence::SnpEvidence;
+use crate::platforms::snp::verify::{genuine_report, SnpCollateralSet};
 use crate::platforms::snp::{Snp, SnpParams, SnpResult};
 use crate::types::PlatformType;
 
@@ -35,12 +36,6 @@ use crate::types::PlatformType;
 #[derive(Debug, Clone, Default)]
 pub struct GcpSnpParams {
     pub snp: SnpParams,
-    /// Google's launch endorsement for the firmware (a serialized
-    /// `VMLaunchEndorsement`, see
-    /// [`endorsement_url`](crate::platforms::gcp_endorsement::endorsement_url)).
-    /// An endorsement that does not verify is
-    /// [`InvalidParams`](crate::AttestationError::InvalidParams).
-    pub endorsement: Option<Vec<u8>>,
 }
 
 /// The answer for genuine GCP SEV-SNP evidence. `endorsement_match` proves
@@ -50,9 +45,9 @@ pub struct GcpSnpParams {
 pub struct GcpSnpResult {
     #[serde(flatten)]
     pub snp: SnpResult,
-    /// The endorsement lists the report's launch measurement and the guest
-    /// policy is no wider than the endorsed one (`None` if no endorsement was
-    /// given): the firmware is a Google OVMF build. Any SNP host can boot it,
+    /// Google's endorsement for the report's launch measurement exists, lists
+    /// it, and the guest policy is no wider than the endorsed one: the
+    /// firmware is a Google OVMF build. Any SNP host can boot it,
     /// so this does not mean the host is GCP.
     pub endorsement_match: Option<bool>,
 }
@@ -68,8 +63,8 @@ impl GcpSnpResult {
 ///
 /// Delegates to the bare-metal SNP verifier. The attestation report format,
 /// certificate chain, and all cryptographic verification are identical to
-/// bare-metal SNP. A supplied launch endorsement is verified first (it is a
-/// param) and matched against the report's launch measurement and guest
+/// bare-metal SNP. Google's launch endorsement for the firmware is collateral,
+/// matched against the report's launch measurement and guest
 /// policy.
 ///
 /// **Note:** The `GcpSnp` platform tag reflects the attester's claim, not a
@@ -82,71 +77,86 @@ impl Platform for GcpSnp {
     type Evidence = SnpEvidence;
     type Params = GcpSnpParams;
     type Result = GcpSnpResult;
+    type CollateralSet = GcpSnpCollateralSet;
 
-    async fn verify(
+    fn validate(params: &GcpSnpParams) -> Result<()> {
+        Snp::validate(&params.snp)
+    }
+
+    /// The Snp collateral and Google's endorsement for the measurement, if
+    /// Google publishes one. A report that carries its VEK is checked first
+    /// (as for Snp); one whose VCEK must be fetched is checked against it
+    /// before the endorsement is looked at.
+    async fn gather(
+        evidence: &SnpEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(GcpSnpCollateralSet, Vec<CollateralUsed>)> {
+        let (report, gen, inline) = genuine_report(evidence, now)?;
+        let measurement = (Self::KIND, report.measurement.to_vec());
+        let (snp, endorsement) = futures_util::join!(
+            SnpCollateralSet::gather(&report, gen, inline, store, now),
+            store.get_if_published::<GceEndorsement>(&measurement, now)
+        );
+        let (snp, mut used) = snp?;
+        let endorsement = endorsement?.map(|(endorsement, u)| {
+            used.push(u);
+            endorsement
+        });
+        Ok((GcpSnpCollateralSet { snp, endorsement }, used))
+    }
+
+    fn verify(
         evidence: &SnpEvidence,
         params: &GcpSnpParams,
-        ctx: &Context,
+        collateral: &GcpSnpCollateralSet,
+        now: i64,
     ) -> Result<GcpSnpResult> {
-        let golden = params
-            .endorsement
-            .as_deref()
-            .map(|endorsement| gcp_endorsement::verify_endorsement(endorsement, ctx.now()))
-            .transpose()?;
-        let snp = Snp::verify(evidence, &params.snp, ctx).await?;
-        let endorsement_match = match &golden {
-            Some(golden) => {
-                let report = gcp_endorsement::snp_report(evidence)?;
-                Some(gcp_endorsement::endorses_snp(
-                    golden,
-                    &report.measurement[..],
-                    report.policy.into(),
-                ))
-            }
-            None => None,
-        };
+        let snp = Snp::verify(evidence, &params.snp, &collateral.snp, now)?;
+        let report = gcp_endorsement::snp_report(evidence)?;
+        let measurement = report.measurement.to_vec();
+        let endorsement_match = collateral.endorsement.as_ref().is_some_and(|e| {
+            gcp_endorsement::endorses_snp(&e.golden, &measurement, report.policy.into())
+        });
         Ok(GcpSnpResult {
             snp,
-            endorsement_match,
+            endorsement_match: Some(endorsement_match),
         })
     }
+}
+
+/// The GcpSnp collateral set: the Snp collateral set and Google's launch
+/// endorsement for the firmware (`None` when Google publishes none for the
+/// measurement).
+pub struct GcpSnpCollateralSet {
+    pub snp: SnpCollateralSet,
+    pub endorsement: Option<GceEndorsement>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::AttestationError;
     use crate::platforms::snp::evidence::SnpCertChain;
     use crate::platforms::snp::verify::parse_report;
-    use crate::types::{ProcessorGeneration, SnpTcb};
+    use crate::testing;
+    use crate::types::ProcessorGeneration;
+    use crate::AttestationError;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     const LIVE_REPORT_V5: &[u8] = include_bytes!("../../../test_data/snp/live-report-v5-genoa.bin");
     const LIVE_VCEK_GENOA: &[u8] = include_bytes!("../../../test_data/snp/live-vcek-genoa.der");
 
-    /// Cert provider that returns the bundled live Genoa VCEK. No network,
-    /// no CRL.
-    struct StubCertProvider;
-
-    #[async_trait::async_trait]
-    impl crate::collateral::CertProvider for StubCertProvider {
-        async fn get_snp_vcek(
-            &self,
-            _processor_gen: ProcessorGeneration,
-            _chip_id: &[u8; 64],
-            _reported_tcb: &SnpTcb,
-        ) -> crate::error::Result<Vec<u8>> {
-            Ok(LIVE_VCEK_GENOA.to_vec())
-        }
-
-        async fn get_snp_cert_chain(
-            &self,
-            _processor_gen: ProcessorGeneration,
-        ) -> crate::error::Result<(Vec<u8>, Vec<u8>)> {
-            Err(AttestationError::CollateralUnavailable(
-                "stub provider does not serve full chain".to_string(),
-            ))
-        }
+    /// Verify with the SNP collateral held and no endorsement.
+    async fn verify_unendorsed(evidence: &SnpEvidence, params: &GcpSnpParams) -> GcpSnpResult {
+        let ctx = testing::context(vec![testing::amd_crl(ProcessorGeneration::Genoa)]);
+        let collateral = GcpSnpCollateralSet {
+            snp: Snp::gather(evidence, ctx.store(), testing::NOW)
+                .await
+                .unwrap()
+                .0,
+            endorsement: None,
+        };
+        GcpSnp::verify(evidence, params, &collateral, testing::NOW).unwrap()
     }
 
     fn make_snp_evidence(report: &[u8], vcek_der: &[u8]) -> SnpEvidence {
@@ -161,38 +171,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gcp_snp_propagates_matching_launch_digest() {
+    async fn test_gcp_snp_propagates_launch_digest_and_needs_an_endorsement() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
         let mut expected = [0u8; 48];
         expected.copy_from_slice(&report.measurement[..]);
-
         let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let params = GcpSnpParams {
+        let params = |digest| GcpSnpParams {
             snp: SnpParams {
-                launch_digest: Some(vec![expected]),
+                launch_digest: Some(vec![digest]),
                 ..Default::default()
             },
-            ..Default::default()
         };
-        let ctx = Context::offline().with_cert_provider(StubCertProvider);
-        let r = GcpSnp::verify(&evidence, &params, &ctx).await.unwrap();
+        let r = verify_unendorsed(&evidence, &params(expected)).await;
         assert_eq!(r.snp.launch_digest_match, Some(true));
-    }
-
-    #[tokio::test]
-    async fn test_gcp_snp_propagates_wrong_launch_digest() {
-        let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
-        let params = GcpSnpParams {
-            snp: SnpParams {
-                launch_digest: Some(vec![[0x77; 48]]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx = Context::offline().with_cert_provider(StubCertProvider);
-        let r = GcpSnp::verify(&evidence, &params, &ctx).await.unwrap();
-        assert_eq!(r.snp.launch_digest_match, Some(false));
+        assert_eq!(r.endorsement_match, Some(false));
         assert!(!r.passed());
+        let r = verify_unendorsed(&evidence, &params([0x77; 48])).await;
+        assert_eq!(r.snp.launch_digest_match, Some(false));
     }
 
     // Real GCP SEV-SNP evidence (n2d, Milan, 2 vCPUs, host-supplied cert chain;
@@ -207,11 +202,18 @@ mod tests {
     async fn verify_endorsed(endorsement: &[u8]) -> Result<GcpSnpResult> {
         let envelope: serde_json::Value = serde_json::from_str(GCP_EVIDENCE).unwrap();
         let evidence: SnpEvidence = serde_json::from_value(envelope["evidence"].clone()).unwrap();
-        let params = GcpSnpParams {
-            endorsement: Some(endorsement.to_vec()),
-            ..Default::default()
-        };
-        GcpSnp::verify(&evidence, &params, &Context::offline()).await
+        let report = gcp_endorsement::snp_report(&evidence).unwrap();
+        let url = <GceEndorsement as crate::collateral::Collateral>::url(&(
+            PlatformType::GcpSnp,
+            report.measurement.to_vec(),
+        ));
+        let held = (url, endorsement.to_vec(), None);
+        testing::verify::<GcpSnp>(
+            &evidence,
+            &GcpSnpParams::default(),
+            vec![testing::amd_crl(ProcessorGeneration::Milan), held],
+        )
+        .await
     }
 
     #[tokio::test]
@@ -219,17 +221,33 @@ mod tests {
         let r = verify_endorsed(ENDORSEMENT).await.unwrap();
         assert_eq!(r.endorsement_match, Some(true));
         assert!(r.passed());
-
-        let r = verify_endorsed(OTHER_BUILD_ENDORSEMENT).await.unwrap();
-        assert_eq!(r.endorsement_match, Some(false));
-        assert!(!r.passed());
     }
 
     #[tokio::test]
-    async fn test_gcp_snp_tampered_endorsement_is_invalid_params() {
-        let mut endorsement = ENDORSEMENT.to_vec();
-        *endorsement.last_mut().unwrap() ^= 1;
-        let err = verify_endorsed(&endorsement).await.unwrap_err();
-        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
+    async fn an_endorsement_for_another_build_or_tampered_is_refused() {
+        let mut tampered = ENDORSEMENT.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        for endorsement in [OTHER_BUILD_ENDORSEMENT.to_vec(), tampered] {
+            let err = verify_endorsed(&endorsement).await.unwrap_err();
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forged_report_is_not_genuine_and_names_no_collateral() {
+        let envelope: serde_json::Value = serde_json::from_str(GCP_EVIDENCE).unwrap();
+        let mut evidence: SnpEvidence =
+            serde_json::from_value(envelope["evidence"].clone()).unwrap();
+        let mut report = BASE64.decode(&evidence.attestation_report).unwrap();
+        // A byte of REPORT_DATA: the report no longer matches its signature.
+        report[0x50] ^= 1;
+        evidence.attestation_report = BASE64.encode(report);
+        let ctx = crate::context::Context::held([]);
+        let err = GcpSnp::gather(&evidence, ctx.store(), testing::NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(!err.is_retryable(), "{err}");
+        assert!(ctx.store().missing().is_empty());
     }
 }

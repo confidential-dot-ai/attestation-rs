@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{AmdCrl, AmdKey, CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::platforms::snp::{SnpParams, SnpResult};
@@ -50,41 +50,22 @@ impl AzSnpResult {
     }
 }
 
-/// A verified az-snp attestation together with the locator for its revocation
-/// collateral.
-///
-/// [`verify_report`] performs the full cryptographic verification (TPM quote, AK
-/// binding, VCEK chain, SNP report signature) and evaluates the params, but
-/// deliberately does not fetch or check revocation collateral — that is a
-/// separate concern. A caller that *does* care about revocation runs
-/// [`VerifiedReport::check_crl`] on the AMD CRL it obtained: [`AzSnp::verify`]
-/// with a provider-fetched CRL, the WASM entry point with a caller-supplied one.
+/// A verified az-snp attestation and what locates its revocation collateral.
 pub struct VerifiedReport {
     /// Verification result; revocation is not checked yet.
     pub result: AzSnpResult,
     /// AMD processor generation the VCEK chain validated against.
     pub matched_gen: ProcessorGeneration,
-    /// VCEK certificate (DER) — needed for the CRL revocation check.
+    /// VCEK certificate (DER), from the HCL report.
     pub vcek_der: Vec<u8>,
     /// SNP attestation report version parsed from the HCL TEE report.
     pub report_version: u32,
 }
 
-impl VerifiedReport {
-    /// Check the VCEK's issuing ASK against `crl_der`, the AMD KDS CRL for
-    /// [`Self::matched_gen`], at `now` (Unix seconds), and record the result
-    /// (`crl_ok`). A CRL that cannot be parsed, is not signed by the ARK, or
-    /// is outside its thisUpdate/nextUpdate window is `CollateralUnavailable`.
-    pub fn check_crl(mut self, crl_der: &[u8], now: i64) -> Result<AzSnpResult> {
-        let ok = crate::platforms::snp::verify::check_vek_against_crl(
-            &self.vcek_der,
-            crl_der,
-            self.matched_gen,
-            now,
-        )?;
-        self.result.snp.crl_ok = Some(ok);
-        Ok(self.result)
-    }
+/// The az-snp collateral set: the AMD CRL (the VCEK comes in the
+/// evidence).
+pub struct AzSnpCollateralSet {
+    pub crl: AmdCrl,
 }
 
 /// Azure SEV-SNP: an SNP report wrapped in an HCL report, bound to a vTPM quote.
@@ -95,28 +76,41 @@ impl Platform for AzSnp {
     type Evidence = AzSnpEvidence;
     type Params = AzSnpParams;
     type Result = AzSnpResult;
+    type CollateralSet = AzSnpCollateralSet;
 
-    /// The full flow: the cryptographic core in [`verify_report`], then the
-    /// revocation check with the context's cert provider.
-    async fn verify(
+    fn validate(params: &AzSnpParams) -> Result<()> {
+        params.validate()
+    }
+
+    /// The whole evidence verifies first; its VCEK names the CRL.
+    async fn gather(
+        evidence: &AzSnpEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(AzSnpCollateralSet, Vec<CollateralUsed>)> {
+        let verified = verify_report(evidence, &AzSnpParams::default(), now)?;
+        let key = AmdKey::of_vek(&verified.vcek_der)?;
+        let (crl, used) = store
+            .get::<AmdCrl>(&(verified.matched_gen, key), now)
+            .await?;
+        Ok((AzSnpCollateralSet { crl }, vec![used]))
+    }
+
+    fn verify(
         evidence: &AzSnpEvidence,
         params: &AzSnpParams,
-        ctx: &Context,
+        collateral: &AzSnpCollateralSet,
+        now: i64,
     ) -> Result<AzSnpResult> {
-        let verified = verify_report(evidence, params, ctx.now())?;
-        match ctx
-            .cert_provider()
-            .get_snp_crl(verified.matched_gen)
-            .await?
-        {
-            Some(crl_der) => verified.check_crl(&crl_der, ctx.now()),
-            None => {
-                log::warn!(
-                    "az-snp: SNP CRL data not available from cert provider; skipping revocation check"
-                );
-                Ok(verified.result)
-            }
-        }
+        let verified = verify_report(evidence, params, now)?;
+        let revoked = crate::platforms::snp::verify::vek_revoked(
+            &verified.vcek_der,
+            &collateral.crl,
+            verified.matched_gen,
+        )?;
+        let mut result = verified.result;
+        result.snp.crl_ok = Some(!revoked);
+        Ok(result)
     }
 }
 
@@ -124,13 +118,10 @@ impl Platform for AzSnp {
 ///
 /// Performs the TPM quote signature check, AK-to-TEE binding, VCEK certificate
 /// chain validation and SNP report signature, then evaluates the params
-/// (nonce, init data, launch digest, VMPL, debug, TCB). Revocation is
-/// intentionally out of scope: it is a separate fetch (the CRL) and check that
-/// needs a cert provider, so this returns the result together with the matched
-/// generation and VCEK that locate the collateral. Callers wanting the full flow use [`AzSnp::verify`]; callers
-/// without an async cert provider — notably WASM — call this directly and
-/// handle revocation separately, if at all. `now` is the evaluation time in
-/// Unix seconds.
+/// (nonce, init data, launch digest, VMPL, debug, TCB). Revocation needs the
+/// AMD CRL, so it is left to [`AzSnp::verify`]; the matched generation and
+/// VCEK returned here name that CRL. `now` is the evaluation time in Unix
+/// seconds.
 pub fn verify_report(
     evidence: &AzSnpEvidence,
     params: &AzSnpParams,
@@ -291,13 +282,11 @@ mod tests {
             vcek: BASE64URL.encode([0u8; 100]),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
+        let result = verify_report(&evidence, &AzSnpParams::default(), 0);
         assert!(
             matches!(result, Err(AttestationError::QuoteParseFailed(_))),
-            "{result:?}"
+            "{:?}",
+            result.as_ref().err()
         );
         assert!(tpm_common::parse_hcl_report(&short_hcl).is_err());
         assert!(tpm_common::parse_hcl_report(COCO_HCL_REPORT).is_ok());
@@ -312,13 +301,11 @@ mod tests {
             vcek: BASE64URL.encode([0u8; 100]),
         };
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Context::offline();
-
-        let result = rt.block_on(AzSnp::verify(&evidence, &AzSnpParams::default(), &ctx));
+        let result = verify_report(&evidence, &AzSnpParams::default(), 0);
         assert!(
             matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
-            "{result:?}"
+            "{:?}",
+            result.as_ref().err()
         );
     }
 
@@ -521,62 +508,47 @@ mod tests {
         include_str!("../../../test_data/az_snp/genoa-v5-attestation.json");
     const GENOA_V5_NONCE: &str = "4b44a067436275615ed70852f6dc34c1d465c02e113c583fddfbfed20e9c114c323026b0c3ddc9759ba7149d7f595cf7";
 
-    // AMD KDS /vcek/v1/Genoa/crl, fetched 2026-10-12: CRL number 11, thisUpdate
-    // 2026-09-22T07:31:33Z, nextUpdate 2026-11-09T01:00:00Z, revokes only serial
-    // 020001 (a retired Genoa ASK; the bundled ASK is 020002). Checked at fixed
-    // times so the tests do not expire with it.
-    const GENOA_CRL: &[u8] = include_bytes!("../../../test_data/snp/amd-crl-genoa.der");
-    const CRL_CURRENT: i64 = 1_791_763_200; // 2026-10-12T00:00:00Z
-    const CRL_EXPIRED: i64 = 1_794_268_800; // 2026-11-10T00:00:00Z
-
     fn verify_genoa(params: &AzSnpParams) -> VerifiedReport {
-        verify_report(&load_az_snp_evidence(GENOA_V5_FIXTURE), params, CRL_CURRENT)
-            .expect("Genoa az-snp fixture should verify")
+        verify_report(
+            &load_az_snp_evidence(GENOA_V5_FIXTURE),
+            params,
+            crate::testing::NOW,
+        )
+        .expect("Genoa az-snp fixture should verify")
     }
 
-    #[test]
-    fn test_genoa_fixture_with_current_crl() {
+    #[tokio::test]
+    async fn test_genoa_fixture_with_current_crl() {
         let params = params_with_nonce(&hex::decode(GENOA_V5_NONCE).unwrap());
-        let verified = verify_genoa(&params);
-        assert_eq!(verified.matched_gen, ProcessorGeneration::Genoa);
-        assert_eq!(verified.result.snp.crl_ok, None);
-
-        let result = verified
-            .check_crl(GENOA_CRL, CRL_CURRENT)
-            .expect("the current Genoa CRL verifies");
+        assert_eq!(
+            verify_genoa(&params).matched_gen,
+            ProcessorGeneration::Genoa
+        );
+        let result = crate::testing::verify::<AzSnp>(
+            &load_az_snp_evidence(GENOA_V5_FIXTURE),
+            &params,
+            vec![crate::testing::amd_crl(ProcessorGeneration::Genoa)],
+        )
+        .await
+        .unwrap();
         assert_eq!(result.snp.crl_ok, Some(true));
         assert!(result.passed());
     }
 
-    #[test]
-    fn test_genoa_fixture_stale_crl_is_collateral_unavailable() {
-        let err = verify_genoa(&AzSnpParams::default())
-            .check_crl(GENOA_CRL, CRL_EXPIRED)
-            .expect_err("a CRL past its nextUpdate must not vouch for the chain");
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_genoa_fixture_rejects_crl_of_another_generation() {
-        // The Genoa CRL is not signed by the Milan ARK.
-        let mut verified = verify_genoa(&AzSnpParams::default());
-        verified.matched_gen = ProcessorGeneration::Milan;
-        let err = verified
-            .check_crl(GENOA_CRL, CRL_CURRENT)
-            .expect_err("a CRL from another ARK must be rejected");
-        assert!(matches!(err, AttestationError::CollateralUnavailable(_)));
-    }
-
     #[tokio::test]
-    async fn test_offline_does_not_check_the_crl() {
-        let ctx = Context::offline().at(CRL_CURRENT).unwrap();
-        let r = AzSnp::verify(
-            &load_az_snp_evidence(GENOA_V5_FIXTURE),
-            &AzSnpParams::default(),
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.snp.crl_ok, None);
+    async fn test_genoa_fixture_needs_the_genoa_crl() {
+        for held in [
+            vec![],
+            vec![crate::testing::amd_crl(ProcessorGeneration::Milan)],
+        ] {
+            let err = crate::testing::verify::<AzSnp>(
+                &load_az_snp_evidence(GENOA_V5_FIXTURE),
+                &AzSnpParams::default(),
+                held,
+            )
+            .await
+            .expect_err("the Genoa CRL is held nowhere");
+            assert!(err.is_retryable(), "{err}");
+        }
     }
 }

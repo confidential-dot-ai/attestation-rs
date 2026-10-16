@@ -3,21 +3,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
 
-/// Canonical processor generation names supported by AMD SEV-SNP.
-pub const KNOWN_GENERATIONS: &[&str] = &["Milan", "Genoa", "Turin"];
-
 /// Platform names this service can generate evidence for.
 pub const SUPPORTED_ATTESTATION_PLATFORMS: &[&str] =
     &["snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx"];
-
-/// Normalize a generation name to its canonical form (case-insensitive match).
-/// Returns `None` if the generation is not recognized.
-pub fn normalize_generation(name: &str) -> Option<&'static str> {
-    KNOWN_GENERATIONS
-        .iter()
-        .find(|g| g.eq_ignore_ascii_case(name))
-        .copied()
-}
 
 /// Normalize a service platform name to its canonical form.
 /// Returns `None` if the platform is not supported for service-side evidence generation.
@@ -32,9 +20,9 @@ pub fn normalize_platform(name: &str) -> Option<&'static str> {
 ///
 /// Priority: config-file value (if non-empty) > `NV_NRAS_GPU_URL` env var >
 /// library default.
-pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
-    if !certs.nras_gpu_url.is_empty() {
-        return certs.nras_gpu_url.clone();
+pub fn resolve_nras_gpu_url(nras: &NrasConfig) -> String {
+    if !nras.gpu_url.is_empty() {
+        return nras.gpu_url.clone();
     }
     std::env::var("NV_NRAS_GPU_URL")
         .unwrap_or_else(|_| attestation::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string())
@@ -44,9 +32,9 @@ pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
 ///
 /// Priority: config-file value (if non-empty) > `NV_NRAS_SWITCH_URL` env var >
 /// library default.
-pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
-    if !certs.nras_switch_url.is_empty() {
-        return certs.nras_switch_url.clone();
+pub fn resolve_nras_switch_url(nras: &NrasConfig) -> String {
+    if !nras.switch_url.is_empty() {
+        return nras.switch_url.clone();
     }
     std::env::var("NV_NRAS_SWITCH_URL").unwrap_or_else(|_| {
         attestation::platforms::nvidia_gpu::provider::NRAS_SWITCH_URL.to_string()
@@ -54,24 +42,24 @@ pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
-    pub certs: CertsConfig,
+    pub nras: NrasConfig,
     pub token: TokenConfig,
     pub attestation: AttestationConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
     pub enabled: bool,
     pub cert_path: String,
@@ -79,7 +67,7 @@ pub struct TlsConfig {
 }
 
 #[derive(Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     pub api_keys: Vec<String>,
 }
@@ -92,50 +80,19 @@ impl fmt::Debug for AuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct CertsConfig {
-    pub cache_max_entries: u64,
-    pub vcek_ttl_hours: u64,
-    pub chain_ttl_hours: u64,
-    pub crl_refresh_hours: u64,
-    pub tdx_collateral_ttl_hours: u64,
-    pub prefetch_chains: Vec<String>,
-    /// Opt out of the AMD CRL check for SEV-SNP. The CRL is then never fetched,
-    /// `crl_ok` is null, and a revoked ASK/ASVK goes undetected. Otherwise a
-    /// CRL that cannot be fetched is `CollateralUnavailable` (502).
-    pub skip_snp_crl: bool,
-    /// Backoff for a CRL distribution point that is failing. Without it a dead
-    /// endpoint costs every verify a fresh connect timeout, because only
-    /// successes were cached. Doubles per consecutive failure from the base up
-    /// to the max, so a blip is retried almost immediately while a real outage
-    /// stops being dialled. While backing off, an SNP verify that needs the CRL
-    /// is `CollateralUnavailable`, so recovery can lag an outage by up to the
-    /// max. 0 disables the backoff and restores per-request retries.
-    pub crl_backoff_base_secs: u64,
-    /// Ceiling for the CRL failure backoff, in seconds.
-    pub crl_backoff_max_secs: u64,
-    /// Directory holding VCEKs and AMD cert chains across restarts. Unset keeps
-    /// collateral in memory only, so a cold process must reach AMD KDS.
-    pub local_collateral_dir: Option<String>,
-
-    // --- NVIDIA NRAS / GPU attestation ---
-    /// TTL for cached NRAS JWKS entries (hours).
-    pub jwks_ttl_hours: u64,
-    /// If true, prefetch GPU+switch JWKS on startup and refresh in background.
-    pub prefetch_nras_jwks: bool,
-    /// Override the NRAS GPU endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/gpu`, honoring
-    /// `NV_NRAS_GPU_URL` env var) when empty.
-    pub nras_gpu_url: String,
-    /// Override the NRAS switch endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/switch`, honoring
-    /// `NV_NRAS_SWITCH_URL` env var) when empty.
-    pub nras_switch_url: String,
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NrasConfig {
+    /// NVIDIA's GPU attestation endpoint. Empty: `NV_NRAS_GPU_URL`, else
+    /// `https://nras.attestation.nvidia.com/v3/attest/gpu`.
+    pub gpu_url: String,
+    /// NVIDIA's switch attestation endpoint. Empty: `NV_NRAS_SWITCH_URL`, else
+    /// `https://nras.attestation.nvidia.com/v3/attest/switch`.
+    pub switch_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TokenConfig {
     pub enabled: bool,
     pub issuer: String,
@@ -144,7 +101,7 @@ pub struct TokenConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AttestationConfig {
     /// If true, the `/attest` endpoint is available.
     pub enabled: bool,
@@ -170,27 +127,6 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
-        }
-    }
-}
-
-impl Default for CertsConfig {
-    fn default() -> Self {
-        Self {
-            cache_max_entries: 1024,
-            vcek_ttl_hours: 24,
-            chain_ttl_hours: 168,
-            crl_refresh_hours: 6,
-            tdx_collateral_ttl_hours: 24,
-            prefetch_chains: vec!["milan".to_string()],
-            skip_snp_crl: false,
-            crl_backoff_base_secs: 1,
-            crl_backoff_max_secs: 300,
-            local_collateral_dir: None,
-            jwks_ttl_hours: 1,
-            prefetch_nras_jwks: true,
-            nras_gpu_url: String::new(),
-            nras_switch_url: String::new(),
         }
     }
 }
@@ -241,10 +177,11 @@ impl AttestationConfig {
 }
 
 impl Config {
+    /// Read the config file. An unknown key (a typo, or a knob that was
+    /// removed) is an error naming it.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&contents)?;
-        Ok(config)
+        toml::from_str(&contents).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
     }
 
     /// Validate configuration at startup. Returns an error for invalid combinations.
@@ -282,38 +219,12 @@ impl Config {
             return Err("token.duration_minutes must be > 0 when token is enabled".to_string());
         }
 
-        // Validate cache TTL values are non-zero to prevent tight refresh loops
-        if self.certs.chain_ttl_hours == 0 {
-            return Err("certs.chain_ttl_hours must be > 0".to_string());
-        }
-        if self.certs.crl_refresh_hours == 0 {
-            return Err("certs.crl_refresh_hours must be > 0".to_string());
-        }
-        if self.certs.vcek_ttl_hours == 0 {
-            return Err("certs.vcek_ttl_hours must be > 0".to_string());
-        }
-        if self.certs.tdx_collateral_ttl_hours == 0 {
-            return Err("certs.tdx_collateral_ttl_hours must be > 0".to_string());
-        }
-        if self.certs.jwks_ttl_hours == 0 {
-            return Err("certs.jwks_ttl_hours must be > 0".to_string());
-        }
-
         // Validate tdx_quote_method
         match self.attestation.tdx_quote_method.as_str() {
             "auto" | "vsock" | "configfs" => {}
             other => {
                 return Err(format!(
                     "invalid attestation.tdx_quote_method '{other}' (expected: auto, vsock, configfs)"
-                ));
-            }
-        }
-
-        // Validate prefetch_chains are known generations
-        for chain in &self.certs.prefetch_chains {
-            if normalize_generation(chain).is_none() {
-                return Err(format!(
-                    "unknown processor generation '{chain}' in certs.prefetch_chains (known: {KNOWN_GENERATIONS:?})"
                 ));
             }
         }
@@ -350,33 +261,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_zero_ttl_values() {
-        let mut config = Config::default();
-        config.certs.chain_ttl_hours = 0;
-        assert!(
-            config.validate().is_err(),
-            "chain_ttl_hours = 0 should be rejected"
-        );
-
-        let mut config = Config::default();
-        config.certs.crl_refresh_hours = 0;
-        assert!(
-            config.validate().is_err(),
-            "crl_refresh_hours = 0 should be rejected"
-        );
-
-        let mut config = Config::default();
-        config.certs.vcek_ttl_hours = 0;
-        assert!(
-            config.validate().is_err(),
-            "vcek_ttl_hours = 0 should be rejected"
-        );
-
-        let mut config = Config::default();
-        config.certs.tdx_collateral_ttl_hours = 0;
-        assert!(
-            config.validate().is_err(),
-            "tdx_collateral_ttl_hours = 0 should be rejected"
-        );
+    fn unknown_keys_are_refused_and_the_example_config_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            Config::load(&path)
+        };
+        for section in ["nras", "server"] {
+            load(&format!("[{section}]\n")).expect("the section alone loads");
+        }
+        for refused in [
+            "[certs]\n",
+            "[certs]\nnras_gpu_url = \"https://nras.example\"\n",
+            "[certs]\ncache_max_entries = 1024\n",
+            "[nras]\nnras_gpu_url = \"https://nras.example\"\n",
+            "[server]\nbnd = \"0.0.0.0:8400\"\n",
+        ] {
+            assert!(load(refused).is_err(), "{refused} must be refused");
+        }
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        Config::load(&example).unwrap().validate().unwrap();
     }
 }

@@ -21,15 +21,15 @@ pub enum ApiError {
     #[error("invalid request: {0}")]
     Body(#[from] JsonRejection),
 
-    #[error("cert fetch failed: {0}")]
-    CertFetch(String),
-
     #[error("token issuer not configured")]
     TokenNotConfigured,
 
     #[error("internal error: {0}")]
     Internal(String),
 }
+
+/// The longest wait passed on to callers, whatever the vendor asked for.
+const MAX_RETRY_AFTER: u64 = 3600;
 
 #[derive(Serialize)]
 struct ErrorBody {
@@ -42,7 +42,7 @@ impl IntoResponse for ApiError {
         let (status, error_key) = match &self {
             // Collateral this service could not fetch, so it is the upstream that
             // failed and not the submitted evidence. Retryable.
-            ApiError::Verification(AttestationError::CollateralUnavailable(_)) => {
+            ApiError::Verification(AttestationError::CollateralUnavailable { .. }) => {
                 (StatusCode::BAD_GATEWAY, "collateral_unavailable")
             }
             ApiError::Verification(e) if e.is_invalid_params() => {
@@ -64,7 +64,6 @@ impl IntoResponse for ApiError {
                 }
                 _ => (StatusCode::BAD_REQUEST, "bad_request"),
             },
-            ApiError::CertFetch(_) => (StatusCode::BAD_GATEWAY, "cert_fetch_failed"),
             ApiError::TokenNotConfigured => (StatusCode::BAD_REQUEST, "token_not_configured"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
@@ -82,12 +81,21 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
 
+        let retry_after = match &self {
+            ApiError::Verification(inner) => inner.retry_after().map(|s| s.min(MAX_RETRY_AFTER)),
+            _ => None,
+        };
         let body = ErrorBody {
             error: error_key,
             message,
         };
-
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -105,14 +113,36 @@ mod tests {
 
     #[tokio::test]
     async fn collateral_this_service_could_not_fetch_is_an_upstream_failure() {
-        let resp = ApiError::Verification(AttestationError::CollateralUnavailable(
-            "cached VCEK fetch: error sending request for url (https://kdsintf.amd.com/vcek/v1/Genoa/…)"
-                .to_string(),
-        ))
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "amd-crl genoa".into(),
+            retry_after: None,
+            detail: "HTTP 503".into(),
+        })
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(resp.headers().get("retry-after").is_none());
         assert_eq!(error_key(resp).await, "collateral_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_vendor_retry_after_is_passed_on() {
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "tcb-info 70a06d070000".into(),
+            retry_after: Some(120),
+            detail: "HTTP 429".into(),
+        })
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["retry-after"], "120");
+
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "tcb-info 70a06d070000".into(),
+            retry_after: Some(u64::MAX),
+            detail: "HTTP 429".into(),
+        })
+        .into_response();
+        assert_eq!(resp.headers()["retry-after"], "3600");
     }
 
     #[tokio::test]

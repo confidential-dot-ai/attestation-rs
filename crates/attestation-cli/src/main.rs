@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use attestation::platforms::gcp_endorsement;
 use attestation::{PlatformType, Policies, SnpParams, TdxParams};
+
+#[cfg(all(feature = "test-vendor", not(debug_assertions)))]
+compile_error!("the test-vendor feature is for debug builds only");
 
 const EXIT_CODES: &str = "\
 Exit codes:
@@ -94,11 +96,16 @@ struct VerifyArgs {
     #[arg(short, long)]
     platform: Vec<PlatformArg>,
 
-    /// Verify without network access: checks that need fetched collateral
-    /// are skipped, and evidence that cannot be verified without a fetch
-    /// exits 3.
+    /// Verify without network access, with the collateral saved by earlier
+    /// runs. Collateral not saved yet exits 3.
     #[arg(long)]
     offline: bool,
+
+    /// Evaluate at this time (Unix seconds) instead of now. For tests; not
+    /// in release builds.
+    #[cfg(debug_assertions)]
+    #[arg(long, hide = true)]
+    at: Option<i64>,
 
     /// Expected report data (hex-encoded) for nonce binding verification.
     #[arg(long)]
@@ -140,16 +147,6 @@ struct VerifyArgs {
     /// Azure vTPM only (az-snp, az-tdx).
     #[arg(long, value_name = "INDEX=HEX")]
     expected_pcr: Vec<String>,
-
-    /// Google's launch endorsement (VMLaunchEndorsement .binarypb) the MRTD
-    /// or launch measurement must be listed in. gcp-tdx and gcp-snp only.
-    #[arg(long, value_name = "FILE")]
-    gcp_endorsement: Option<PathBuf>,
-
-    /// Like --gcp-endorsement, downloading the endorsement for the evidence's
-    /// measurement from storage.googleapis.com/gce_tcb_integrity.
-    #[arg(long, conflicts_with_all = ["gcp_endorsement", "offline"])]
-    fetch_gcp_endorsement: bool,
 
     /// NVIDIA GPU user nonce (hex) that seeded the GPU SPDM nonce. Enables GPU
     /// bundle verification via NRAS. If --expected-report-data is not given, it
@@ -374,7 +371,6 @@ const TDX_PLATFORMS: [PlatformType; 3] =
 const SNP_PLATFORMS: [PlatformType; 3] =
     [PlatformType::Snp, PlatformType::AzSnp, PlatformType::GcpSnp];
 const AZURE_PLATFORMS: [PlatformType; 2] = [PlatformType::AzTdx, PlatformType::AzSnp];
-const GCP_PLATFORMS: [PlatformType; 2] = [PlatformType::GcpTdx, PlatformType::GcpSnp];
 
 /// The platforms to accept: `--platform`, or else the platforms every
 /// platform-specific pin applies to. Never the evidence's own tag, which is
@@ -398,9 +394,6 @@ fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
     }
     if !args.expected_pcr.is_empty() {
         pins.push(("--expected-pcr", &AZURE_PLATFORMS));
-    }
-    if args.gcp_endorsement.is_some() || args.fetch_gcp_endorsement {
-        pins.push(("--gcp-endorsement/--fetch-gcp-endorsement", &GCP_PLATFORMS));
     }
 
     let platforms: Vec<PlatformType> = if args.platform.is_empty() {
@@ -433,7 +426,7 @@ fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
 /// Build one policy per accepted platform from the flags. A pin an accepted
 /// platform cannot answer (`--expected-mrtd` with `--platform snp`) is a usage
 /// error.
-fn build_policies(args: &VerifyArgs, endorsement: Option<Vec<u8>>) -> Policies {
+fn build_policies(args: &VerifyArgs) -> Policies {
     let platforms = accepted_platforms(args);
     let report_data = args
         .expected_report_data
@@ -529,10 +522,7 @@ fn build_policies(args: &VerifyArgs, endorsement: Option<Vec<u8>>) -> Policies {
                 })
             }
             PlatformType::GcpTdx => {
-                policies.gcp_tdx = Some(attestation::GcpTdxParams {
-                    tdx: tdx(),
-                    endorsement: endorsement.clone(),
-                })
+                policies.gcp_tdx = Some(attestation::GcpTdxParams { tdx: tdx() })
             }
             PlatformType::Snp => policies.snp = Some(snp()),
             PlatformType::AzSnp => {
@@ -542,10 +532,7 @@ fn build_policies(args: &VerifyArgs, endorsement: Option<Vec<u8>>) -> Policies {
                 })
             }
             PlatformType::GcpSnp => {
-                policies.gcp_snp = Some(attestation::GcpSnpParams {
-                    snp: snp(),
-                    endorsement: endorsement.clone(),
-                })
+                policies.gcp_snp = Some(attestation::GcpSnpParams { snp: snp() })
             }
             // Not a --platform value.
             PlatformType::Dstack => {}
@@ -568,39 +555,28 @@ fn exit_for_error(e: &attestation::AttestationError) -> ! {
     process::exit(1);
 }
 
-/// Download the GCP launch endorsement for the evidence's measurement. Called
-/// only once the evidence verified, so forged evidence never names what is
-/// fetched.
-async fn fetch_gcp_endorsement(evidence_json: &[u8]) -> Vec<u8> {
-    let fetched = async {
-        let url = gcp_endorsement::endorsement_url(evidence_json)?;
-        eprintln!("Fetching GCP launch endorsement {url}");
-        gcp_endorsement::fetch_endorsement(&url).await
-    };
-    fetched.await.unwrap_or_else(|e| exit_for_error(&e))
-}
-
 async fn cmd_verify(args: VerifyArgs) {
     let evidence_json = read_evidence(&args).unwrap_or_else(|e| usage_error(&e));
-    let endorsement = args.gcp_endorsement.as_ref().map(|path| {
-        std::fs::read(path)
-            .unwrap_or_else(|e| usage_error(&format!("failed to read {}: {e}", path.display())))
-    });
-    let mut policies = build_policies(&args, endorsement);
+    let policies = build_policies(&args);
     let ctx = if args.offline {
         attestation::Context::offline()
     } else {
         attestation::Context::new()
     };
-    let verifier = attestation::Verifier::new(ctx);
-
-    if args.fetch_gcp_endorsement {
-        let _genuine = verifier
-            .verify(&evidence_json, &policies)
-            .await
-            .unwrap_or_else(|e| exit_for_error(&e));
-        policies = build_policies(&args, Some(fetch_gcp_endorsement(&evidence_json).await));
-    }
+    #[cfg(debug_assertions)]
+    let ctx = match args.at {
+        Some(t) => ctx.at(t).unwrap_or_else(|e| usage_error(&e.to_string())),
+        None => ctx,
+    };
+    #[cfg(feature = "test-vendor")]
+    let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
+        Ok(base) => ctx.with_vendor_base(&base),
+        Err(_) => ctx,
+    };
+    let verifier = attestation::Verifier::new(match cache_dir() {
+        Some(dir) => ctx.with_cache_dir(dir),
+        None => ctx,
+    });
 
     eprintln!("Verifying evidence...");
 
@@ -640,6 +616,11 @@ async fn cmd_verify(args: VerifyArgs) {
             gpu.claims.devices.len()
         );
     }
+    for c in &verified.collateral {
+        let version = c.version.map(|v| format!(" v{v}")).unwrap_or_default();
+        let current = if c.current { "current" } else { "not current" };
+        eprintln!("  Collateral: {}{version}, {current} ({})", c.name, c.from);
+    }
     eprintln!("  Passed: {passed}");
 
     // Structured JSON to stdout
@@ -653,6 +634,14 @@ async fn cmd_verify(args: VerifyArgs) {
     if !passed {
         process::exit(1);
     }
+}
+
+/// Where verified collateral is kept between runs: the user's cache
+/// directory.
+fn cache_dir() -> Option<PathBuf> {
+    use etcetera::BaseStrategy;
+    let dir = etcetera::choose_base_strategy().ok()?.cache_dir();
+    Some(dir.join("attestation"))
 }
 
 /// Parse an `--expected-pcr` value of the form `INDEX=HEX`.

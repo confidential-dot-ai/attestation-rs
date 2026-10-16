@@ -1,5 +1,40 @@
 use thiserror::Error;
 
+/// Why a vendor fetch failed, inside the crate: the HTTP status (`None` for
+/// a network error or no fetch), the Retry-After it sent, and a description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unavailable {
+    pub status: Option<u16>,
+    pub retry_after: Option<u64>,
+    pub detail: String,
+}
+
+impl Unavailable {
+    pub fn offline() -> Self {
+        Self::detail("not held, and fetching is off")
+    }
+
+    pub fn detail(detail: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            retry_after: None,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn not_found(&self) -> bool {
+        matches!(self.status, Some(404 | 410))
+    }
+
+    pub fn into_error(self, collateral: &str) -> AttestationError {
+        AttestationError::CollateralUnavailable {
+            collateral: collateral.to_string(),
+            retry_after: self.retry_after,
+            detail: self.detail,
+        }
+    }
+}
+
 /// Unified error type for all attestation operations.
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -31,10 +66,15 @@ pub enum AttestationError {
     CertChainError(String),
 
     /// Collateral the verifier needed (certificates, CRLs, TCB info, NRAS
-    /// results) could not be fetched. The only retryable error: the evidence
-    /// was not judged.
-    #[error("collateral unavailable: {0}")]
-    CollateralUnavailable(String),
+    /// results) is held nowhere and could not be fetched. The only retryable
+    /// error: the evidence was not judged.
+    #[error("collateral unavailable: {collateral}: {detail}")]
+    CollateralUnavailable {
+        collateral: String,
+        /// Seconds the vendor asked to wait, when it said.
+        retry_after: Option<u64>,
+        detail: String,
+    },
 
     #[error("quote parsing failed: {0}")]
     QuoteParseFailed(String),
@@ -123,7 +163,15 @@ impl AttestationError {
     /// not fetch what it needed, so retrying may succeed. Every other error is
     /// final for the given evidence and params.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, AttestationError::CollateralUnavailable(_))
+        matches!(self, AttestationError::CollateralUnavailable { .. })
+    }
+
+    /// Seconds the vendor asked to wait before retrying, when it said.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            AttestationError::CollateralUnavailable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
     }
 
     /// True when the caller's params cannot be applied: fixing the params,
