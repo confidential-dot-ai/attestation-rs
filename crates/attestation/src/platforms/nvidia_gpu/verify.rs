@@ -1199,10 +1199,10 @@ mod tests {
             .map(|c| c.as_str().unwrap().to_string())
             .collect();
         for (chain, at) in [(nras_x5c_fixture(), 1780951820), (chain_005, 1792051921)] {
-            assert!(verify_x5c_chain_and_extract_key(&chain, at).is_ok());
+            assert!(verify_x5c_chain_and_extract_key(&chain, Some(at)).is_ok());
             let mut unpinned = chain.clone();
             unpinned.pop();
-            assert!(verify_x5c_chain_and_extract_key(&unpinned, at).is_err());
+            assert!(verify_x5c_chain_and_extract_key(&unpinned, Some(at)).is_err());
         }
     }
 

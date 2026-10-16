@@ -8,8 +8,6 @@ use crate::platforms::snp::certs;
 use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
 use crate::types::{ProcessorGeneration, SnpTcb};
 
-const AMD_KDS: &str = "https://kdsintf.amd.com";
-
 /// An AMD VCEK: the per-chip certificate a SEV-SNP report is signed under,
 /// for one TCB.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +23,17 @@ impl Collateral for Vcek {
     type Id = (ProcessorGeneration, [u8; 64], SnpTcb);
     const NAMED_BY_EVIDENCE: bool = true;
 
-    fn name((generation, chip_id, _): &Self::Id) -> String {
-        format!("vcek {generation:?} {}", hex::encode(&chip_id[..8])).to_lowercase()
+    fn name((generation, chip_id, tcb): &Self::Id) -> String {
+        let fmc = tcb.fmc.map(|f| format!(".{f}")).unwrap_or_default();
+        format!(
+            "vcek {generation:?} {} tcb {}.{}.{}.{}{fmc}",
+            hex::encode(&chip_id[..8]),
+            tcb.bootloader,
+            tcb.tee,
+            tcb.snp,
+            tcb.microcode
+        )
+        .to_lowercase()
     }
 
     /// Where AMD KDS publishes the VCEK.
@@ -80,11 +87,11 @@ impl Collateral for AmdCrl {
     }
 
     fn url((generation, key): &Self::Id) -> String {
-        let path = match key {
-            AmdKey::Vcek => "vcek",
-            AmdKey::Vlek => "vlek",
+        let base = match key {
+            AmdKey::Vcek => super::AMD_KDS_VCEK_BASE,
+            AmdKey::Vlek => super::AMD_KDS_VLEK_BASE,
         };
-        format!("{AMD_KDS}/{path}/v1/{}/crl", generation.product_name())
+        format!("{base}/{}/crl", generation.product_name())
     }
 
     /// Signed by the bundled ARK of the generation; AMD lists the
