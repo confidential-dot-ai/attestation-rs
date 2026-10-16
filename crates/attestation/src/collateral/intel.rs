@@ -243,12 +243,11 @@ impl PckCa {
         let leaf = pck_chain_der.first().ok_or_else(|| {
             crate::error::AttestationError::CertChainError("empty PCK chain".into())
         })?;
-        Ok(
-            match dcap::determine_ca_type_from_der(std::slice::from_ref(leaf))?.as_str() {
-                "platform" => PckCa::Platform,
-                _ => PckCa::Processor,
-            },
-        )
+        match dcap::determine_ca_type_from_der(std::slice::from_ref(leaf))?.as_str() {
+            "platform" => Ok(PckCa::Platform),
+            "processor" => Ok(PckCa::Processor),
+            other => Err(super::refused(format!("PCK issued by {other}"))),
+        }
     }
 }
 
