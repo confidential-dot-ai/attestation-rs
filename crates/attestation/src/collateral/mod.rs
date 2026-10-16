@@ -871,6 +871,14 @@ impl TdxCollateralProvider for DefaultTdxCollateralProvider {
             "TDX collateral fetch requires a custom TdxCollateralProvider in WASM".to_string(),
         ))
     }
+
+    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.get_cached("tcb_signing_chain"))
+    }
+
+    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.get_cached("td_qe_identity_signing_chain"))
+    }
 }
 
 impl Default for DefaultTdxCollateralProvider {
