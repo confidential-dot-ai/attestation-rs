@@ -1,10 +1,10 @@
 #![no_main]
 
 use attestation::collateral::{
-    AmdCrl, AmdSigner, GceEndorsement, GceTee, NrasJwks, PckCa, PckCrl, QeIdentity, RootCrl,
+    AmdCrl, AmdKey, Collateral, GceEndorsement, NrasJwks, PckCa, PckCrl, QeIdentity, RootCrl,
     TcbInfo, Vcek,
 };
-use attestation::types::{ProcessorGeneration, SnpTcb};
+use attestation::types::{PlatformType, ProcessorGeneration, SnpTcb};
 use libfuzzer_sys::fuzz_target;
 
 const TCB_CHAIN: &str = include_str!("../../test_data/collateral/2026-10-14/tcb_signing_chain.pem");
@@ -56,17 +56,17 @@ fuzz_target!(|data: &[u8]| {
         fmc: None,
     };
     let refused = [
-        Vcek::verify(data, ProcessorGeneration::Genoa, &[0; 64], &tcb).is_err(),
-        AmdCrl::verify(data, ProcessorGeneration::Milan, AmdSigner::Ask).is_err(),
+        Vcek::verify(data, None, &(ProcessorGeneration::Genoa, [0; 64], tcb)).is_err(),
+        AmdCrl::verify(data, None, &(ProcessorGeneration::Milan, AmdKey::Vcek)).is_err(),
         TcbInfo::verify(data, Some(TCB_CHAIN), &[0x70, 0xa0, 0x6d, 0x07, 0, 0]).is_err(),
-        QeIdentity::verify(data, Some(TCB_CHAIN)).is_err(),
-        PckCrl::verify(data, Some(PCK_CHAIN), PckCa::Platform).is_err(),
-        RootCrl::verify(data).is_err(),
-        GceEndorsement::verify(data, GceTee::Tdx, &[0; 48]).is_err(),
+        QeIdentity::verify(data, Some(TCB_CHAIN), &()).is_err(),
+        PckCrl::verify(data, Some(PCK_CHAIN), &PckCa::Platform).is_err(),
+        RootCrl::verify(data, None, &()).is_err(),
+        GceEndorsement::verify(data, None, &(PlatformType::GcpTdx, vec![0; 48])).is_err(),
     ];
     assert!(
         refused.iter().all(|r| *r) || GENUINE.iter().any(|g| same_signed_content(g, data)),
         "fuzzed bytes were accepted"
     );
-    let _ = NrasJwks::verify(data);
+    let _ = NrasJwks::verify(data, None, &String::new());
 });

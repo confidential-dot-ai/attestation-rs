@@ -2,15 +2,16 @@
 
 use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 
-use super::{crl_number, AmdSigner, Refused};
+use super::{crl_number, refused, AmdKey, Collateral, Dates};
+use crate::error::Result;
 use crate::platforms::snp::certs;
 use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
 use crate::types::{ProcessorGeneration, SnpTcb};
 
 const AMD_KDS: &str = "https://kdsintf.amd.com";
 
-/// An AMD VCEK: the per-chip key a SEV-SNP report is signed with, for one
-/// TCB.
+/// An AMD VCEK: the per-chip certificate a SEV-SNP report is signed under,
+/// for one TCB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vcek {
     /// The certificate, DER.
@@ -19,10 +20,18 @@ pub struct Vcek {
     pub not_after: i64,
 }
 
-impl Vcek {
+impl Collateral for Vcek {
+    /// Generation, CHIP_ID and the reported TCB.
+    type Id = (ProcessorGeneration, [u8; 64], SnpTcb);
+    const NAMED_BY_EVIDENCE: bool = true;
+
+    fn name((generation, chip_id, _): &Self::Id) -> String {
+        format!("vcek {generation:?} {}", hex::encode(&chip_id[..8])).to_lowercase()
+    }
+
     /// Where AMD KDS publishes the VCEK. Turin keys the lookup on the first
     /// 8 bytes of CHIP_ID.
-    pub fn url(generation: ProcessorGeneration, chip_id: &[u8; 64], tcb: &SnpTcb) -> String {
+    fn url((generation, chip_id, tcb): &Self::Id) -> String {
         let chip_id = match generation {
             ProcessorGeneration::Turin => hex::encode(&chip_id[..8]),
             _ => hex::encode(chip_id),
@@ -42,17 +51,14 @@ impl Vcek {
     }
 
     /// Issued by the bundled ASK of the generation, for this chip and TCB.
-    pub fn verify(
-        der: &[u8],
-        generation: ProcessorGeneration,
-        chip_id: &[u8; 64],
-        tcb: &SnpTcb,
-    ) -> Result<Self, Refused> {
+    fn verify(der: &[u8], _: Option<&str>, (generation, chip_id, tcb): &Self::Id) -> Result<Self> {
+        let generation = *generation;
         verify_cert_chain(certs::get_ark(generation), certs::get_ask(generation), der)?;
         check_vek_binding(der, chip_id, tcb, generation)?;
-        let (rest, cert) = X509Certificate::from_der(der).map_err(|e| format!("VCEK: {e}"))?;
+        let (rest, cert) =
+            X509Certificate::from_der(der).map_err(|e| refused(format!("VCEK: {e}")))?;
         if !rest.is_empty() {
-            return Err("VCEK has trailing bytes".into());
+            return Err(refused("VCEK has trailing bytes"));
         }
         Ok(Self {
             der: der.to_vec(),
@@ -60,70 +66,83 @@ impl Vcek {
             not_after: cert.validity().not_after.timestamp(),
         })
     }
+
+    fn dates(&self) -> Dates {
+        Dates::window(self.not_before, self.not_after, None)
+    }
 }
 
-/// The AMD CRL for one generation and signer.
+/// The AMD CRL for one generation, for VCEKs or for VLEKs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmdCrl {
     /// The CRL, DER.
     pub der: Vec<u8>,
     pub generation: ProcessorGeneration,
-    pub signer: AmdSigner,
+    pub key: AmdKey,
     pub this_update: i64,
     pub next_update: i64,
     pub number: Option<u64>,
 }
 
-impl AmdCrl {
-    pub fn url(generation: ProcessorGeneration, signer: AmdSigner) -> String {
-        let path = match signer {
-            AmdSigner::Ask => "vcek",
-            AmdSigner::Asvk => "vlek",
+impl Collateral for AmdCrl {
+    type Id = (ProcessorGeneration, AmdKey);
+
+    fn name((generation, key): &Self::Id) -> String {
+        let vlek = if *key == AmdKey::Vlek { " vlek" } else { "" };
+        format!("amd-crl {generation:?}{vlek}").to_lowercase()
+    }
+
+    fn url((generation, key): &Self::Id) -> String {
+        let path = match key {
+            AmdKey::Vcek => "vcek",
+            AmdKey::Vlek => "vlek",
         };
         format!("{AMD_KDS}/{path}/v1/{}/crl", generation.product_name())
     }
 
     /// Signed by the bundled ARK of the generation; AMD lists the
     /// ARK-issued ASKs and ASVKs in it.
-    pub fn verify(
-        der: &[u8],
-        generation: ProcessorGeneration,
-        signer: AmdSigner,
-    ) -> Result<Self, Refused> {
-        let (rest, crl) =
-            CertificateRevocationList::from_der(der).map_err(|e| format!("AMD CRL: {e}"))?;
+    fn verify(der: &[u8], _: Option<&str>, &(generation, key): &Self::Id) -> Result<Self> {
+        let (rest, crl) = CertificateRevocationList::from_der(der)
+            .map_err(|e| refused(format!("AMD CRL: {e}")))?;
         if !rest.is_empty() {
-            return Err("AMD CRL has trailing bytes".into());
+            return Err(refused("AMD CRL has trailing bytes"));
         }
         let (_, ark) = X509Certificate::from_der(certs::get_ark(generation))
-            .map_err(|e| format!("bundled ARK: {e}"))?;
+            .map_err(|e| refused(format!("bundled ARK: {e}")))?;
         if crl.issuer() != ark.subject() {
-            return Err(Refused(format!(
+            return Err(refused(format!(
                 "AMD CRL is issued by {}, not the {generation:?} ARK",
                 crl.issuer()
             )));
         }
         verify_crl_signature(&crl, der, &ark)?;
-        let next_update = crl.next_update().ok_or("AMD CRL has no nextUpdate")?;
+        let next_update = crl
+            .next_update()
+            .ok_or_else(|| refused("AMD CRL has no nextUpdate"))?;
         Ok(Self {
             der: der.to_vec(),
             generation,
-            signer,
+            key,
             this_update: crl.last_update().timestamp(),
             next_update: next_update.timestamp(),
             number: crl_number(&crl),
         })
     }
+
+    fn dates(&self) -> Dates {
+        Dates::window(self.this_update, self.next_update, self.number)
+    }
 }
 
-impl AmdSigner {
-    /// The signer whose CRL can revoke `vek_der`'s issuer: the ASVK for a
-    /// VLEK, the ASK for a VCEK.
-    pub fn of_vek(vek_der: &[u8]) -> crate::error::Result<Self> {
+impl AmdKey {
+    /// Whether `vek_der` is a VCEK or a VLEK, which picks the CRL that can
+    /// revoke its issuer.
+    pub fn of_vek(vek_der: &[u8]) -> Result<Self> {
         Ok(if crate::platforms::snp::verify::is_vlek_cert(vek_der)? {
-            AmdSigner::Asvk
+            AmdKey::Vlek
         } else {
-            AmdSigner::Ask
+            AmdKey::Vcek
         })
     }
 }
@@ -158,12 +177,12 @@ mod tests {
         fmc: None,
     };
 
-    fn vcek(der: &[u8]) -> Result<Vcek, Refused> {
-        Vcek::verify(der, ProcessorGeneration::Genoa, &chip_id(), &TCB)
+    fn vcek(der: &[u8]) -> Result<Vcek> {
+        Vcek::verify(der, None, &(ProcessorGeneration::Genoa, chip_id(), TCB))
     }
 
-    fn crl(der: &[u8], generation: ProcessorGeneration) -> Result<AmdCrl, Refused> {
-        AmdCrl::verify(der, generation, AmdSigner::Ask)
+    fn crl(der: &[u8], generation: ProcessorGeneration) -> Result<AmdCrl> {
+        AmdCrl::verify(der, None, &(generation, AmdKey::Vcek))
     }
 
     /// 2026-10-15T00:00:00Z.
@@ -191,9 +210,10 @@ mod tests {
         let der = file("amd_vcek_genoa.der");
         let gen = ProcessorGeneration::Genoa;
         let other_tcb = SnpTcb { snp: 26, ..TCB };
-        assert!(Vcek::verify(&der, gen, &[0; 64], &TCB).is_err());
-        assert!(Vcek::verify(&der, gen, &chip_id(), &other_tcb).is_err());
-        assert!(Vcek::verify(&der, ProcessorGeneration::Milan, &chip_id(), &TCB).is_err());
+        assert!(Vcek::verify(&der, None, &(gen, [0; 64], TCB)).is_err());
+        assert!(Vcek::verify(&der, None, &(gen, chip_id(), other_tcb)).is_err());
+        let milan = ProcessorGeneration::Milan;
+        assert!(Vcek::verify(&der, None, &(milan, chip_id(), TCB)).is_err());
     }
 
     #[test]
@@ -209,12 +229,12 @@ mod tests {
             // 2026-11-09T01:00Z, the shared nextUpdate.
             assert_eq!(c.next_update, 1_794_186_000);
         }
-        let asvk = AmdCrl::verify(
+        let vlek = AmdCrl::verify(
             &file("amd_vlek_crl_genoa.der"),
-            ProcessorGeneration::Genoa,
-            AmdSigner::Asvk,
+            None,
+            &(ProcessorGeneration::Genoa, AmdKey::Vlek),
         );
-        assert!(asvk.is_ok());
+        assert!(vlek.is_ok());
     }
 
     #[test]
@@ -255,23 +275,23 @@ mod tests {
     }
 
     #[test]
-    fn a_vek_names_its_crl_signer() {
+    fn a_vek_names_its_crl() {
         assert_eq!(
-            AmdSigner::of_vek(&file("amd_vcek_genoa.der")).unwrap(),
-            AmdSigner::Ask
+            AmdKey::of_vek(&file("amd_vcek_genoa.der")).unwrap(),
+            AmdKey::Vcek
         );
         let vlek = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/test_data/snp/test-vlek.der"
         ))
         .unwrap();
-        assert_eq!(AmdSigner::of_vek(&vlek).unwrap(), AmdSigner::Asvk);
+        assert_eq!(AmdKey::of_vek(&vlek).unwrap(), AmdKey::Vlek);
     }
 
     #[test]
     fn urls_name_the_kds_paths() {
         assert_eq!(
-            Vcek::url(ProcessorGeneration::Genoa, &[0xab; 64], &TCB),
+            Vcek::url(&(ProcessorGeneration::Genoa, [0xab; 64], TCB)),
             format!(
                 "https://kdsintf.amd.com/vcek/v1/Genoa/{}?blSPL=10&teeSPL=00&snpSPL=27&ucodeSPL=28",
                 "ab".repeat(64)
@@ -282,14 +302,14 @@ mod tests {
             ..TCB
         };
         assert_eq!(
-            Vcek::url(ProcessorGeneration::Turin, &[0xcd; 64], &turin),
+            Vcek::url(&(ProcessorGeneration::Turin, [0xcd; 64], turin)),
             format!(
                 "https://kdsintf.amd.com/vcek/v1/Turin/{}?blSPL=10&teeSPL=00&snpSPL=27&ucodeSPL=28&fmcSPL=03",
                 "cd".repeat(8)
             )
         );
         assert_eq!(
-            AmdCrl::url(ProcessorGeneration::Milan, AmdSigner::Asvk),
+            AmdCrl::url(&(ProcessorGeneration::Milan, AmdKey::Vlek)),
             "https://kdsintf.amd.com/vlek/v1/Milan/crl"
         );
     }

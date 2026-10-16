@@ -26,8 +26,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "collateral_documents"
-path = "fuzz_targets/collateral_documents.rs"
+name = "collateral"
+path = "fuzz_targets/collateral.rs"
 test = false
 doc = false
 bench = false
