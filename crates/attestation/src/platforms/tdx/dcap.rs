@@ -1230,7 +1230,7 @@ pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bo
 
     // Parse the leaf cert to get its serial number
     let (_, leaf_cert) = X509Certificate::from_der(&der_certs[0])
-        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf parse: {e}")))?;
+        .map_err(|e| AttestationError::CertChainError(format!("certificate parse: {e}")))?;
     let leaf_serial = leaf_cert.raw_serial();
 
     // Parse the CRL (handle both PEM and DER formats)
