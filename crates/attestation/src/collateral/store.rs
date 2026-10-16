@@ -203,14 +203,16 @@ impl Store {
         Err(Failure::Unavailable(Unavailable::offline()))
     }
 
-    /// The NRAS URL the key set is published next to.
+    /// Where NRAS publishes its key set, from the configured NRAS URL.
     #[cfg(feature = "nvidia-gpu")]
-    pub(crate) fn nras_url(&self) -> String {
+    pub(crate) fn nras_jwks_url(&self) -> Result<String> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(vendor) = self.vendor() {
-            return vendor.nras.gpu_url.clone();
-        }
-        crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string()
+        let gpu_url = self.vendor().map(|v| v.nras.gpu_url.as_str());
+        #[cfg(target_arch = "wasm32")]
+        let gpu_url = None;
+        let gpu_url = gpu_url.unwrap_or(crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL);
+        crate::platforms::nvidia_gpu::jwks_url_for_endpoint(gpu_url)
+            .map_err(|_| AttestationError::InvalidParams(format!("invalid NRAS URL {gpu_url:?}")))
     }
 
     /// Refetch the piece `id` names (the NRAS key set when a token names an
@@ -276,6 +278,8 @@ mod native {
 
     pub(crate) struct Native {
         pub(super) mem: moka::future::Cache<String, Entry>,
+        /// URLs the vendor answered "not published" for, and when.
+        not_published: moka::future::Cache<String, (Instant, Failure)>,
         pub(crate) disk: Option<Disk>,
         pub(crate) vendor: Option<Vendor>,
         /// Do not ask the vendor about one piece more often than this.
@@ -286,6 +290,7 @@ mod native {
         pub(crate) fn new(vendor: Option<Vendor>) -> Self {
             Self {
                 mem: moka::future::Cache::new(4096),
+                not_published: moka::future::Cache::new(4096),
                 disk: None,
                 vendor,
                 recheck: Duration::from_secs(300),
@@ -344,14 +349,29 @@ mod native {
                 .vendor
                 .as_ref()
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
-            let (body, chain) = vendor.fetch(url).await.map_err(|e| match e {
-                // The vendor does not know the chip or platform the evidence
-                // names: the evidence is at fault, retrying will not help.
-                e if C::NAMED_BY_EVIDENCE && (e.not_found() || e.status == Some(400)) => {
-                    Failure::Refused(format!("the vendor does not publish it ({})", e.detail))
+            if let Some((at, failure)) = self.not_published.get(url).await {
+                if at.elapsed() < self.recheck {
+                    return Err(failure);
                 }
-                e => Failure::Unavailable(e),
-            })?;
+            }
+            let (body, chain) = match vendor.fetch(url).await {
+                Ok(fetched) => fetched,
+                Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
+                    // The vendor does not know the chip or platform the
+                    // evidence names: for a piece the evidence names, the
+                    // evidence is at fault and retrying will not help.
+                    let failure = if C::NAMED_BY_EVIDENCE {
+                        Failure::Refused(format!("the vendor does not publish it ({})", e.detail))
+                    } else {
+                        Failure::Unavailable(e)
+                    };
+                    self.not_published
+                        .insert(url.to_string(), (Instant::now(), failure.clone()))
+                        .await;
+                    return Err(failure);
+                }
+                Err(e) => return Err(Failure::Unavailable(e)),
+            };
             check::<C>(id, body, chain, Source::Vendor)
         }
 
@@ -674,6 +694,23 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "snp")]
+    #[tokio::test]
+    async fn the_vendor_is_asked_about_an_unpublished_piece_once_per_recheck() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = Context::new()
+            .with_vendor_base(&v.base)
+            .with_recheck(Duration::from_secs(300));
+        for _ in 0..2 {
+            let err = vcek(&ctx).await.err().unwrap();
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+        let ctx = ctx.with_recheck(Duration::ZERO);
+        vcek(&ctx).await.err().unwrap();
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn a_short_retry_after_is_waited_out_and_a_long_one_returned() {
         let v = vendor(
@@ -790,6 +827,12 @@ mod tests {
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&only_file(&dir)), 0o600);
+
+        let open = parent.path().join("existing");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tcb_info(&ctx(&v).with_cache_dir(&open), NOW).await.unwrap();
+        assert_eq!(mode(&open), 0o700);
     }
 
     #[tokio::test]
@@ -857,6 +900,47 @@ mod tests {
             ctx.store().refresh::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         }
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn a_token_under_a_key_not_yet_published_is_retryable() {
+        use crate::types::{
+            NvidiaGpuArch, NvidiaGpuDeviceEvidence, NvidiaGpuEvidenceBundle, NvidiaGpuParams,
+        };
+        use base64::Engine;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"kid":"next"}"#);
+        let eat = serde_json::json!([["JWT", format!("{header}.e30.sig")], {}]);
+        let (jwks, _) = raw("2026-10-14/nras_jwks.json", None);
+        let v = vendor(
+            vec![
+                (200, vec![], eat.to_string().into_bytes()),
+                (200, vec![], jwks),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = Context::new()
+            .with_vendor_base(&v.base)
+            .with_recheck(Duration::from_secs(300));
+        let bundle = NvidiaGpuEvidenceBundle {
+            devices: vec![NvidiaGpuDeviceEvidence {
+                arch: NvidiaGpuArch::Hopper,
+                uuid: "GPU-0".into(),
+                evidence_b64: String::new(),
+                cert_chain_b64: String::new(),
+            }],
+            binding: Default::default(),
+        };
+        let params = NvidiaGpuParams {
+            user_nonce: Some(vec![7; 32]),
+            ..Default::default()
+        };
+        let err = crate::platforms::nvidia_gpu::gather_bundle(&bundle, &params, ctx.store(), NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.is_retryable(), "{err}");
     }
 
     #[cfg(feature = "snp")]

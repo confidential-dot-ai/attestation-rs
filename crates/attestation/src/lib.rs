@@ -700,6 +700,58 @@ mod tests {
         assert!(!verified.passed());
     }
 
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn a_gpu_nonce_must_be_the_cpu_report_data_before_any_fetch() {
+        let mut envelope: serde_json::Value = serde_json::from_slice(&tdx_envelope()).unwrap();
+        envelope["nvidia_gpu"] = serde_json::json!({
+            "devices": [{
+                "arch": "HOPPER",
+                "uuid": "GPU-0",
+                "evidence_b64": "",
+                "cert_chain_b64": "",
+            }],
+            "binding": NvidiaGpuBinding::default(),
+        });
+        let envelope = serde_json::to_vec(&envelope).unwrap();
+        let gpu = |nonce: &[u8]| NvidiaGpuParams {
+            user_nonce: Some(nonce.to_vec()),
+            ..Default::default()
+        };
+        let with = |report_data: Option<&[u8]>, gpu: Option<NvidiaGpuParams>| Policies {
+            tdx: Some(TdxParams {
+                report_data: report_data.map(<[u8]>::to_vec),
+                ..Default::default()
+            }),
+            gpu,
+            ..Default::default()
+        };
+        let verifier = Verifier::new(Context::held([]));
+        let refused = |policies: Policies| {
+            let verifier = &verifier;
+            let envelope = &envelope;
+            async move { verifier.verify(envelope, &policies).await.err().unwrap() }
+        };
+        let (cpu, other) = ([1; 32], [2; 32]);
+
+        let err = refused(with(Some(&cpu), Some(gpu(&other)))).await;
+        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
+        let err = refused(with(None, Some(gpu(&cpu)))).await;
+        assert!(
+            matches!(err, AttestationError::NvidiaGpuReportDataRequired),
+            "{err}"
+        );
+        let err = refused(with(Some(&cpu), None)).await;
+        assert!(
+            matches!(err, AttestationError::PlatformNotAllowed(_)),
+            "{err}"
+        );
+        assert!(verifier.context().store().missing().is_empty());
+
+        let err = refused(with(Some(&cpu), Some(gpu(&cpu)))).await;
+        assert!(!verifier.context().store().missing().is_empty(), "{err}");
+    }
+
     #[cfg(feature = "az-tdx")]
     #[test]
     fn with_report_data_reaches_the_cloud_platforms() {

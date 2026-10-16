@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let gpu_url = resolve_nras_gpu_url(&config.nras);
     let switch_url = resolve_nras_switch_url(&config.nras);
     tracing::info!(gpu = %gpu_url, switch = %switch_url, "configured NRAS endpoints");
-    let ctx = attestation::Context::new().with_nras_urls(gpu_url, switch_url);
+    let ctx = attestation::Context::new().with_nras_urls(gpu_url, switch_url)?;
     #[cfg(feature = "test-vendor")]
     let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
         Ok(base) => ctx.with_vendor_base(&base),

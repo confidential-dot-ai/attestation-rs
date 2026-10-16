@@ -2,7 +2,8 @@
 
 use super::{refused, Collateral, Dates};
 use crate::error::Result;
-use crate::platforms::nvidia_gpu::provider::{jwks_url_for_endpoint, Jwks};
+use crate::platforms::nvidia_gpu::provider::Jwks;
+use crate::platforms::nvidia_gpu::verify::es384_verifying_key_from_jwks_entry;
 
 /// The keys NVIDIA's NRAS signs its attestation tokens with.
 #[derive(Debug, Clone)]
@@ -11,25 +12,28 @@ pub struct NrasJwks {
 }
 
 impl Collateral for NrasJwks {
-    /// The NRAS attestation URL the caller configured; its key set is
-    /// published next to it.
+    /// Where NRAS publishes its key set: derived from the configured NRAS
+    /// attestation URL ([`jwks_url_for_endpoint`](crate::platforms::nvidia_gpu::jwks_url_for_endpoint)).
     type Id = String;
 
     fn name(_: &String) -> String {
         "nras-jwks".into()
     }
 
-    fn url(nras_url: &String) -> String {
-        jwks_url_for_endpoint(nras_url).unwrap_or_else(|_| nras_url.clone())
+    fn url(jwks_url: &String) -> String {
+        jwks_url.clone()
     }
 
-    /// A key set with at least one key. The set is not signed itself: each
-    /// key is trusted only through its `x5c` chain to the pinned NVIDIA
-    /// anchor, which is checked when a token is verified with it.
+    /// The keys whose `x5c` chain leads to the pinned NVIDIA anchor; at least
+    /// one must. The set itself is not signed. The certificates' validity is
+    /// checked when a token is verified with a key.
     fn verify(json: &[u8], _: Option<&str>, _: &String) -> Result<Self> {
-        let jwks: Jwks = serde_json::from_slice(json).map_err(|e| refused(format!("JWKS: {e}")))?;
+        let mut jwks: Jwks =
+            serde_json::from_slice(json).map_err(|e| refused(format!("JWKS: {e}")))?;
+        jwks.keys
+            .retain(|key| es384_verifying_key_from_jwks_entry(key, None).is_ok());
         if jwks.keys.is_empty() {
-            return Err(refused("JWKS has no keys"));
+            return Err(refused("JWKS has no key under the NVIDIA anchor"));
         }
         Ok(Self { jwks })
     }
@@ -55,5 +59,24 @@ mod tests {
         for bad in [&b""[..], b"{\"keys\":[]}", b"<html>"] {
             assert!(NrasJwks::verify(bad, None, &url).is_err());
         }
+    }
+
+    #[test]
+    fn only_keys_under_the_nvidia_anchor_are_kept() {
+        let body = include_bytes!("../../test_data/collateral/2026-10-14/nras_jwks.json");
+        let mut set: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let keys = set["keys"].as_array_mut().unwrap();
+        let mut foreign = keys[0].clone();
+        foreign["kid"] = "foreign".into();
+        foreign.as_object_mut().unwrap().remove("x5c");
+        keys.push(foreign.clone());
+        let url = String::new();
+        let genuine = NrasJwks::verify(body, None, &url).unwrap().jwks.keys.len();
+        let mixed = serde_json::to_vec(&set).unwrap();
+        let kept = NrasJwks::verify(&mixed, None, &url).unwrap().jwks.keys;
+        assert_eq!(kept.len(), genuine);
+        assert!(kept.iter().all(|k| k.kid != "foreign"));
+        let only_foreign = serde_json::to_vec(&serde_json::json!({ "keys": [foreign] })).unwrap();
+        assert!(NrasJwks::verify(&only_foreign, None, &url).is_err());
     }
 }

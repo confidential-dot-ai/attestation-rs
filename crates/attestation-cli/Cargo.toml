@@ -15,7 +15,7 @@ nvidia-gpu = ["attestation/nvidia-gpu"]
 nvidia-gpu-attest = ["nvidia-gpu", "attest", "attestation/nvidia-gpu-attest"]
 # Fetch collateral from $ATTESTATION_TEST_VENDOR instead of the vendors, for
 # fault-injection tests against a fake vendor. Never enable in releases.
-test-vendor = []
+test-vendor = ["attestation/test-vendor"]
 
 [dependencies]
 attestation = { workspace = true }

@@ -19,6 +19,8 @@ pub struct TcbInfo {
     pub issue_date: i64,
     pub next_update: i64,
     pub evaluation_number: u64,
+    /// The TCB Signing certificate, DER.
+    pub signer: Vec<u8>,
 }
 
 /// Intel's TD Quoting Enclave identity.
@@ -28,6 +30,8 @@ pub struct QeIdentity {
     pub issue_date: i64,
     pub next_update: i64,
     pub evaluation_number: u64,
+    /// The TCB Signing certificate, DER.
+    pub signer: Vec<u8>,
 }
 
 /// The CRL of an Intel PCK CA.
@@ -89,6 +93,14 @@ fn chain(issuer_chain: Option<&str>) -> Result<&[u8]> {
         .ok_or_else(|| refused("no issuer chain"))
 }
 
+/// The first certificate of a verified issuer chain.
+fn signer(chain: &[u8]) -> Result<Vec<u8>> {
+    dcap::parse_pem_to_der(chain)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| refused("empty issuer chain"))
+}
+
 impl Collateral for TcbInfo {
     type Id = Fmspc;
     const NAMED_BY_EVIDENCE: bool = true;
@@ -108,7 +120,8 @@ impl Collateral for TcbInfo {
     /// CA), for TDX and this FMSPC.
     fn verify(json: &[u8], issuer_chain: Option<&str>, fmspc: &Fmspc) -> Result<Self> {
         let (body, issue_date, next_update) = signed_body(json, "tcbInfo")?;
-        dcap::verify_tcb_info_signature(json, chain(issuer_chain)?, issue_date)?;
+        let chain = chain(issuer_chain)?;
+        dcap::verify_tcb_info_signature(json, chain, issue_date)?;
         if body.id != "TDX" {
             return Err(refused(format!("TCB Info is for {:?}, not TDX", body.id)));
         }
@@ -124,6 +137,7 @@ impl Collateral for TcbInfo {
             issue_date,
             next_update,
             evaluation_number: body.tcb_evaluation_data_number,
+            signer: signer(chain)?,
         })
     }
 
@@ -150,7 +164,8 @@ impl Collateral for QeIdentity {
     /// Signed by Intel's TCB Signing key, for the TD QE.
     fn verify(json: &[u8], issuer_chain: Option<&str>, _: &()) -> Result<Self> {
         let (body, issue_date, next_update) = signed_body(json, "enclaveIdentity")?;
-        dcap::verify_qe_identity_signature(json, chain(issuer_chain)?, issue_date)?;
+        let chain = chain(issuer_chain)?;
+        dcap::verify_qe_identity_signature(json, chain, issue_date)?;
         if body.id != "TD_QE" {
             return Err(refused(format!(
                 "QE Identity is for {:?}, not TD_QE",
@@ -162,6 +177,7 @@ impl Collateral for QeIdentity {
             issue_date,
             next_update,
             evaluation_number: body.tcb_evaluation_data_number,
+            signer: signer(chain)?,
         })
     }
 
