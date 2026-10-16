@@ -140,6 +140,7 @@ impl Dates {
 
     /// True unless `self` is an older issue than `other`: a lower version,
     /// or the same version issued earlier.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn not_older_than(&self, other: &Dates) -> bool {
         (self.version, self.this_update) >= (other.version, other.this_update)
     }

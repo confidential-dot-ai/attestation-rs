@@ -68,6 +68,7 @@ impl CollateralUsed {
 
 /// What the store knows about a piece before it has it.
 #[derive(Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct Spec {
     url: String,
     name: String,
@@ -110,6 +111,7 @@ impl Failure {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn check(
     spec: &Spec,
     body: Vec<u8>,
