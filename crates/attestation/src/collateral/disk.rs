@@ -66,11 +66,6 @@ impl Disk {
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
         dir.create(&self.dir)?;
-        #[cfg(unix)]
-        std::fs::set_permissions(
-            &self.dir,
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )?;
         let bytes = serde_json::to_vec(&Stored {
             url: url.to_string(),
             body: BASE64.encode(body),
