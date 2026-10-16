@@ -1551,8 +1551,9 @@ mod tests {
         let first_cert_end = pem_str.find(end_marker).unwrap() + end_marker.len();
         let single_cert_pem = &pem_str[..first_cert_end];
 
-        let bogus_crl = vec![0x30, 0x00];
-        let result = intermediate_ca_revoked(single_cert_pem.as_bytes(), &bogus_crl);
+        let root_crl = include_bytes!("../../../test_data/collateral/root_ca_crl.der");
+        assert!(intermediate_ca_revoked(auth.pck_cert_chain_pem, root_crl).is_ok());
+        let result = intermediate_ca_revoked(single_cert_pem.as_bytes(), root_crl);
         assert!(
             matches!(result, Err(AttestationError::CertChainError(_))),
             "{result:?}"

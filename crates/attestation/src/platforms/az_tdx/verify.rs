@@ -168,17 +168,24 @@ mod tests {
 
     #[test]
     fn test_evidence_version_rejected() {
-        let evidence = AzTdxEvidence {
-            version: 99,
-            tpm_quote: build_dummy_tpm_quote(),
-            hcl_report: "dGVzdA".to_string(),
-            td_quote: "AAAA".to_string(),
-        };
-
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Context::offline();
+        let verify = |version| {
+            let evidence = AzTdxEvidence {
+                version,
+                tpm_quote: build_dummy_tpm_quote(),
+                hcl_report: "dGVzdA".to_string(),
+                td_quote: "AAAA".to_string(),
+            };
+            rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx))
+        };
 
-        let result = rt.block_on(AzTdx::verify(&evidence, &AzTdxParams::default(), &ctx));
+        let current = verify(1);
+        assert!(
+            !matches!(current, Err(AttestationError::EvidenceDeserialize(_))),
+            "{current:?}"
+        );
+        let result = verify(99);
         assert!(
             matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
             "{result:?}"
