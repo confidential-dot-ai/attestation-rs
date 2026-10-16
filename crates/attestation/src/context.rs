@@ -91,15 +91,20 @@ impl Context {
     }
 
     /// Send NVIDIA GPU evidence to these NRAS endpoints instead of the
-    /// default ones (or `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`).
+    /// default ones (or `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`). A URL
+    /// without a scheme and host is [`AttestationError::InvalidParams`].
     #[cfg(all(feature = "nvidia-gpu", not(target_arch = "wasm32")))]
-    #[must_use]
-    pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Self {
+    pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Result<Self> {
+        for url in [&gpu_url, &switch_url] {
+            crate::platforms::nvidia_gpu::jwks_url_for_endpoint(url).map_err(|_| {
+                AttestationError::InvalidParams(format!("invalid NRAS URL {url:?}"))
+            })?;
+        }
         if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
             vendor.nras.gpu_url = gpu_url;
             vendor.nras.switch_url = switch_url;
         }
-        self
+        Ok(self)
     }
 
     /// Evaluate certificate, CRL and token validity at a fixed time (Unix
@@ -134,6 +139,21 @@ impl Default for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[test]
+    fn an_nras_url_that_names_no_host_is_refused_when_configured() {
+        let good = "https://nras.attestation.nvidia.com/v3/attest/gpu".to_string();
+        assert!(Context::new()
+            .with_nras_urls(good.clone(), good.clone())
+            .is_ok());
+        for (gpu, switch) in [("nras", good.as_str()), (good.as_str(), "nras")] {
+            assert!(matches!(
+                Context::new().with_nras_urls(gpu.into(), switch.into()),
+                Err(AttestationError::InvalidParams(_))
+            ));
+        }
+    }
 
     #[test]
     fn an_evaluation_time_out_of_range_is_invalid_params() {

@@ -2,7 +2,7 @@
 
 use super::{refused, Collateral, Dates};
 use crate::error::Result;
-use crate::platforms::nvidia_gpu::provider::{jwks_url_for_endpoint, Jwks};
+use crate::platforms::nvidia_gpu::provider::Jwks;
 use crate::platforms::nvidia_gpu::verify::es384_verifying_key_from_jwks_entry;
 
 /// The keys NVIDIA's NRAS signs its attestation tokens with.
@@ -12,16 +12,16 @@ pub struct NrasJwks {
 }
 
 impl Collateral for NrasJwks {
-    /// The NRAS attestation URL the caller configured; its key set is
-    /// published next to it.
+    /// Where NRAS publishes its key set: derived from the configured NRAS
+    /// attestation URL ([`jwks_url_for_endpoint`](crate::platforms::nvidia_gpu::jwks_url_for_endpoint)).
     type Id = String;
 
     fn name(_: &String) -> String {
         "nras-jwks".into()
     }
 
-    fn url(nras_url: &String) -> String {
-        jwks_url_for_endpoint(nras_url).unwrap_or_else(|_| nras_url.clone())
+    fn url(jwks_url: &String) -> String {
+        jwks_url.clone()
     }
 
     /// The keys whose `x5c` chain leads to the pinned NVIDIA anchor; at least

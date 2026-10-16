@@ -28,6 +28,7 @@ pub async fn gather_bundle(
     now: i64,
 ) -> Result<(GpuCollateralSet, CollateralUsed)> {
     let user_nonce = check_preconditions(bundle, params)?;
+    let jwks_url = store.nras_jwks_url()?;
     let mut nras = std::collections::BTreeMap::new();
     for (arch, devices) in group_by_arch(bundle) {
         let request = NrasRequest {
@@ -44,7 +45,7 @@ pub async fn gather_bundle(
         };
         nras.insert(arch, nras_attest(store, &request).await?);
     }
-    let mut jwks = store.get::<NrasJwks>(&store.nras_url(), now).await?;
+    let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
     let known = |jwks: &NrasJwks| {
         nras.values().all(|response| {
             split_eat_response(response).is_ok_and(|(overall, subs)| {
@@ -57,13 +58,13 @@ pub async fn gather_bundle(
         })
     };
     if !known(&jwks.0) {
-        store.refresh::<NrasJwks>(&store.nras_url(), now).await?;
-        jwks = store.get::<NrasJwks>(&store.nras_url(), now).await?;
+        store.refresh::<NrasJwks>(&jwks_url, now).await?;
+        jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
         if !known(&jwks.0) {
             return Err(crate::error::Unavailable::detail(
                 "NRAS signed with a key it has not published yet",
             )
-            .into_error(&NrasJwks::name(&store.nras_url())));
+            .into_error(&NrasJwks::name(&jwks_url)));
         }
     }
     let (jwks, used) = jwks;
