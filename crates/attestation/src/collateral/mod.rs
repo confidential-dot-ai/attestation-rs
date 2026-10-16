@@ -65,7 +65,7 @@ impl Dates {
 
     /// True when `now` is inside the window.
     pub fn current(&self, now: i64) -> bool {
-        !self.this_update.is_some_and(|t| now < t) && !self.next_update.is_some_and(|t| now > t)
+        self.this_update.is_none_or(|t| t <= now) && self.next_update.is_none_or(|t| now <= t)
     }
 }
 
@@ -196,6 +196,14 @@ pub fn snp_vcek_url(
             "Turin TCB carries no FMC SPL; cannot build the VCEK lookup".to_string(),
         ));
     }
+    Ok(kds_vcek_url(processor_gen, chip_id, tcb))
+}
+
+pub(crate) fn kds_vcek_url(
+    processor_gen: ProcessorGeneration,
+    chip_id: &[u8; 64],
+    tcb: &SnpTcb,
+) -> String {
     let chip_id_hex = if processor_gen == ProcessorGeneration::Turin {
         hex::encode(&chip_id[..8])
     } else {
@@ -214,7 +222,7 @@ pub fn snp_vcek_url(
     if let Some(fmc) = tcb.fmc {
         url.push_str(&format!("&fmcSPL={fmc:02}"));
     }
-    Ok(url)
+    url
 }
 
 /// Default HTTP request timeout (total).
@@ -552,8 +560,7 @@ pub trait TdxCollateralProvider: Send + Sync {
     /// containing the Intel SGX TCB Signing Certificate → Root CA chain.
     /// Used to verify the Intel ECDSA signature on TCB Info JSON.
     ///
-    /// Returns `None` if the signing chain is not available (signature
-    /// verification will be skipped).
+    /// `None` refuses the collateral: unsigned TCB Info is never used.
     async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
@@ -563,13 +570,13 @@ pub trait TdxCollateralProvider: Send + Sync {
     /// This is the `SGX-Enclave-Identity-Issuer-Chain` response header from
     /// Intel PCS. Used to verify the Intel ECDSA signature on QE Identity JSON.
     ///
-    /// Returns `None` if the signing chain is not available (signature
-    /// verification will be skipped).
+    /// `None` refuses the collateral: an unsigned QE Identity is never used.
     async fn get_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
-    /// Fetch the TD QE Identity signing certificate chain (PEM).
+    /// Fetch the TD QE Identity signing certificate chain (PEM). `None`
+    /// refuses the collateral.
     async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
@@ -921,6 +928,16 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_follows_the_window() {
+        let d = Dates::window(100, 200, Some(1));
+        assert!(!d.current(99));
+        assert!(d.current(100));
+        assert!(d.current(200));
+        assert!(!d.current(201));
+        assert!(Dates::default().current(0));
+    }
 
     #[test]
     fn test_vcek_url_construction_milan() {

@@ -29,30 +29,17 @@ impl Collateral for Vcek {
         format!("vcek {generation:?} {}", hex::encode(&chip_id[..8])).to_lowercase()
     }
 
-    /// Where AMD KDS publishes the VCEK. Turin keys the lookup on the first
-    /// 8 bytes of CHIP_ID.
+    /// Where AMD KDS publishes the VCEK.
     fn url((generation, chip_id, tcb): &Self::Id) -> String {
-        let chip_id = match generation {
-            ProcessorGeneration::Turin => hex::encode(&chip_id[..8]),
-            _ => hex::encode(chip_id),
-        };
-        let mut url = format!(
-            "{AMD_KDS}/vcek/v1/{}/{chip_id}?blSPL={:02}&teeSPL={:02}&snpSPL={:02}&ucodeSPL={:02}",
-            generation.product_name(),
-            tcb.bootloader,
-            tcb.tee,
-            tcb.snp,
-            tcb.microcode
-        );
-        if let Some(fmc) = tcb.fmc {
-            url.push_str(&format!("&fmcSPL={fmc:02}"));
-        }
-        url
+        super::kds_vcek_url(*generation, chip_id, tcb)
     }
 
     /// Issued by the bundled ASK of the generation, for this chip and TCB.
     fn verify(der: &[u8], _: Option<&str>, (generation, chip_id, tcb): &Self::Id) -> Result<Self> {
         let generation = *generation;
+        if generation == ProcessorGeneration::Turin && tcb.fmc.is_none() {
+            return Err(refused("a Turin VCEK is named by its FMC SPL"));
+        }
         verify_cert_chain(certs::get_ark(generation), certs::get_ask(generation), der)?;
         check_vek_binding(der, chip_id, tcb, generation)?;
         let (rest, cert) =
@@ -214,6 +201,12 @@ mod tests {
         assert!(Vcek::verify(&der, None, &(gen, chip_id(), other_tcb)).is_err());
         let milan = ProcessorGeneration::Milan;
         assert!(Vcek::verify(&der, None, &(milan, chip_id(), TCB)).is_err());
+    }
+
+    #[test]
+    fn a_turin_vcek_without_an_fmc_spl_is_refused() {
+        let id = (ProcessorGeneration::Turin, chip_id(), TCB);
+        assert!(Vcek::verify(&file("amd_vcek_genoa.der"), None, &id).is_err());
     }
 
     #[test]
