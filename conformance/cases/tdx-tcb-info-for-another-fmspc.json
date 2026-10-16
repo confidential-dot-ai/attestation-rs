@@ -1,0 +1,25 @@
+{
+  "id": "tdx-tcb-info-for-another-fmspc",
+  "rule": {
+    "section": "9.2.3",
+    "statement": "step 5: the TCB Info carries the PCK certificate's FMSPC, whatever supplied it; an Intel-signed TCB Info for another platform is refused"
+  },
+  "now": "2026-04-01T00:00:00Z",
+  "evidence": "evidence/tdx-tcb-info-for-another-fmspc.json",
+  "policy": "policy/tdx-tcb-info-for-another-fmspc.json",
+  "collateral": {
+    "tdx_pck_crl/platform": "collateral/pck_crl_platform.der",
+    "tdx_qe_identity/td": {
+      "body": "collateral/td_qe_identity.json",
+      "signing_chain": "collateral/qe_identity_signing_chain.pem"
+    },
+    "tdx_root_crl": "collateral/root_ca_crl.der",
+    "tdx_tcb_info/b0c06f000000": {
+      "body": "collateral/tcb_info_90c06f000000.json",
+      "signing_chain": "collateral/tcb_signing_chain.pem"
+    }
+  },
+  "expect": {
+    "refusal": "collateral-invalid"
+  }
+}
