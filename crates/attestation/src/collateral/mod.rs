@@ -103,6 +103,14 @@ impl PckCa {
             PckCa::Processor => "processor",
         }
     }
+
+    /// The Intel CA certificate that signs this CA's CRL.
+    pub fn signer(self) -> &'static str {
+        match self {
+            PckCa::Platform => "Intel SGX PCK Platform CA",
+            PckCa::Processor => "Intel SGX PCK Processor CA",
+        }
+    }
 }
 
 /// An Intel platform's FMSPC (Family-Model-Stepping-Platform-CustomSKU).
