@@ -604,9 +604,7 @@ pub fn check_vek_binding(
                     "VCEK fmc SPL {cert_val} does not match report {fmc_expected}"
                 )));
             }
-        } else if fmc_expected != 0 {
-            // Non-zero FMC in the report but VCEK lacks the OID — the cert cannot
-            // attest to the platform's FMC level, so reject.
+        } else if fmc_expected != 0 || processor_gen == ProcessorGeneration::Turin {
             return Err(AttestationError::TcbMismatch(format!(
                 "report FMC SPL is {fmc_expected} but VCEK certificate lacks FMC OID extension"
             )));
@@ -1352,6 +1350,43 @@ mod tests {
 
     use time::macros::datetime;
     use time::{Duration as TimeDuration, OffsetDateTime};
+
+    #[test]
+    fn a_turin_vcek_must_carry_the_fmc_spl() {
+        fn vcek(fmc: Option<u8>) -> Vec<u8> {
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, "SEV-VCEK");
+            let ext = |oid: &str, content: Vec<u8>| {
+                let arcs: Vec<u64> = oid.split('.').map(|a| a.parse().unwrap()).collect();
+                rcgen::CustomExtension::from_oid_content(&arcs, content)
+            };
+            params.custom_extensions = vec![ext(HW_ID_OID, vec![0x04, 8, 7, 7, 7, 7, 7, 7, 7, 7])];
+            for oid in [LOADER_SPL_OID, TEE_SPL_OID, SNP_SPL_OID, UCODE_SPL_OID] {
+                params.custom_extensions.push(ext(oid, vec![0x02, 1, 1]));
+            }
+            if let Some(fmc) = fmc {
+                params
+                    .custom_extensions
+                    .push(ext(FMC_SPL_OID, vec![0x02, 1, fmc]));
+            }
+            params.self_signed(&key).unwrap().der().to_vec()
+        }
+        let mut chip_id = [0u8; 64];
+        chip_id[..8].fill(7);
+        let tcb = SnpTcb {
+            bootloader: 1,
+            tee: 1,
+            snp: 1,
+            microcode: 1,
+            fmc: Some(0),
+        };
+        let turin = ProcessorGeneration::Turin;
+        assert!(check_vek_binding(&vcek(Some(0)), &chip_id, &tcb, turin).is_ok());
+        assert!(check_vek_binding(&vcek(None), &chip_id, &tcb, turin).is_err());
+    }
 
     fn mint_issuer(cn: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
