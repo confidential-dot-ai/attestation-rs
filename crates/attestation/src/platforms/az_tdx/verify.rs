@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::collateral::{CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
-use crate::platforms::tdx::verify::{TdxCollateral, TdxQuote};
+use crate::platforms::tdx::verify::{TdxCollateralSet, TdxQuote};
 use crate::platforms::tdx::{verify as tdx_verify, TdxParams, TdxResult};
 use crate::platforms::tpm_common;
 use crate::types::PlatformType;
@@ -59,7 +59,7 @@ impl Platform for AzTdx {
     type Evidence = AzTdxEvidence;
     type Params = AzTdxParams;
     type Result = AzTdxResult;
-    type Collateral = TdxCollateral;
+    type CollateralSet = TdxCollateralSet;
 
     fn validate(params: &AzTdxParams) -> Result<()> {
         params.validate()
@@ -70,15 +70,15 @@ impl Platform for AzTdx {
         evidence: &AzTdxEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(TdxCollateralSet, Vec<CollateralUsed>)> {
         let (quote_bytes, quote, _) = verify_evidence(evidence, &AzTdxParams::default(), now)?;
-        TdxCollateral::gather(&quote_bytes, &quote, store, now).await
+        TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await
     }
 
     fn verify(
         evidence: &AzTdxEvidence,
         params: &AzTdxParams,
-        collateral: &TdxCollateral,
+        collateral: &TdxCollateralSet,
         now: i64,
     ) -> Result<AzTdxResult> {
         let (quote_bytes, quote, mut result) = verify_evidence(evidence, params, now)?;

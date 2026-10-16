@@ -120,14 +120,17 @@ let verifier = Verifier::new(Context::new().with_cache_dir("/var/cache/attestati
 let verified = verifier.verify(evidence_json, &policies).await?;
 ```
 
-A `Context` holds the collateral store: each piece of collateral is fetched
-once, verified against the vendor roots compiled into the crate, kept in
-memory (and in `with_cache_dir`, if given) by its vendor URL, and refreshed
-near its nextUpdate. `Context::offline()` never touches the network: a piece
-not held is `CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
+A `Context` holds the collateral store. Each piece of collateral (a type
+implementing `collateral::Collateral`: a VCEK, an AMD CRL, TCB Info, ...) is
+fetched once with `store.get::<C>(&id, now)`, verified against the vendor
+roots compiled into the crate, kept in memory (and in `with_cache_dir`, if
+given) by its vendor URL, and refreshed near its nextUpdate.
+`Context::offline()` never touches the network: a piece not held is
+`CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
 certificate, CRL, collateral and token validity. A platform's
-`gather(evidence, store, now)` gets its collateral; its `verify(evidence, params,
-collateral, now)` is pure.
+`gather(evidence, store, now)` returns its collateral set (for example
+`TdxCollateralSet`); its `verify(evidence, params, collateral_set, now)` is
+pure.
 
 ### Attester (Guest-Side Agent)
 

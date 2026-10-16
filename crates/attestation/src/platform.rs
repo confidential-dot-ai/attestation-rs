@@ -34,27 +34,27 @@ use crate::platforms::tdx::{TdxParams, TdxResult};
 #[cfg(feature = "nvidia-gpu")]
 use crate::types::{NvidiaGpuParams, NvidiaGpuResult};
 
-/// One TEE platform: its evidence, what a caller can ask of it, the
-/// collateral it needs, and what it answers.
+/// One TEE platform: its evidence, what a caller can ask of it, its
+/// collateral set, and what it answers.
 pub trait Platform {
     const KIND: PlatformType;
     type Evidence: DeserializeOwned + Sync;
     type Params: Default + Sync;
     type Result: Serialize;
-    type Collateral: Send + Sync;
+    type CollateralSet: Send + Sync;
 
     /// Reject params that cannot be applied. Runs before any collateral is
     /// fetched, so caller misuse is never reported as a retryable error.
     fn validate(params: &Self::Params) -> Result<()>;
 
-    /// Get the collateral `evidence` needs from `store`, at `now` (Unix
+    /// Get the collateral set for `evidence` from `store`, at `now` (Unix
     /// seconds), and what the verdict should say about each piece. Checks
     /// that need no collateral run first; the store is the only I/O.
     fn gather(
         evidence: &Self::Evidence,
         store: &Store,
         now: i64,
-    ) -> impl Future<Output = Result<(Self::Collateral, Vec<CollateralUsed>)>> + Send;
+    ) -> impl Future<Output = Result<(Self::CollateralSet, Vec<CollateralUsed>)>> + Send;
 
     /// Verify `evidence` and evaluate every rule in `params`, at `now` (Unix
     /// seconds). Pure: no network, no cache, no clock.
@@ -64,7 +64,7 @@ pub trait Platform {
     fn verify(
         evidence: &Self::Evidence,
         params: &Self::Params,
-        collateral: &Self::Collateral,
+        collateral: &Self::CollateralSet,
         now: i64,
     ) -> Result<Self::Result>;
 }

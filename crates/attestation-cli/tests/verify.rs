@@ -18,10 +18,8 @@ fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
-    let url = attestation::collateral::AmdCrl::url(
-        attestation::ProcessorGeneration::Genoa,
-        attestation::collateral::AmdSigner::Ask,
-    );
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral};
+    let url = AmdCrl::url(&(attestation::ProcessorGeneration::Genoa, AmdKey::Vcek));
     attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &url, GENOA_CRL, None);
     let path = dir.join("evidence.json");
     std::fs::write(&path, evidence.to_string()).unwrap();

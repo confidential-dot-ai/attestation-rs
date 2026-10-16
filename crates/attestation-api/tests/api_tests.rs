@@ -48,20 +48,20 @@ fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
     let held = vec![
         tcb_info("50806f000000"),
         tcb_info("00806f050000"),
-        held(QeIdentity::url(), "td_qe_identity.json", signing),
+        held(QeIdentity::url(&()), "td_qe_identity.json", signing),
         held(
-            PckCrl::url(PckCa::Platform),
+            PckCrl::url(&PckCa::Platform),
             "pck_crl_platform.der",
             Some("pck_crl_platform_chain.pem"),
         ),
         held(
-            PckCrl::url(PckCa::Processor),
+            PckCrl::url(&PckCa::Processor),
             "pck_crl_processor.pem",
             Some("pck_crl_processor_chain.pem"),
         ),
-        held(RootCrl::url(), "root_ca_crl.der", None),
+        held(RootCrl::url(&()), "root_ca_crl.der", None),
         (
-            GceEndorsement::url(GceTee::Tdx, &mrtd),
+            GceEndorsement::url(&(attestation::PlatformType::GcpTdx, mrtd)),
             endorsement_body.to_vec(),
             None,
         ),

@@ -23,12 +23,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
+use crate::collateral::{CollateralUsed, GceEndorsement, Store};
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::tdx::evidence::TdxEvidence;
-use crate::platforms::tdx::verify::{genuine_quote, TdxCollateral};
+use crate::platforms::tdx::verify::{genuine_quote, TdxCollateralSet};
 use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
 use crate::types::PlatformType;
 
@@ -75,7 +75,7 @@ impl Platform for GcpTdx {
     type Evidence = TdxEvidence;
     type Params = GcpTdxParams;
     type Result = GcpTdxResult;
-    type Collateral = GcpTdxCollateral;
+    type CollateralSet = GcpTdxCollateralSet;
 
     fn validate(params: &GcpTdxParams) -> Result<()> {
         Tdx::validate(&params.tdx)
@@ -87,24 +87,25 @@ impl Platform for GcpTdx {
         evidence: &TdxEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(GcpTdxCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(GcpTdxCollateralSet, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
+        let mrtd = (Self::KIND, quote.body.mr_td.to_vec());
         let (tdx, endorsement) = futures_util::join!(
-            TdxCollateral::gather(&quote_bytes, &quote, store, now),
-            store.gce_endorsement(GceTee::Tdx, &quote.body.mr_td, now)
+            TdxCollateralSet::gather(&quote_bytes, &quote, store, now),
+            store.get_if_published::<GceEndorsement>(&mrtd, now)
         );
         let (tdx, mut used) = tdx?;
         let endorsement = endorsement?.map(|(endorsement, u)| {
             used.push(u);
             endorsement
         });
-        Ok((GcpTdxCollateral { tdx, endorsement }, used))
+        Ok((GcpTdxCollateralSet { tdx, endorsement }, used))
     }
 
     fn verify(
         evidence: &TdxEvidence,
         params: &GcpTdxParams,
-        collateral: &GcpTdxCollateral,
+        collateral: &GcpTdxCollateralSet,
         now: i64,
     ) -> Result<GcpTdxResult> {
         let tdx = Tdx::verify(evidence, &params.tdx, &collateral.tdx, now)?;
@@ -121,11 +122,11 @@ impl Platform for GcpTdx {
     }
 }
 
-/// What GcpTdx verification needs: the Tdx collateral and Google's launch
+/// The GcpTdx collateral set: the Tdx collateral set and Google's launch
 /// endorsement for the firmware (`None` when Google publishes none for the
 /// measurement).
-pub struct GcpTdxCollateral {
-    pub tdx: TdxCollateral,
+pub struct GcpTdxCollateralSet {
+    pub tdx: TdxCollateralSet,
     pub endorsement: Option<GceEndorsement>,
 }
 
@@ -154,7 +155,10 @@ mod tests {
 
     async fn verify(endorsement: &[u8], params: &GcpTdxParams) -> Result<GcpTdxResult> {
         let mrtd = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body.mr_td;
-        let url = GceEndorsement::url(GceTee::Tdx, &mrtd);
+        let url = <GceEndorsement as crate::collateral::Collateral>::url(&(
+            PlatformType::GcpTdx,
+            mrtd.to_vec(),
+        ));
         let mut held = testing::intel();
         held.push((url, endorsement.to_vec(), None));
         testing::verify::<GcpTdx>(&evidence(), params, held).await
@@ -192,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn without_an_endorsement_the_firmware_is_not_endorsed() {
         let ctx = testing::context(testing::intel());
-        let collateral = GcpTdxCollateral {
+        let collateral = GcpTdxCollateralSet {
             tdx: Tdx::gather(&evidence(), ctx.store(), testing::NOW)
                 .await
                 .unwrap()

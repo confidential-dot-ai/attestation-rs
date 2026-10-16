@@ -458,16 +458,16 @@ impl TdxResult {
     }
 }
 
-/// What TDX verification needs besides the evidence: Intel's collateral for
+/// The TDX collateral set: Intel's collateral for
 /// the quote's platform.
-pub struct TdxCollateral {
+pub struct TdxCollateralSet {
     pub tcb_info: TcbInfo,
     pub qe_identity: QeIdentity,
     pub pck_crl: PckCrl,
     pub root_crl: RootCrl,
 }
 
-impl TdxCollateral {
+impl TdxCollateralSet {
     /// Gather the collateral for a quote whose signature and PCK chain have
     /// already been verified.
     pub(crate) async fn gather(
@@ -478,10 +478,10 @@ impl TdxCollateral {
     ) -> Result<(Self, Vec<CollateralUsed>)> {
         let pck = PckChain::of(quote_bytes, quote)?;
         let (tcb_info, qe_identity, pck_crl, root_crl) = futures_util::join!(
-            store.tcb_info(&pck.fmspc, now),
-            store.qe_identity(now),
-            store.pck_crl(pck.ca, now),
-            store.root_crl(now)
+            store.get::<TcbInfo>(&pck.fmspc, now),
+            store.get::<QeIdentity>(&(), now),
+            store.get::<PckCrl>(&pck.ca, now),
+            store.get::<RootCrl>(&(), now)
         );
         let ((tcb_info, u1), (qe_identity, u2), (pck_crl, u3), (root_crl, u4)) =
             (tcb_info?, qe_identity?, pck_crl?, root_crl?);
@@ -523,7 +523,7 @@ impl Platform for Tdx {
     type Evidence = TdxEvidence;
     type Params = TdxParams;
     type Result = TdxResult;
-    type Collateral = TdxCollateral;
+    type CollateralSet = TdxCollateralSet;
 
     fn validate(params: &TdxParams) -> Result<()> {
         params.validate()
@@ -535,15 +535,15 @@ impl Platform for Tdx {
         evidence: &TdxEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(TdxCollateralSet, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
-        TdxCollateral::gather(&quote_bytes, &quote, store, now).await
+        TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await
     }
 
     fn verify(
         evidence: &TdxEvidence,
         params: &TdxParams,
-        collateral: &TdxCollateral,
+        collateral: &TdxCollateralSet,
         now: i64,
     ) -> Result<TdxResult> {
         params.validate()?;
@@ -657,7 +657,7 @@ pub(crate) fn check_collateral(
     quote_bytes: &[u8],
     quote: &TdxQuote,
     params: &TdxParams,
-    collateral: &TdxCollateral,
+    collateral: &TdxCollateralSet,
     now: i64,
 ) -> Result<()> {
     let pck = PckChain::of(quote_bytes, quote)?;

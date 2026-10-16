@@ -1,7 +1,7 @@
-//! Collateral: the vendor-signed pieces a verifier needs besides the
-//! evidence. Each piece is a plain type with `url(..)`, where the vendor
-//! publishes it, and `verify(..)`: parse, check the signature against the
-//! vendor roots compiled into this crate, and check that it is the piece the
+//! Collateral: the vendor-signed pieces a verifier uses besides the
+//! evidence. Each piece implements [`Collateral`]: `url`, where the vendor
+//! publishes it, and `verify`: parse, check the signature against the vendor
+//! roots compiled into this crate, and check that it is the piece the
 //! evidence names. The [`Store`] gets pieces from held copies, memory, disk
 //! and the vendors, and verifies each on the way in.
 
@@ -41,36 +41,73 @@ pub use intel::{PckCrl, QeIdentity, RootCrl, TcbInfo};
 pub use nvidia::NrasJwks;
 pub use store::{CollateralUsed, Source, Store};
 
-/// Why a piece of collateral was refused: it does not parse, its signature
-/// does not verify, or it is not the piece the evidence names.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct Refused(pub String);
+use crate::error::Result;
 
-impl From<crate::error::AttestationError> for Refused {
-    fn from(e: crate::error::AttestationError) -> Self {
-        Self(e.to_string())
+/// One piece of vendor-signed collateral: something we download, check
+/// against the vendor's compiled-in roots, and that carries its own validity
+/// dates.
+pub trait Collateral: Sized {
+    /// What picks the right piece: the FMSPC for TCB Info, the PCK CA for a
+    /// PCK CRL, chip and TCB for a VCEK, `()` when there is only one.
+    type Id;
+    /// A vendor 404 for this piece means the evidence names something the
+    /// vendor never issued, so the evidence is refused rather than retried.
+    const NAMED_BY_EVIDENCE: bool = false;
+    /// How a verdict names the piece, for example `tcb-info 70a06d070000`.
+    fn name(id: &Self::Id) -> String;
+    /// Where the vendor publishes it.
+    fn url(id: &Self::Id) -> String;
+    /// Parse `bytes`, check the signature against the compiled-in roots (via
+    /// `issuer_chain` where the vendor sends one), and check that it is the
+    /// piece `id` names.
+    fn verify(bytes: &[u8], issuer_chain: Option<&str>, id: &Self::Id) -> Result<Self>;
+    fn dates(&self) -> Dates;
+}
+
+/// A piece's own validity window and version, in Unix seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dates {
+    /// thisUpdate, issueDate, or notBefore.
+    pub this_update: Option<i64>,
+    /// nextUpdate, or notAfter. `None` when the piece does not expire.
+    pub next_update: Option<i64>,
+    /// CRL Number or tcbEvaluationDataNumber.
+    pub version: Option<u64>,
+}
+
+impl Dates {
+    pub fn window(this_update: i64, next_update: i64, version: Option<u64>) -> Self {
+        Self {
+            this_update: Some(this_update),
+            next_update: Some(next_update),
+            version,
+        }
+    }
+
+    /// True when `now` is inside the window.
+    pub fn current(&self, now: i64) -> bool {
+        !self.this_update.is_some_and(|t| now < t) && !self.next_update.is_some_and(|t| now > t)
     }
 }
 
-impl From<String> for Refused {
-    fn from(why: String) -> Self {
-        Self(why)
-    }
-}
-
-impl From<&str> for Refused {
-    fn from(why: &str) -> Self {
-        Self(why.into())
-    }
+/// A piece that does not verify: the evidence is not genuine.
+#[cfg(any(
+    feature = "snp",
+    feature = "tdx",
+    feature = "gcp-tdx",
+    feature = "gcp-snp",
+    feature = "nvidia-gpu"
+))]
+pub(crate) fn refused(why: impl std::fmt::Display) -> crate::error::AttestationError {
+    crate::error::AttestationError::CertChainError(why.to_string())
 }
 
 /// AMD signs one CRL per generation for the certificates its ARK issues, at
-/// two paths: for VCEKs (ASK) and for VLEKs (ASVK).
+/// two paths: the CRL for VCEKs and the CRL for VLEKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AmdSigner {
-    Ask,
-    Asvk,
+pub enum AmdKey {
+    Vcek,
+    Vlek,
 }
 
 /// The Intel CA that issued a PCK certificate.
@@ -89,13 +126,6 @@ impl PckCa {
     }
 }
 
-/// The TEE a GCE launch endorsement is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GceTee {
-    Tdx,
-    SevSnp,
-}
-
 /// An Intel platform's FMSPC (Family-Model-Stepping-Platform-CustomSKU).
 pub type Fmspc = [u8; 6];
 
@@ -108,40 +138,11 @@ pub(crate) fn crl_number(
     (bytes.len() <= 8).then(|| bytes.iter().fold(0u64, |n, b| n << 8 | u64::from(*b)))
 }
 
-/// A piece's own validity window and version, in Unix seconds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Dates {
-    /// thisUpdate, issueDate, or notBefore.
-    pub this_update: Option<i64>,
-    /// nextUpdate, or notAfter. `None` when the piece does not expire.
-    pub next_update: Option<i64>,
-    /// CRL Number or tcbEvaluationDataNumber.
-    pub version: Option<u64>,
-}
-
 impl Dates {
-    #[cfg(any(
-        feature = "snp",
-        feature = "tdx",
-        feature = "gcp-tdx",
-        feature = "gcp-snp"
-    ))]
-    pub fn window(this_update: i64, next_update: i64, version: Option<u64>) -> Self {
-        Self {
-            this_update: Some(this_update),
-            next_update: Some(next_update),
-            version,
-        }
-    }
-
-    pub fn current(&self, now: i64) -> bool {
-        !self.this_update.is_some_and(|t| now < t) && !self.next_update.is_some_and(|t| now > t)
-    }
-
     /// True unless `self` is an older issue than `other`: a lower version,
     /// or the same version issued earlier.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn not_older_than(&self, other: &Dates) -> bool {
+    pub(crate) fn not_older_than(&self, other: &Dates) -> bool {
         (self.version, self.this_update) >= (other.version, other.this_update)
     }
 }

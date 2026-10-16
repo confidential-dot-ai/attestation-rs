@@ -1,5 +1,5 @@
 //! The verifier for browsers and other JS runtimes. WASM does no network or
-//! disk I/O, so the caller fetches the vendor URLs the evidence needs
+//! disk I/O, so the caller fetches the vendor URLs for the evidence
 //! ([`collateral_needed`]) and hands the responses to [`evaluate`], which
 //! verifies each piece of collateral exactly as the native verifier does.
 
