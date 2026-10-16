@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
 
     // One collateral store for the process: every piece is fetched once,
     // checked, and kept until a newer one replaces it.
-    let gpu_url = resolve_nras_gpu_url(&config.certs);
-    let switch_url = resolve_nras_switch_url(&config.certs);
+    let gpu_url = resolve_nras_gpu_url(&config.nras);
+    let switch_url = resolve_nras_switch_url(&config.nras);
     tracing::info!(gpu = %gpu_url, switch = %switch_url, "configured NRAS endpoints");
     let ctx = attestation::Context::new().with_nras_urls(gpu_url, switch_url);
     #[cfg(feature = "test-vendor")]

@@ -20,9 +20,9 @@ pub fn normalize_platform(name: &str) -> Option<&'static str> {
 ///
 /// Priority: config-file value (if non-empty) > `NV_NRAS_GPU_URL` env var >
 /// library default.
-pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
-    if !certs.nras_gpu_url.is_empty() {
-        return certs.nras_gpu_url.clone();
+pub fn resolve_nras_gpu_url(nras: &NrasConfig) -> String {
+    if !nras.gpu_url.is_empty() {
+        return nras.gpu_url.clone();
     }
     std::env::var("NV_NRAS_GPU_URL")
         .unwrap_or_else(|_| attestation::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string())
@@ -32,9 +32,9 @@ pub fn resolve_nras_gpu_url(certs: &CertsConfig) -> String {
 ///
 /// Priority: config-file value (if non-empty) > `NV_NRAS_SWITCH_URL` env var >
 /// library default.
-pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
-    if !certs.nras_switch_url.is_empty() {
-        return certs.nras_switch_url.clone();
+pub fn resolve_nras_switch_url(nras: &NrasConfig) -> String {
+    if !nras.switch_url.is_empty() {
+        return nras.switch_url.clone();
     }
     std::env::var("NV_NRAS_SWITCH_URL").unwrap_or_else(|_| {
         attestation::platforms::nvidia_gpu::provider::NRAS_SWITCH_URL.to_string()
@@ -46,7 +46,7 @@ pub fn resolve_nras_switch_url(certs: &CertsConfig) -> String {
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
-    pub certs: CertsConfig,
+    pub nras: NrasConfig,
     pub token: TokenConfig,
     pub attestation: AttestationConfig,
 }
@@ -82,15 +82,13 @@ impl fmt::Debug for AuthConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct CertsConfig {
-    /// Override the NRAS GPU endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/gpu`, honoring
-    /// `NV_NRAS_GPU_URL` env var) when empty.
-    pub nras_gpu_url: String,
-    /// Override the NRAS switch endpoint. Falls back to library default
-    /// (`https://nras.attestation.nvidia.com/v3/attest/switch`, honoring
-    /// `NV_NRAS_SWITCH_URL` env var) when empty.
-    pub nras_switch_url: String,
+pub struct NrasConfig {
+    /// NVIDIA's GPU attestation endpoint. Empty: `NV_NRAS_GPU_URL`, else
+    /// `https://nras.attestation.nvidia.com/v3/attest/gpu`.
+    pub gpu_url: String,
+    /// NVIDIA's switch attestation endpoint. Empty: `NV_NRAS_SWITCH_URL`, else
+    /// `https://nras.attestation.nvidia.com/v3/attest/switch`.
+    pub switch_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -269,17 +267,22 @@ mod tests {
     #[test]
     fn unknown_keys_are_refused_and_the_example_config_loads() {
         let dir = tempfile::tempdir().unwrap();
-        for (section, key) in [
-            ("certs", "vcek_ttl_hours = 24"),
-            ("certs", "skip_snp_crl = true"),
-            ("certs", "local_collateral_dir = \"/var/cache\""),
-            ("server", "bnd = \"0.0.0.0:8400\""),
+        let path = dir.path().join("config.toml");
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            Config::load(&path)
+        };
+        for section in ["nras", "server"] {
+            load(&format!("[{section}]\n")).expect("the section alone loads");
+        }
+        for refused in [
+            "[certs]\n",
+            "[certs]\nnras_gpu_url = \"https://nras.example\"\n",
+            "[certs]\ncache_max_entries = 1024\n",
+            "[nras]\nnras_gpu_url = \"https://nras.example\"\n",
+            "[server]\nbnd = \"0.0.0.0:8400\"\n",
         ] {
-            let path = dir.path().join("config.toml");
-            std::fs::write(&path, format!("[{section}]\n")).unwrap();
-            Config::load(&path).expect("the section alone loads");
-            std::fs::write(&path, format!("[{section}]\n{key}\n")).unwrap();
-            assert!(Config::load(&path).is_err(), "{key} must be refused");
+            assert!(load(refused).is_err(), "{refused} must be refused");
         }
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         Config::load(&example).unwrap().validate().unwrap();

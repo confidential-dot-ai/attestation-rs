@@ -55,9 +55,9 @@ key_path = ""
 [auth]
 api_keys = []                   # Bearer tokens; empty = no auth (warning logged)
 
-[certs]
-nras_gpu_url = ""               # Empty = NV_NRAS_GPU_URL, else NVIDIA's endpoint
-nras_switch_url = ""
+[nras]
+gpu_url = ""                    # Empty = NV_NRAS_GPU_URL, else NVIDIA's endpoint
+switch_url = ""
 
 [token]
 enabled = false
