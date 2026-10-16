@@ -16,10 +16,8 @@ const AT: &str = "1792108800";
 
 /// AMD's Genoa CRL, as the vendor response for its URL.
 fn genoa_crl() -> attestation::HeldResponse {
-    let url = attestation::collateral::AmdCrl::url(
-        attestation::ProcessorGeneration::Genoa,
-        attestation::collateral::AmdSigner::Ask,
-    );
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral};
+    let url = AmdCrl::url(&(attestation::ProcessorGeneration::Genoa, AmdKey::Vcek));
     (url, GENOA_CRL.to_vec(), None)
 }
 

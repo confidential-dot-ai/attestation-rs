@@ -7,25 +7,12 @@
 //! replaces it; a failed refetch keeps the old copy.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "nvidia-gpu")]
-use super::NrasJwks;
-#[cfg(feature = "snp")]
-use super::{AmdCrl, AmdSigner, Vcek};
-use super::{Dates, Refused};
-#[cfg(feature = "tdx")]
-use super::{Fmspc, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
-#[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
-use super::{GceEndorsement, GceTee};
+use super::{Collateral, Dates};
 use crate::error::{AttestationError, Result, Unavailable};
-#[cfg(feature = "snp")]
-use crate::types::{ProcessorGeneration as Gen, SnpTcb};
-
-/// A piece and what the verdict should say about it.
-type Got<T> = Result<(T, CollateralUsed)>;
 
 /// Where a piece of collateral used for a verdict came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,26 +53,9 @@ impl CollateralUsed {
     }
 }
 
-/// What the store knows about a piece before it has it.
-#[derive(Clone)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-struct Spec {
-    url: String,
-    name: String,
-    /// The evidence names it: a vendor 404 means the evidence is at fault.
-    named_by_evidence: bool,
-    verify: VerifyFn,
-}
-
-/// A piece's `verify` with its identity bound: body and issuer chain in,
-/// dates out.
-type VerifyFn =
-    Arc<dyn Fn(&[u8], Option<&str>) -> std::result::Result<Dates, Refused> + Send + Sync>;
-
 #[derive(Clone)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct Entry {
-    spec: Spec,
     body: Vec<u8>,
     issuer_chain: Option<String>,
     dates: Dates,
@@ -97,10 +67,18 @@ struct Entry {
 #[derive(Clone)]
 enum Failure {
     Unavailable(Unavailable),
-    Refused(Refused),
+    /// Why the piece does not verify.
+    Refused(String),
 }
 
 impl Failure {
+    fn refused(e: AttestationError) -> Self {
+        Failure::Refused(match e {
+            AttestationError::CertChainError(why) => why,
+            e => e.to_string(),
+        })
+    }
+
     fn into_error(self, name: &str) -> AttestationError {
         match self {
             Failure::Unavailable(e) => e.into_error(name),
@@ -112,15 +90,16 @@ impl Failure {
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn check(
-    spec: &Spec,
+fn check<C: Collateral>(
+    id: &C::Id,
     body: Vec<u8>,
     issuer_chain: Option<String>,
     origin: Source,
 ) -> std::result::Result<Entry, Failure> {
-    let dates = (spec.verify)(&body, issuer_chain.as_deref()).map_err(Failure::Refused)?;
+    let dates = C::verify(&body, issuer_chain.as_deref(), id)
+        .map_err(Failure::refused)?
+        .dates();
     Ok(Entry {
-        spec: spec.clone(),
         body,
         issuer_chain,
         dates,
@@ -164,193 +143,93 @@ impl Store {
             .clone()
     }
 
-    /// The piece at `url`, verified with `verify`, and what the verdict
-    /// should say about it at `now` (Unix seconds); `dates` reads its window
-    /// and version. For `named_by_evidence` see [`Spec`]. A copy that does
-    /// not verify is refused when no good copy exists.
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    async fn get<T: 'static>(
+    /// The piece `id` names, verified, and what the verdict should say about
+    /// it at `now` (Unix seconds). A copy that does not verify is refused
+    /// when no good copy exists.
+    pub async fn get<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<(C, CollateralUsed)> {
+        self.lookup(id, now)
+            .await
+            .map_err(|e| e.into_error(&C::name(id)))
+    }
+
+    /// As [`Self::get`], but `None` when the vendor publishes no such piece
+    /// (a GCE endorsement for a measurement Google never built).
+    #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
+    pub(crate) async fn get_if_published<C: Collateral>(
         &self,
-        url: String,
-        name: &str,
-        named_by_evidence: bool,
+        id: &C::Id,
         now: i64,
-        verify: impl Fn(&[u8], Option<&str>) -> std::result::Result<T, Refused>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        dates: fn(&T) -> Dates,
-    ) -> std::result::Result<(T, CollateralUsed), Failure> {
+    ) -> Result<Option<(C, CollateralUsed)>> {
+        match self.lookup(id, now).await {
+            Ok(got) => Ok(Some(got)),
+            Err(Failure::Unavailable(e)) if e.not_found() => Ok(None),
+            Err(e) => Err(e.into_error(&C::name(id))),
+        }
+    }
+
+    async fn lookup<C: Collateral>(
+        &self,
+        id: &C::Id,
+        now: i64,
+    ) -> std::result::Result<(C, CollateralUsed), Failure> {
+        let url = C::url(id);
         let (body, chain, from) = match self.held.get(&url) {
             Some((body, chain)) => (body.clone(), chain.clone(), Source::Held),
             None => {
-                let spec = Spec {
-                    url,
-                    name: name.to_string(),
-                    named_by_evidence,
-                    verify: Arc::new({
-                        let verify = verify.clone();
-                        move |body, chain| verify(body, chain).map(|p| dates(&p))
-                    }),
-                };
-                let (entry, from) = self.load(spec, now).await?;
+                let (entry, from) = self.load::<C>(url, id, now).await?;
                 (entry.body, entry.issuer_chain, from)
             }
         };
-        let piece = verify(&body, chain.as_deref()).map_err(Failure::Refused)?;
-        let used = CollateralUsed::new(name.to_string(), from, dates(&piece), now);
+        let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
+        let used = CollateralUsed::new(C::name(id), from, piece.dates(), now);
         Ok((piece, used))
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    async fn load(&self, spec: Spec, now: i64) -> std::result::Result<(Entry, Source), Failure> {
+    async fn load<C: Collateral>(
+        &self,
+        url: String,
+        id: &C::Id,
+        now: i64,
+    ) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            return native.entry(spec, now).await;
+            return native.entry::<C>(url, id, now).await;
         }
         let mut missing = self.missing.lock().unwrap_or_else(|e| e.into_inner());
-        if !missing.contains(&spec.url) {
-            missing.push(spec.url);
+        if !missing.contains(&url) {
+            missing.push(url);
         }
         Err(Failure::Unavailable(Unavailable::offline()))
     }
 
-    /// The VCEK for a chip at a TCB.
-    #[cfg(feature = "snp")]
-    pub async fn vcek(&self, gen: Gen, chip_id: &[u8; 64], tcb: &SnpTcb, now: i64) -> Got<Vcek> {
-        let (chip_id, tcb) = (*chip_id, *tcb);
-        let name = format!("vcek {gen:?} {}", hex::encode(&chip_id[..8])).to_lowercase();
-        let verify = move |b: &[u8], _: Option<&str>| Vcek::verify(b, gen, &chip_id, &tcb);
-        let url = Vcek::url(gen, &chip_id, &tcb);
-        let dates = |v: &Vcek| Dates::window(v.not_before, v.not_after, None);
-        self.get(url, &name, true, now, verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// AMD's CRL for a generation and signer.
-    #[cfg(feature = "snp")]
-    pub async fn amd_crl(&self, gen: Gen, signer: AmdSigner, now: i64) -> Got<AmdCrl> {
-        let vlek = if signer == AmdSigner::Asvk {
-            " vlek"
-        } else {
-            ""
-        };
-        let name = format!("amd-crl {gen:?}{vlek}").to_lowercase();
-        let verify = move |b: &[u8], _: Option<&str>| AmdCrl::verify(b, gen, signer);
-        let url = AmdCrl::url(gen, signer);
-        let dates = |c: &AmdCrl| Dates::window(c.this_update, c.next_update, c.number);
-        self.get(url, &name, false, now, verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// Intel's TCB Info for a platform.
-    #[cfg(feature = "tdx")]
-    pub async fn tcb_info(&self, fmspc: &Fmspc, now: i64) -> Got<TcbInfo> {
-        let fmspc = *fmspc;
-        let name = format!("tcb-info {}", hex::encode(fmspc));
-        let verify = move |b: &[u8], c: Option<&str>| TcbInfo::verify(b, c, &fmspc);
-        let url = TcbInfo::url(&fmspc);
-        let dates =
-            |t: &TcbInfo| Dates::window(t.issue_date, t.next_update, Some(t.evaluation_number));
-        self.get(url, &name, true, now, verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// Intel's TD QE Identity.
-    #[cfg(feature = "tdx")]
-    pub async fn qe_identity(&self, now: i64) -> Got<QeIdentity> {
-        let (url, name) = (QeIdentity::url(), String::from("qe-identity"));
-        let dates =
-            |q: &QeIdentity| Dates::window(q.issue_date, q.next_update, Some(q.evaluation_number));
-        self.get(url, &name, false, now, QeIdentity::verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// The CRL of an Intel PCK CA.
-    #[cfg(feature = "tdx")]
-    pub async fn pck_crl(&self, ca: PckCa, now: i64) -> Got<PckCrl> {
-        let (url, name) = (PckCrl::url(ca), format!("pck-crl {}", ca.name()));
-        let verify = move |b: &[u8], c: Option<&str>| PckCrl::verify(b, c, ca);
-        let dates = |c: &PckCrl| Dates::window(c.this_update, c.next_update, c.number);
-        self.get(url, &name, false, now, verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// The CRL of the Intel SGX Root CA.
-    #[cfg(feature = "tdx")]
-    pub async fn root_crl(&self, now: i64) -> Got<RootCrl> {
-        let (url, name) = (RootCrl::url(), String::from("root-crl"));
-        let verify = |b: &[u8], _: Option<&str>| RootCrl::verify(b);
-        let dates = |c: &RootCrl| Dates::window(c.this_update, c.next_update, c.number);
-        self.get(url, &name, false, now, verify, dates)
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    /// Google's endorsement of a GCE firmware build; `None` when Google
-    /// publishes none for the measurement.
-    #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
-    pub async fn gce_endorsement(
-        &self,
-        tee: GceTee,
-        m: &[u8],
-        now: i64,
-    ) -> Result<Option<(GceEndorsement, CollateralUsed)>> {
-        let (url, m) = (GceEndorsement::url(tee, m), m.to_vec());
-        let name = format!(
-            "gce-endorsement {tee:?} {}",
-            hex::encode(&m[..m.len().min(8)])
-        );
-        let name = name.to_lowercase();
-        let verify = move |b: &[u8], _: Option<&str>| GceEndorsement::verify(b, tee, &m);
-        let dates = |e: &GceEndorsement| Dates::window(e.not_before, e.not_after, None);
-        match self.get(url, &name, false, now, verify, dates).await {
-            Ok(got) => Ok(Some(got)),
-            Err(Failure::Unavailable(e)) if e.not_found() => Ok(None),
-            Err(e) => Err(e.into_error(&name)),
-        }
-    }
-
-    /// The keys NRAS signs its tokens with.
+    /// The NRAS URL the key set is published next to.
     #[cfg(feature = "nvidia-gpu")]
-    pub async fn nras_jwks(&self, now: i64) -> Got<NrasJwks> {
-        let (url, name) = (self.nras_jwks_url(), String::from("nras-jwks"));
-        let verify = |b: &[u8], _: Option<&str>| NrasJwks::verify(b);
-        self.get(url, &name, false, now, verify, |_| Dates::default())
-            .await
-            .map_err(|e| e.into_error(&name))
-    }
-
-    #[cfg(feature = "nvidia-gpu")]
-    pub(crate) fn nras_jwks_url(&self) -> String {
+    pub(crate) fn nras_url(&self) -> String {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(vendor) = self.vendor() {
-            return NrasJwks::url(&vendor.nras.gpu_url);
+            return vendor.nras.gpu_url.clone();
         }
-        NrasJwks::url(crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL)
+        crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL.to_string()
     }
 
-    /// Refetch the piece at `url` (the NRAS key set when a token names an
+    /// Refetch the piece `id` names (the NRAS key set when a token names an
     /// unknown key), unless it was checked with the vendor in the last few
-    /// minutes; replace the copy in memory only with a valid
-    /// copy that is not older. `Err` says why the refetch failed (the old
-    /// copy, if any, is kept). A piece not in memory is left alone.
+    /// minutes; replace the copy in memory only with a valid copy that is
+    /// not older. `Err` says why the refetch failed (the old copy, if any,
+    /// is kept). A piece not in memory is left alone.
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    pub async fn refresh(&self, url: &str, now: i64) -> Result<()> {
+    pub async fn refresh<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            return match native.refresh_url(url, true, now).await {
-                Some((name, e)) => Err(e.into_error(&name)),
-                None => Ok(()),
-            };
+            let url = C::url(id);
+            if native.mem.contains_key(&url) {
+                let (_, _, failure) = native.refresh::<C>(&url, id, true, now).await;
+                return failure.map_or(Ok(()), |e| Err(e.into_error(&C::name(id))));
+            }
+            return Ok(());
         }
-        Err(Failure::Unavailable(Unavailable::offline()).into_error(url))
+        Err(Failure::Unavailable(Unavailable::offline()).into_error(&C::name(id)))
     }
 }
 
@@ -427,14 +306,15 @@ mod native {
                     })
         }
 
-        pub(super) async fn entry(
+        pub(super) async fn entry<C: Collateral>(
             &self,
-            spec: Spec,
+            url: String,
+            id: &C::Id,
             now: i64,
         ) -> std::result::Result<(Entry, Source), Failure> {
-            match self.mem.get(&spec.url).await {
+            match self.mem.get(&url).await {
                 Some(entry) if self.due(&entry, now, false) => {
-                    let (held, replaced, _) = self.refresh(&spec, false, now).await;
+                    let (held, replaced, _) = self.refresh::<C>(&url, id, false, now).await;
                     let source = if replaced {
                         Source::Vendor
                     } else {
@@ -445,7 +325,7 @@ mod native {
                 Some(entry) => Ok((entry, Source::Memory)),
                 None => self
                     .mem
-                    .try_get_with(spec.url.clone(), self.load(&spec, now))
+                    .try_get_with(url.clone(), self.load::<C>(&url, id, now))
                     .await
                     .map(|e| {
                         let origin = e.origin;
@@ -455,50 +335,53 @@ mod native {
             }
         }
 
-        async fn fetch(&self, spec: &Spec) -> std::result::Result<Entry, Failure> {
+        async fn fetch<C: Collateral>(
+            &self,
+            url: &str,
+            id: &C::Id,
+        ) -> std::result::Result<Entry, Failure> {
             let vendor = self
                 .vendor
                 .as_ref()
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
-            let (body, chain) = vendor.fetch(&spec.url).await.map_err(|e| match e {
+            let (body, chain) = vendor.fetch(url).await.map_err(|e| match e {
                 // The vendor does not know the chip or platform the evidence
                 // names: the evidence is at fault, retrying will not help.
-                e if spec.named_by_evidence && (e.not_found() || e.status == Some(400)) => {
-                    Failure::Refused(Refused(format!(
-                        "the vendor does not publish it ({})",
-                        e.detail
-                    )))
+                e if C::NAMED_BY_EVIDENCE && (e.not_found() || e.status == Some(400)) => {
+                    Failure::Refused(format!("the vendor does not publish it ({})", e.detail))
                 }
                 e => Failure::Unavailable(e),
             })?;
-            check(spec, body, chain, Source::Vendor)
+            check::<C>(id, body, chain, Source::Vendor)
         }
 
-        fn store(&self, entry: &Entry) {
+        fn store(&self, url: &str, entry: &Entry) {
             if let Some(disk) = &self.disk {
-                disk.write(&entry.spec.url, &entry.body, entry.issuer_chain.as_deref());
+                disk.write(url, &entry.body, entry.issuer_chain.as_deref());
             }
         }
 
         /// A miss: the disk copy if it is current, else the vendor's, else
         /// the disk copy anyway.
-        async fn load(&self, spec: &Spec, now: i64) -> std::result::Result<Entry, Failure> {
+        async fn load<C: Collateral>(
+            &self,
+            url: &str,
+            id: &C::Id,
+            now: i64,
+        ) -> std::result::Result<Entry, Failure> {
             let on_disk =
-                self.disk
-                    .as_ref()
-                    .and_then(|d| d.read(&spec.url))
-                    .and_then(
-                        |(body, chain)| match check(spec, body, chain, Source::Disk) {
-                            Ok(e) => Some(e),
-                            Err(_) => {
-                                log::warn!(
-                                    "collateral cache: ignoring {}: it does not verify",
-                                    spec.name
-                                );
-                                None
-                            }
-                        },
-                    );
+                self.disk.as_ref().and_then(|d| d.read(url)).and_then(
+                    |(body, chain)| match check::<C>(id, body, chain, Source::Disk) {
+                        Ok(e) => Some(e),
+                        Err(_) => {
+                            log::warn!(
+                                "collateral cache: ignoring {}: it does not verify",
+                                C::name(id)
+                            );
+                            None
+                        }
+                    },
+                );
             // A current disk copy is served as is: a process that only loads
             // (the CLI) would otherwise ask the vendor on every run near
             // nextUpdate. Refresh-ahead applies once it is in memory.
@@ -507,10 +390,10 @@ mod native {
                     return Ok(e.clone());
                 }
             }
-            match (self.fetch(spec).await, on_disk) {
+            match (self.fetch::<C>(url, id).await, on_disk) {
                 (Ok(new), Some(old)) if !new.dates.not_older_than(&old.dates) => Ok(old),
                 (Ok(new), _) => {
-                    self.store(&new);
+                    self.store(url, &new);
                     Ok(new)
                 }
                 (Err(_), Some(old)) => Ok(old),
@@ -518,26 +401,14 @@ mod native {
             }
         }
 
-        /// [`Self::refresh`] the piece in memory at `url`. Returns its name
-        /// and why the fetch failed, if it did.
-        pub(super) async fn refresh_url(
-            &self,
-            url: &str,
-            force: bool,
-            now: i64,
-        ) -> Option<(String, Failure)> {
-            let spec = self.mem.get(url).await?.spec;
-            let (_, _, failure) = self.refresh(&spec, force, now).await;
-            failure.map(|f| (spec.name, f))
-        }
-
         /// Refetch the piece when [`Self::due`] and replace the held copy
         /// with it when it verifies and is not older. Concurrent refreshes of
         /// one piece run one at a time. Returns the copy now held, whether it
         /// was replaced, and why a fetch failed.
-        async fn refresh(
+        pub(super) async fn refresh<C: Collateral>(
             &self,
-            spec: &Spec,
+            url: &str,
+            id: &C::Id,
             force: bool,
             now: i64,
         ) -> (Option<Entry>, bool, Option<Failure>) {
@@ -545,19 +416,19 @@ mod native {
             let replaced = Mutex::new(false);
             let result = self
                 .mem
-                .entry(spec.url.clone())
+                .entry(url.to_string())
                 .and_compute_with(|current| async {
                     let current = current.map(|e| e.into_value());
                     if current.as_ref().is_some_and(|c| !self.due(c, now, force)) {
                         return Op::Nop;
                     }
-                    match self.fetch(spec).await {
+                    match self.fetch::<C>(url, id).await {
                         Ok(new)
                             if current
                                 .as_ref()
                                 .is_none_or(|c| new.dates.not_older_than(&c.dates)) =>
                         {
-                            self.store(&new);
+                            self.store(url, &new);
                             *replaced.lock().unwrap() = true;
                             Op::Put(new)
                         }
@@ -590,12 +461,13 @@ mod native {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::collateral::{PckCa, Source, TcbInfo};
+    use crate::collateral::{PckCa, PckCrl, QeIdentity, Source, TcbInfo};
     use crate::context::Context;
     use crate::testing::{raw, NOW};
 
@@ -674,12 +546,12 @@ mod tests {
 
     /// TCB Info for [`FMSPC`]: its version and source.
     async fn tcb_info(ctx: &Context, now: i64) -> Result<(Option<u64>, Source)> {
-        let (_, used) = ctx.store().tcb_info(&FMSPC, now).await?;
+        let (_, used) = ctx.store().get::<TcbInfo>(&FMSPC, now).await?;
         Ok((used.version, used.from))
     }
 
     async fn qe_identity(ctx: &Context) -> Result<(Option<u64>, Source)> {
-        let (_, used) = ctx.store().qe_identity(NOW).await?;
+        let (_, used) = ctx.store().get::<QeIdentity>(&(), NOW).await?;
         Ok((used.version, used.from))
     }
 
@@ -748,7 +620,7 @@ mod tests {
         .await;
         let ctx = ctx(&v);
         assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(22));
-        ctx.store().refresh(&tcb_info_url(), NOW).await.unwrap();
+        ctx.store().refresh::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
         assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(22));
     }
@@ -772,7 +644,7 @@ mod tests {
         .await;
         let ctx = ctx(&v);
         tcb_info(&ctx, NOW).await.unwrap();
-        assert!(ctx.store().refresh(&tcb_info_url(), NOW).await.is_err());
+        assert!(ctx.store().refresh::<TcbInfo>(&FMSPC, NOW).await.is_err());
         assert_eq!(tcb_info(&ctx, NOW).await.unwrap().0, Some(20));
     }
 
@@ -938,7 +810,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let expired = "2026-10-14/td_qe_identity_2026-03-16_eval18_expired.json";
         let (body, chain) = raw(expired, Some(CHAIN));
-        let url = crate::collateral::QeIdentity::url();
+        let url = QeIdentity::url(&());
         crate::collateral::save_to_cache_dir(dir.path(), &url, &body, chain.as_deref());
         let v = vendor(vec![status(503, vec![])], Duration::ZERO).await;
         let doc = qe_identity(&ctx(&v).with_cache_dir(dir.path()))
@@ -961,7 +833,7 @@ mod tests {
         tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
         // A day before nextUpdate: due for refresh.
-        let (info, _) = ctx.store().tcb_info(&FMSPC, NOW).await.unwrap();
+        let (info, _) = ctx.store().get::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         let ending = info.next_update - 3600;
         let gets = (0..20).map(|_| tcb_info(&ctx, ending));
         for doc in futures_util::future::join_all(gets).await {
@@ -982,7 +854,7 @@ mod tests {
             .with_recheck(Duration::from_secs(300));
         tcb_info(&ctx, NOW).await.unwrap();
         for _ in 0..5 {
-            ctx.store().refresh(&tcb_info_url(), NOW).await.unwrap();
+            ctx.store().refresh::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         }
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
@@ -1004,14 +876,14 @@ mod tests {
             fmc: None,
         };
         let genoa = crate::types::ProcessorGeneration::Genoa;
-        ctx.store().vcek(genoa, &chip_id, &tcb, NOW).await
+        ctx.store().get(&(genoa, chip_id, tcb), NOW).await
     }
 
     #[tokio::test]
     async fn offline_without_a_copy_is_retryable_unavailable() {
         let err = Context::offline()
             .store()
-            .pck_crl(PckCa::Platform, NOW)
+            .get::<PckCrl>(&PckCa::Platform, NOW)
             .await
             .err()
             .unwrap();

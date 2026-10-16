@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{AmdCrl, AmdSigner, CollateralUsed, Store};
+use crate::collateral::{AmdCrl, AmdKey, CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::platforms::snp::{SnpParams, SnpResult};
@@ -62,9 +62,9 @@ pub struct VerifiedReport {
     pub report_version: u32,
 }
 
-/// What az-snp verification needs besides the evidence: the AMD CRL (the
-/// VCEK comes in the evidence).
-pub struct AzSnpCollateral {
+/// The az-snp collateral set: the AMD CRL (the VCEK comes in the
+/// evidence).
+pub struct AzSnpCollateralSet {
     pub crl: AmdCrl,
 }
 
@@ -76,7 +76,7 @@ impl Platform for AzSnp {
     type Evidence = AzSnpEvidence;
     type Params = AzSnpParams;
     type Result = AzSnpResult;
-    type Collateral = AzSnpCollateral;
+    type CollateralSet = AzSnpCollateralSet;
 
     fn validate(params: &AzSnpParams) -> Result<()> {
         params.validate()
@@ -87,17 +87,19 @@ impl Platform for AzSnp {
         evidence: &AzSnpEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(AzSnpCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(AzSnpCollateralSet, Vec<CollateralUsed>)> {
         let verified = verify_report(evidence, &AzSnpParams::default(), now)?;
-        let signer = AmdSigner::of_vek(&verified.vcek_der)?;
-        let (crl, used) = store.amd_crl(verified.matched_gen, signer, now).await?;
-        Ok((AzSnpCollateral { crl }, vec![used]))
+        let key = AmdKey::of_vek(&verified.vcek_der)?;
+        let (crl, used) = store
+            .get::<AmdCrl>(&(verified.matched_gen, key), now)
+            .await?;
+        Ok((AzSnpCollateralSet { crl }, vec![used]))
     }
 
     fn verify(
         evidence: &AzSnpEvidence,
         params: &AzSnpParams,
-        collateral: &AzSnpCollateral,
+        collateral: &AzSnpCollateralSet,
         now: i64,
     ) -> Result<AzSnpResult> {
         let verified = verify_report(evidence, params, now)?;

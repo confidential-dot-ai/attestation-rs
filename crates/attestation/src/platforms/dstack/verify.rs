@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::collateral::{CollateralUsed, Store};
 use crate::error::Result;
 use crate::platform::Platform;
-use crate::platforms::tdx::verify::TdxCollateral;
+use crate::platforms::tdx::verify::TdxCollateralSet;
 use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
 use crate::types::PlatformType;
 
@@ -94,7 +94,7 @@ impl Platform for Dstack {
     type Evidence = DstackEvidence;
     type Params = DstackParams;
     type Result = DstackResult;
-    type Collateral = TdxCollateral;
+    type CollateralSet = TdxCollateralSet;
 
     fn validate(params: &DstackParams) -> Result<()> {
         params.tdx.validate()
@@ -104,14 +104,14 @@ impl Platform for Dstack {
         evidence: &DstackEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(TdxCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(TdxCollateralSet, Vec<CollateralUsed>)> {
         Tdx::gather(&tdx_evidence(evidence)?, store, now).await
     }
 
     fn verify(
         evidence: &DstackEvidence,
         params: &DstackParams,
-        collateral: &TdxCollateral,
+        collateral: &TdxCollateralSet,
         now: i64,
     ) -> Result<DstackResult> {
         let tdx = Tdx::verify(&tdx_evidence(evidence)?, &params.tdx, collateral, now)?;

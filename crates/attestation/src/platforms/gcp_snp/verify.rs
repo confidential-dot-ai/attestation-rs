@@ -23,12 +23,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
+use crate::collateral::{CollateralUsed, GceEndorsement, Store};
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::snp::evidence::SnpEvidence;
-use crate::platforms::snp::verify::{genuine_report, SnpCollateral};
+use crate::platforms::snp::verify::{genuine_report, SnpCollateralSet};
 use crate::platforms::snp::{Snp, SnpParams, SnpResult};
 use crate::types::PlatformType;
 
@@ -77,7 +77,7 @@ impl Platform for GcpSnp {
     type Evidence = SnpEvidence;
     type Params = GcpSnpParams;
     type Result = GcpSnpResult;
-    type Collateral = GcpSnpCollateral;
+    type CollateralSet = GcpSnpCollateralSet;
 
     fn validate(params: &GcpSnpParams) -> Result<()> {
         Snp::validate(&params.snp)
@@ -91,24 +91,25 @@ impl Platform for GcpSnp {
         evidence: &SnpEvidence,
         store: &Store,
         now: i64,
-    ) -> Result<(GcpSnpCollateral, Vec<CollateralUsed>)> {
+    ) -> Result<(GcpSnpCollateralSet, Vec<CollateralUsed>)> {
         let (report, gen, inline) = genuine_report(evidence, now)?;
+        let measurement = (Self::KIND, report.measurement.to_vec());
         let (snp, endorsement) = futures_util::join!(
-            SnpCollateral::gather(&report, gen, inline, store, now),
-            store.gce_endorsement(GceTee::SevSnp, &report.measurement, now)
+            SnpCollateralSet::gather(&report, gen, inline, store, now),
+            store.get_if_published::<GceEndorsement>(&measurement, now)
         );
         let (snp, mut used) = snp?;
         let endorsement = endorsement?.map(|(endorsement, u)| {
             used.push(u);
             endorsement
         });
-        Ok((GcpSnpCollateral { snp, endorsement }, used))
+        Ok((GcpSnpCollateralSet { snp, endorsement }, used))
     }
 
     fn verify(
         evidence: &SnpEvidence,
         params: &GcpSnpParams,
-        collateral: &GcpSnpCollateral,
+        collateral: &GcpSnpCollateralSet,
         now: i64,
     ) -> Result<GcpSnpResult> {
         let snp = Snp::verify(evidence, &params.snp, &collateral.snp, now)?;
@@ -124,11 +125,11 @@ impl Platform for GcpSnp {
     }
 }
 
-/// What GcpSnp verification needs: the Snp collateral and Google's launch
+/// The GcpSnp collateral set: the Snp collateral set and Google's launch
 /// endorsement for the firmware (`None` when Google publishes none for the
 /// measurement).
-pub struct GcpSnpCollateral {
-    pub snp: SnpCollateral,
+pub struct GcpSnpCollateralSet {
+    pub snp: SnpCollateralSet,
     pub endorsement: Option<GceEndorsement>,
 }
 
@@ -148,7 +149,7 @@ mod tests {
     /// Verify with the SNP collateral held and no endorsement.
     async fn verify_unendorsed(evidence: &SnpEvidence, params: &GcpSnpParams) -> GcpSnpResult {
         let ctx = testing::context(vec![testing::amd_crl(ProcessorGeneration::Genoa)]);
-        let collateral = GcpSnpCollateral {
+        let collateral = GcpSnpCollateralSet {
             snp: Snp::gather(evidence, ctx.store(), testing::NOW)
                 .await
                 .unwrap()
@@ -202,7 +203,10 @@ mod tests {
         let envelope: serde_json::Value = serde_json::from_str(GCP_EVIDENCE).unwrap();
         let evidence: SnpEvidence = serde_json::from_value(envelope["evidence"].clone()).unwrap();
         let report = gcp_endorsement::snp_report(&evidence).unwrap();
-        let url = GceEndorsement::url(GceTee::SevSnp, &report.measurement);
+        let url = <GceEndorsement as crate::collateral::Collateral>::url(&(
+            PlatformType::GcpSnp,
+            report.measurement.to_vec(),
+        ));
         let held = (url, endorsement.to_vec(), None);
         testing::verify::<GcpSnp>(
             &evidence,

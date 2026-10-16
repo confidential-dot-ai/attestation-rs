@@ -3,7 +3,7 @@
 // Live SNP attestation → WASM verification example.
 //
 // 1. Generates fresh attestation evidence with a report_data nonce (native)
-// 2. Asks the verifier which vendor URLs the evidence needs, and fetches them
+// 2. Asks the verifier which vendor URLs to fetch for the evidence, and fetches them
 // 3. Verifies the evidence and the report_data binding entirely in WASM
 //
 // Usage:
@@ -32,7 +32,7 @@ const envelope = execFileSync(
 
 const wasm = await import('./pkg/attestation_wasm.js');
 
-// Fetch the URLs the evidence needs, keeping the issuer-chain header Intel sends.
+// Fetch the URLs for the evidence, keeping the issuer-chain header Intel sends.
 const ISSUER_CHAIN_HEADERS = [
   'TCB-Info-Issuer-Chain',
   'SGX-Enclave-Identity-Issuer-Chain',

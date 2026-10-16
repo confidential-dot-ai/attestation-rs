@@ -12,9 +12,9 @@ use crate::types::{
     NvidiaGpuParams, NvidiaGpuResult,
 };
 
-/// What GPU verification needs besides the bundle: NRAS's attestation for
+/// The GPU collateral set: NRAS's attestation for
 /// each architecture group, and its signing keys.
-pub struct GpuCollateral {
+pub struct GpuCollateralSet {
     pub nras: std::collections::BTreeMap<NvidiaGpuArch, serde_json::Value>,
     pub jwks: NrasJwks,
 }
@@ -26,7 +26,7 @@ pub async fn gather_bundle(
     params: &NvidiaGpuParams,
     store: &Store,
     now: i64,
-) -> Result<(GpuCollateral, CollateralUsed)> {
+) -> Result<(GpuCollateralSet, CollateralUsed)> {
     let user_nonce = check_preconditions(bundle, params)?;
     let mut nras = std::collections::BTreeMap::new();
     for (arch, devices) in group_by_arch(bundle) {
@@ -44,7 +44,7 @@ pub async fn gather_bundle(
         };
         nras.insert(arch, nras_attest(store, &request).await?);
     }
-    let mut jwks = store.nras_jwks(now).await?;
+    let mut jwks = store.get::<NrasJwks>(&store.nras_url(), now).await?;
     let known = |jwks: &NrasJwks| {
         nras.values().all(|response| {
             split_eat_response(response).is_ok_and(|(overall, subs)| {
@@ -57,11 +57,11 @@ pub async fn gather_bundle(
         })
     };
     if !known(&jwks.0) {
-        store.refresh(&store.nras_jwks_url(), now).await?;
-        jwks = store.nras_jwks(now).await?;
+        store.refresh::<NrasJwks>(&store.nras_url(), now).await?;
+        jwks = store.get::<NrasJwks>(&store.nras_url(), now).await?;
     }
     let (jwks, used) = jwks;
-    Ok((GpuCollateral { nras, jwks }, used))
+    Ok((GpuCollateralSet { nras, jwks }, used))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -107,7 +107,7 @@ fn arch_nonce(
 pub fn verify_bundle(
     bundle: &NvidiaGpuEvidenceBundle,
     params: &NvidiaGpuParams,
-    collateral: &GpuCollateral,
+    collateral: &GpuCollateralSet,
     now: i64,
 ) -> Result<NvidiaGpuResult> {
     let user_nonce = check_preconditions(bundle, params)?;
@@ -909,7 +909,7 @@ mod tests {
     /// call site from `verify_bundle` (verify.rs:40). The helper would
     /// still exist, the unit-level branch would still work, but a short nonce
     /// would silently flow into the NRAS request. A held-only store records
-    /// every document it was asked for, so the rejection is shown to come
+    /// every piece it was asked for, so the rejection is shown to come
     /// first.
     #[tokio::test]
     async fn gather_bundle_rejects_short_user_nonce_before_any_fetch() {

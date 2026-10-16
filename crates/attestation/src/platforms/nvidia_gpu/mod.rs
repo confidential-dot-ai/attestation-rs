@@ -60,7 +60,7 @@ pub mod verify;
 pub mod attest;
 
 pub use provider::{jwks_url_for_endpoint, Jwks, JwksKey, NrasRequest};
-pub use verify::{gather_bundle, verify_bundle, GpuCollateral};
+pub use verify::{gather_bundle, verify_bundle, GpuCollateralSet};
 
 use crate::error::{AttestationError, Result};
 use crate::types::{NvidiaGpuBinding, NvidiaGpuHashAlgo};

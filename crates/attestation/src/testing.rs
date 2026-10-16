@@ -33,7 +33,10 @@ pub(crate) fn amd_crl(generation: ProcessorGeneration) -> HeldResponse {
         ProcessorGeneration::Genoa => "2026-10-14/amd_crl_genoa.der",
         ProcessorGeneration::Turin => "2026-10-14/amd_crl_turin.der",
     };
-    let url = crate::collateral::AmdCrl::url(generation, crate::collateral::AmdSigner::Ask);
+    let url = <crate::collateral::AmdCrl as crate::collateral::Collateral>::url(&(
+        generation,
+        crate::collateral::AmdKey::Vcek,
+    ));
     held(url, file, None)
 }
 
@@ -42,7 +45,7 @@ pub(crate) fn amd_crl(generation: ProcessorGeneration) -> HeldResponse {
 /// 2026-10-14.
 #[cfg(feature = "tdx")]
 pub(crate) fn intel() -> Vec<HeldResponse> {
-    use crate::collateral::{PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
+    use crate::collateral::{Collateral, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
     let chain = Some("2026-10-14/tcb_signing_chain.pem");
     let mut pieces: Vec<HeldResponse> = [
         "00806f050000",
@@ -59,18 +62,22 @@ pub(crate) fn intel() -> Vec<HeldResponse> {
     })
     .collect();
     pieces.extend([
-        held(QeIdentity::url(), "2026-10-14/td_qe_identity.json", chain),
         held(
-            PckCrl::url(PckCa::Platform),
+            QeIdentity::url(&()),
+            "2026-10-14/td_qe_identity.json",
+            chain,
+        ),
+        held(
+            PckCrl::url(&PckCa::Platform),
             "2026-10-14/pck_crl_platform.der",
             Some("2026-10-14/pck_crl_platform_chain.pem"),
         ),
         held(
-            PckCrl::url(PckCa::Processor),
+            PckCrl::url(&PckCa::Processor),
             "2026-10-14/pck_crl_processor.pem",
             Some("2026-10-14/pck_crl_processor_chain.pem"),
         ),
-        held(RootCrl::url(), "2026-10-14/root_ca_crl.der", None),
+        held(RootCrl::url(&()), "2026-10-14/root_ca_crl.der", None),
     ]);
     pieces
 }
