@@ -9,6 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use attestation::{PlatformType, Policies, SnpParams, TdxParams};
 
+#[cfg(all(feature = "test-vendor", not(debug_assertions)))]
+compile_error!("the test-vendor feature is for debug builds only");
+
 const EXIT_CODES: &str = "\
 Exit codes:
   0  passed: genuine, and every rule in the flags held
@@ -616,10 +619,7 @@ async fn cmd_verify(args: VerifyArgs) {
     for c in &verified.collateral {
         let version = c.version.map(|v| format!(" v{v}")).unwrap_or_default();
         let current = if c.current { "current" } else { "not current" };
-        eprintln!(
-            "  Collateral: {}{version}, {current} ({:?})",
-            c.name, c.from
-        );
+        eprintln!("  Collateral: {}{version}, {current} ({})", c.name, c.from);
     }
     eprintln!("  Passed: {passed}");
 
