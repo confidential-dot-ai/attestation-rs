@@ -1,0 +1,13 @@
+{
+  "id": "snp-endorsement-type-wrong",
+  "rule": {
+    "section": "10.1",
+    "statement": "snp.vek is application/pkix-cert"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-endorsement-type-wrong.json",
+  "policy": "policy/snp-endorsement-type-wrong.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
