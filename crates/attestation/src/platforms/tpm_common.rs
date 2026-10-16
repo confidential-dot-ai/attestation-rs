@@ -1299,14 +1299,8 @@ mod tests {
 
     #[test]
     fn test_verify_tpm_signature_tries_jwk_then_tpm2b() {
-        // verify_tpm_signature should accept both JWK JSON and TPM2B_PUBLIC
-        // formats for var_data. This test verifies the TPM2B_PUBLIC fallback
-        // still works even though JWK JSON is tried first.
         let modulus = vec![0xAB; 256];
         let var_data = build_tpm2b_public_rsa(&modulus);
-
-        // This will fail at signature verification (dummy data) but should
-        // successfully extract the key from TPM2B_PUBLIC format
         let dummy_sig = vec![0u8; 256];
         let dummy_msg = vec![0xFF, 0x54, 0x43, 0x47, 0x80, 0x18, 0x00, 0x00, 0x00, 0x00];
 

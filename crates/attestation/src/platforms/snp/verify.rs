@@ -1511,9 +1511,14 @@ mod tests {
             now + TimeDuration::days(1),
             now + TimeDuration::days(30),
         );
+        let later = (now + TimeDuration::days(2)).unix_timestamp();
+        assert!(crl_lists(&leaf, &crl, issuer.0.der(), later).is_ok());
         let err = crl_lists(&leaf, &crl, issuer.0.der(), now_secs())
             .expect_err("future-dated CRL must be rejected");
-        assert!(err.to_string().contains("future"), "got: {err}");
+        assert!(
+            err.is_retryable(),
+            "a CRL not yet valid needs a fresh fetch: {err}"
+        );
     }
 
     #[test]
@@ -1525,12 +1530,10 @@ mod tests {
         // An empty CRL signed by a key the verifier does not trust must not
         // clear the check — this is exactly the forged-empty-CRL bypass.
         let crl = mint_crl(&signer, None, not_before, not_after);
+        assert!(crl_lists(&leaf, &crl, signer.0.der(), now_secs()).is_ok());
         let err = crl_lists(&leaf, &crl, impostor.0.der(), now_secs())
             .expect_err("CRL signed by the wrong issuer must be rejected");
-        assert!(
-            err.to_string().contains("signature verification failed"),
-            "got: {err}"
-        );
+        assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
     }
 
     #[test]

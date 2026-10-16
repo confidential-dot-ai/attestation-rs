@@ -299,6 +299,8 @@ mod tests {
             matches!(result, Err(AttestationError::QuoteParseFailed(_))),
             "{result:?}"
         );
+        assert!(tpm_common::parse_hcl_report(&short_hcl).is_err());
+        assert!(tpm_common::parse_hcl_report(COCO_HCL_REPORT).is_ok());
     }
 
     #[test]
