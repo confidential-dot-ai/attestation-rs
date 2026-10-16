@@ -827,6 +827,12 @@ mod tests {
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&only_file(&dir)), 0o600);
+
+        let open = parent.path().join("existing");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tcb_info(&ctx(&v).with_cache_dir(&open), NOW).await.unwrap();
+        assert_eq!(mode(&open), 0o700);
     }
 
     #[tokio::test]
