@@ -1,0 +1,13 @@
+{
+  "id": "snp-floor-names-fmc-before-turin",
+  "rule": {
+    "section": "13.2",
+    "statement": "a floor that names the FMC SPL fails a report without one"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-floor-names-fmc-before-turin.json",
+  "policy": "policy/snp-floor-names-fmc-before-turin.json",
+  "expect": {
+    "refusal": "tcb-not-allowed"
+  }
+}
