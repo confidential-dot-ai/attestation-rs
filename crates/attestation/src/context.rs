@@ -92,13 +92,18 @@ impl Context {
 
     /// Send NVIDIA GPU evidence to these NRAS endpoints instead of the
     /// default ones (or `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`). A URL
-    /// without a scheme and host is [`AttestationError::InvalidParams`].
+    /// that is not `https` with a host is [`AttestationError::InvalidParams`].
     #[cfg(all(feature = "nvidia-gpu", not(target_arch = "wasm32")))]
     pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Result<Self> {
         for url in [&gpu_url, &switch_url] {
-            crate::platforms::nvidia_gpu::jwks_url_for_endpoint(url).map_err(|_| {
-                AttestationError::InvalidParams(format!("invalid NRAS URL {url:?}"))
-            })?;
+            let parsed = reqwest::Url::parse(url).ok();
+            if !parsed.is_some_and(|u| {
+                u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty())
+            }) {
+                return Err(AttestationError::InvalidParams(format!(
+                    "invalid NRAS URL {url:?}"
+                )));
+            }
         }
         if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
             vendor.nras.gpu_url = gpu_url;
@@ -147,7 +152,14 @@ mod tests {
         assert!(Context::new()
             .with_nras_urls(good.clone(), good.clone())
             .is_ok());
-        for (gpu, switch) in [("nras", good.as_str()), (good.as_str(), "nras")] {
+        for (gpu, switch) in [
+            ("nras", good.as_str()),
+            (good.as_str(), "nras"),
+            ("https://", good.as_str()),
+            ("http://nras.example/x", good.as_str()),
+            ("ftp://nras.example", good.as_str()),
+            ("https://nras.example:notaport/x", good.as_str()),
+        ] {
             assert!(matches!(
                 Context::new().with_nras_urls(gpu.into(), switch.into()),
                 Err(AttestationError::InvalidParams(_))

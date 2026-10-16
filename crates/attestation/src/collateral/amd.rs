@@ -25,8 +25,17 @@ impl Collateral for Vcek {
     type Id = (ProcessorGeneration, [u8; 64], SnpTcb);
     const NAMED_BY_EVIDENCE: bool = true;
 
-    fn name((generation, chip_id, _): &Self::Id) -> String {
-        format!("vcek {generation:?} {}", hex::encode(&chip_id[..8])).to_lowercase()
+    fn name((generation, chip_id, tcb): &Self::Id) -> String {
+        let fmc = tcb.fmc.map(|f| format!(".{f}")).unwrap_or_default();
+        format!(
+            "vcek {generation:?} {} tcb {}.{}.{}.{}{fmc}",
+            hex::encode(&chip_id[..8]),
+            tcb.bootloader,
+            tcb.tee,
+            tcb.snp,
+            tcb.microcode
+        )
+        .to_lowercase()
     }
 
     /// Where AMD KDS publishes the VCEK. Turin keys the lookup on the first

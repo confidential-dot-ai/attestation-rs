@@ -1230,7 +1230,7 @@ pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bo
 
     // Parse the leaf cert to get its serial number
     let (_, leaf_cert) = X509Certificate::from_der(&der_certs[0])
-        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf parse: {e}")))?;
+        .map_err(|e| AttestationError::CertChainError(format!("certificate parse: {e}")))?;
     let leaf_serial = leaf_cert.raw_serial();
 
     // Parse the CRL (handle both PEM and DER formats)
@@ -1277,10 +1277,14 @@ pub(crate) fn check_crl(
     }
 
     let alg = parsed.signature_algorithm.algorithm.to_id_string();
-    if alg != OID_ECDSA_WITH_SHA256 || parsed.signature_algorithm != parsed.tbs_cert_list.signature
-    {
+    if alg != OID_ECDSA_WITH_SHA256 {
         return Err(AttestationError::CertChainError(format!(
             "{label} signature algorithm {alg} is not ecdsa-with-SHA256"
+        )));
+    }
+    if parsed.signature_algorithm != parsed.tbs_cert_list.signature {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} outer and signed signature algorithms differ"
         )));
     }
     let key = extract_p256_pub_key(&issuer.public_key().subject_public_key.data, label)?;

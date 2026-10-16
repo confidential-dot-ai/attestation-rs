@@ -289,7 +289,8 @@ mod native {
 
     pub(crate) struct Native {
         pub(super) mem: moka::future::Cache<String, Entry>,
-        /// URLs the vendor answered "not published" for, and when.
+        /// Pieces the evidence names that the vendor answered "not
+        /// published" for, and when.
         not_published: moka::future::Cache<String, (Instant, Failure)>,
         pub(crate) disk: Option<Disk>,
         pub(crate) vendor: Option<Vendor>,
@@ -371,11 +372,11 @@ mod native {
                     // The vendor does not know the chip or platform the
                     // evidence names: for a piece the evidence names, the
                     // evidence is at fault and retrying will not help.
-                    let failure = if C::NAMED_BY_EVIDENCE {
-                        Failure::Refused(format!("the vendor does not publish it ({})", e.detail))
-                    } else {
-                        Failure::Unavailable(e)
-                    };
+                    if !C::NAMED_BY_EVIDENCE {
+                        return Err(Failure::Unavailable(e));
+                    }
+                    let failure =
+                        Failure::Refused(format!("the vendor does not publish it ({})", e.detail));
                     self.not_published
                         .insert(url.to_string(), (Instant::now(), failure.clone()))
                         .await;
@@ -705,6 +706,16 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_piece_the_evidence_does_not_name_is_asked_for_again_after_a_404() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = ctx(&v).with_recheck(Duration::from_secs(300));
+        for _ in 0..2 {
+            assert!(qe_identity(&ctx).await.err().unwrap().is_retryable());
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
     #[cfg(feature = "snp")]
     #[tokio::test]
     async fn the_vendor_is_asked_about_an_unpublished_piece_once_per_recheck() {
@@ -843,7 +854,8 @@ mod tests {
         std::fs::create_dir(&open).unwrap();
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
         tcb_info(&ctx(&v).with_cache_dir(&open), NOW).await.unwrap();
-        assert_eq!(mode(&open), 0o700);
+        assert_eq!(mode(&open), 0o755);
+        assert_eq!(mode(&only_file(&open)), 0o600);
     }
 
     #[tokio::test]
