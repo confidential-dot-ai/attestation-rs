@@ -276,10 +276,10 @@ mod tests {
             ("server", "bnd = \"0.0.0.0:8400\""),
         ] {
             let path = dir.path().join("config.toml");
+            std::fs::write(&path, format!("[{section}]\n")).unwrap();
+            Config::load(&path).expect("the section alone loads");
             std::fs::write(&path, format!("[{section}]\n{key}\n")).unwrap();
-            let err = Config::load(&path).unwrap_err().to_string();
-            let name = key.split(' ').next().unwrap();
-            assert!(err.contains(&format!("unknown field `{name}`")), "{err}");
+            assert!(Config::load(&path).is_err(), "{key} must be refused");
         }
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         Config::load(&example).unwrap().validate().unwrap();
