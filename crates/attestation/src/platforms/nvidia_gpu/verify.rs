@@ -360,7 +360,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks, now: i64) -> Result<serde_json
         .find(|k| k.kid == kid)
         .ok_or_else(|| AttestationError::JwksKidNotFound(kid.to_string()))?;
 
-    let verifying_key = es384_verifying_key_from_jwks_entry(key, now)?;
+    let verifying_key = es384_verifying_key_from_jwks_entry(key, Some(now))?;
 
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let sig_bytes = URL_SAFE_NO_PAD
@@ -425,9 +425,10 @@ fn enforce_time_claims(claims: &serde_json::Value, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn es384_verifying_key_from_jwks_entry(
+/// `now: None` checks the chain without the certificates' validity windows.
+pub(crate) fn es384_verifying_key_from_jwks_entry(
     key: &crate::platforms::nvidia_gpu::provider::JwksKey,
-    now: i64,
+    now: Option<i64>,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     // The signing key MUST come from an x5c chain that validates up to the
     // pinned NVIDIA trust anchor. The raw JWK `(x, y)` coordinates carry no
@@ -470,7 +471,7 @@ const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
 /// chains to the pinned anchor through these constraints.
 fn verify_x5c_chain_and_extract_key(
     chain: &[String],
-    now: i64,
+    now: Option<i64>,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     use sha2::Digest;
     use spki::DecodePublicKey;
@@ -497,8 +498,7 @@ fn verify_x5c_chain_and_extract_key(
         .collect::<Result<Vec<_>>>()?;
 
     // Enforce certificate validity periods at the evaluation time.
-    {
-        let now_secs = now;
+    if let Some(now_secs) = now {
         for (i, (_der, cert)) in certs.iter().enumerate() {
             let validity = &cert.tbs_certificate.validity;
             let nb_unix: i64 = validity
@@ -989,7 +989,7 @@ mod tests {
                 x5c,
             };
             assert!(
-                es384_verifying_key_from_jwks_entry(&key, now()).is_err(),
+                es384_verifying_key_from_jwks_entry(&key, Some(now())).is_err(),
                 "raw (x,y) without an x5c chain must be rejected"
             );
         }
@@ -1188,7 +1188,7 @@ mod tests {
         // the issuer<->subject name chain; either way it must be rejected.
         let mut chain = nras_x5c_fixture();
         chain.reverse();
-        match verify_x5c_chain_and_extract_key(&chain, now()) {
+        match verify_x5c_chain_and_extract_key(&chain, Some(now())) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("reversed chain must be rejected, got {other:?}"),
         }
@@ -1200,7 +1200,7 @@ mod tests {
         // is not in the pinned trusted set. (If the captured leaf has aged out,
         // the validity check rejects it first — either way it must not pass.)
         let chain = vec![nras_x5c_fixture()[0].clone()];
-        match verify_x5c_chain_and_extract_key(&chain, now()) {
+        match verify_x5c_chain_and_extract_key(&chain, Some(now())) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("leaf-only chain must be rejected, got {other:?}"),
         }
