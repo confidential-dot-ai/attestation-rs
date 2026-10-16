@@ -1,0 +1,13 @@
+{
+  "id": "gpu-device-binding-not-nras-nonce",
+  "rule": {
+    "section": "4.5",
+    "statement": "a device submodule binds in nras-nonce mode"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/gpu-device-binding-not-nras-nonce.json",
+  "policy": "policy/gpu-device-binding-not-nras-nonce.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
