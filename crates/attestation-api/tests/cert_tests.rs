@@ -10,8 +10,8 @@ fn config_parse_explicit_values() {
         [auth]
         api_keys = ["key1", "key2"]
 
-        [certs]
-        nras_gpu_url = "https://nras.example/v3/attest/gpu"
+        [nras]
+        gpu_url = "https://nras.example/v3/attest/gpu"
 
         [token]
         enabled = true
@@ -26,14 +26,11 @@ fn config_parse_explicit_values() {
     assert_eq!(config.server.bind, "0.0.0.0:9000");
     assert_eq!(config.auth.api_keys.len(), 2);
     assert!(!config.attestation.enabled);
-    assert_eq!(
-        config.certs.nras_gpu_url,
-        "https://nras.example/v3/attest/gpu"
-    );
+    assert_eq!(config.nras.gpu_url, "https://nras.example/v3/attest/gpu");
     assert!(config.token.enabled);
     assert_eq!(config.token.issuer, "my-service");
     assert_eq!(config.token.duration_minutes, 10);
-    assert!(config.certs.nras_switch_url.is_empty());
+    assert!(config.nras.switch_url.is_empty());
 }
 
 #[test]
