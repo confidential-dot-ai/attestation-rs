@@ -449,11 +449,14 @@ pub(crate) fn es384_verifying_key_from_jwks_entry(
 /// SHA-256 hashes of trusted NRAS intermediate CA Subject Public Key Info (SPKI).
 /// The topmost certificate in the x5c chain must have an SPKI matching one of these.
 ///
-/// GPU/Switch Intermediate 004 — valid 2025-12-08 to 2029-12-08
-/// Subject: CN=NVIDIA Attestation Service GPU Intermediate 004
-/// Issuer:  CN=NVIDIA Attestation Service CA 001
-const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
-    &["fd32837f954e2c45db073105166dfe6985ae0480bb113fba63b091a75affe896"];
+/// Both are issued by CN=NVIDIA Attestation Service CA 001 (same authority key
+/// identifier); NRAS signs with keys under either.
+/// - GPU Intermediate 004 — valid 2025-12-08 to 2029-12-08
+/// - GPU Intermediate 005 — valid 2026-10-08 to 2030-10-08
+const NRAS_TRUSTED_SPKI_SHA256: &[&str] = &[
+    "fd32837f954e2c45db073105166dfe6985ae0480bb113fba63b091a75affe896",
+    "ba14d00377699189b6762c22c744a9dbdc62aa9396097ada7150426c6ff39afc",
+];
 
 /// Validate the x5c certificate chain and return the leaf's P-384 verifying key.
 ///
@@ -1180,6 +1183,27 @@ mod tests {
             .iter()
             .map(|c| c.as_str().expect("x5c entry is a string").to_string())
             .collect()
+    }
+
+    // NRAS signs with keys under both pinned intermediates. Each captured chain
+    // is checked at a time inside its leaf's validity window.
+    #[test]
+    fn x5c_chains_under_both_intermediates_are_accepted() {
+        let chain_005: Vec<String> = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../test_data/nvidia_gpu/nras_gpu_x5c_chain_005.json"
+        ))
+        .unwrap()["x5c"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        for (chain, at) in [(nras_x5c_fixture(), 1780951820), (chain_005, 1792051921)] {
+            assert!(verify_x5c_chain_and_extract_key(&chain, at).is_ok());
+            let mut unpinned = chain.clone();
+            unpinned.pop();
+            assert!(verify_x5c_chain_and_extract_key(&unpinned, at).is_err());
+        }
     }
 
     #[test]
