@@ -24,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::collateral::{CollateralUsed, GceEndorsement, GceTee, Store};
-use crate::error::{AttestationError, Result, Unavailable};
+use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::tdx::evidence::TdxEvidence;
@@ -94,17 +94,10 @@ impl Platform for GcpTdx {
             store.gce_endorsement(GceTee::Tdx, &quote.body.mr_td, now)
         );
         let (tdx, mut used) = tdx?;
-        let endorsement = match endorsement {
-            Ok((endorsement, u)) => {
-                used.push(u);
-                Some(endorsement)
-            }
-            Err(AttestationError::CollateralUnavailable {
-                reason: Unavailable::NotFound { .. },
-                ..
-            }) => None,
-            Err(e) => return Err(e),
-        };
+        let endorsement = endorsement?.map(|(endorsement, u)| {
+            used.push(u);
+            endorsement
+        });
         Ok((GcpTdxCollateral { tdx, endorsement }, used))
     }
 
@@ -141,6 +134,7 @@ mod tests {
     use super::*;
     use crate::platforms::tdx::verify::parse_tdx_quote;
     use crate::testing;
+    use crate::AttestationError;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     // A real GCP TDX quote and the endorsements of two OVMF builds: the one it

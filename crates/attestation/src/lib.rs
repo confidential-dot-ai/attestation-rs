@@ -54,7 +54,7 @@ mod testing;
 
 pub use collateral::CollateralUsed;
 pub use context::{Context, HeldResponse};
-pub use error::{AttestationError, Result, Unavailable};
+pub use error::{AttestationError, Result};
 pub use platform::{Platform, PlatformResult, Policies, Verified};
 #[cfg(feature = "az-snp")]
 pub use platforms::az_snp::{AzSnp, AzSnpParams, AzSnpResult};

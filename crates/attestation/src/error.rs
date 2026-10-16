@@ -1,32 +1,36 @@
 use thiserror::Error;
 
-/// Why a piece of collateral could not be had.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
-pub enum Unavailable {
-    /// No connection, a timeout, or a body that was cut off.
-    Unreachable { detail: String },
-    /// The vendor does not publish it (404, 410).
-    NotFound { status: u16 },
-    /// The vendor asked to be called later (429, or a Retry-After).
-    RateLimited { retry_after: Option<u64> },
-    /// Any other HTTP status.
-    Status { status: u16 },
-    /// Fetching is off and no copy is held.
-    Offline,
+/// Why a vendor fetch failed, inside the crate: the HTTP status (`None` for
+/// a network error or no fetch), the Retry-After it sent, and a description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unavailable {
+    pub status: Option<u16>,
+    pub retry_after: Option<u64>,
+    pub detail: String,
 }
 
-impl std::fmt::Display for Unavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Unavailable::Unreachable { detail } => write!(f, "unreachable ({detail})"),
-            Unavailable::NotFound { status } => write!(f, "not found (HTTP {status})"),
-            Unavailable::RateLimited {
-                retry_after: Some(s),
-            } => write!(f, "rate limited, retry after {s}s"),
-            Unavailable::RateLimited { retry_after: None } => f.write_str("rate limited"),
-            Unavailable::Status { status } => write!(f, "HTTP {status}"),
-            Unavailable::Offline => f.write_str("not held, and fetching is off"),
+impl Unavailable {
+    pub fn offline() -> Self {
+        Self::detail("not held, and fetching is off")
+    }
+
+    pub fn detail(detail: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            retry_after: None,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn not_found(&self) -> bool {
+        matches!(self.status, Some(404 | 410))
+    }
+
+    pub fn into_error(self, collateral: &str) -> AttestationError {
+        AttestationError::CollateralUnavailable {
+            collateral: collateral.to_string(),
+            retry_after: self.retry_after,
+            detail: self.detail,
         }
     }
 }
@@ -64,10 +68,12 @@ pub enum AttestationError {
     /// Collateral the verifier needed (certificates, CRLs, TCB info, NRAS
     /// results) is held nowhere and could not be fetched. The only retryable
     /// error: the evidence was not judged.
-    #[error("collateral unavailable: {collateral}: {reason}")]
+    #[error("collateral unavailable: {collateral}: {detail}")]
     CollateralUnavailable {
         collateral: String,
-        reason: Unavailable,
+        /// Seconds the vendor asked to wait, when it said.
+        retry_after: Option<u64>,
+        detail: String,
     },
 
     #[error("quote parsing failed: {0}")]
@@ -163,10 +169,7 @@ impl AttestationError {
     /// Seconds the vendor asked to wait before retrying, when it said.
     pub fn retry_after(&self) -> Option<u64> {
         match self {
-            AttestationError::CollateralUnavailable {
-                reason: Unavailable::RateLimited { retry_after },
-                ..
-            } => *retry_after,
+            AttestationError::CollateralUnavailable { retry_after, .. } => *retry_after,
             _ => None,
         }
     }

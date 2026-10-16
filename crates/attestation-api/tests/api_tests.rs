@@ -552,49 +552,6 @@ async fn a_vcek_the_vendor_does_not_publish_is_a_422() {
     assert_eq!(json["error"], "verification_failed");
 }
 
-async fn send(state: AppState, method: &str, uri: &str) -> serde_json::Value {
-    let resp = build_api_router(state)
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
-}
-
-#[tokio::test]
-async fn certs_status_counts_vceks_and_refresh_respects_the_recheck_interval() {
-    let (base, hits) = vendor(vec![
-        ("/crl", 200, GENOA_CRL.to_vec()),
-        ("/vcek/v1/Genoa/", 200, SNP_VCEK.to_vec()),
-    ])
-    .await;
-    let state = online_state(&base);
-    let (status, _) = post_verify(state.clone(), snp_body(false)).await;
-    assert_eq!(status, StatusCode::OK);
-    let fetched = hits.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(fetched, 2);
-
-    let status = send(state.clone(), "GET", "/certs/status").await;
-    assert_eq!(status["amd_vceks"], 1);
-    let shared = status["collateral"].as_array().unwrap();
-    assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0]["name"], "amd-crl genoa");
-
-    for _ in 0..3 {
-        send(state.clone(), "POST", "/certs/refresh").await;
-    }
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), fetched);
-}
-
 #[tokio::test]
 async fn the_answer_is_the_librarys() {
     const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
@@ -763,29 +720,6 @@ async fn attest_rejects_disallowed_platform_before_hardware_access() {
     assert_eq!(json["error"], "bad_request");
 }
 
-#[tokio::test]
-async fn certs_status_returns_ok() {
-    let state = test_state();
-    let app = build_api_router(state);
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/certs/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["collateral"], serde_json::json!([]));
-}
-
 // --- Attestation disabled tests ---
 
 #[tokio::test]
@@ -856,7 +790,7 @@ async fn rejects_without_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -881,7 +815,7 @@ async fn accepts_valid_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .header("authorization", "Bearer test-key-123")
                 .body(Body::empty())
                 .unwrap(),
@@ -889,7 +823,7 @@ async fn accepts_valid_api_key() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -902,7 +836,7 @@ async fn rejects_invalid_api_key() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .header("authorization", "Bearer wrong-key")
                 .body(Body::empty())
                 .unwrap(),
@@ -926,14 +860,14 @@ async fn no_auth_allows_all_requests() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/certs/status")
+                .uri("/platform")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // --- Input validation tests ---

@@ -157,9 +157,9 @@ valid copy that is not older, refetched when it nears its nextUpdate, and kept
 when a refetch fails. The CLI also saves collateral in the user cache directory
 and reuses it in later runs; `--offline` uses only that.
 
-- No copy anywhere is `CollateralUnavailable` (the only retryable error; it
-  names the piece and why: unreachable, not found, rate limited with the
-  vendor's Retry-After, or an HTTP status).
+- No copy anywhere is `CollateralUnavailable { collateral, retry_after,
+  detail }`, the only retryable error: it names the piece, the vendor's
+  Retry-After when it sent one, and why in `detail`.
 - A piece that is not the vendor's (bad signature, wrong piece) is
   refused like evidence that is not genuine, and so is a VCEK or TCB Info the
   vendor does not publish (404) for the chip or platform the evidence names.
