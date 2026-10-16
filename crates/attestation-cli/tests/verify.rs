@@ -152,9 +152,11 @@ fn collateral_unavailable_exits_three() {
 
 /// The verdict without where each piece came from (the cache here, a
 /// held copy for the library).
-fn without_sources(mut json: serde_json::Value) -> serde_json::Value {
+/// The verdict without where each piece came from, after checking that every
+/// piece came from `from`.
+fn sourced_from(mut json: serde_json::Value, from: &str) -> serde_json::Value {
     for piece in json["collateral"].as_array_mut().unwrap() {
-        piece.as_object_mut().unwrap().remove("from");
+        assert_eq!(piece.as_object_mut().unwrap().remove("from").unwrap(), from);
     }
     json
 }
@@ -179,8 +181,8 @@ async fn the_answer_is_the_librarys() {
     let mut lib_json = serde_json::to_value(&lib).unwrap();
     lib_json["passed"] = lib.passed().into();
     assert_eq!(
-        without_sources(stdout_json(&out)),
-        without_sources(lib_json)
+        sourced_from(stdout_json(&out), "disk"),
+        sourced_from(lib_json, "held")
     );
 }
 

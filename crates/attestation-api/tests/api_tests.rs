@@ -466,15 +466,11 @@ async fn collateral_held_nowhere_is_a_502() {
 }
 
 /// A vendor on localhost: each request gets the reply of the first route
-/// whose path fragment its request line contains, else 404. Counts requests.
-async fn vendor(
-    routes: Vec<(&'static str, u16, Vec<u8>)>,
-) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+/// whose path fragment its request line contains, else 404.
+async fn vendor(routes: Vec<(&'static str, u16, Vec<u8>)>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = hits.clone();
     tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {
             let mut buf = Vec::new();
@@ -487,7 +483,6 @@ async fn vendor(
             }
             let line = String::from_utf8_lossy(&buf);
             let line = line.lines().next().unwrap_or_default();
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (status, body) = routes
                 .iter()
                 .find(|(path, _, _)| line.contains(path))
@@ -500,7 +495,7 @@ async fn vendor(
             let _ = sock.write_all(body).await;
         }
     });
-    (base, hits)
+    base
 }
 
 const SNP_REPORT: &[u8] =
@@ -538,7 +533,7 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
 async fn collateral_that_is_not_the_vendors_is_a_422() {
     let mut crl = GENOA_CRL.to_vec();
     *crl.last_mut().unwrap() ^= 1;
-    let (base, _) = vendor(vec![("/crl", 200, crl)]).await;
+    let base = vendor(vec![("/crl", 200, crl)]).await;
     let (status, json) = post_verify(online_state(&base), snp_body(true)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json["error"], "verification_failed");
@@ -546,7 +541,7 @@ async fn collateral_that_is_not_the_vendors_is_a_422() {
 
 #[tokio::test]
 async fn a_vcek_the_vendor_does_not_publish_is_a_422() {
-    let (base, _) = vendor(vec![("/crl", 200, GENOA_CRL.to_vec())]).await;
+    let base = vendor(vec![("/crl", 200, GENOA_CRL.to_vec())]).await;
     let (status, json) = post_verify(online_state(&base), snp_body(false)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json["error"], "verification_failed");
