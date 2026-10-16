@@ -1277,10 +1277,14 @@ pub(crate) fn check_crl(
     }
 
     let alg = parsed.signature_algorithm.algorithm.to_id_string();
-    if alg != OID_ECDSA_WITH_SHA256 || parsed.signature_algorithm != parsed.tbs_cert_list.signature
-    {
+    if alg != OID_ECDSA_WITH_SHA256 {
         return Err(AttestationError::CertChainError(format!(
             "{label} signature algorithm {alg} is not ecdsa-with-SHA256"
+        )));
+    }
+    if parsed.signature_algorithm != parsed.tbs_cert_list.signature {
+        return Err(AttestationError::CertChainError(format!(
+            "{label} outer and signed signature algorithms differ"
         )));
     }
     let key = extract_p256_pub_key(&issuer.public_key().subject_public_key.data, label)?;
