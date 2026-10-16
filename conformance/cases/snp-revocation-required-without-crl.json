@@ -1,0 +1,13 @@
+{
+  "id": "snp-revocation-required-without-crl",
+  "rule": {
+    "section": "11",
+    "statement": "step 6: policy requires revocation and no CRL can be obtained"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-revocation-required-without-crl.json",
+  "policy": "policy/snp-revocation-required-without-crl.json",
+  "expect": {
+    "refusal": "collateral-unavailable"
+  }
+}
