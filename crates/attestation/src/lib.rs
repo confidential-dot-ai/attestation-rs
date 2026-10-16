@@ -532,6 +532,12 @@ mod tests {
         async fn get_pck_crl(&self, _: &str) -> Result<Vec<u8>> {
             panic!("fetched collateral")
         }
+        async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+            panic!("fetched collateral")
+        }
+        async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+            panic!("fetched collateral")
+        }
     }
 
     #[tokio::test]

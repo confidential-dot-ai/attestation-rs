@@ -632,6 +632,7 @@ pub async fn verify_collateral(
         .get_tcb_signing_chain()
         .await?
         .ok_or_else(unsigned)?;
+    super::dcap::verify_tcb_info_signature(&tcb_info_json, &tcb_signing_chain, now)?;
     let mut status = super::dcap::evaluate_tcb_status(
         &tcb_info_json,
         &quote.body.tee_tcb_svn,
@@ -647,8 +648,7 @@ pub async fn verify_collateral(
         .get_td_qe_identity_signing_chain()
         .await?
         .ok_or_else(unsigned)?;
-    super::dcap::verify_qe_identity_signature(&qe_identity_json, &qe_signing_chain, now)
-        .map_err(unusable)?;
+    super::dcap::verify_qe_identity_signature(&qe_identity_json, &qe_signing_chain, now)?;
     let qe_identity = super::dcap::parse_qe_identity(&qe_identity_json).map_err(unusable)?;
     let qe_status = super::dcap::check_qe_report(auth.qe_report_body, &qe_identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
@@ -660,8 +660,8 @@ pub async fn verify_collateral(
     })
 }
 
-/// Intel signs its TCB Info and QE Identity; without the issuer chain the
-/// signature cannot be checked, so the collateral is refused.
+/// Intel signs its TCB Info and QE Identity; collateral whose signature is
+/// missing or does not verify is refused.
 fn unsigned() -> AttestationError {
     AttestationError::CertChainError("Intel collateral came without its issuer chain".into())
 }

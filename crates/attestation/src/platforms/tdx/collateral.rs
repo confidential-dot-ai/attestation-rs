@@ -294,6 +294,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn intel_collateral_that_is_not_intel_signed_is_refused() {
+        let quote = crate::platforms::tdx::verify::parse_tdx_quote(QUOTE).unwrap();
+        for c in [
+            StaticTdxCollateral {
+                tcb_info: replace(TCB_INFO, "\"OutOfDate\"", "\"UpToDate\""),
+                ..collateral()
+            },
+            StaticTdxCollateral {
+                qe_identity: replace(
+                    QE_IDENTITY,
+                    "\"miscselect\":\"00000000\"",
+                    "\"miscselect\":\"00000001\"",
+                ),
+                ..collateral()
+            },
+        ] {
+            let err = crate::platforms::tdx::verify::verify_collateral(QUOTE, &quote, &c, AT)
+                .await
+                .expect_err("collateral not signed by Intel");
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+        }
+    }
+
+    #[tokio::test]
     async fn intel_collateral_without_its_issuer_chain_is_refused() {
         let quote = crate::platforms::tdx::verify::parse_tdx_quote(QUOTE).unwrap();
         for tcb_chain_only in [true, false] {

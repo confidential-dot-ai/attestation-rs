@@ -561,9 +561,7 @@ pub trait TdxCollateralProvider: Send + Sync {
     /// Used to verify the Intel ECDSA signature on TCB Info JSON.
     ///
     /// `None` refuses the collateral: unsigned TCB Info is never used.
-    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
+    async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>>;
 
     /// Fetch the QE Identity signing certificate chain (PEM).
     ///
@@ -577,9 +575,7 @@ pub trait TdxCollateralProvider: Send + Sync {
 
     /// Fetch the TD QE Identity signing certificate chain (PEM). `None`
     /// refuses the collateral.
-    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
+    async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>>;
 
     /// True when the PCK leaf or its intermediate CA is listed in Intel's
     /// CRLs. A revoked certificate is a value, not an error: the quote is
