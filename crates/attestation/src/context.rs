@@ -1,80 +1,115 @@
-//! Everything a platform verifier gets from outside: collateral providers and
-//! the evaluation time.
+//! Everything a platform verifier gets from outside: the collateral store
+//! and the evaluation time.
 
-use async_trait::async_trait;
-
-use crate::collateral::{
-    CertProvider, DefaultCertProvider, DefaultTdxCollateralProvider, TdxCollateralProvider,
-};
+use crate::collateral::Store;
 use crate::error::{AttestationError, Result};
-use crate::types::{ProcessorGeneration, SnpTcb};
 
-/// Providers and evaluation time shared by every platform verifier.
-///
-/// Platforms do not build HTTP clients or read the clock themselves; they ask
-/// the context. Construct once and reuse.
+/// A vendor response the caller already has: the URL it came from, the body,
+/// and the issuer chain Intel PCS sent in a header (PEM), if any.
+pub type HeldResponse = (String, Vec<u8>, Option<String>);
+
+/// The collateral store and evaluation time shared by every platform
+/// verifier. Construct once and reuse: the store keeps what it fetched.
 pub struct Context {
-    cert_provider: Box<dyn CertProvider>,
-    /// `None` = offline: TDX collateral checks (PCK CRL, TCB status, QE
-    /// identity) are skipped and their result fields stay `None`.
-    tdx_collateral: Option<Box<dyn TdxCollateralProvider>>,
-    #[cfg(feature = "nvidia-gpu")]
-    nras: Box<dyn crate::platforms::nvidia_gpu::NrasProvider>,
+    store: Store,
     /// Fixed evaluation time in Unix seconds; `None` = the current time.
     time: Option<i64>,
 }
 
 impl Context {
-    /// Default network-backed providers, evaluated at the current time.
+    /// Collateral from memory and the vendors, evaluated at the current time.
+    /// On wasm32 there is no network: only held responses ([`Self::with_held`]).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            cert_provider: Box::new(DefaultCertProvider::new()),
-            tdx_collateral: Some(Box::new(DefaultTdxCollateralProvider::new())),
-            #[cfg(feature = "nvidia-gpu")]
-            nras: Box::new(crate::platforms::nvidia_gpu::DefaultNrasProvider::new()),
-            time: None,
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = Store::new(false);
+        #[cfg(target_arch = "wasm32")]
+        let store = Store::held_only();
+        Self { store, time: None }
     }
 
-    /// No network: quote signatures and cert chains verify against the
-    /// bundled AMD/Intel roots, and checks that need fetched collateral are
-    /// skipped (their result fields stay `None`). Evidence that cannot be
-    /// verified without a fetch (SNP without an inline VEK, an NVIDIA GPU
-    /// bundle, which needs NRAS) fails with
-    /// [`AttestationError::CollateralUnavailable`]. This is the mode the WASM
-    /// verifier runs in.
+    /// No network: collateral only from what is held, in memory or on disk. A
+    /// piece held nowhere is
+    /// [`CollateralUnavailable`](AttestationError::CollateralUnavailable).
     #[must_use]
     pub fn offline() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = Store::new(true);
+        #[cfg(target_arch = "wasm32")]
+        let store = Store::held_only();
+        Self { store, time: None }
+    }
+
+    /// Only `responses`: no memory, disk or network. The store records the
+    /// URLs it was asked for and did not hold ([`Store::missing`]).
+    #[must_use]
+    pub fn held(responses: impl IntoIterator<Item = HeldResponse>) -> Self {
         Self {
-            cert_provider: Box::new(Offline),
-            tdx_collateral: None,
-            #[cfg(feature = "nvidia-gpu")]
-            nras: Box::new(Offline),
+            store: Store::held_only(),
             time: None,
         }
+        .with_held(responses)
     }
 
+    /// Keep collateral in `dir` across processes, and read it from there.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn with_cert_provider(mut self, provider: impl CertProvider + 'static) -> Self {
-        self.cert_provider = Box::new(provider);
+    pub fn with_cache_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        if let Some(native) = self.store.native_mut() {
+            native.disk = Some(crate::collateral::disk::Disk::new(dir));
+        }
         self
     }
 
+    /// Use these vendor responses before any other source. Each is verified
+    /// like a fetched one.
     #[must_use]
-    pub fn with_tdx_provider(mut self, provider: impl TdxCollateralProvider + 'static) -> Self {
-        self.tdx_collateral = Some(Box::new(provider));
+    pub fn with_held(mut self, responses: impl IntoIterator<Item = HeldResponse>) -> Self {
+        for (url, body, issuer_chain) in responses {
+            self.store.hold(url, body, issuer_chain);
+        }
         self
     }
 
-    #[cfg(feature = "nvidia-gpu")]
+    /// Fetch all collateral from `{base}/{vendor host}/{path}`, plain HTTP
+    /// allowed. Only for tests.
+    #[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
     #[must_use]
-    pub fn with_nras_provider(
-        mut self,
-        provider: impl crate::platforms::nvidia_gpu::NrasProvider + 'static,
-    ) -> Self {
-        self.nras = Box::new(provider);
+    pub fn with_vendor_base(mut self, base: &str) -> Self {
+        if let Some(native) = self.store.native_mut() {
+            native.vendor = native.vendor.take().map(|v| v.with_base(base));
+        }
         self
+    }
+
+    #[cfg(all(test, feature = "tdx", not(target_arch = "wasm32")))]
+    pub(crate) fn with_recheck(mut self, recheck: std::time::Duration) -> Self {
+        if let Some(native) = self.store.native_mut() {
+            native.recheck = recheck;
+        }
+        self
+    }
+
+    /// Send NVIDIA GPU evidence to these NRAS endpoints instead of the
+    /// default ones (or `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`). A URL
+    /// that is not `https` with a host is [`AttestationError::InvalidParams`].
+    #[cfg(all(feature = "nvidia-gpu", not(target_arch = "wasm32")))]
+    pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Result<Self> {
+        for url in [&gpu_url, &switch_url] {
+            let parsed = reqwest::Url::parse(url).ok();
+            if !parsed.is_some_and(|u| {
+                u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty())
+            }) {
+                return Err(AttestationError::InvalidParams(format!(
+                    "invalid NRAS URL {url:?}"
+                )));
+            }
+        }
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.nras.gpu_url = gpu_url;
+            vendor.nras.switch_url = switch_url;
+        }
+        Ok(self)
     }
 
     /// Evaluate certificate, CRL and token validity at a fixed time (Unix
@@ -96,85 +131,41 @@ impl Context {
         self.time.unwrap_or_else(|| chrono::Utc::now().timestamp())
     }
 
-    pub fn cert_provider(&self) -> &dyn CertProvider {
-        self.cert_provider.as_ref()
-    }
-
-    /// The TDX collateral provider (`None` in offline mode).
-    pub fn tdx_collateral(&self) -> Option<&dyn TdxCollateralProvider> {
-        self.tdx_collateral.as_deref()
-    }
-
-    #[cfg(feature = "nvidia-gpu")]
-    pub fn nras(&self) -> &dyn crate::platforms::nvidia_gpu::NrasProvider {
-        self.nras.as_ref()
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 }
-
 impl Default for Context {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// The providers behind [`Context::offline`]: every fetch fails without
-/// touching the network.
-struct Offline;
-
-fn offline(what: &str) -> AttestationError {
-    AttestationError::CollateralUnavailable(format!("offline mode does not fetch {what}"))
-}
-
-#[async_trait]
-impl CertProvider for Offline {
-    async fn get_snp_vcek(
-        &self,
-        _processor_gen: ProcessorGeneration,
-        _chip_id: &[u8; 64],
-        _reported_tcb: &SnpTcb,
-    ) -> Result<Vec<u8>> {
-        Err(offline("the VEK (the evidence carries none)"))
-    }
-
-    async fn get_snp_cert_chain(
-        &self,
-        _processor_gen: ProcessorGeneration,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
-        Err(offline("the AMD cert chain"))
-    }
-}
-
-#[cfg(feature = "nvidia-gpu")]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl crate::platforms::nvidia_gpu::NrasProvider for Offline {
-    fn url_for(&self, _arch: crate::types::NvidiaGpuArch) -> &str {
-        ""
-    }
-
-    async fn attest(
-        &self,
-        _request: &crate::platforms::nvidia_gpu::NrasRequest,
-    ) -> Result<serde_json::Value> {
-        Err(offline("an NRAS attestation"))
-    }
-
-    async fn jwks(
-        &self,
-        _arch: crate::types::NvidiaGpuArch,
-    ) -> Result<crate::platforms::nvidia_gpu::Jwks> {
-        Err(offline("the NRAS signing keys"))
-    }
-}
-
-#[cfg(all(test, any(feature = "snp", feature = "tdx")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    // Each test runs a fixture whose verification needs a fetch under
-    // `Context::new()`. Offline, the fetch is never attempted: the evidence
-    // either verifies with the collateral checks left `None`, or fails with
-    // `CollateralUnavailable` from the offline provider.
+    #[cfg(feature = "nvidia-gpu")]
+    #[test]
+    fn an_nras_url_that_names_no_host_is_refused_when_configured() {
+        let good = "https://nras.attestation.nvidia.com/v3/attest/gpu".to_string();
+        assert!(Context::new()
+            .with_nras_urls(good.clone(), good.clone())
+            .is_ok());
+        for (gpu, switch) in [
+            ("nras", good.as_str()),
+            (good.as_str(), "nras"),
+            ("https://", good.as_str()),
+            ("http://nras.example/x", good.as_str()),
+            ("ftp://nras.example", good.as_str()),
+            ("https://nras.example:notaport/x", good.as_str()),
+        ] {
+            assert!(matches!(
+                Context::new().with_nras_urls(gpu.into(), switch.into()),
+                Err(AttestationError::InvalidParams(_))
+            ));
+        }
+    }
 
     #[test]
     fn an_evaluation_time_out_of_range_is_invalid_params() {
@@ -185,183 +176,5 @@ mod tests {
                 Err(AttestationError::InvalidParams(_))
             ));
         }
-    }
-
-    #[cfg(feature = "snp")]
-    #[tokio::test]
-    async fn offline_snp_without_inline_vek_does_not_fetch_it() {
-        use crate::platform::Platform;
-        use crate::platforms::snp::{Snp, SnpParams};
-
-        let envelope: serde_json::Value =
-            serde_json::from_str(include_str!("../test_data/snp/live-evidence-genoa.json"))
-                .unwrap();
-        let mut evidence: crate::platforms::snp::evidence::SnpEvidence =
-            serde_json::from_value(envelope["evidence"].clone()).unwrap();
-        let ctx = Context::offline();
-
-        let r = Snp::verify(&evidence, &SnpParams::default(), &ctx)
-            .await
-            .expect("inline VEK verifies offline");
-        assert!(r.crl_ok.is_none(), "the AMD CRL is not fetched");
-
-        evidence.cert_chain = None;
-        let err = Snp::verify(&evidence, &SnpParams::default(), &ctx)
-            .await
-            .expect_err("no VEK and no fetch");
-        assert!(matches!(err, AttestationError::CollateralUnavailable(_)));
-
-        // Invalid params are refused before the VEK would be fetched.
-        let oversize = SnpParams {
-            report_data: Some(vec![0; 65]),
-            ..Default::default()
-        };
-        let err = Snp::verify(&evidence, &oversize, &ctx)
-            .await
-            .expect_err("invalid params");
-        assert!(matches!(err, AttestationError::ReportDataTooLarge { .. }));
-    }
-
-    #[cfg(feature = "tdx")]
-    #[tokio::test]
-    async fn offline_tdx_skips_pcs_collateral() {
-        use crate::platform::Platform;
-        use crate::platforms::tdx::{evidence::TdxEvidence, Tdx, TdxParams};
-        use base64::Engine;
-
-        let evidence = TdxEvidence {
-            quote: base64::engine::general_purpose::STANDARD
-                .encode(include_bytes!("../test_data/tdx_quote_5.dat")),
-            cc_eventlog: None,
-        };
-        let r = Tdx::verify(&evidence, &TdxParams::default(), &Context::offline())
-            .await
-            .expect("verifies offline");
-        assert!(r.tcb_status.is_none());
-        assert!(r.crl_ok.is_none());
-    }
-
-    #[cfg(all(feature = "nvidia-gpu", feature = "tdx"))]
-    #[tokio::test]
-    async fn offline_gpu_bundle_does_not_call_nras() {
-        use crate::platform::Policies;
-        use crate::platforms::tdx::TdxParams;
-        use crate::types::{
-            AttestationEvidence, NvidiaGpuArch, NvidiaGpuDeviceEvidence, NvidiaGpuEvidenceBundle,
-            NvidiaGpuParams, PlatformType,
-        };
-        use base64::Engine;
-
-        let nonce = vec![7u8; 32];
-        let envelope = AttestationEvidence {
-            platform: PlatformType::Tdx,
-            evidence: serde_json::json!({
-                "quote": base64::engine::general_purpose::STANDARD
-                    .encode(include_bytes!("../test_data/tdx_quote_5.dat")),
-            }),
-            nvidia_gpu: Some(NvidiaGpuEvidenceBundle {
-                devices: vec![NvidiaGpuDeviceEvidence {
-                    arch: NvidiaGpuArch::Hopper,
-                    uuid: "GPU-0".into(),
-                    evidence_b64: String::new(),
-                    cert_chain_b64: String::new(),
-                }],
-                binding: Default::default(),
-            }),
-        };
-        #[allow(clippy::needless_update)]
-        let policies = Policies {
-            tdx: Some(TdxParams {
-                report_data: Some(nonce.clone()),
-                ..Default::default()
-            }),
-            gpu: Some(NvidiaGpuParams {
-                user_nonce: Some(nonce),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let err = crate::Verifier::new(Context::offline())
-            .verify(&serde_json::to_vec(&envelope).unwrap(), &policies)
-            .await
-            .expect_err("NRAS is not reachable offline");
-        assert!(matches!(err, AttestationError::CollateralUnavailable(_)));
-    }
-
-    #[cfg(all(feature = "nvidia-gpu", feature = "snp"))]
-    #[tokio::test]
-    async fn gpu_misuse_is_refused_before_the_cpu_fetch() {
-        use crate::platform::Policies;
-        use crate::platforms::snp::SnpParams;
-        use crate::types::{NvidiaGpuArch, NvidiaGpuDeviceEvidence, NvidiaGpuEvidenceBundle};
-
-        // SNP evidence without its VEK: verifying the CPU side offline would
-        // fail with CollateralUnavailable, so any other error came first.
-        let mut envelope: serde_json::Value =
-            serde_json::from_str(include_str!("../test_data/snp/live-evidence-genoa.json"))
-                .unwrap();
-        envelope["evidence"]
-            .as_object_mut()
-            .unwrap()
-            .remove("cert_chain");
-        envelope["nvidia_gpu"] = serde_json::to_value(NvidiaGpuEvidenceBundle {
-            devices: vec![NvidiaGpuDeviceEvidence {
-                arch: NvidiaGpuArch::Hopper,
-                uuid: "GPU-0".into(),
-                evidence_b64: String::new(),
-                cert_chain_b64: String::new(),
-            }],
-            binding: Default::default(),
-        })
-        .unwrap();
-        let envelope = serde_json::to_vec(&envelope).unwrap();
-        let verify = |policies: Policies| {
-            let envelope = envelope.clone();
-            async move {
-                crate::Verifier::new(Context::offline())
-                    .verify(&envelope, &policies)
-                    .await
-                    .expect_err("refused")
-            }
-        };
-        let gpu = |user_nonce: Option<Vec<u8>>| {
-            Some(crate::types::NvidiaGpuParams {
-                user_nonce,
-                ..Default::default()
-            })
-        };
-        let snp = |report_data: Vec<u8>| SnpParams {
-            report_data: Some(report_data),
-            ..Default::default()
-        };
-
-        #[allow(clippy::needless_update)]
-        let err = verify(Policies {
-            snp: Some(snp(vec![7; 32])),
-            gpu: gpu(None),
-            ..Default::default()
-        })
-        .await;
-        assert!(err.is_invalid_params(), "{err}");
-
-        #[allow(clippy::needless_update)]
-        let err = verify(Policies {
-            snp: Some(snp(vec![7; 8])),
-            gpu: gpu(Some(vec![7; 8])),
-            ..Default::default()
-        })
-        .await;
-        assert!(err.is_invalid_params(), "{err}");
-
-        #[allow(clippy::needless_update)]
-        let err = verify(Policies {
-            gpu: gpu(Some(vec![7; 32])),
-            ..Default::default()
-        })
-        .await;
-        assert!(
-            matches!(err, AttestationError::PlatformNotAllowed(_)),
-            "{err}"
-        );
     }
 }

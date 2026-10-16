@@ -12,9 +12,8 @@ pub struct NrasJwks {
 }
 
 impl Collateral for NrasJwks {
-    /// Where NRAS publishes its key set
-    /// ([`jwks_url_for_endpoint`](crate::platforms::nvidia_gpu::jwks_url_for_endpoint)
-    /// of the configured NRAS URL).
+    /// Where NRAS publishes its key set: derived from the configured NRAS
+    /// attestation URL ([`jwks_url_for_endpoint`](crate::platforms::nvidia_gpu::jwks_url_for_endpoint)).
     type Id = String;
 
     fn name(_: &String) -> String {

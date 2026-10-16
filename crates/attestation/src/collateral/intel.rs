@@ -19,6 +19,8 @@ pub struct TcbInfo {
     pub issue_date: i64,
     pub next_update: i64,
     pub evaluation_number: u64,
+    /// The TCB Signing certificate, DER.
+    pub signer: Vec<u8>,
 }
 
 /// Intel's TD Quoting Enclave identity.
@@ -28,6 +30,8 @@ pub struct QeIdentity {
     pub issue_date: i64,
     pub next_update: i64,
     pub evaluation_number: u64,
+    /// The TCB Signing certificate, DER.
+    pub signer: Vec<u8>,
 }
 
 /// The CRL of an Intel PCK CA.
@@ -89,6 +93,14 @@ fn chain(issuer_chain: Option<&str>) -> Result<&[u8]> {
         .ok_or_else(|| refused("no issuer chain"))
 }
 
+/// The first certificate of a verified issuer chain.
+fn signer(chain: &[u8]) -> Result<Vec<u8>> {
+    dcap::parse_pem_to_der(chain)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| refused("empty issuer chain"))
+}
+
 impl Collateral for TcbInfo {
     type Id = Fmspc;
     const NAMED_BY_EVIDENCE: bool = true;
@@ -108,7 +120,8 @@ impl Collateral for TcbInfo {
     /// CA), for TDX and this FMSPC.
     fn verify(json: &[u8], issuer_chain: Option<&str>, fmspc: &Fmspc) -> Result<Self> {
         let (body, issue_date, next_update) = signed_body(json, "tcbInfo")?;
-        dcap::verify_tcb_info_signature(json, chain(issuer_chain)?, issue_date)?;
+        let chain = chain(issuer_chain)?;
+        dcap::verify_tcb_info_signature(json, chain, issue_date)?;
         if body.id != "TDX" {
             return Err(refused(format!("TCB Info is for {:?}, not TDX", body.id)));
         }
@@ -124,6 +137,7 @@ impl Collateral for TcbInfo {
             issue_date,
             next_update,
             evaluation_number: body.tcb_evaluation_data_number,
+            signer: signer(chain)?,
         })
     }
 
@@ -150,7 +164,8 @@ impl Collateral for QeIdentity {
     /// Signed by Intel's TCB Signing key, for the TD QE.
     fn verify(json: &[u8], issuer_chain: Option<&str>, _: &()) -> Result<Self> {
         let (body, issue_date, next_update) = signed_body(json, "enclaveIdentity")?;
-        dcap::verify_qe_identity_signature(json, chain(issuer_chain)?, issue_date)?;
+        let chain = chain(issuer_chain)?;
+        dcap::verify_qe_identity_signature(json, chain, issue_date)?;
         if body.id != "TD_QE" {
             return Err(refused(format!(
                 "QE Identity is for {:?}, not TD_QE",
@@ -162,6 +177,7 @@ impl Collateral for QeIdentity {
             issue_date,
             next_update,
             evaluation_number: body.tcb_evaluation_data_number,
+            signer: signer(chain)?,
         })
     }
 
@@ -234,20 +250,6 @@ impl Collateral for RootCrl {
 
     fn dates(&self) -> Dates {
         Dates::window(self.this_update, self.next_update, self.number)
-    }
-}
-
-impl PckCa {
-    /// The CA that issued the PCK leaf in `pck_chain_der`.
-    pub fn of_pck_chain(pck_chain_der: &[Vec<u8>]) -> Result<Self> {
-        let leaf = pck_chain_der.first().ok_or_else(|| {
-            crate::error::AttestationError::CertChainError("empty PCK chain".into())
-        })?;
-        match dcap::determine_ca_type_from_der(std::slice::from_ref(leaf))?.as_str() {
-            "platform" => Ok(PckCa::Platform),
-            "processor" => Ok(PckCa::Processor),
-            other => Err(super::refused(format!("PCK issued by {other}"))),
-        }
     }
 }
 

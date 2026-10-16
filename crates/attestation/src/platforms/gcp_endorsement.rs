@@ -24,7 +24,6 @@ use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
 use x509_cert::{Certificate, TbsCertificate};
 
 use crate::error::{AttestationError, Result};
-use crate::types::{AttestationEvidence, PlatformType};
 
 /// GCE-cc-tcb-root_1, from <https://pki.goog/cloud_integrity/GCE-cc-tcb-root_1.crt>
 /// (SHA-256 e876bc69...f0b18c). Endorsement signing certs are issued by it directly.
@@ -32,10 +31,6 @@ const GCE_TCB_ROOT: &[u8] = include_bytes!("../../certs/google/GCE-cc-tcb-root_1
 
 /// Subject CN of the certificate Google signs launch endorsements with.
 const SIGNER_CN: &str = "GCE-uefi-signer";
-
-/// Public HTTPS location of the `gce_tcb_integrity` bucket's endorsements.
-pub const GCE_TCB_INTEGRITY_URL: &str =
-    "https://storage.googleapis.com/gce_tcb_integrity/ovmf_x64_csm";
 
 /// Golden measurements signed after this time (2024-08-02T00:00:00Z) must name
 /// the source they were built from (`cl_spec` or `commit`).
@@ -107,24 +102,6 @@ impl TdxGolden {
     pub fn endorses(&self, mrtd: &[u8]) -> bool {
         self.endorsed().any(|m| m == mrtd)
     }
-}
-
-/// Verifies a serialized `VMLaunchEndorsement` and returns its golden
-/// measurement: the signing certificate must be Google's `GCE-uefi-signer`,
-/// issued by the pinned GCE-cc-tcb-root and valid at `now` (Unix seconds), and
-/// its key must sign the golden measurement (RSASSA-PSS, SHA-256). The
-/// endorsement is a caller param, so one that does not verify is
-/// [`AttestationError::InvalidParams`].
-pub fn verify_endorsement(endorsement: &[u8], now: i64) -> Result<GoldenMeasurement> {
-    let (golden, (not_before, not_after)) = check_endorsement(endorsement).map_err(|reason| {
-        AttestationError::InvalidParams(format!("GCE launch endorsement: {reason}"))
-    })?;
-    if !(not_before..=not_after).contains(&now) {
-        return Err(AttestationError::InvalidParams(format!(
-            "GCE launch endorsement: signing cert is not valid at {now} (valid {not_before}..{not_after})"
-        )));
-    }
-    Ok(golden)
 }
 
 /// Checks an endorsement's signature, signer role and provenance, and returns
@@ -325,57 +302,6 @@ pub(crate) fn snp_report(
     crate::platforms::snp::verify::parse_report(&report)
 }
 
-/// URL of the endorsement for the firmware that produced `evidence_json` (a
-/// gcp-tdx or gcp-snp [`AttestationEvidence`](crate::types::AttestationEvidence)
-/// envelope), named by its MRTD or launch measurement.
-pub fn endorsement_url(evidence_json: &[u8]) -> Result<String> {
-    let envelope: AttestationEvidence = serde_json::from_slice(evidence_json)
-        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-    let deserialize = |e: serde_json::Error| AttestationError::EvidenceDeserialize(e.to_string());
-    let (dir, measurement) = match envelope.platform {
-        #[cfg(feature = "gcp-tdx")]
-        PlatformType::GcpTdx => (
-            "tdx",
-            tdx_mrtd(&serde_json::from_value(envelope.evidence).map_err(deserialize)?)?.to_vec(),
-        ),
-        #[cfg(feature = "gcp-snp")]
-        PlatformType::GcpSnp => (
-            "sevsnp",
-            snp_report(&serde_json::from_value(envelope.evidence).map_err(deserialize)?)?
-                .measurement
-                .to_vec(),
-        ),
-        other => {
-            return Err(AttestationError::InvalidParams(format!(
-                "Google publishes launch endorsements for gcp-tdx and gcp-snp, not {other}"
-            )))
-        }
-    };
-    Ok(format!(
-        "{GCE_TCB_INTEGRITY_URL}/{dir}/{}.binarypb",
-        hex::encode(measurement)
-    ))
-}
-
-/// Downloads an endorsement from `url` (see [`endorsement_url`]) and checks
-/// that it verifies now. A download that fails or does not verify is
-/// [`AttestationError::CollateralUnavailable`]. Pass the bytes as the
-/// `endorsement` param.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn fetch_endorsement(url: &str) -> Result<Vec<u8>> {
-    let timeouts = crate::collateral::HttpTimeouts::default();
-    let client = reqwest::Client::builder()
-        .timeout(timeouts.request_timeout)
-        .connect_timeout(timeouts.connect_timeout)
-        .build()
-        .map_err(|e| AttestationError::CollateralUnavailable(format!("HTTP client: {e}")))?;
-    let response = crate::collateral::send_get(&client, url).await?;
-    let endorsement = crate::collateral::read_response_with_limit(response).await?;
-    verify_endorsement(&endorsement, chrono::Utc::now().timestamp())
-        .map_err(|e| AttestationError::CollateralUnavailable(format!("{url}: {e}")))?;
-    Ok(endorsement)
-}
-
 // ── Minimal protobuf decoding ──
 // The endorsement messages use only varint and length-delimited fields;
 // fixed-width fields are skipped, groups are rejected.
@@ -564,9 +490,8 @@ mod tests {
     /// 2026-10-01T00:00:00Z. Both signing certs are valid 2026-05-05..2031-05-05.
     const NOW: i64 = 1_790_812_800;
 
-    fn rejected(result: Result<GoldenMeasurement>) {
-        let err = result.expect_err("endorsement must be rejected");
-        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
+    fn rejected(result: std::result::Result<(GoldenMeasurement, (i64, i64)), String>) {
+        assert!(result.is_err(), "endorsement must be rejected");
     }
 
     fn len_field(number: u8, bytes: &[u8]) -> Vec<u8> {
@@ -583,7 +508,7 @@ mod tests {
 
     #[test]
     fn tdx_endorsement_endorses_the_gcp_tdx_mrtd() {
-        let golden = verify_endorsement(TDX_ENDORSEMENT, NOW).unwrap();
+        let golden = check_endorsement(TDX_ENDORSEMENT).unwrap().0;
         let tdx = golden.tdx.unwrap();
         assert!(tdx.endorses(&hex::decode(GCP_TDX_MRTD).unwrap()));
         assert!(!golden
@@ -594,7 +519,7 @@ mod tests {
 
     #[test]
     fn snp_endorsement_endorses_the_gcp_snp_measurement_for_2_vmsas() {
-        let golden = verify_endorsement(SNP_ENDORSEMENT, NOW).unwrap();
+        let golden = check_endorsement(SNP_ENDORSEMENT).unwrap().0;
         let snp = golden.sev_snp.unwrap();
         let measurement = hex::decode(GCP_SNP_MEASUREMENT).unwrap();
         assert!(snp.endorses(&measurement));
@@ -610,7 +535,7 @@ mod tests {
     fn tampered_signature_is_rejected() {
         let mut endorsement = TDX_ENDORSEMENT.to_vec();
         *endorsement.last_mut().unwrap() ^= 1;
-        rejected(verify_endorsement(&endorsement, NOW));
+        rejected(check_endorsement(&endorsement));
     }
 
     #[test]
@@ -622,14 +547,16 @@ mod tests {
             .position(|w| w == mrtd)
             .unwrap();
         endorsement[at] ^= 1;
-        rejected(verify_endorsement(&endorsement, NOW));
+        rejected(check_endorsement(&endorsement));
     }
 
     #[test]
     fn signing_cert_outside_its_validity_is_rejected() {
         // 2026-05-01 and 2031-06-01.
+        let (_, window) = check_endorsement(TDX_ENDORSEMENT).unwrap();
+        assert!((window.0..=window.1).contains(&NOW));
         for now in [1_777_593_600, 1_938_124_800] {
-            rejected(verify_endorsement(TDX_ENDORSEMENT, now));
+            assert!(!(window.0..=window.1).contains(&now));
         }
     }
 
@@ -638,12 +565,12 @@ mod tests {
         let ark = include_bytes!("../../certs/amd/milan/ark.der");
         let golden = [len_field(3, b"commit"), len_field(4, ark)].concat();
         let endorsement = [len_field(1, &golden), len_field(2, &[0; 512])].concat();
-        rejected(verify_endorsement(&endorsement, NOW));
+        rejected(check_endorsement(&endorsement));
     }
 
     #[test]
     fn truncated_endorsement_is_rejected() {
-        rejected(verify_endorsement(&TDX_ENDORSEMENT[..100], NOW));
+        rejected(check_endorsement(&TDX_ENDORSEMENT[..100]));
     }
 
     #[test]
@@ -673,9 +600,8 @@ mod tests {
     #[test]
     fn field_number_0_is_rejected() {
         assert!(fields(&[0x00, 0x01]).is_err());
-        rejected(verify_endorsement(
+        rejected(check_endorsement(
             &[&[0x02, 0x00], TDX_ENDORSEMENT].concat(),
-            NOW,
         ));
     }
 
@@ -744,24 +670,5 @@ mod tests {
         for (policy, endorsed) in [(0xb0000, 0x70000), (0x30000, 0x70001), (0x30000, 0x170000)] {
             assert!(check_snp_policy(policy, endorsed).is_err(), "{policy:#x}");
         }
-    }
-
-    #[cfg(feature = "gcp-tdx")]
-    #[test]
-    fn endorsement_url_names_the_mrtd() {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        let quote = include_bytes!("../../test_data/gcp_tdx/boot-quote.dat");
-        let envelope = |platform: &str| {
-            serde_json::to_vec(&serde_json::json!({
-                "platform": platform,
-                "evidence": { "quote": BASE64.encode(quote) },
-            }))
-            .unwrap()
-        };
-        assert_eq!(
-            endorsement_url(&envelope("gcp-tdx")).unwrap(),
-            format!("{GCE_TCB_INTEGRITY_URL}/tdx/{GCP_TDX_MRTD}.binarypb")
-        );
-        assert!(endorsement_url(&envelope("tdx")).is_err());
     }
 }

@@ -38,6 +38,9 @@
 //! let evidence_json = attestation::attest(platform, b"nonce", &attestation::AttestOptions::default()).await?;
 //! ```
 
+#[cfg(all(feature = "test-vendor", not(debug_assertions)))]
+compile_error!("the test-vendor feature is for tests and must not be built in release");
+
 #[cfg(all(feature = "attest", target_os = "linux"))]
 use std::sync::OnceLock;
 
@@ -49,13 +52,11 @@ pub mod platforms;
 pub mod types;
 pub mod utils;
 
-pub use collateral::{
-    snp_cert_chain_url, snp_crl_url, snp_vcek_url, CertProvider, DefaultCertProvider,
-    DefaultTdxCollateralProvider, HttpTimeouts, TdxCollateralProvider, AMD_KDS_VCEK_BASE,
-    AMD_KDS_VLEK_BASE, INTEL_CERTS_BASE, INTEL_PCS_V4_BASE, INTEL_QE_IDENTITY_URL,
-    INTEL_ROOT_CA_CRL_URL, INTEL_TDX_PCS_V4_BASE, INTEL_TD_QE_IDENTITY_URL,
-};
-pub use context::Context;
+#[cfg(all(test, any(feature = "snp", feature = "tdx")))]
+mod testing;
+
+pub use collateral::CollateralUsed;
+pub use context::{Context, HeldResponse};
 pub use error::{AttestationError, Result};
 pub use platform::{Platform, PlatformResult, Policies, Verified};
 #[cfg(feature = "az-snp")]
@@ -72,8 +73,6 @@ pub use platforms::gcp_tdx::{GcpTdx, GcpTdxParams, GcpTdxResult};
 pub use platforms::snp::{Snp, SnpParams, SnpResult};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]
 pub use platforms::tdx::attest::TdxQuoteMethod;
-#[cfg(feature = "tdx")]
-pub use platforms::tdx::dcap::{cert_revoked, determine_ca_type, intermediate_ca_revoked};
 #[cfg(feature = "tdx")]
 pub use platforms::tdx::{Tdx, TdxParams, TdxResult};
 pub use types::*;
@@ -290,7 +289,7 @@ pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
 /// for each request.
 ///
 /// ```rust,ignore
-/// let verifier = Verifier::new(Context::new().with_cert_provider(my_cached_provider));
+/// let verifier = Verifier::new(Context::new());
 /// let verified = verifier.verify(&evidence_json, &policies).await?;
 /// ```
 pub struct Verifier {
@@ -303,9 +302,8 @@ impl Verifier {
         Self { ctx }
     }
 
-    /// The context passed to every platform verifier. Use it to call a
-    /// platform directly when the caller knows the platform, e.g.
-    /// `Tdx::verify(&evidence, &params, verifier.context())`.
+    /// The context passed to every platform verifier: its collateral store
+    /// and evaluation time.
     pub fn context(&self) -> &Context {
         &self.ctx
     }
@@ -368,28 +366,28 @@ impl Verifier {
             (None, None) => {}
         }
 
-        let platform = self
-            .verify_platform(envelope.platform, envelope.evidence, policies)
+        let now = self.ctx.now();
+        let (platform, used) = self
+            .verify_platform(envelope.platform, envelope.evidence, policies, now)
             .await?;
 
         #[cfg(feature = "nvidia-gpu")]
-        let gpu = match (envelope.nvidia_gpu, &policies.gpu) {
-            (Some(bundle), Some(params)) => Some(
-                platforms::nvidia_gpu::verify_bundle(
-                    &bundle,
-                    params,
-                    self.ctx.nras(),
-                    self.ctx.now(),
-                )
-                .await?,
-            ),
-            _ => None,
+        let (gpu, used) = match (envelope.nvidia_gpu, &policies.gpu) {
+            (Some(bundle), Some(params)) => {
+                let (collateral, jwks) =
+                    platforms::nvidia_gpu::gather_bundle(&bundle, params, self.ctx.store(), now)
+                        .await?;
+                let gpu = platforms::nvidia_gpu::verify_bundle(&bundle, params, &collateral, now)?;
+                (Some(gpu), [used, vec![jwks]].concat())
+            }
+            _ => (None, used),
         };
 
         Ok(Verified {
             platform,
             #[cfg(feature = "nvidia-gpu")]
             gpu,
+            collateral: used,
         })
     }
 
@@ -399,46 +397,51 @@ impl Verifier {
         platform: PlatformType,
         evidence: serde_json::Value,
         policies: &Policies,
-    ) -> Result<PlatformResult> {
-        let ctx = &self.ctx;
+        now: i64,
+    ) -> Result<(PlatformResult, Vec<CollateralUsed>)> {
+        let store = self.ctx.store();
         match platform {
             #[cfg(feature = "snp")]
-            PlatformType::Snp => run::<platforms::snp::Snp>(evidence, policies.snp.as_ref(), ctx)
-                .await
-                .map(PlatformResult::Snp),
+            PlatformType::Snp => {
+                run::<platforms::snp::Snp>(evidence, policies.snp.as_ref(), store, now)
+                    .await
+                    .map(|(r, p)| (PlatformResult::Snp(r), p))
+            }
             #[cfg(feature = "tdx")]
-            PlatformType::Tdx => run::<platforms::tdx::Tdx>(evidence, policies.tdx.as_ref(), ctx)
-                .await
-                .map(PlatformResult::Tdx),
+            PlatformType::Tdx => {
+                run::<platforms::tdx::Tdx>(evidence, policies.tdx.as_ref(), store, now)
+                    .await
+                    .map(|(r, p)| (PlatformResult::Tdx(r), p))
+            }
             #[cfg(feature = "az-snp")]
             PlatformType::AzSnp => {
-                run::<platforms::az_snp::AzSnp>(evidence, policies.az_snp.as_ref(), ctx)
+                run::<platforms::az_snp::AzSnp>(evidence, policies.az_snp.as_ref(), store, now)
                     .await
-                    .map(PlatformResult::AzSnp)
+                    .map(|(r, p)| (PlatformResult::AzSnp(r), p))
             }
             #[cfg(feature = "az-tdx")]
             PlatformType::AzTdx => {
-                run::<platforms::az_tdx::AzTdx>(evidence, policies.az_tdx.as_ref(), ctx)
+                run::<platforms::az_tdx::AzTdx>(evidence, policies.az_tdx.as_ref(), store, now)
                     .await
-                    .map(PlatformResult::AzTdx)
+                    .map(|(r, p)| (PlatformResult::AzTdx(r), p))
             }
             #[cfg(feature = "gcp-snp")]
             PlatformType::GcpSnp => {
-                run::<platforms::gcp_snp::GcpSnp>(evidence, policies.gcp_snp.as_ref(), ctx)
+                run::<platforms::gcp_snp::GcpSnp>(evidence, policies.gcp_snp.as_ref(), store, now)
                     .await
-                    .map(PlatformResult::GcpSnp)
+                    .map(|(r, p)| (PlatformResult::GcpSnp(r), p))
             }
             #[cfg(feature = "gcp-tdx")]
             PlatformType::GcpTdx => {
-                run::<platforms::gcp_tdx::GcpTdx>(evidence, policies.gcp_tdx.as_ref(), ctx)
+                run::<platforms::gcp_tdx::GcpTdx>(evidence, policies.gcp_tdx.as_ref(), store, now)
                     .await
-                    .map(PlatformResult::GcpTdx)
+                    .map(|(r, p)| (PlatformResult::GcpTdx(r), p))
             }
             #[cfg(feature = "dstack")]
             PlatformType::Dstack => {
-                run::<platforms::dstack::Dstack>(evidence, policies.dstack.as_ref(), ctx)
+                run::<platforms::dstack::Dstack>(evidence, policies.dstack.as_ref(), store, now)
                     .await
-                    .map(PlatformResult::Dstack)
+                    .map(|(r, p)| (PlatformResult::Dstack(r), p))
             }
             #[cfg(not(all(
                 feature = "snp",
@@ -454,18 +457,23 @@ impl Verifier {
     }
 }
 
-/// Run one platform: refuse it when the caller gave no params for it, then
-/// decode its evidence and verify.
+/// Run one platform: refuse it when the caller gave no params for it, decode
+/// its evidence, check the params, gather its collateral and verify, all at
+/// `now`.
 #[allow(dead_code)]
 async fn run<P: Platform>(
     evidence: serde_json::Value,
     params: Option<&P::Params>,
-    ctx: &Context,
-) -> Result<P::Result> {
+    store: &collateral::Store,
+    now: i64,
+) -> Result<(P::Result, Vec<CollateralUsed>)> {
     let params = params.ok_or_else(|| AttestationError::PlatformNotAllowed(P::KIND.to_string()))?;
     let evidence: P::Evidence = serde_json::from_value(evidence)
         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
-    P::verify(&evidence, params, ctx).await
+    P::validate(params)?;
+    let (collateral, used) = P::gather(&evidence, store, now).await?;
+    let result = P::verify(&evidence, params, &collateral, now)?;
+    Ok((result, used))
 }
 
 impl Default for Verifier {
@@ -474,16 +482,20 @@ impl Default for Verifier {
     }
 }
 
-/// Verify attestation evidence from a self-describing JSON envelope with the
-/// default network-backed [`Context`].
+/// Verify attestation evidence from a self-describing JSON envelope.
 ///
-/// For custom providers (e.g. cached certs), construct a [`Verifier`] instead.
+/// Collateral comes from one store shared by every call in the process,
+/// which fetches each piece from its vendor once and keeps it.
 ///
 /// # Errors
 ///
 /// See [`Verifier::verify`].
 pub async fn verify(evidence_json: &[u8], policies: &Policies) -> Result<Verified> {
-    Verifier::default().verify(evidence_json, policies).await
+    static SHARED: std::sync::OnceLock<Verifier> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(Verifier::default)
+        .verify(evidence_json, policies)
+        .await
 }
 
 #[cfg(all(test, feature = "tdx"))]
@@ -491,7 +503,7 @@ mod tests {
     use super::*;
     use base64::Engine;
 
-    const V5_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_5.dat");
+    const V5_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_00a06d080000.dat");
 
     fn tdx_envelope() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
@@ -512,37 +524,13 @@ mod tests {
         }
     }
 
-    /// Fails the test if verification reaches for collateral.
-    struct NoFetch;
-
-    #[async_trait::async_trait]
-    impl TdxCollateralProvider for NoFetch {
-        async fn get_tcb_info(&self, _: &str) -> Result<Vec<u8>> {
-            panic!("fetched collateral")
-        }
-        async fn get_qe_identity(&self) -> Result<Vec<u8>> {
-            panic!("fetched collateral")
-        }
-        async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
-            panic!("fetched collateral")
-        }
-        async fn get_root_ca_crl(&self) -> Result<Vec<u8>> {
-            panic!("fetched collateral")
-        }
-        async fn get_pck_crl(&self, _: &str) -> Result<Vec<u8>> {
-            panic!("fetched collateral")
-        }
-        async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-            panic!("fetched collateral")
-        }
-        async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
-            panic!("fetched collateral")
-        }
+    fn verifier() -> Verifier {
+        Verifier::new(crate::testing::context(crate::testing::intel()))
     }
 
     #[tokio::test]
     async fn invalid_params_are_refused_before_any_fetch() {
-        let verifier = Verifier::new(Context::offline().with_tdx_provider(NoFetch));
+        let verifier = verifier();
         let refused = |params| async {
             verifier
                 .verify(&tdx_envelope(), &tdx_policies(params))
@@ -561,6 +549,7 @@ mod tests {
         })
         .await;
         assert!(matches!(err, AttestationError::InvalidParams(_)));
+        assert!(verifier.context().store().missing().is_empty());
     }
 
     #[cfg(not(feature = "nvidia-gpu"))]
@@ -568,7 +557,7 @@ mod tests {
     async fn a_gpu_bundle_without_the_gpu_feature_is_refused() {
         let mut envelope: serde_json::Value = serde_json::from_slice(&tdx_envelope()).unwrap();
         envelope["nvidia_gpu"] = serde_json::json!({ "devices": [] });
-        let err = Verifier::new(Context::offline())
+        let err = verifier()
             .verify(
                 &serde_json::to_vec(&envelope).unwrap(),
                 &tdx_policies(TdxParams::default()),
@@ -584,7 +573,7 @@ mod tests {
         envelope["evidence"]["cc_eventlog"] = base64::engine::general_purpose::STANDARD
             .encode([0u8; 64])
             .into();
-        let err = Verifier::new(Context::offline().with_tdx_provider(NoFetch))
+        let err = verifier()
             .verify(
                 &serde_json::to_vec(&envelope).unwrap(),
                 &tdx_policies(TdxParams::default()),
@@ -595,8 +584,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_result_lists_its_collateral_and_expired_collateral_does_not_pass() {
+        let verified = verifier()
+            .verify(&tdx_envelope(), &Policies::all())
+            .await
+            .unwrap();
+        assert_eq!(verified.collateral.len(), 4);
+        assert!(verified
+            .collateral
+            .iter()
+            .all(|c| c.current && c.from == collateral::Source::Held));
+        assert!(verified.passed());
+
+        // 2026-12-01: past the nextUpdate of all but the Root CA CRL.
+        let late = Context::offline()
+            .with_held(crate::testing::intel())
+            .at(1_796_083_200)
+            .unwrap();
+        let verified = Verifier::new(late)
+            .verify(&tdx_envelope(), &Policies::all())
+            .await
+            .expect("expired collateral is a value");
+        assert!(verified.platform.passed());
+        let expired = verified.collateral.iter().filter(|c| !c.current);
+        assert_eq!(expired.count(), 3);
+        assert!(!verified.passed());
+    }
+
+    #[tokio::test]
+    async fn pure_verify_gives_the_same_answer_every_time() {
+        let evidence = platforms::tdx::evidence::TdxEvidence {
+            quote: base64::engine::general_purpose::STANDARD.encode(V5_QUOTE),
+            cc_eventlog: None,
+        };
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let (collateral, _) = Tdx::gather(&evidence, ctx.store(), now).await.unwrap();
+        let answer = || {
+            serde_json::to_value(
+                Tdx::verify(&evidence, &TdxParams::default(), &collateral, now).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = answer();
+        assert!((0..10).all(|_| answer() == first));
+    }
+
+    #[tokio::test]
     async fn evidence_for_a_platform_without_policy_is_refused() {
-        let err = Verifier::new(Context::offline())
+        let err = verifier()
             .verify(&tdx_envelope(), &Policies::default())
             .await
             .expect_err("no policy for tdx");
@@ -605,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn verified_passes_only_when_every_rule_holds() {
-        let verifier = Verifier::new(Context::offline());
+        let verifier = verifier();
         let mrtd = platforms::tdx::verify::parse_tdx_quote(V5_QUOTE)
             .unwrap()
             .body
@@ -639,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_accepts_any_platform_and_with_report_data_pins_the_nonce() {
-        let verifier = Verifier::new(Context::offline());
+        let verifier = verifier();
         let nonce = platforms::tdx::verify::parse_tdx_quote(V5_QUOTE)
             .unwrap()
             .body
@@ -665,6 +701,58 @@ mod tests {
             .await
             .expect("a nonce mismatch is a value, not an error");
         assert!(!verified.passed());
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn a_gpu_nonce_must_be_the_cpu_report_data_before_any_fetch() {
+        let mut envelope: serde_json::Value = serde_json::from_slice(&tdx_envelope()).unwrap();
+        envelope["nvidia_gpu"] = serde_json::json!({
+            "devices": [{
+                "arch": "HOPPER",
+                "uuid": "GPU-0",
+                "evidence_b64": "",
+                "cert_chain_b64": "",
+            }],
+            "binding": NvidiaGpuBinding::default(),
+        });
+        let envelope = serde_json::to_vec(&envelope).unwrap();
+        let gpu = |nonce: &[u8]| NvidiaGpuParams {
+            user_nonce: Some(nonce.to_vec()),
+            ..Default::default()
+        };
+        let with = |report_data: Option<&[u8]>, gpu: Option<NvidiaGpuParams>| Policies {
+            tdx: Some(TdxParams {
+                report_data: report_data.map(<[u8]>::to_vec),
+                ..Default::default()
+            }),
+            gpu,
+            ..Default::default()
+        };
+        let verifier = Verifier::new(Context::held([]));
+        let refused = |policies: Policies| {
+            let verifier = &verifier;
+            let envelope = &envelope;
+            async move { verifier.verify(envelope, &policies).await.err().unwrap() }
+        };
+        let (cpu, other) = ([1; 32], [2; 32]);
+
+        let err = refused(with(Some(&cpu), Some(gpu(&other)))).await;
+        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
+        let err = refused(with(None, Some(gpu(&cpu)))).await;
+        assert!(
+            matches!(err, AttestationError::NvidiaGpuReportDataRequired),
+            "{err}"
+        );
+        let err = refused(with(Some(&cpu), None)).await;
+        assert!(
+            matches!(err, AttestationError::PlatformNotAllowed(_)),
+            "{err}"
+        );
+        assert!(verifier.context().store().missing().is_empty());
+
+        let err = refused(with(Some(&cpu), Some(gpu(&cpu)))).await;
+        assert!(!verifier.context().store().missing().is_empty(), "{err}");
     }
 
     #[cfg(feature = "az-tdx")]

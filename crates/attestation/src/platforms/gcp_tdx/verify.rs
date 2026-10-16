@@ -23,11 +23,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{CollateralUsed, GceEndorsement, Store};
 use crate::error::Result;
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::tdx::evidence::TdxEvidence;
+use crate::platforms::tdx::verify::{genuine_quote, TdxCollateralSet};
 use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
 use crate::types::PlatformType;
 
@@ -35,12 +36,6 @@ use crate::types::PlatformType;
 #[derive(Debug, Clone, Default)]
 pub struct GcpTdxParams {
     pub tdx: TdxParams,
-    /// Google's launch endorsement for the firmware (a serialized
-    /// `VMLaunchEndorsement`, see
-    /// [`endorsement_url`](crate::platforms::gcp_endorsement::endorsement_url)).
-    /// An endorsement that does not verify is
-    /// [`InvalidParams`](crate::AttestationError::InvalidParams).
-    pub endorsement: Option<Vec<u8>>,
 }
 
 /// The answer for genuine GCP TDX evidence. `endorsement_match` proves
@@ -50,8 +45,8 @@ pub struct GcpTdxParams {
 pub struct GcpTdxResult {
     #[serde(flatten)]
     pub tdx: TdxResult,
-    /// The endorsement lists the quote's MRTD (`None` if no endorsement was
-    /// given): the firmware is a Google OVMF build. Any TDX host can boot it,
+    /// Google's endorsement for the quote's MRTD exists and lists it: the
+    /// firmware is a Google OVMF build. Any TDX host can boot it,
     /// so this does not mean the host is GCP.
     pub endorsement_match: Option<bool>,
 }
@@ -67,8 +62,8 @@ impl GcpTdxResult {
 ///
 /// Delegates to the bare-metal TDX verifier. The quote format, DCAP
 /// certificate chain, and all cryptographic verification are identical to
-/// bare-metal TDX. A supplied launch endorsement is verified first (it is a
-/// param) and matched against the quote's MRTD.
+/// bare-metal TDX. Google's launch endorsement for the firmware is collateral,
+/// matched against the quote's MRTD.
 ///
 /// **Note:** The `GcpTdx` platform tag reflects the attester's claim, not a
 /// cryptographic proof of GCP origin. Policy decisions should use report
@@ -80,82 +75,68 @@ impl Platform for GcpTdx {
     type Evidence = TdxEvidence;
     type Params = GcpTdxParams;
     type Result = GcpTdxResult;
+    type CollateralSet = GcpTdxCollateralSet;
 
-    async fn verify(
+    fn validate(params: &GcpTdxParams) -> Result<()> {
+        Tdx::validate(&params.tdx)
+    }
+
+    /// The Tdx collateral and Google's endorsement for the MRTD, if Google
+    /// publishes one, fetched once the quote has verified (as for Tdx).
+    async fn gather(
+        evidence: &TdxEvidence,
+        store: &Store,
+        now: i64,
+    ) -> Result<(GcpTdxCollateralSet, Vec<CollateralUsed>)> {
+        let (quote_bytes, quote) = genuine_quote(evidence, now)?;
+        let mrtd = (Self::KIND, quote.body.mr_td.to_vec());
+        let (tdx, endorsement) = futures_util::join!(
+            TdxCollateralSet::gather(&quote_bytes, &quote, store, now),
+            store.get_if_published::<GceEndorsement>(&mrtd, now)
+        );
+        let (tdx, mut used) = tdx?;
+        let endorsement = endorsement?.map(|(endorsement, u)| {
+            used.push(u);
+            endorsement
+        });
+        Ok((GcpTdxCollateralSet { tdx, endorsement }, used))
+    }
+
+    fn verify(
         evidence: &TdxEvidence,
         params: &GcpTdxParams,
-        ctx: &Context,
+        collateral: &GcpTdxCollateralSet,
+        now: i64,
     ) -> Result<GcpTdxResult> {
-        let golden = params
+        let tdx = Tdx::verify(evidence, &params.tdx, &collateral.tdx, now)?;
+
+        let measurement = gcp_endorsement::tdx_mrtd(evidence)?.to_vec();
+        let endorsement_match = collateral
             .endorsement
-            .as_deref()
-            .map(|endorsement| gcp_endorsement::verify_endorsement(endorsement, ctx.now()))
-            .transpose()?;
-        let tdx = Tdx::verify(evidence, &params.tdx, ctx).await?;
-        let endorsement_match = match &golden {
-            Some(golden) => Some(gcp_endorsement::endorses_tdx(
-                golden,
-                &gcp_endorsement::tdx_mrtd(evidence)?,
-            )),
-            None => None,
-        };
+            .as_ref()
+            .is_some_and(|e| gcp_endorsement::endorses_tdx(&e.golden, &measurement));
         Ok(GcpTdxResult {
             tdx,
-            endorsement_match,
+            endorsement_match: Some(endorsement_match),
         })
     }
+}
+
+/// The GcpTdx collateral set: the Tdx collateral set and Google's launch
+/// endorsement for the firmware (`None` when Google publishes none for the
+/// measurement).
+pub struct GcpTdxCollateralSet {
+    pub tdx: TdxCollateralSet,
+    pub endorsement: Option<GceEndorsement>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platforms::tdx::verify::parse_tdx_quote;
+    use crate::testing;
+    use crate::AttestationError;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
-    const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
-
-    fn make_tdx_evidence(quote_bytes: &[u8]) -> TdxEvidence {
-        TdxEvidence {
-            quote: BASE64.encode(quote_bytes),
-            cc_eventlog: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_gcp_tdx_propagates_expected_mrtd_match() {
-        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = GcpTdxParams {
-            tdx: TdxParams {
-                allow_debug: true, // v4 fixture has the debug bit set
-                mrtd: Some(vec![quote.body.mr_td]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let r = GcpTdx::verify(&evidence, &params, &Context::offline())
-            .await
-            .unwrap();
-        assert_eq!(r.tdx.mrtd_match, Some(true));
-    }
-
-    #[tokio::test]
-    async fn test_gcp_tdx_propagates_wrong_mrtd_match() {
-        let evidence = make_tdx_evidence(V4_QUOTE);
-        let params = GcpTdxParams {
-            tdx: TdxParams {
-                allow_debug: true,
-                mrtd: Some(vec![[0x55; 48]]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let r = GcpTdx::verify(&evidence, &params, &Context::offline())
-            .await
-            .unwrap();
-        assert_eq!(r.tdx.mrtd_match, Some(false));
-        assert!(!r.passed());
-    }
 
     // A real GCP TDX quote and the endorsements of two OVMF builds: the one it
     // booted (lists its MRTD) and another (does not).
@@ -165,42 +146,89 @@ mod tests {
     const OTHER_BUILD_ENDORSEMENT: &[u8] =
         include_bytes!("../../../test_data/gcp_snp/endorsement-0e017d2f.binarypb");
 
-    async fn verify_endorsed(endorsement: Option<&[u8]>) -> Result<GcpTdxResult> {
-        let params = GcpTdxParams {
-            endorsement: endorsement.map(<[u8]>::to_vec),
-            ..Default::default()
-        };
-        GcpTdx::verify(
-            &make_tdx_evidence(GCP_BOOT_QUOTE),
-            &params,
-            &Context::offline(),
-        )
-        .await
+    fn evidence() -> TdxEvidence {
+        TdxEvidence {
+            quote: BASE64.encode(GCP_BOOT_QUOTE),
+            cc_eventlog: None,
+        }
+    }
+
+    async fn verify(endorsement: &[u8], params: &GcpTdxParams) -> Result<GcpTdxResult> {
+        let mrtd = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body.mr_td;
+        let url = <GceEndorsement as crate::collateral::Collateral>::url(&(
+            PlatformType::GcpTdx,
+            mrtd.to_vec(),
+        ));
+        let mut held = testing::intel();
+        held.push((url, endorsement.to_vec(), None));
+        testing::verify::<GcpTdx>(&evidence(), params, held).await
     }
 
     #[tokio::test]
-    async fn test_gcp_tdx_launch_endorsement() {
-        let r = verify_endorsed(Some(ENDORSEMENT)).await.unwrap();
+    async fn test_gcp_tdx_launch_endorsement_and_mrtd() {
+        let mrtd = parse_tdx_quote(GCP_BOOT_QUOTE).unwrap().body.mr_td;
+        let params = |mrtd| GcpTdxParams {
+            tdx: TdxParams {
+                mrtd: Some(vec![mrtd]),
+                ..Default::default()
+            },
+        };
+        let r = verify(ENDORSEMENT, &params(mrtd)).await.unwrap();
         assert_eq!(r.endorsement_match, Some(true));
-        assert!(r.passed());
+        assert_eq!(r.tdx.mrtd_match, Some(true));
+        let r = verify(ENDORSEMENT, &params([0x55; 48])).await.unwrap();
+        assert_eq!(r.tdx.mrtd_match, Some(false));
+        assert!(!r.passed());
+    }
 
-        assert_eq!(verify_endorsed(None).await.unwrap().endorsement_match, None);
+    #[tokio::test]
+    async fn an_endorsement_for_another_build_or_tampered_is_refused() {
+        let mut tampered = ENDORSEMENT.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        for endorsement in [OTHER_BUILD_ENDORSEMENT.to_vec(), tampered] {
+            let err = verify(&endorsement, &GcpTdxParams::default())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+        }
+    }
 
-        let r = verify_endorsed(Some(OTHER_BUILD_ENDORSEMENT))
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn without_an_endorsement_the_firmware_is_not_endorsed() {
+        let ctx = testing::context(testing::intel());
+        let collateral = GcpTdxCollateralSet {
+            tdx: Tdx::gather(&evidence(), ctx.store(), testing::NOW)
+                .await
+                .unwrap()
+                .0,
+            endorsement: None,
+        };
+        let r = GcpTdx::verify(
+            &evidence(),
+            &GcpTdxParams::default(),
+            &collateral,
+            testing::NOW,
+        )
+        .unwrap();
         assert_eq!(r.endorsement_match, Some(false));
         assert!(!r.passed());
     }
 
     #[tokio::test]
-    async fn test_gcp_tdx_tampered_endorsement_is_invalid_params() {
-        let mut endorsement = ENDORSEMENT.to_vec();
-        *endorsement.last_mut().unwrap() ^= 1;
-        let err = verify_endorsed(Some(&endorsement)).await.unwrap_err();
-        assert!(
-            matches!(err, crate::AttestationError::InvalidParams(_)),
-            "{err}"
-        );
+    async fn a_forged_quote_is_not_genuine_and_names_no_collateral() {
+        let mut quote = GCP_BOOT_QUOTE.to_vec();
+        // A byte of REPORTDATA: the quote no longer matches its signature.
+        quote[crate::platforms::tdx::verify::QUOTE_HEADER_SIZE + 520] ^= 1;
+        let forged = TdxEvidence {
+            quote: BASE64.encode(quote),
+            cc_eventlog: None,
+        };
+        let ctx = crate::context::Context::held([]);
+        let err = GcpTdx::gather(&forged, ctx.store(), testing::NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(!err.is_retryable(), "{err}");
+        assert!(ctx.store().missing().is_empty());
     }
 }

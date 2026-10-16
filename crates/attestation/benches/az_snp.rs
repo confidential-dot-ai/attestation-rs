@@ -1,40 +1,12 @@
-use async_trait::async_trait;
 use base64::Engine;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use attestation::collateral::CertProvider;
-use attestation::error::Result as AttResult;
-use attestation::types::{ProcessorGeneration, SnpTcb};
-use attestation::{AzSnp, AzSnpParams, Context, Platform};
+use attestation::platforms::az_snp::verify::verify_report;
+use attestation::AzSnpParams;
 
 static AZ_SNP_HCL_REPORT: &[u8] = include_bytes!("../test_data/az_snp/hcl-report.bin");
 static AZ_SNP_EVIDENCE_JSON: &str = include_str!("../test_data/az_snp/evidence-v1.json");
 static AZ_SNP_LIVE_EVIDENCE_JSON: &str = include_str!("../test_data/az_snp/live-evidence.json");
-static IMDS_VCEK: &[u8] = include_bytes!("../test_data/az_snp/imds-vcek.der");
-static IMDS_ASK: &[u8] = include_bytes!("../test_data/az_snp/imds-chain-0.der");
-static IMDS_ARK: &[u8] = include_bytes!("../test_data/az_snp/imds-chain-1.der");
-
-/// Mock CertProvider that returns pre-loaded IMDS certs (no network I/O).
-struct BenchCertProvider;
-
-#[async_trait]
-impl CertProvider for BenchCertProvider {
-    async fn get_snp_vcek(
-        &self,
-        _processor_gen: ProcessorGeneration,
-        _chip_id: &[u8; 64],
-        _reported_tcb: &SnpTcb,
-    ) -> AttResult<Vec<u8>> {
-        Ok(IMDS_VCEK.to_vec())
-    }
-
-    async fn get_snp_cert_chain(
-        &self,
-        _processor_gen: ProcessorGeneration,
-    ) -> AttResult<(Vec<u8>, Vec<u8>)> {
-        Ok((IMDS_ARK.to_vec(), IMDS_ASK.to_vec()))
-    }
-}
 
 fn bench_hcl_report_parse(c: &mut Criterion) {
     c.bench_function("az_snp/hcl_report_parse", |b| {
@@ -148,15 +120,12 @@ fn bench_full_pipeline(c: &mut Criterion) {
     let evidence: attestation::platforms::az_snp::evidence::AzSnpEvidence =
         serde_json::from_value(envelope.evidence).unwrap();
     let params = AzSnpParams::default();
-    let ctx = Context::offline().with_cert_provider(BenchCertProvider);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let now = chrono::Utc::now().timestamp();
 
     c.bench_function("az_snp/full_pipeline", |b| {
-        b.to_async(&rt).iter(|| async {
-            let result = AzSnp::verify(black_box(&evidence), black_box(&params), &ctx)
-                .await
-                .unwrap();
-            black_box(&result);
+        b.iter(|| {
+            let result = verify_report(black_box(&evidence), black_box(&params), now).unwrap();
+            black_box(&result.result);
         });
     });
 }
@@ -167,15 +136,12 @@ fn bench_full_pipeline_live(c: &mut Criterion) {
     let evidence: attestation::platforms::az_snp::evidence::AzSnpEvidence =
         serde_json::from_value(envelope.evidence).unwrap();
     let params = AzSnpParams::default();
-    let ctx = Context::offline().with_cert_provider(BenchCertProvider);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let now = chrono::Utc::now().timestamp();
 
     c.bench_function("az_snp/full_pipeline_live", |b| {
-        b.to_async(&rt).iter(|| async {
-            let result = AzSnp::verify(black_box(&evidence), black_box(&params), &ctx)
-                .await
-                .unwrap();
-            black_box(&result);
+        b.iter(|| {
+            let result = verify_report(black_box(&evidence), black_box(&params), now).unwrap();
+            black_box(&result.result);
         });
     });
 }

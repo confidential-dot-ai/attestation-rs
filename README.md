@@ -48,7 +48,7 @@ The service image is published as `ghcr.io/confidential-dot-ai/attestation-api`.
 
 ## WASM verification in the browser
 
-`attestation-wasm` compiles the SNP verification path to WebAssembly so evidence
+`attestation-wasm` compiles the verifier to WebAssembly so evidence
 can be verified entirely client-side. To produce a blob usable in a browser, build
 with the `web` target (this requires [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/)):
 
@@ -62,54 +62,47 @@ This writes an ES module and the `.wasm` binary to `pkg/`:
 - `pkg/attestation_wasm.js` — JS bindings and the `init` loader
 - `pkg/attestation_wasm_bg.wasm` — the WASM blob
 
-Serve `pkg/` over HTTP (browsers won't load WASM from `file://`) and use it from a
-module script:
+Serve `pkg/` over HTTP (browsers won't load WASM from `file://`). WASM does
+no network or disk I/O, so the caller fetches the vendor URLs the evidence
+needs and hands the responses over; each is verified against the vendor roots
+compiled into the verifier, exactly as on native:
 
 ```html
 <script type="module">
-  import init, { evaluate_snp } from './pkg/attestation_wasm.js';
+  import init, { collateral_needed, evaluate } from './pkg/attestation_wasm.js';
 
   await init(); // fetches and instantiates the .wasm blob
 
-  // evidence: SNP evidence JSON with an inline cert_chain.vcek (base64 DER)
-  // generation: "milan" | "genoa" | "turin"
-  // expectedReportData (optional): Uint8Array of the nonce to bind against
-  const result = JSON.parse(evaluate_snp(
-    JSON.stringify(evidence),
-    'genoa',
-    new TextEncoder().encode('my-nonce'),
+  // envelope: { platform, evidence } JSON string
+  const needed = JSON.parse(await collateral_needed(envelope)); // vendor URLs
+  const chainHeaders = ['TCB-Info-Issuer-Chain', 'SGX-Enclave-Identity-Issuer-Chain',
+    'SGX-PCK-CRL-Issuer-Chain'];
+  const collateral = [];
+  for (const url of needed) {
+    const resp = await fetch(url); // AMD KDS, Intel PCS (via a proxy: no CORS)
+    const header = chainHeaders.map((h) => resp.headers.get(h)).find(Boolean);
+    collateral.push({
+      url,
+      body: btoa(String.fromCharCode(...new Uint8Array(await resp.arrayBuffer()))),
+      issuer_chain: header ? decodeURIComponent(header) : undefined,
+    });
+  }
+  const result = JSON.parse(await evaluate(
+    envelope, ['snp', 'tdx'], new TextEncoder().encode('my-nonce'),
+    undefined, undefined, undefined, JSON.stringify(collateral),
   ));
   if (!result.passed) throw new Error('attestation did not pass');
 </script>
 ```
 
-The module also exports `evaluate_az_snp` for full **Azure SEV-SNP** (vTPM)
-verification. Unlike `evaluate_snp`, which checks only the bare SNP hardware report,
-it verifies the HCL-wrapped report *and* the vTPM quote — the TPM signature against
-the attestation key (AK) in the HCL runtime data, the AK→TEE binding, and the
-freshness anchor in the quote's `extraData` (not the SNP `report_data`). The
-processor generation is auto-detected from the report CPUID, so no `generation`
-argument is needed:
+`evaluate(envelope, platforms, report_data, init_data, rtmr3, min_tcb,
+collateral)` throws only when the evidence cannot be evaluated (malformed, not
+genuine, platform not accepted, needed collateral missing or not the
+vendor's); mismatches, policy flags and expired collateral are fields, so the
+caller must read `passed`.
 
-```js
-import init, { evaluate_az_snp } from './pkg/attestation_wasm.js';
-await init();
-// evidence: AzSnpEvidence JSON { version, tpm_quote, hcl_report, vcek }
-// expectedReportData (optional): Uint8Array the quote's extraData must equal
-const resultJson = evaluate_az_snp(JSON.stringify(evidence), expectedReportData);
-```
-
-It returns the same top-level keys as `evaluate_snp` (with `platform: "az-snp"`),
-including `passed`. The other exports are `evaluate` (any accepted platform,
-from a `{ platform, evidence }` envelope and a required list of accepted
-platform tags), `evaluate_tdx` and `evaluate_az_tdx`. Every export throws only
-when the evidence cannot be evaluated; mismatches and policy flags are fields,
-so the caller must read `passed`. (The exports were named `verify*` before the
-result shape changed; the rename makes old callers that treated "no throw" as
-success fail loudly.) Without a CRL argument the revocation check is skipped.
-
-For a Node.js end-to-end example (generate live evidence, fetch the VCEK from AMD
-KDS, verify in WASM), build with `--target nodejs` and run
+For a Node.js end-to-end example (generate live evidence, fetch its collateral,
+verify in WASM), build with `--target nodejs` and run
 `crates/attestation-wasm/example.mjs`.
 
 ## Verifying evidence
@@ -152,27 +145,36 @@ firmware the cloud provider owns varies (the Azure paravisor build, the GCP
 firmware per memory size or machine type). The measurement must equal one of
 them; an empty set is invalid params (`Err`).
 
-For SEV-SNP (`snp`, `gcp-snp`, `az-snp`) the verifier fetches the AMD KDS CRL
-for the processor generation and checks the VEK's issuing ASK/ASVK against it
-(AMD CRLs are signed by the ARK and list ASK/ASVK serials). A revoked issuer is
-`crl_ok: false`; a CRL that cannot be fetched, parsed or verified, or is
-stale, is `CollateralUnavailable`; `Context::offline()` skips the check
-(`crl_ok: null`).
+## Collateral
 
-For GCP (`gcp-tdx`, `gcp-snp`), `GcpTdxParams::endorsement` /
-`GcpSnpParams::endorsement` take Google's signed launch endorsement for the
-firmware (`VMLaunchEndorsement`, published in the public `gce_tcb_integrity`
-bucket). An endorsement that does not verify against the bundled
-GCE-cc-tcb-root is invalid params. `endorsement_match` is `false` when it does not
-list the evidence's MRTD or launch measurement (SNP: or the guest policy is
-wider than the endorsed one). It shows the firmware is a Google OVMF build, not
-that the host is GCP. The CLI reads it from a file, or downloads it by the
-evidence's measurement once the evidence has verified:
+Collateral is what a verifier needs besides the evidence: AMD VCEKs and CRLs,
+Intel TCB Info, QE Identity and CRLs, Google's launch endorsements, NVIDIA's
+NRAS keys. The library fetches each piece from its vendor, verifies its
+signature against the roots compiled into the crate and that it is the piece
+the evidence names, and keeps it by its vendor URL: one store is shared by
+every `attestation::verify` call in the process. A piece is replaced only by a
+valid copy that is not older, refetched when it nears its nextUpdate, and kept
+when a refetch fails. The CLI also saves collateral in the user cache directory
+and reuses it in later runs; `--offline` uses only that.
 
-```bash
-attestation-cli verify --evidence evidence.json --gcp-endorsement endorsement.binarypb
-attestation-cli verify --evidence evidence.json --fetch-gcp-endorsement
-```
+- No copy anywhere is `CollateralUnavailable { collateral, retry_after,
+  detail }`, the only retryable error: it names the piece, the vendor's
+  Retry-After when it sent one, and why in `detail`.
+- A piece that is not the vendor's (bad signature, wrong piece) is
+  refused like evidence that is not genuine, and so is a VCEK or TCB Info the
+  vendor does not publish (404) for the chip or platform the evidence names.
+- A piece past its nextUpdate is a value: the result lists every piece used
+  (`collateral`: `name`, `from`, `version`, `next_update`, `current`), and
+  `passed()` is false unless all are current.
+
+SEV-SNP (`snp`, `gcp-snp`, `az-snp`) checks the VEK's issuing ASK/ASVK against
+the AMD CRL (`crl_ok`). TDX platforms check the PCK chain against Intel's CRLs
+(`crl_ok`) and grade the TCB with TCB Info and the QE Identity (`tcb_status`).
+GCP platforms check the firmware against Google's launch endorsement for the
+measurement (`endorsement_match`: false when Google publishes none, or it does
+not list the MRTD or measurement, or for SNP the guest policy is wider than the
+endorsed one). It shows the firmware is a Google OVMF build, not that the host
+is GCP.
 
 The CLI exposes matching flags (`--expected-mrtd`, `--expected-rtmrN` and
 `--expected-launch-digest` are repeatable: any of the given values):
@@ -191,7 +193,7 @@ platform-specific pins decide (`--expected-mrtd`/`--expected-rtmrN`: the TDX
 platforms; `--expected-launch-digest`: the SNP platforms); the evidence's own
 platform tag never does. A pin an accepted platform does not have
 (`--expected-mrtd` with `--platform snp`) is a usage error. `--offline`
-verifies without network access.
+verifies without network access, with the collateral saved by earlier runs.
 
 | Exit code | Meaning |
 |---|---|
