@@ -86,7 +86,7 @@ impl Dates {
 
     /// True when `now` is inside the window.
     pub fn current(&self, now: i64) -> bool {
-        !self.this_update.is_some_and(|t| now < t) && !self.next_update.is_some_and(|t| now > t)
+        self.this_update.is_none_or(|t| t <= now) && self.next_update.is_none_or(|t| now <= t)
     }
 }
 
