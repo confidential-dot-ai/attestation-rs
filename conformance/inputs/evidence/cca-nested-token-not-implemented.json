@@ -1,0 +1,11 @@
+{
+  "cvm_version": 1,
+  "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+  "eat_profile": "tag:confidential.ai,2026:cvm#1",
+  "submods": {
+    "cpu": [
+      "CBOR",
+      "2QOLoA"
+    ]
+  }
+}
