@@ -1,0 +1,13 @@
+{
+  "id": "tdx-register-value-wrong-length",
+  "rule": {
+    "section": "6.1",
+    "statement": "value is exactly the digest length of alg"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-register-value-wrong-length.json",
+  "policy": "policy/tdx-register-value-wrong-length.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
