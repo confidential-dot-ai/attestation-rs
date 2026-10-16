@@ -203,6 +203,138 @@ Each TEE lets the host place a value in the signed report at launch that the lau
 
 A host-set field becomes a guarantee when the measured image contains code that enforces a relationship with it: for example, a guest that refuses to start unless `HOST_DATA` equals the digest of the configuration it loads. Only then does pinning it (`reference.host_data`, Section 13.4) establish something about the workload, and the guarantee rests on the launch measurement pin that establishes the enforcing code.
 
+## 4. Evidence
+
+### 4.1. Envelope
+
+Evidence is an EAT claims set (RFC 9711) under the profile `tag:confidential.ai,2026:cvm#1`, carried unprotected: as a UJCS in JSON and as a UCCS (CBOR tag 601) in CBOR (RFC 9781). On the wire it is labeled with the media types of RFC 9782:
+
+```
+application/eat-ucs+json; eat_profile="tag:confidential.ai,2026:cvm#1"
+application/eat-ucs+cbor; eat_profile="tag:confidential.ai,2026:cvm#1"
+```
+
+The envelope carries no signature of its own. Every byte a verifier relies on is signed by the TEE, a vendor service or the vTPM, or is bound by the verifier to such bytes (Section 3.4). A signature by a key inside the guest would add nothing a verifier could rely on beyond what those signatures already establish.
+
+RFC 9781 section 4 premises the RATS use of unprotected claims sets on a secure channel in which the receiver authenticates the sender and the channel protects integrity. This profile departs from that premise: it relies on no property of the channel that carries the envelope, because every value an appraisal decides on is signed or bound (Section 3.4). RFC 9781 section 7 requires such a use to define the roles of its endpoints and its security argument; Section 3 and this section are that definition.
+
+Top-level claims:
+
+| Claim | CBOR key | Requirement | Value |
+| --- | --- | --- | --- |
+| `eat_profile` | 265 | MUST | `tag:confidential.ai,2026:cvm#1` |
+| `eat_nonce` | 10 | MUST | the nonce, a byte string of 16 to 64 bytes: the relying party's in the challenge pattern, the attester's in the certificate pattern (Section 5.1) |
+| `cvm_version` | -70000 | MUST | the integer 1 |
+| `submods` | 266 | MUST | the submodules of Section 4.2 |
+
+In JSON, `eat_nonce` is the base64url text (Section 4.7) of the 16 to 64 byte nonce, a narrowing of RFC 9711's text form; the anchor and every binding use the decoded bytes. The array form of RFC 9711 section 4.1 is refused.
+
+A verifier MUST refuse an envelope with another `eat_profile` or another `cvm_version`, and MUST refuse an envelope whose `eat_nonce` differs from the nonce the relying party supplied to it. Other top-level claims are ignored, whatever they hold.
+
+### 4.2. Submodules
+
+`submods` maps names to attester claims sets. Names are drawn from these forms and no other:
+
+| Name | Count | Contents |
+| --- | --- | --- |
+| `cpu` | exactly one | the CPU TEE's claims (Section 4.3), or for Arm CCA the nested token (Section 4.6) |
+| `vtpm` | present exactly when the `cpu` submodule's binding mode is `vtpm-extradata` | the vTPM's claims (Section 4.4) |
+| `gpu/<ueid>` | zero or more | one NVIDIA GPU (Section 4.5) |
+| `nvswitch/<ueid>` | zero or more | one NVIDIA NVSwitch (Section 4.5) |
+
+`<ueid>` is the device's identifier as the NVIDIA SDK reports it: 1 to 128 printable ASCII characters (0x21 to 0x7E) excluding `/`. A verifier refuses an envelope with more than 66 submodules with `envelope-invalid` while parsing it (Section 4.7), and a well-formed envelope with more than 32 device submodules with `device-not-allowed`. A verifier MUST refuse an envelope with an unknown name, without a `cpu` submodule, with a `vtpm` submodule whose `cpu` does not bind through it, or with a `cpu` bound through `vtpm-extradata` and no `vtpm`.
+
+### 4.3. The `cpu` submodule
+
+| Claim | CBOR key | Requirement | Class | Value |
+| --- | --- | --- | --- | --- |
+| `cvm_platform` | -70001 | MUST | hint | `{vendor, tee, generation?, hosting}` |
+| `cvm_report` | -70002 | MUST | signed | a CMW record carrying the raw hardware report |
+| `cvm_binding` | -70003 | MUST | bound | `{pattern, mode, key?}` (Section 5) |
+| `cvm_endorsements` | -70004 | MAY | bound | a CMW collection of collateral (Section 10) |
+| `cvm_registers` | -70005 | MUST in `commitment` mode and whenever `cvm_log` is present; MAY on TDX; absent on SEV-SNP in the other modes | bound | the register array (Section 6) |
+| `cvm_log` | -70006 | in `commitment` mode REQUIRED by appraisal (refused with `log-required` when absent); MAY on TDX; absent on SEV-SNP in the other modes | bound | `{format, data}` (Section 7) |
+| `cvm_chain` | -70007 | MUST when the mode is `commitment`, absent otherwise | bound | `{chain_len}` with `chain_len` at least 1 (Section 8) |
+| `bootseed` | 268 | MUST when the mode is `commitment`, absent otherwise | bound | 32 bytes (Section 8.2) |
+| `dbgstat` | 263 | MAY | hint | RFC 9711 section 4.2.9 debug status |
+| `cvm_provenance` | -70008 | MAY | reserved | ignored by version 1 verifiers |
+
+`cvm_platform` members:
+
+- `vendor`: `amd`, `intel` or `arm`, and MUST be the vendor of `tee`;
+- `tee`: `sev-snp`, `tdx` or `cca`;
+- `generation`: OPTIONAL. On `sev-snp` one of `Milan`, `Genoa`, `Turin`; on `tdx` the FMSPC as twelve lowercase hexadecimal digits. When present it MUST equal the generation the verifier derives from signed data (Section 9);
+- `hosting`: `bare`, `azure`, `gcp` or `dstack`.
+
+`cvm_report` is a CMW record (RFC 9999 section 3.1) `[type, value, indicator]`. `value` is the report bytes exactly as the TEE produced them. The indicator is REQUIRED and MUST be exactly 4 (bit 2, evidence). `type` is one of:
+
+| Media type | Content | Accepted for |
+| --- | --- | --- |
+| `application/vnd.confidential-ai.sev-snp-report` | an SNP `ATTESTATION_REPORT`, 1184 bytes (Section 9.1) | `sev-snp` |
+| `application/vnd.confidential-ai.tdx-quote` | a TD quote, version 4 or 5 (Section 9.2) | `tdx` |
+| `application/vnd.veraison.tsm-report+json` | the Linux configfs-tsm report as JSON, whose `outblob` is one of the two above; accepted on ingest and never emitted | `sev-snp` and `tdx` with hosting `bare` or `gcp` |
+
+`dbgstat`, when present, is the RFC 9711 text value in JSON (`enabled`, `disabled`, `disabled-since-boot`, `disabled-permanently`, `disabled-fully-and-permanently`) and the integer 0 to 4 in CBOR. A verifier derives the debug state from the signed report and MUST refuse a hint that disagrees with it on whether debug is enabled; the qualifier among the disabled values is the attester's.
+
+The combinations a `cpu` submodule may take are fixed by the TEE and the hosting:
+
+| TEE and hosting | Report types | Binding modes | Registers and log |
+| --- | --- | --- | --- |
+| `sev-snp`, `bare` or `gcp` | SNP report, tsm-report | `report-data`, `commitment` | only in `commitment` mode: all 16 `snp-vmr` slots, a log, `cvm_chain`, `bootseed` |
+| `sev-snp`, `dstack` | SNP report | `report-data`, `commitment` | as above |
+| `sev-snp`, `azure` | SNP report | `vtpm-extradata` | none on the `cpu` submodule; the vTPM carries them |
+| `tdx`, `bare` or `gcp` | TD quote, tsm-report | `report-data` | OPTIONAL `tdx-rtmr` registers (each RTMR at most once) and a log |
+| `tdx`, `dstack` | TD quote | `report-data` | as above |
+| `tdx`, `azure` | TD quote | `vtpm-extradata` | as above |
+| `cca`, `bare` | nested token (Section 4.6) | `cca-challenge` | carried in the realm token |
+
+### 4.4. The `vtpm` submodule
+
+| Claim | CBOR key | Requirement | Class | Value |
+| --- | --- | --- | --- | --- |
+| `cvm_tpm_quote` | -70010 | MUST | signed | `{message, signature, pcrs, bank}` |
+| `cvm_tpm_ak` | -70011 | MUST | bound | `{method, data}` |
+| `cvm_registers` | -70005 | MUST | bound | 1 to 24 registers of source `vtpm-pcr` |
+| `cvm_log` | -70006 | MAY | bound | the vTPM's event log (Section 7) |
+
+`cvm_tpm_quote.message` is the marshaled `TPMS_ATTEST` structure the TPM signed, `signature` the signature value over it (for the RSA attestation key of Section 9.4, the `sig` buffer of the `TPMS_SIGNATURE_RSA` without its size prefix, an RSASSA-PKCS1-v1_5 signature), `pcrs` the 24 PCR values of the quoted bank in PCR order, and `bank` the bank's TPM algorithm name (`sha256`, `sha384` or `sha512`, Section 6.1). Version 1 appraises only the `sha256` bank (Section 9.4.3). `cvm_tpm_ak.method` is `hcl-report` and `data` is the Azure HCL report that carries the attestation key and binds it to the hardware report (Section 9.4).
+
+Each register's `alg` MUST be the quoted bank, its `index` a PCR inside the quote's signed selection, its `value` equal to the entry of `pcrs` at that index, its `source` `vtpm-pcr` and its `backing` `privileged-service`. Each index appears at most once.
+
+### 4.7. Encoding rules
+
+JSON (the primary encoding):
+
+- Claim names are text; profile claims carry the `cvm_` prefix.
+- Byte strings are base64url (RFC 4648 section 5) without padding and with zero trailing bits (RFC 4648 section 3.5), which is the strict `.b64u` of RFC 9741. A verifier MUST refuse the standard alphabet, padding and non-zero trailing bits.
+- Integers are JSON numbers. No profile claim holds a floating-point value. Integers are written without a fraction or an exponent (`1`, never `1.0` or `1e0`), are at most 2^64 - 1, and are exact: an implementation parses the 64-bit members (`chain_len`, `seq`, `recnum`) without loss.
+- Each value has exactly one encoding. An object with a duplicate member name is refused, in the envelope, in every `cvm_*` object and in every CMW collection. `null` is not a value: an optional member is absent or holds its type. An object is written as an object, never as the array of its members, and an enumerated value is its text, never an object naming it. An implementation whose JSON library admits any of these (keeping the last duplicate, reading `null` as absent, reading a struct from an array) MUST refuse them itself.
+- Unknown claims at the top level and in a submodule claims set, device submodules included, are ignored whatever they hold, as EAT extensibility requires. An unknown member inside any `cvm_*` object is refused. `cvm_provenance` is reserved and exempt from both rules: its value is ignored whatever it holds.
+- A CMW record's indicator, where this document does not fix it, is 1 to 31 (RFC 9999 section 3.1).
+
+Bounds. A verifier refuses input that exceeds these bounds, and checks each bound before it parses the input the bound covers: the whole envelope is at most 10 MiB (10485760 bytes); JSON is nested at most 32 levels deep, where each array and each object counts one level and the envelope's top-level object is level 1; at most 66 submodules; a CMW collection has at most 32 entries and one level of nesting; every byte string field is at most 1 MiB (1048576 bytes) after decoding. The nesting bound applies to unknown claims too, so that an ignored claim cannot exhaust a recursive parser.
+
+CBOR: claim keys are the integers of Appendix A; names inside profile objects stay text; byte strings are byte strings; every map and string has a definite length; every object the attester produces uses deterministic encoding (RFC 8949 section 4.2.1). A verifier MUST refuse a CBOR envelope that is not a claims set under UCCS tag 601, that uses an indefinite length, that has a duplicate map key, or that is not in deterministic encoding, and a `cvm_report` or `cvm_endorsements` record whose `type` is a CoAP content-format integer (the CCA token's own records, inside its bytes, keep theirs); the same one-encoding rule as JSON applies, so that two verifiers cannot read different claims from the same bytes.
+
+### 4.8. EAT profile checklist
+
+RFC 9711 section 6.3 lists the decisions a profile makes. For this profile:
+
+| Item | Decision |
+| --- | --- |
+| 6.3.1 JSON, CBOR or both | both; JSON is primary; CBOR uses the keys of Appendix A |
+| 6.3.2 map and array encoding | definite lengths only |
+| 6.3.3 string encoding | definite lengths only |
+| 6.3.4 preferred serialization | deterministic encoding (RFC 8949 section 4.2.1) for every CBOR object the attester produces |
+| 6.3.5 CBOR tags | UCCS tag 601 when a CBOR envelope is written; no tags in JSON apart from those inside the bytes of a nested CCA token (Section 4.6) |
+| 6.3.6 COSE/JOSE protection | none at the envelope; Section 4.1 states the argument |
+| 6.3.7 COSE/JOSE algorithms | inherited from each hardware report; the profile adds SHA-384 for registers, the anchor and the commitment, and SHA-256 for the `spki-sha256` and `x509-tbs-sha256` key values, the vTPM key binding and the NRAS nonce |
+| 6.3.8 detached EAT bundle support | not used in version 1 |
+| 6.3.9 key identification | per submodule: VCEK or VLEK for SNP; the PCK chain for TDX; the HCL attestation key for the vTPM; the CCA platform and realm attestation keys; the NRAS key identifier (`kid`) |
+| 6.3.10 endorsement identification | inline in `cvm_endorsements` or fetched by the verifier, anchored to pinned roots either way (Section 10) |
+| 6.3.11 freshness | `eat_nonce` at the top, bound per submodule in a declared mode (Section 5) |
+| 6.3.12 claims requirements | Sections 4.1 to 4.6 |
+
 ## 11. Verification procedure
 
 A verifier appraises evidence under a policy, with the relying party's nonce, the digest of the presented certificate in the certificate pattern (which a version 1 verifier receives as `freshness.key`, Section 5.5), collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
