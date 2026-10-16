@@ -28,6 +28,9 @@ pub enum ApiError {
     Internal(String),
 }
 
+/// The longest wait passed on to callers, whatever the vendor asked for.
+const MAX_RETRY_AFTER: u64 = 3600;
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
@@ -79,7 +82,7 @@ impl IntoResponse for ApiError {
         };
 
         let retry_after = match &self {
-            ApiError::Verification(inner) => inner.retry_after(),
+            ApiError::Verification(inner) => inner.retry_after().map(|s| s.min(MAX_RETRY_AFTER)),
             _ => None,
         };
         let body = ErrorBody {
@@ -132,6 +135,14 @@ mod tests {
         .into_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(resp.headers()["retry-after"], "120");
+
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "tcb-info 70a06d070000".into(),
+            retry_after: Some(u64::MAX),
+            detail: "HTTP 429".into(),
+        })
+        .into_response();
+        assert_eq!(resp.headers()["retry-after"], "3600");
     }
 
     #[tokio::test]
