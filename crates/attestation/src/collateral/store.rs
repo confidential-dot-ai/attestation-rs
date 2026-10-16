@@ -29,6 +29,17 @@ pub enum Source {
     Vendor,
 }
 
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Source::Held => "held",
+            Source::Memory => "memory",
+            Source::Disk => "disk",
+            Source::Vendor => "vendor",
+        })
+    }
+}
+
 /// A piece of collateral a verdict used: which, from where, its version and
 /// nextUpdate, and whether it was current at the evaluation time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
