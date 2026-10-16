@@ -13,7 +13,7 @@ use std::future::Future;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
+use crate::collateral::{CollateralUsed, Store};
 use crate::error::{AttestationError, Result};
 use crate::types::{Claims, PlatformType};
 
@@ -34,23 +34,39 @@ use crate::platforms::tdx::{TdxParams, TdxResult};
 #[cfg(feature = "nvidia-gpu")]
 use crate::types::{NvidiaGpuParams, NvidiaGpuResult};
 
-/// One TEE platform: its evidence, what a caller can ask of it, and what it
-/// answers.
+/// One TEE platform: its evidence, what a caller can ask of it, its
+/// collateral set, and what it answers.
 pub trait Platform {
     const KIND: PlatformType;
     type Evidence: DeserializeOwned + Sync;
     type Params: Default + Sync;
     type Result: Serialize;
+    type CollateralSet: Send + Sync;
 
-    /// Verify `evidence` and evaluate every rule in `params`.
+    /// Reject params that cannot be applied. Runs before any collateral is
+    /// fetched, so caller misuse is never reported as a retryable error.
+    fn validate(params: &Self::Params) -> Result<()>;
+
+    /// Get the collateral set for `evidence` from `store`, at `now` (Unix
+    /// seconds), and what the verdict should say about each piece. Checks
+    /// that need no collateral run first; the store is the only I/O.
+    fn gather(
+        evidence: &Self::Evidence,
+        store: &Store,
+        now: i64,
+    ) -> impl Future<Output = Result<(Self::CollateralSet, Vec<CollateralUsed>)>> + Send;
+
+    /// Verify `evidence` and evaluate every rule in `params`, at `now` (Unix
+    /// seconds). Pure: no network, no cache, no clock.
     ///
     /// `Ok` means the evidence is genuine; whether it satisfied the params is
     /// in the result (`passed()`).
     fn verify(
         evidence: &Self::Evidence,
         params: &Self::Params,
-        ctx: &Context,
-    ) -> impl Future<Output = Result<Self::Result>> + Send;
+        collateral: &Self::CollateralSet,
+        now: i64,
+    ) -> Result<Self::Result>;
 }
 
 /// The platforms a caller accepts, each with its params. Evidence for a
@@ -297,16 +313,20 @@ pub struct Verified {
     #[cfg(feature = "nvidia-gpu")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<NvidiaGpuResult>,
+    /// Every piece of collateral the verdict used.
+    #[serde(default)]
+    pub collateral: Vec<CollateralUsed>,
 }
 
 impl Verified {
-    /// True when the platform result and the GPU result (if any) both passed.
+    /// True when the platform result and the GPU result (if any) both
+    /// passed, and every piece of collateral was current.
     pub fn passed(&self) -> bool {
         #[cfg(feature = "nvidia-gpu")]
         if self.gpu.as_ref().is_some_and(|gpu| !gpu.passed()) {
             return false;
         }
-        self.platform.passed()
+        self.platform.passed() && self.collateral.iter().all(|c| c.current)
     }
 }
 

@@ -10,9 +10,8 @@ fn config_parse_explicit_values() {
         [auth]
         api_keys = ["key1", "key2"]
 
-        [certs]
-        cache_max_entries = 512
-        vcek_ttl_hours = 12
+        [nras]
+        gpu_url = "https://nras.example/v3/attest/gpu"
 
         [token]
         enabled = true
@@ -27,13 +26,11 @@ fn config_parse_explicit_values() {
     assert_eq!(config.server.bind, "0.0.0.0:9000");
     assert_eq!(config.auth.api_keys.len(), 2);
     assert!(!config.attestation.enabled);
-    assert_eq!(config.certs.cache_max_entries, 512);
-    assert_eq!(config.certs.vcek_ttl_hours, 12);
+    assert_eq!(config.nras.gpu_url, "https://nras.example/v3/attest/gpu");
     assert!(config.token.enabled);
     assert_eq!(config.token.issuer, "my-service");
     assert_eq!(config.token.duration_minutes, 10);
-    // Omitted fields should be filled with defaults (not asserting specific values)
-    assert!(config.certs.chain_ttl_hours > 0);
+    assert!(config.nras.switch_url.is_empty());
 }
 
 #[test]

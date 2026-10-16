@@ -11,14 +11,9 @@ key_path = ""
 # If empty or omitted, endpoints are unauthenticated (a warning is logged on startup).
 api_keys = []
 
-[certs]
-cache_max_entries = 1024
-vcek_ttl_hours = 24
-chain_ttl_hours = 168             # 7 days
-crl_refresh_hours = 6
-tdx_collateral_ttl_hours = 24
-prefetch_chains = ["milan"]       # Pre-warm on startup
-skip_snp_crl = false              # true = never fetch or check the AMD CRL (revoked ASK/ASVK undetected)
+[nras]
+gpu_url = ""                      # Empty = NV_NRAS_GPU_URL, else NVIDIA's endpoint
+switch_url = ""                   # Empty = NV_NRAS_SWITCH_URL, else NVIDIA's endpoint
 
 [token]
 enabled = false

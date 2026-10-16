@@ -3,6 +3,25 @@
 
 #![cfg(all(feature = "attest", target_os = "linux"))]
 
+/// Verify the captured evidence as `platform` and print the verdict.
+async fn verify(platform: &str, evidence: &impl serde::Serialize) {
+    let envelope = serde_json::json!({ "platform": platform, "evidence": evidence });
+    let verified = attestation::verify(
+        envelope.to_string().as_bytes(),
+        &attestation::Policies::all(),
+    )
+    .await
+    .expect("verify failed");
+    eprintln!("Verified: passed={}", verified.passed());
+    eprintln!(
+        "Launch digest: {}",
+        verified.platform.claims().launch_digest
+    );
+    for c in &verified.collateral {
+        eprintln!("  {} current={}", c.name, c.current);
+    }
+}
+
 #[cfg(feature = "tdx")]
 #[tokio::test]
 #[ignore]
@@ -17,29 +36,7 @@ async fn capture_tdx_evidence_fixture() {
     std::fs::write(path, &json).unwrap();
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
-    // Verify it — first without collateral, then with
-    use attestation::{Context, Platform, Tdx, TdxParams};
-    let params = TdxParams::default();
-
-    let result = Tdx::verify(&evidence, &params, &Context::offline())
-        .await
-        .expect("verify without collateral failed");
-    eprintln!("Verified (no collateral): passed={}", result.passed());
-    eprintln!("Launch digest (MRTD): {}", result.claims.launch_digest);
-
-    // With collateral
-    match Tdx::verify(&evidence, &params, &Context::new()).await {
-        Ok(r) => {
-            eprintln!("Verified (with collateral): crl_ok={:?}", r.crl_ok);
-            if let Some(ref tcb) = r.tcb_status {
-                eprintln!("  TCB status: {}", tcb.tcb_status);
-                eprintln!("  FMSPC: {}", tcb.fmspc);
-            }
-        }
-        Err(e) => {
-            eprintln!("Collateral verification failed (may be expected): {e}");
-        }
-    }
+    verify("tdx", &evidence).await;
 }
 
 #[cfg(all(feature = "attest", feature = "az-snp"))]
@@ -56,13 +53,7 @@ async fn capture_az_snp_evidence_fixture() {
     std::fs::write(path, &json).unwrap();
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
-    // Also verify it
-    use attestation::{AzSnp, AzSnpParams, Context, Platform};
-    let result = AzSnp::verify(&evidence, &AzSnpParams::default(), &Context::new())
-        .await
-        .expect("verify failed");
-    eprintln!("Verified: passed={}", result.passed());
-    eprintln!("Launch digest: {}", result.snp.claims.launch_digest);
+    verify("az-snp", &evidence).await;
 }
 
 #[cfg(all(feature = "attest", feature = "az-tdx"))]
@@ -79,11 +70,5 @@ async fn capture_az_tdx_evidence_fixture() {
     std::fs::write(path, &json).unwrap();
     eprintln!("Wrote {} ({} bytes)", path, json.len());
 
-    // Also verify it
-    use attestation::{AzTdx, AzTdxParams, Context, Platform};
-    let result = AzTdx::verify(&evidence, &AzTdxParams::default(), &Context::offline())
-        .await
-        .expect("verify failed");
-    eprintln!("Verified: passed={}", result.passed());
-    eprintln!("Launch digest: {}", result.tdx.claims.launch_digest);
+    verify("az-tdx", &evidence).await;
 }

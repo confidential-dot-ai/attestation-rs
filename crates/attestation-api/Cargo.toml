@@ -29,14 +29,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 
-# Caching
-moka = { version = "0.12", features = ["future"] }
-
 # Crypto / tokens
 p256 = { workspace = true, features = ["jwk", "ecdsa"] }
 subtle = { workspace = true }
 
-# HTTP client (cert fetching). Pinned directly (not `workspace = true`) so
+# HTTP client (loadtest). Pinned directly (not `workspace = true`) so
 # default-features=false takes effect — drops reqwest's default `default-tls`
 # (native-tls → openssl-sys), which breaks the static-musl build and is
 # redundant with rustls. Matches the `attestation` crate's reqwest line.
@@ -47,20 +44,11 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
-# Async traits
-async-trait = { workspace = true }
-# Bounded concurrency for collateral refreshes
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-
-# PEM parsing
-pem = { workspace = true }
-
 # Hashing
 sha2 = { workspace = true }
 
 # Utilities
 base64 = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
@@ -68,6 +56,7 @@ rand = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+attestation = { workspace = true, features = ["test-vendor"] }
 tempfile = { workspace = true }
 
 [[bin]]

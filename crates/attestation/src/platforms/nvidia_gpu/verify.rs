@@ -3,28 +3,118 @@
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 
+use crate::collateral::{Collateral, CollateralUsed, NrasJwks, Store};
 use crate::error::{AttestationError, Result};
-use crate::platforms::nvidia_gpu::provider::{Jwks, NrasEvidenceEntry, NrasProvider, NrasRequest};
+use crate::platforms::nvidia_gpu::provider::{Jwks, NrasEvidenceEntry, NrasRequest};
 use crate::platforms::nvidia_gpu::{gpu_nonce, switch_nonce};
 use crate::types::{
     NvidiaGpuArch, NvidiaGpuClaims, NvidiaGpuDeviceClaims, NvidiaGpuEvidenceBundle,
     NvidiaGpuParams, NvidiaGpuResult,
 };
 
-/// Verify a GPU bundle end-to-end:
-/// - Group devices by arch (NRAS requires one arch per request).
-/// - Derive the SPDM nonce from `params.user_nonce` per `bundle.binding`.
-/// - POST evidence to NRAS, JWS-verify the response, check `eat_nonce`.
+/// The GPU collateral set: NRAS's attestation for
+/// each architecture group, and its signing keys.
+pub struct GpuCollateralSet {
+    pub nras: std::collections::BTreeMap<NvidiaGpuArch, serde_json::Value>,
+    pub jwks: NrasJwks,
+}
+
+/// Send each architecture group of the bundle to NRAS and get its signing
+/// keys, refetching them once if a token names a key they lack.
+pub async fn gather_bundle(
+    bundle: &NvidiaGpuEvidenceBundle,
+    params: &NvidiaGpuParams,
+    store: &Store,
+    now: i64,
+) -> Result<(GpuCollateralSet, CollateralUsed)> {
+    let user_nonce = check_preconditions(bundle, params)?;
+    let jwks_url = store.nras_jwks_url()?;
+    let mut nras = std::collections::BTreeMap::new();
+    for (arch, devices) in group_by_arch(bundle) {
+        let request = NrasRequest {
+            nonce: hex::encode(arch_nonce(arch, user_nonce, bundle)),
+            evidence_list: devices
+                .iter()
+                .map(|d| NrasEvidenceEntry {
+                    evidence: d.evidence_b64.clone(),
+                    certificate: d.cert_chain_b64.clone(),
+                })
+                .collect(),
+            arch,
+            claims_version: "2.0".into(),
+        };
+        nras.insert(arch, nras_attest(store, &request).await?);
+    }
+    let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
+    let known = |jwks: &NrasJwks| {
+        nras.values().all(|response| {
+            split_eat_response(response).is_ok_and(|(overall, subs)| {
+                std::iter::once(&overall)
+                    .chain(subs.iter().map(|(_, t)| t))
+                    .all(|t| {
+                        jwt_kid(t).is_none_or(|kid| jwks.jwks.keys.iter().any(|k| k.kid == kid))
+                    })
+            })
+        })
+    };
+    if !known(&jwks.0) {
+        store.refresh::<NrasJwks>(&jwks_url, now).await?;
+        jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
+        if !known(&jwks.0) {
+            return Err(crate::error::Unavailable::detail(
+                "NRAS signed with a key it has not published yet",
+            )
+            .into_error(&NrasJwks::name(&jwks_url)));
+        }
+    }
+    let (jwks, used) = jwks;
+    Ok((GpuCollateralSet { nras, jwks }, used))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
+    match store.vendor() {
+        Some(vendor) => vendor.nras_attest(request).await,
+        None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn nras_attest(_store: &Store, _request: &NrasRequest) -> Result<serde_json::Value> {
+    Err(crate::error::Unavailable::offline().into_error("NRAS attestation"))
+}
+
+/// The `kid` a compact JWS names, if it can be read.
+fn jwt_kid(token: &str) -> Option<String> {
+    let header = URL_SAFE_NO_PAD.decode(token.split('.').next()?).ok()?;
+    let header: serde_json::Value = serde_json::from_slice(&header).ok()?;
+    header.get("kid")?.as_str().map(String::from)
+}
+
+fn arch_nonce(
+    arch: NvidiaGpuArch,
+    user_nonce: &[u8],
+    bundle: &NvidiaGpuEvidenceBundle,
+) -> [u8; 32] {
+    match arch {
+        NvidiaGpuArch::Ls10 => switch_nonce(user_nonce, &bundle.binding),
+        _ => gpu_nonce(user_nonce, &bundle.binding),
+    }
+}
+
+/// Verify a GPU bundle against NRAS's answers:
+/// - JWS-verify each overall and submodule token, check every `eat_nonce`
+///   against the SPDM nonce derived from `params.user_nonce`.
 /// - Evaluate the params' rules (arch allowlist, device policy, device count)
 ///   and NRAS's `x-nvidia-overall-att-result` into the result.
 ///
 /// `now` is the evaluation time (Unix seconds) for token and certificate
 /// validity. Caller is responsible for asserting the CPU ↔ GPU coupling (the
 /// same `user_nonce` was used as the CPU report data).
-pub async fn verify_bundle(
+pub fn verify_bundle(
     bundle: &NvidiaGpuEvidenceBundle,
     params: &NvidiaGpuParams,
-    provider: &dyn NrasProvider,
+    collateral: &GpuCollateralSet,
     now: i64,
 ) -> Result<NvidiaGpuResult> {
     let user_nonce = check_preconditions(bundle, params)?;
@@ -37,9 +127,18 @@ pub async fn verify_bundle(
     };
     let mut device_policy_met = true;
 
-    for (arch, devices) in group_by_arch(bundle) {
-        let group =
-            verify_arch_group(arch, &devices, user_nonce, bundle, params, provider, now).await?;
+    for (arch, _) in group_by_arch(bundle) {
+        let response = collateral.nras.get(&arch).ok_or_else(|| {
+            AttestationError::NrasResponseParse(format!("no NRAS answer for {arch:?}"))
+        })?;
+        let group = verify_arch_group(
+            arch,
+            response,
+            &arch_nonce(arch, user_nonce, bundle),
+            params,
+            &collateral.jwks.jwks,
+            now,
+        )?;
         device_policy_met &= group.device_policy_met;
         fold_arch_group(&mut claims, group);
     }
@@ -128,42 +227,18 @@ struct ArchGroupResult {
     device_policy_met: bool,
 }
 
-/// Build the NRAS request, attest, JWS-verify the overall + each submodule,
-/// and check the eat_nonce binding against the derived SPDM nonce.
-async fn verify_arch_group(
+/// JWS-verify NRAS's overall and per-submodule tokens for one architecture
+/// group, and check the eat_nonce binding against the derived SPDM nonce.
+fn verify_arch_group(
     arch: NvidiaGpuArch,
-    devices: &[&crate::types::NvidiaGpuDeviceEvidence],
-    user_nonce: &[u8],
-    bundle: &NvidiaGpuEvidenceBundle,
+    response: &serde_json::Value,
+    nonce_bytes: &[u8; 32],
     params: &NvidiaGpuParams,
-    provider: &dyn NrasProvider,
+    jwks: &Jwks,
     now: i64,
 ) -> Result<ArchGroupResult> {
-    let nonce_bytes = match arch {
-        NvidiaGpuArch::Ls10 => switch_nonce(user_nonce, &bundle.binding),
-        _ => gpu_nonce(user_nonce, &bundle.binding),
-    };
-    let nonce_hex = hex::encode(nonce_bytes);
-
-    let request = NrasRequest {
-        nonce: nonce_hex.clone(),
-        evidence_list: devices
-            .iter()
-            .map(|d| NrasEvidenceEntry {
-                evidence: d.evidence_b64.clone(),
-                certificate: d.cert_chain_b64.clone(),
-            })
-            .collect(),
-        arch,
-        claims_version: provider.claims_version().to_string(),
-    };
-
-    let response = provider.attest(&request).await?;
-    let (overall_jwt, submodule_jwts) = split_eat_response(&response)?;
-    let mut jwks = provider.jwks(arch).await?;
-
-    let overall_claims =
-        verify_jws_with_kid_rotation(&overall_jwt, &mut jwks, arch, provider, now).await?;
+    let (overall_jwt, submodule_jwts) = split_eat_response(response)?;
+    let overall_claims = verify_jws_es384(&overall_jwt, jwks, now)?;
     let overall_ok = overall_claims
         .get("x-nvidia-overall-att-result")
         .and_then(|v| v.as_bool())
@@ -181,7 +256,7 @@ async fn verify_arch_group(
         .and_then(|n| hex::decode(n).ok())
         .is_some_and(|decoded| {
             use subtle::ConstantTimeEq;
-            decoded.ct_eq(&nonce_bytes).into()
+            decoded.ct_eq(nonce_bytes).into()
         });
     if !nonce_binding_ok {
         log::warn!("NVIDIA GPU attestation: nonce binding mismatch");
@@ -191,8 +266,7 @@ async fn verify_arch_group(
     let mut device_claims = Vec::with_capacity(submodule_jwts.len());
     let mut device_policy_met = true;
     for (name, sub_jwt) in submodule_jwts {
-        let sub_claims =
-            verify_jws_with_kid_rotation(&sub_jwt, &mut jwks, arch, provider, now).await?;
+        let sub_claims = verify_jws_es384(&sub_jwt, jwks, now)?;
         // Bind this submodule to the session: its `eat_nonce` must equal the
         // SPDM nonce we derived. The overall token's `eat_nonce` alone does not
         // cover the submodule JWTs (NRAS's RFC 9711 `submods` DIGEST is computed
@@ -201,7 +275,7 @@ async fn verify_arch_group(
         // module docs). Per-submodule `eat_nonce` is the cheaper, robust subset:
         // a submodule spliced from another session carries a different nonce and
         // is rejected here.
-        check_submodule_nonce(&name, &sub_claims, &nonce_bytes)?;
+        check_submodule_nonce(&name, &sub_claims, nonce_bytes)?;
         let mut dc = device_claims_from_submodule(&sub_claims);
         check_device_report_nonce(&name, &dc)?;
         if dc.arch.is_none() {
@@ -229,30 +303,6 @@ fn fold_arch_group(aggregated: &mut NvidiaGpuClaims, group: ArchGroupResult) {
     }
     aggregated.overall_raw = group.overall_raw;
     aggregated.devices.extend(group.devices);
-}
-
-/// Verify a JWS, transparently refetching the JWKS once on `kid` miss.
-///
-/// NRAS rotates signing keys without coordination. Both the overall and
-/// per-submodule JWTs in a single response may reference a kid that wasn't
-/// in our cached JWKS at the time of fetch. On miss, force-refresh once and
-/// retry. After the refetch, `*jwks` reflects the new key set so subsequent
-/// calls (e.g. for submodule JWTs after the overall has rotated) use the
-/// refreshed material without an extra round-trip.
-async fn verify_jws_with_kid_rotation(
-    token: &str,
-    jwks: &mut Jwks,
-    arch: NvidiaGpuArch,
-    provider: &dyn NrasProvider,
-    now: i64,
-) -> Result<serde_json::Value> {
-    match verify_jws_es384(token, jwks, now) {
-        Err(AttestationError::JwksKidNotFound(_)) => {
-            *jwks = provider.jwks_force(arch).await?;
-            verify_jws_es384(token, jwks, now)
-        }
-        other => other,
-    }
 }
 
 /// NRAS returns a 2-tuple "detached EAT" of the shape
@@ -360,7 +410,7 @@ pub fn verify_jws_es384(token: &str, jwks: &Jwks, now: i64) -> Result<serde_json
         .find(|k| k.kid == kid)
         .ok_or_else(|| AttestationError::JwksKidNotFound(kid.to_string()))?;
 
-    let verifying_key = es384_verifying_key_from_jwks_entry(key, now)?;
+    let verifying_key = es384_verifying_key_from_jwks_entry(key, Some(now))?;
 
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let sig_bytes = URL_SAFE_NO_PAD
@@ -425,9 +475,10 @@ fn enforce_time_claims(claims: &serde_json::Value, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn es384_verifying_key_from_jwks_entry(
+/// `now: None` checks the chain without the certificates' validity windows.
+pub(crate) fn es384_verifying_key_from_jwks_entry(
     key: &crate::platforms::nvidia_gpu::provider::JwksKey,
-    now: i64,
+    now: Option<i64>,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     // The signing key MUST come from an x5c chain that validates up to the
     // pinned NVIDIA trust anchor. The raw JWK `(x, y)` coordinates carry no
@@ -448,11 +499,14 @@ fn es384_verifying_key_from_jwks_entry(
 /// SHA-256 hashes of trusted NRAS intermediate CA Subject Public Key Info (SPKI).
 /// The topmost certificate in the x5c chain must have an SPKI matching one of these.
 ///
-/// GPU/Switch Intermediate 004 — valid 2025-12-08 to 2029-12-08
-/// Subject: CN=NVIDIA Attestation Service GPU Intermediate 004
-/// Issuer:  CN=NVIDIA Attestation Service CA 001
-const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
-    &["fd32837f954e2c45db073105166dfe6985ae0480bb113fba63b091a75affe896"];
+/// Both are issued by CN=NVIDIA Attestation Service CA 001 (same authority key
+/// identifier); NRAS signs with keys under either.
+/// - GPU Intermediate 004 — valid 2025-12-08 to 2029-12-08
+/// - GPU Intermediate 005 — valid 2026-10-08 to 2030-10-08
+const NRAS_TRUSTED_SPKI_SHA256: &[&str] = &[
+    "fd32837f954e2c45db073105166dfe6985ae0480bb113fba63b091a75affe896",
+    "ba14d00377699189b6762c22c744a9dbdc62aa9396097ada7150426c6ff39afc",
+];
 
 /// Validate the x5c certificate chain and return the leaf's P-384 verifying key.
 ///
@@ -470,7 +524,7 @@ const NRAS_TRUSTED_SPKI_SHA256: &[&str] =
 /// chains to the pinned anchor through these constraints.
 fn verify_x5c_chain_and_extract_key(
     chain: &[String],
-    now: i64,
+    now: Option<i64>,
 ) -> Result<p384::ecdsa::VerifyingKey> {
     use sha2::Digest;
     use spki::DecodePublicKey;
@@ -497,8 +551,7 @@ fn verify_x5c_chain_and_extract_key(
         .collect::<Result<Vec<_>>>()?;
 
     // Enforce certificate validity periods at the evaluation time.
-    {
-        let now_secs = now;
+    if let Some(now_secs) = now {
         for (i, (_der, cert)) in certs.iter().enumerate() {
             let validity = &cert.tbs_certificate.validity;
             let nb_unix: i64 = validity
@@ -850,23 +903,6 @@ mod tests {
         NvidiaGpuEvidenceBundle, NvidiaGpuParams,
     };
 
-    /// `NrasProvider` whose methods panic on call. Used to prove `verify_bundle`
-    /// short-circuits on bad input before reaching the network/FFI.
-    struct PanicProvider;
-
-    #[async_trait::async_trait]
-    impl NrasProvider for PanicProvider {
-        fn url_for(&self, _arch: NvidiaGpuArch) -> &str {
-            "https://invalid.test/should-not-be-called"
-        }
-        async fn attest(&self, _request: &NrasRequest) -> Result<serde_json::Value> {
-            panic!("verify_bundle reached provider.attest() with invalid input");
-        }
-        async fn jwks(&self, _arch: NvidiaGpuArch) -> Result<Jwks> {
-            panic!("verify_bundle reached provider.jwks() with invalid input");
-        }
-    }
-
     fn one_device_bundle() -> NvidiaGpuEvidenceBundle {
         NvidiaGpuEvidenceBundle {
             devices: vec![NvidiaGpuDeviceEvidence {
@@ -882,10 +918,11 @@ mod tests {
     /// Real bug this catches: removing the `check_user_nonce_len(user_nonce)?`
     /// call site from `verify_bundle` (verify.rs:40). The helper would
     /// still exist, the unit-level branch would still work, but a short nonce
-    /// would silently flow into the NRAS request. The `PanicProvider` exists
-    /// to assert the rejection happens *before* any network call.
+    /// would silently flow into the NRAS request. A held-only store records
+    /// every piece it was asked for, so the rejection is shown to come
+    /// first.
     #[tokio::test]
-    async fn verify_bundle_rejects_short_user_nonce_before_provider_call() {
+    async fn gather_bundle_rejects_short_user_nonce_before_any_fetch() {
         let too_short = vec![0u8; MIN_GPU_USER_NONCE_LEN - 1];
         let bundle = one_device_bundle();
         let params = NvidiaGpuParams {
@@ -893,7 +930,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = verify_bundle(&bundle, &params, &PanicProvider, now()).await;
+        let ctx = crate::context::Context::held([]);
+        let result = gather_bundle(&bundle, &params, ctx.store(), 0)
+            .await
+            .map(|_| ());
+        assert!(ctx.store().missing().is_empty());
 
         match result {
             Err(AttestationError::NvidiaGpuNonceTooShort(n)) => {
@@ -989,7 +1030,7 @@ mod tests {
                 x5c,
             };
             assert!(
-                es384_verifying_key_from_jwks_entry(&key, now()).is_err(),
+                es384_verifying_key_from_jwks_entry(&key, Some(now())).is_err(),
                 "raw (x,y) without an x5c chain must be rejected"
             );
         }
@@ -1182,13 +1223,34 @@ mod tests {
             .collect()
     }
 
+    // NRAS signs with keys under both pinned intermediates. Each captured chain
+    // is checked at a time inside its leaf's validity window.
+    #[test]
+    fn x5c_chains_under_both_intermediates_are_accepted() {
+        let chain_005: Vec<String> = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../test_data/nvidia_gpu/nras_gpu_x5c_chain_005.json"
+        ))
+        .unwrap()["x5c"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        for (chain, at) in [(nras_x5c_fixture(), 1780951820), (chain_005, 1792051921)] {
+            assert!(verify_x5c_chain_and_extract_key(&chain, Some(at)).is_ok());
+            let mut unpinned = chain.clone();
+            unpinned.pop();
+            assert!(verify_x5c_chain_and_extract_key(&unpinned, Some(at)).is_err());
+        }
+    }
+
     #[test]
     fn x5c_reversed_chain_breaks_name_linkage() {
         // Swapping leaf and intermediate breaks both the signature linkage and
         // the issuer<->subject name chain; either way it must be rejected.
         let mut chain = nras_x5c_fixture();
         chain.reverse();
-        match verify_x5c_chain_and_extract_key(&chain, now()) {
+        match verify_x5c_chain_and_extract_key(&chain, Some(now())) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("reversed chain must be rejected, got {other:?}"),
         }
@@ -1200,7 +1262,7 @@ mod tests {
         // is not in the pinned trusted set. (If the captured leaf has aged out,
         // the validity check rejects it first — either way it must not pass.)
         let chain = vec![nras_x5c_fixture()[0].clone()];
-        match verify_x5c_chain_and_extract_key(&chain, now()) {
+        match verify_x5c_chain_and_extract_key(&chain, Some(now())) {
             Err(AttestationError::JwsVerification(_)) => {}
             other => panic!("leaf-only chain must be rejected, got {other:?}"),
         }
