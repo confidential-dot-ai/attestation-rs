@@ -628,23 +628,27 @@ pub async fn verify_collateral(
     // TCB status evaluation
     let fmspc = super::dcap::extract_fmspc_from_pck(auth.pck_cert_chain_pem)?;
     let tcb_info_json = provider.get_tcb_info(&fmspc).await?;
-    let tcb_signing_chain = provider.get_tcb_signing_chain().await?;
+    let tcb_signing_chain = provider
+        .get_tcb_signing_chain()
+        .await?
+        .ok_or_else(unsigned)?;
     let mut status = super::dcap::evaluate_tcb_status(
         &tcb_info_json,
         &quote.body.tee_tcb_svn,
         auth.pck_cert_chain_pem,
-        tcb_signing_chain.as_deref(),
+        Some(&tcb_signing_chain),
         now,
     )
     .map_err(unusable)?;
 
     // QE Identity verification (TDX uses TD_QE, not SGX QE)
     let qe_identity_json = provider.get_td_qe_identity().await?;
-    let qe_signing_chain = provider.get_td_qe_identity_signing_chain().await?;
-    if let Some(chain) = qe_signing_chain.as_deref() {
-        super::dcap::verify_qe_identity_signature(&qe_identity_json, chain, now)
-            .map_err(unusable)?;
-    }
+    let qe_signing_chain = provider
+        .get_td_qe_identity_signing_chain()
+        .await?
+        .ok_or_else(unsigned)?;
+    super::dcap::verify_qe_identity_signature(&qe_identity_json, &qe_signing_chain, now)
+        .map_err(unusable)?;
     let qe_identity = super::dcap::parse_qe_identity(&qe_identity_json).map_err(unusable)?;
     let qe_status = super::dcap::check_qe_report(auth.qe_report_body, &qe_identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
@@ -654,6 +658,12 @@ pub async fn verify_collateral(
         tcb: status,
         pck_revoked,
     })
+}
+
+/// Intel signs its TCB Info and QE Identity; without the issuer chain the
+/// signature cannot be checked, so the collateral is refused.
+fn unsigned() -> AttestationError {
+    AttestationError::CertChainError("Intel collateral came without its issuer chain".into())
 }
 
 /// Fetched collateral that does not parse or verify was not usefully

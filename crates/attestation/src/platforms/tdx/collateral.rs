@@ -257,6 +257,54 @@ mod tests {
         assert_eq!(step(stale()).await.unwrap_err(), rejection(stale()).await);
     }
 
+    struct WithoutChains(StaticTdxCollateral, bool);
+
+    #[async_trait::async_trait]
+    impl TdxCollateralProvider for WithoutChains {
+        async fn get_tcb_info(&self, fmspc: &str) -> Result<Vec<u8>> {
+            self.0.get_tcb_info(fmspc).await
+        }
+        async fn get_qe_identity(&self) -> Result<Vec<u8>> {
+            self.0.get_qe_identity().await
+        }
+        async fn get_td_qe_identity(&self) -> Result<Vec<u8>> {
+            self.0.get_td_qe_identity().await
+        }
+        async fn get_root_ca_crl(&self) -> Result<Vec<u8>> {
+            self.0.get_root_ca_crl().await
+        }
+        async fn get_pck_crl(&self, ca: &str) -> Result<Vec<u8>> {
+            self.0.get_pck_crl(ca).await
+        }
+        async fn get_tcb_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+            match self.1 {
+                true => self.0.get_tcb_signing_chain().await,
+                false => Ok(None),
+            }
+        }
+        async fn get_td_qe_identity_signing_chain(&self) -> Result<Option<Vec<u8>>> {
+            match self.1 {
+                false => self.0.get_td_qe_identity_signing_chain().await,
+                true => Ok(None),
+            }
+        }
+        async fn pck_revoked(&self, pem: &[u8]) -> Result<bool> {
+            self.0.pck_revoked(pem).await
+        }
+    }
+
+    #[tokio::test]
+    async fn intel_collateral_without_its_issuer_chain_is_refused() {
+        let quote = crate::platforms::tdx::verify::parse_tdx_quote(QUOTE).unwrap();
+        for tcb_chain_only in [true, false] {
+            let c = WithoutChains(collateral(), tcb_chain_only);
+            let err = crate::platforms::tdx::verify::verify_collateral(QUOTE, &quote, &c, AT)
+                .await
+                .expect_err("unsigned collateral");
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+        }
+    }
+
     #[tokio::test]
     async fn current_collateral_grades_the_quote() {
         let r = verify(collateral()).await.expect("verify");
