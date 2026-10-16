@@ -87,7 +87,8 @@ The service verifies with one in-memory collateral store for its lifetime:
 AMD, Intel, Google and NVIDIA collateral is fetched on first use, checked
 against the vendor roots compiled into the library, kept, and refetched near
 its nextUpdate (a failed refetch keeps the current copy). A piece held
-nowhere and not fetchable is `502 collateral_unavailable`; a piece that is not the vendor's is `422
+nowhere and not fetchable is `502 collateral_unavailable` (with `Retry-After`
+when the vendor sent one); a piece that is not the vendor's is `422
 verification_failed`.
 
 ## Usage Examples

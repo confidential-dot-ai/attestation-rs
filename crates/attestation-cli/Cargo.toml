@@ -13,6 +13,9 @@ nvidia-gpu = ["attestation/nvidia-gpu"]
 # Collect NVIDIA GPU evidence during `attest` (CC-mode Linux host; requires the
 # NVIDIA SDK / libnvat at build+run time). Implies `attest` + `nvidia-gpu`.
 nvidia-gpu-attest = ["nvidia-gpu", "attest", "attestation/nvidia-gpu-attest"]
+# Fetch collateral from $ATTESTATION_TEST_VENDOR instead of the vendors, for
+# fault-injection tests against a fake vendor. Refused in release builds.
+test-vendor = ["attestation/test-vendor"]
 
 [dependencies]
 attestation = { workspace = true }

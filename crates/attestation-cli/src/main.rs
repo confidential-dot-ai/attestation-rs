@@ -9,6 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use attestation::{PlatformType, Policies, SnpParams, TdxParams};
 
+#[cfg(all(feature = "test-vendor", not(debug_assertions)))]
+compile_error!("the test-vendor feature is for debug builds only");
+
 const EXIT_CODES: &str = "\
 Exit codes:
   0  passed: genuine, and every rule in the flags held
@@ -565,6 +568,11 @@ async fn cmd_verify(args: VerifyArgs) {
         Some(t) => ctx.at(t).unwrap_or_else(|e| usage_error(&e.to_string())),
         None => ctx,
     };
+    #[cfg(feature = "test-vendor")]
+    let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
+        Ok(base) => ctx.with_vendor_base(&base),
+        Err(_) => ctx,
+    };
     let verifier = attestation::Verifier::new(match cache_dir() {
         Some(dir) => ctx.with_cache_dir(dir),
         None => ctx,
@@ -607,6 +615,11 @@ async fn cmd_verify(args: VerifyArgs) {
             gpu.passed(),
             gpu.claims.devices.len()
         );
+    }
+    for c in &verified.collateral {
+        let version = c.version.map(|v| format!(" v{v}")).unwrap_or_default();
+        let current = if c.current { "current" } else { "not current" };
+        eprintln!("  Collateral: {}{version}, {current} ({})", c.name, c.from);
     }
     eprintln!("  Passed: {passed}");
 

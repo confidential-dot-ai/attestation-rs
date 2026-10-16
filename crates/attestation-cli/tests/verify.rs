@@ -14,13 +14,19 @@ const GENOA_CRL: &[u8] =
 /// 2026-10-16T00:00:00Z, inside the CRL's window.
 const AT: &str = "1792108800";
 
+/// AMD's Genoa CRL, as the vendor response for its URL.
+fn genoa_crl() -> attestation::HeldResponse {
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral};
+    let url = AmdCrl::url(&(attestation::ProcessorGeneration::Genoa, AmdKey::Vcek));
+    (url, GENOA_CRL.to_vec(), None)
+}
+
 fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
-    use attestation::collateral::{AmdCrl, AmdKey, Collateral};
-    let url = AmdCrl::url(&(attestation::ProcessorGeneration::Genoa, AmdKey::Vcek));
-    attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &url, GENOA_CRL, None);
+    let (url, body, _) = genoa_crl();
+    attestation::collateral::save_to_cache_dir(&dir.join("attestation"), &url, &body, None);
     let path = dir.join("evidence.json");
     std::fs::write(&path, evidence.to_string()).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
@@ -35,17 +41,18 @@ fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
 }
 
 /// The Genoa evidence with its VCEK inline.
+fn evidence() -> serde_json::Value {
+    serde_json::json!({
+        "platform": "snp",
+        "evidence": {
+            "attestation_report": BASE64.encode(REPORT),
+            "cert_chain": { "vcek": BASE64.encode(VCEK) },
+        },
+    })
+}
+
 fn verify(args: &[&str]) -> Output {
-    run(
-        serde_json::json!({
-            "platform": "snp",
-            "evidence": {
-                "attestation_report": BASE64.encode(REPORT),
-                "cert_chain": { "vcek": BASE64.encode(VCEK) },
-            },
-        }),
-        args,
-    )
+    run(evidence(), args)
 }
 
 fn stdout_json(out: &Output) -> serde_json::Value {
@@ -140,5 +147,110 @@ fn collateral_unavailable_exits_three() {
         &["--platform", "snp"],
     );
     assert_eq!(out.status.code(), Some(3));
+    assert!(out.stdout.is_empty(), "nothing was verified");
+}
+
+/// The verdict without where each piece came from, after checking that every
+/// piece came from `from`.
+fn sourced_from(mut json: serde_json::Value, from: &str) -> serde_json::Value {
+    for piece in json["collateral"].as_array_mut().unwrap() {
+        assert_eq!(piece.as_object_mut().unwrap().remove("from").unwrap(), from);
+    }
+    json
+}
+
+#[tokio::test]
+async fn the_answer_is_the_librarys() {
+    let out = verify(&["--platform", "snp"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    let ctx = attestation::Context::offline()
+        .with_held([genoa_crl()])
+        .at(AT.parse().unwrap())
+        .unwrap();
+    let policies = attestation::Policies {
+        snp: Some(Default::default()),
+        ..Default::default()
+    };
+    let lib = attestation::Verifier::new(ctx)
+        .verify(evidence().to_string().as_bytes(), &policies)
+        .await
+        .unwrap();
+    let mut lib_json = serde_json::to_value(&lib).unwrap();
+    lib_json["passed"] = lib.passed().into();
+    assert_eq!(
+        sourced_from(stdout_json(&out), "disk"),
+        sourced_from(lib_json, "held")
+    );
+}
+
+/// A vendor on localhost that serves `crl` for CRL URLs and 404 for
+/// everything else.
+#[cfg(feature = "test-vendor")]
+fn vendor(crl: Vec<u8>) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut sock in listener.incoming().flatten() {
+            let mut req = [0; 8192];
+            let n = sock.read(&mut req).unwrap_or(0);
+            let line = String::from_utf8_lossy(&req[..n]);
+            let is_crl = line.lines().next().is_some_and(|l| l.contains("/crl "));
+            let (status, body) = if is_crl {
+                (200, &crl[..])
+            } else {
+                (404, &[][..])
+            };
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(body);
+        }
+    });
+    base
+}
+
+/// `verify` against the vendor at `base`, with an empty cache.
+#[cfg(feature = "test-vendor")]
+fn run_online(evidence: serde_json::Value, base: &str) -> Output {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("cli-online-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("evidence.json");
+    std::fs::write(&path, evidence.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
+        .env("XDG_CACHE_HOME", &dir)
+        .env("ATTESTATION_TEST_VENDOR", base)
+        .args(["verify", "--platform", "snp", "--at", AT, "--evidence"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    out
+}
+
+#[cfg(feature = "test-vendor")]
+#[test]
+fn collateral_that_is_not_the_vendors_exits_one() {
+    let mut crl = GENOA_CRL.to_vec();
+    *crl.last_mut().unwrap() ^= 1;
+    let out = run_online(evidence(), &vendor(crl));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "nothing was verified");
+}
+
+#[cfg(feature = "test-vendor")]
+#[test]
+fn a_vcek_the_vendor_does_not_publish_exits_one() {
+    let without_vcek = serde_json::json!({
+        "platform": "snp",
+        "evidence": { "attestation_report": BASE64.encode(REPORT) },
+    });
+    let out = run_online(without_vcek, &vendor(GENOA_CRL.to_vec()));
+    assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty(), "nothing was verified");
 }

@@ -28,6 +28,9 @@ pub enum ApiError {
     Internal(String),
 }
 
+/// The longest wait passed on to callers, whatever the vendor asked for.
+const MAX_RETRY_AFTER: u64 = 3600;
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
@@ -78,12 +81,21 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
 
+        let retry_after = match &self {
+            ApiError::Verification(inner) => inner.retry_after().map(|s| s.min(MAX_RETRY_AFTER)),
+            _ => None,
+        };
         let body = ErrorBody {
             error: error_key,
             message,
         };
-
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -109,7 +121,28 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(resp.headers().get("retry-after").is_none());
         assert_eq!(error_key(resp).await, "collateral_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_vendor_retry_after_is_passed_on() {
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "tcb-info 70a06d070000".into(),
+            retry_after: Some(120),
+            detail: "HTTP 429".into(),
+        })
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["retry-after"], "120");
+
+        let resp = ApiError::Verification(AttestationError::CollateralUnavailable {
+            collateral: "tcb-info 70a06d070000".into(),
+            retry_after: Some(u64::MAX),
+            detail: "HTTP 429".into(),
+        })
+        .into_response();
+        assert_eq!(resp.headers()["retry-after"], "3600");
     }
 
     #[tokio::test]

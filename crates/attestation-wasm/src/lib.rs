@@ -395,6 +395,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_answer_is_the_librarys() {
+        for (envelope, platform) in [(tdx_envelope(), "tdx"), (snp_envelope(), "snp")] {
+            let collateral = fetch(&envelope).await;
+            let wasm = evaluate_impl(&envelope, request(&[platform]), &collateral, Some(NOW))
+                .await
+                .unwrap();
+            let held: Vec<Held> = serde_json::from_str(&collateral).unwrap();
+            let ctx = Context::held(
+                held.into_iter()
+                    .map(|h| (h.url, BASE64.decode(h.body).unwrap(), h.issuer_chain)),
+            )
+            .at(NOW)
+            .unwrap();
+            let policies = request(&[platform]).policies().unwrap();
+            let lib = Verifier::new(ctx)
+                .verify(envelope.as_bytes(), &policies)
+                .await
+                .unwrap();
+            let mut lib_json = serde_json::to_value(&lib).unwrap();
+            lib_json["passed"] = lib.passed().into();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&wasm).unwrap(),
+                lib_json
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn evidence_for_a_platform_not_listed_throws() {
         let err = evaluate(&tdx_envelope(), request(&["snp"]))
             .await

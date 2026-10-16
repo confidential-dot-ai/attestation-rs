@@ -56,7 +56,7 @@ pub mod utils;
 mod testing;
 
 pub use collateral::CollateralUsed;
-pub use context::Context;
+pub use context::{Context, HeldResponse};
 pub use error::{AttestationError, Result};
 pub use platform::{Platform, PlatformResult, Policies, Verified};
 #[cfg(feature = "az-snp")]
@@ -609,6 +609,25 @@ mod tests {
         let expired = verified.collateral.iter().filter(|c| !c.current);
         assert_eq!(expired.count(), 3);
         assert!(!verified.passed());
+    }
+
+    #[tokio::test]
+    async fn pure_verify_gives_the_same_answer_every_time() {
+        let evidence = platforms::tdx::evidence::TdxEvidence {
+            quote: base64::engine::general_purpose::STANDARD.encode(V5_QUOTE),
+            cc_eventlog: None,
+        };
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let (collateral, _) = Tdx::gather(&evidence, ctx.store(), now).await.unwrap();
+        let answer = || {
+            serde_json::to_value(
+                Tdx::verify(&evidence, &TdxParams::default(), &collateral, now).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = answer();
+        assert!((0..10).all(|_| answer() == first));
     }
 
     #[tokio::test]
