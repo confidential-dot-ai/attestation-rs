@@ -150,8 +150,6 @@ fn collateral_unavailable_exits_three() {
     assert!(out.stdout.is_empty(), "nothing was verified");
 }
 
-/// The verdict without where each piece came from (the cache here, a
-/// held copy for the library).
 /// The verdict without where each piece came from, after checking that every
 /// piece came from `from`.
 fn sourced_from(mut json: serde_json::Value, from: &str) -> serde_json::Value {
@@ -186,22 +184,30 @@ async fn the_answer_is_the_librarys() {
     );
 }
 
-/// A vendor on localhost that answers every request with `status` and
-/// `body`.
+/// A vendor on localhost that serves `crl` for CRL URLs and 404 for
+/// everything else.
 #[cfg(feature = "test-vendor")]
-fn vendor(status: u16, body: Vec<u8>) -> String {
+fn vendor(crl: Vec<u8>) -> String {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut sock in listener.incoming().flatten() {
-            let _ = sock.read(&mut [0; 8192]);
+            let mut req = [0; 8192];
+            let n = sock.read(&mut req).unwrap_or(0);
+            let line = String::from_utf8_lossy(&req[..n]);
+            let is_crl = line.lines().next().is_some_and(|l| l.contains("/crl "));
+            let (status, body) = if is_crl {
+                (200, &crl[..])
+            } else {
+                (404, &[][..])
+            };
             let head = format!(
                 "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = sock.write_all(head.as_bytes());
-            let _ = sock.write_all(&body);
+            let _ = sock.write_all(body);
         }
     });
     base
@@ -232,7 +238,7 @@ fn run_online(evidence: serde_json::Value, base: &str) -> Output {
 fn collateral_that_is_not_the_vendors_exits_one() {
     let mut crl = GENOA_CRL.to_vec();
     *crl.last_mut().unwrap() ^= 1;
-    let out = run_online(evidence(), &vendor(200, crl));
+    let out = run_online(evidence(), &vendor(crl));
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty(), "nothing was verified");
 }
@@ -244,7 +250,7 @@ fn a_vcek_the_vendor_does_not_publish_exits_one() {
         "platform": "snp",
         "evidence": { "attestation_report": BASE64.encode(REPORT) },
     });
-    let out = run_online(without_vcek, &vendor(404, Vec::new()));
+    let out = run_online(without_vcek, &vendor(GENOA_CRL.to_vec()));
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty(), "nothing was verified");
 }

@@ -15,6 +15,7 @@ nvidia-gpu = ["attestation/nvidia-gpu"]
 # needs libnvat.so. Deployments that only verify (no attester role) should
 # leave this off.
 nvidia-gpu-attest = ["nvidia-gpu", "attestation/nvidia-gpu-attest"]
+
 [dependencies]
 attestation = { workspace = true, features = ["attest", "nvidia-gpu"] }
 # Web framework
