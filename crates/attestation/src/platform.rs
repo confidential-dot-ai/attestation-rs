@@ -79,23 +79,30 @@ pub trait Platform {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Policies {
     #[cfg(feature = "tdx")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tdx: Option<TdxParams>,
     #[cfg(feature = "snp")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snp: Option<SnpParams>,
     #[cfg(feature = "az-tdx")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub az_tdx: Option<AzTdxParams>,
     #[cfg(feature = "az-snp")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub az_snp: Option<AzSnpParams>,
     #[cfg(feature = "gcp-tdx")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gcp_tdx: Option<GcpTdxParams>,
     #[cfg(feature = "gcp-snp")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gcp_snp: Option<GcpSnpParams>,
     #[cfg(feature = "dstack")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dstack: Option<DstackParams>,
     /// Params for an NVIDIA GPU bundle carried next to the CPU evidence.
     /// Evidence that carries a bundle is rejected when this is `None`.
     #[cfg(feature = "nvidia-gpu")]
-    #[serde(rename = "nvidia_gpu")]
+    #[serde(rename = "nvidia_gpu", skip_serializing_if = "Option::is_none")]
     pub gpu: Option<NvidiaGpuParams>,
     /// The lowest collateral versions accepted.
     pub floors: VersionFloors,
@@ -192,6 +199,36 @@ impl Policies {
             Some(false) => Err(AttestationError::PlatformNotAllowed(platform.to_string())),
             None => Err(AttestationError::PlatformNotEnabled(platform.to_string())),
         }
+    }
+
+    /// The TDX params of every TDX-based platform present.
+    #[cfg(feature = "tdx")]
+    pub fn tdx_params(&self) -> impl Iterator<Item = &TdxParams> {
+        [
+            self.tdx.as_ref(),
+            #[cfg(feature = "az-tdx")]
+            self.az_tdx.as_ref().map(|p| &p.tdx),
+            #[cfg(feature = "gcp-tdx")]
+            self.gcp_tdx.as_ref().map(|p| &p.tdx),
+            #[cfg(feature = "dstack")]
+            self.dstack.as_ref().map(|p| &p.tdx),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// The SNP params of every SNP-based platform present.
+    #[cfg(feature = "snp")]
+    pub fn snp_params(&self) -> impl Iterator<Item = &SnpParams> {
+        [
+            self.snp.as_ref(),
+            #[cfg(feature = "az-snp")]
+            self.az_snp.as_ref().map(|p| &p.snp),
+            #[cfg(feature = "gcp-snp")]
+            self.gcp_snp.as_ref().map(|p| &p.snp),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// The `report_data` the params for `platform` expect, if any.
@@ -376,8 +413,13 @@ mod tests {
             policies.floors.amd_crl_milan,
             VersionFloors::default().amd_crl_milan
         );
-        let again: Policies =
-            serde_json::from_value(serde_json::to_value(&policies).unwrap()).unwrap();
+        // A claim names only the platforms it accepts, so a build with fewer
+        // features reads it back.
+        let claim = serde_json::to_value(&policies).unwrap();
+        let mut keys: Vec<_> = claim.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["az-tdx", "floors", "snp"]);
+        let again: Policies = serde_json::from_value(claim).unwrap();
         assert_eq!(format!("{again:?}"), format!("{policies:?}"));
 
         for refused in [

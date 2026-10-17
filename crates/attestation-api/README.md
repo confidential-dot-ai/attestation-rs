@@ -139,7 +139,7 @@ status Intel does not consider valid (`"Revoked"`, `"NoMatchingLevel"`) in
 `accepted_tcb_statuses` are a `400` unless the matching `attestation.allow_*`
 option is enabled (`allow_debug` covers `nvidia_gpu.device_policy.allow_debug`
 too); `floors` below the shipped versions and a `device_policy` that drops
-`require_secboot` or `require_measres_success` are always a `400`. `issue_token` requires `report_data` in the policy for the
+`require_secboot` or `require_measres_success` are always a `400`. `issue_token` requires a non-empty `report_data` in the policy for the
 evidence's platform.
 
 A token alone is not fresh: anyone who can call `/verify` can replay old

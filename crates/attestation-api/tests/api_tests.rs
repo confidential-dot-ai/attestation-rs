@@ -358,6 +358,16 @@ async fn verify_refuses_policies_below_the_server_floors_unless_enabled() {
         serde_json::json!({ "tdx": { "allow_debug": true }, "nvidia_gpu": { "device_policy": { "allow_debug": true } } }),
     )
     .await;
+    assert_floor(
+        |c| c.attestation.allow_debug = false,
+        serde_json::json!({ "tdx": {}, "dstack": { "allow_debug": true } }),
+    )
+    .await;
+    assert_floor(
+        |c| c.attestation.allow_revoked_or_unlisted_tcb = false,
+        serde_json::json!({ "tdx": {}, "dstack": { "accepted_tcb_statuses": ["Revoked"] } }),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -390,19 +400,24 @@ async fn verify_refuses_collateral_floors_or_gpu_checks_below_the_defaults() {
 
 #[tokio::test]
 async fn verify_refuses_a_token_request_without_report_data() {
-    let (status, json) = post_verify(
-        offline_state_with(|c| c.attestation.allow_debug = true),
-        serde_json::json!({
-            "platform": "tdx",
-            "evidence": tdx_v4_evidence(),
-            "policies": { "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==" } },
-            "issue_token": true
-        }),
-    )
-    .await;
+    for policies in [
+        serde_json::json!({ "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==" } }),
+        serde_json::json!({ "tdx": { "allow_debug": true, "report_data": "" } }),
+    ] {
+        let (status, json) = post_verify(
+            offline_state_with(|c| c.attestation.allow_debug = true),
+            serde_json::json!({
+                "platform": "tdx",
+                "evidence": tdx_v4_evidence(),
+                "policies": policies,
+                "issue_token": true
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"], "bad_request");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{policies}");
+        assert_eq!(json["error"], "bad_request");
+    }
 }
 
 #[tokio::test]

@@ -47,15 +47,22 @@ pub async fn handler(
     let Json(req) = payload?;
     let platform = canonical_platform(req.platform.as_deref())?;
     check_server_floors(&req.policies, &state.config.attestation)?;
-    let kind: attestation::PlatformType =
-        serde_json::from_value(platform.into()).expect("supported platforms are platform tags");
-    if req.issue_token && req.policies.report_data(kind).is_none() {
+    if req.issue_token
+        && req
+            .policies
+            .report_data(platform)
+            .is_none_or(<[u8]>::is_empty)
+    {
         return Err(ApiError::BadRequest(format!(
-            "issue_token requires policies.{platform}.report_data"
+            "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
-    let evidence_json =
-        build_evidence_envelope(platform, req.evidence, req.nvidia_gpu, req.collateral)?;
+    let evidence_json = build_evidence_envelope(
+        &platform.to_string(),
+        req.evidence,
+        req.nvidia_gpu,
+        req.collateral,
+    )?;
 
     let result = state.verifier.verify(&evidence_json, &req.policies).await?;
     let passed = PassedVerification::new(&result);
@@ -92,42 +99,26 @@ fn check_server_floors(
             "{what} is disabled by server configuration"
         )))
     };
-    let tdx = [
-        policies.tdx.as_ref(),
-        policies.az_tdx.as_ref().map(|p| &p.tdx),
-        policies.gcp_tdx.as_ref().map(|p| &p.tdx),
-    ];
-    let snp = [
-        policies.snp.as_ref(),
-        policies.az_snp.as_ref().map(|p| &p.snp),
-        policies.gcp_snp.as_ref().map(|p| &p.snp),
-    ];
     let gpu = policies.gpu.as_ref().map(|p| &p.device_policy);
-    let debug = tdx.iter().flatten().any(|p| p.allow_debug)
-        || snp.iter().flatten().any(|p| p.allow_debug)
+    let debug = policies.tdx_params().any(|p| p.allow_debug)
+        || policies.snp_params().any(|p| p.allow_debug)
         || gpu.is_some_and(|p| p.allow_debug);
     if debug && !config.allow_debug {
         return refuse("allow_debug");
     }
     if !config.allow_revoked_or_unlisted_tcb {
         let valid = attestation::TdxParams::default().accepted_tcb_statuses;
-        let statuses = tdx.iter().flatten().flat_map(|p| &p.accepted_tcb_statuses);
-        if let Some(status) = statuses.into_iter().find(|s| !valid.contains(s)) {
+        let mut statuses = policies.tdx_params().flat_map(|p| &p.accepted_tcb_statuses);
+        if let Some(status) = statuses.find(|s| !valid.contains(s)) {
             return refuse(&format!("accepting TCB status {status}"));
         }
     }
-    if !config.allow_nonzero_vmpl && snp.iter().flatten().any(|p| p.max_vmpl > 0) {
+    if !config.allow_nonzero_vmpl && policies.snp_params().any(|p| p.max_vmpl > 0) {
         return refuse("max_vmpl above 0");
     }
-    let (floors, shipped) = (
-        &policies.floors,
-        attestation::collateral::VersionFloors::default(),
-    );
-    if floors.amd_crl_milan < shipped.amd_crl_milan
-        || floors.amd_crl_genoa < shipped.amd_crl_genoa
-        || floors.amd_crl_turin < shipped.amd_crl_turin
-        || floors.intel_tcb_info < shipped.intel_tcb_info
-        || floors.intel_qe_identity < shipped.intel_qe_identity
+    if policies
+        .floors
+        .lowers(&attestation::collateral::VersionFloors::default())
     {
         return Err(ApiError::BadRequest(
             "floors may raise, not lower, the collateral versions accepted".to_string(),
@@ -141,11 +132,12 @@ fn check_server_floors(
     Ok(())
 }
 
-fn canonical_platform(platform: Option<&str>) -> Result<&'static str, ApiError> {
+fn canonical_platform(platform: Option<&str>) -> Result<attestation::PlatformType, ApiError> {
     let platform = platform.ok_or_else(|| {
         ApiError::BadRequest("platform is required for evidence verification".to_string())
     })?;
     normalize_platform(platform)
+        .and_then(|p| serde_json::from_value(p.into()).ok())
         .ok_or_else(|| ApiError::BadRequest(format!("unknown platform: {platform}")))
 }
 
@@ -192,7 +184,7 @@ mod tests {
     fn build_evidence_envelope_wraps_split_form_with_canonical_platform() {
         let normalized: Value = serde_json::from_slice(
             &build_evidence_envelope(
-                canonical_platform(Some("SNP")).unwrap(),
+                &canonical_platform(Some("SNP")).unwrap().to_string(),
                 json!({ "report": "abc" }),
                 None,
                 None,

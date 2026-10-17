@@ -111,6 +111,24 @@ impl Default for VersionFloors {
     }
 }
 
+impl VersionFloors {
+    /// True when any floor here is below the same floor in `other`.
+    pub fn lowers(&self, other: &Self) -> bool {
+        let Self {
+            amd_crl_milan,
+            amd_crl_genoa,
+            amd_crl_turin,
+            intel_tcb_info,
+            intel_qe_identity,
+        } = self;
+        *amd_crl_milan < other.amd_crl_milan
+            || *amd_crl_genoa < other.amd_crl_genoa
+            || *amd_crl_turin < other.amd_crl_turin
+            || *intel_tcb_info < other.intel_tcb_info
+            || *intel_qe_identity < other.intel_qe_identity
+    }
+}
+
 /// `pem` without the certificates compiled into this crate as roots: the
 /// verifier has them already.
 pub(crate) fn without_roots(pem: &str) -> String {

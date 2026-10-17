@@ -266,6 +266,11 @@ pub(crate) fn check_preconditions<'a>(
         .allowed_bindings
         .as_deref()
         .unwrap_or(&default_allowed);
+    if allowed.is_empty() {
+        return Err(AttestationError::InvalidParams(
+            "allowed_bindings: the allowed set is empty".into(),
+        ));
+    }
     if !allowed.contains(&bundle.binding) {
         return Err(AttestationError::NvidiaGpuBindingNotAllowed);
     }
@@ -983,6 +988,17 @@ mod tests {
             }],
             binding: NvidiaGpuBinding::default(),
         }
+    }
+
+    #[test]
+    fn an_empty_allowed_bindings_is_invalid_params() {
+        let params = NvidiaGpuParams {
+            user_nonce: Some(vec![0; MIN_GPU_USER_NONCE_LEN]),
+            allowed_bindings: Some(vec![]),
+            ..Default::default()
+        };
+        let err = check_preconditions(&one_device_bundle(), &params).unwrap_err();
+        assert!(err.is_invalid_params(), "{err:?}");
     }
 
     /// Real bug this catches: removing the `check_user_nonce_len(user_nonce)?`
