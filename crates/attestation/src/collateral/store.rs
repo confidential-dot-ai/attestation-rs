@@ -30,6 +30,8 @@ pub enum Source {
     /// Fetched from the vendor by this call, or by a concurrent call it
     /// waited for.
     Vendor,
+    /// Fetched, as [`Source::Vendor`], from an upstream collateral cache.
+    Cache,
 }
 
 impl std::fmt::Display for Source {
@@ -40,6 +42,7 @@ impl std::fmt::Display for Source {
             Source::Memory => "memory",
             Source::Disk => "disk",
             Source::Vendor => "vendor",
+            Source::Cache => "cache",
         })
     }
 }
@@ -96,8 +99,30 @@ struct Entry {
     issuer_chain: Option<String>,
     dates: Dates,
     origin: Source,
+    /// When to ask the upstream for a newer copy (Unix seconds).
+    refresh_at: i64,
     #[cfg(not(target_arch = "wasm32"))]
     checked_at: std::time::Instant,
+}
+
+/// A random time in the last quarter of the window of a piece, and at least
+/// a day before its nextUpdate, so that copies made together are not all
+/// refreshed together.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn refresh_at(dates: &Dates) -> i64 {
+    const DAY: i64 = 24 * 3600;
+    let Some(next) = dates.next_update else {
+        return i64::MAX;
+    };
+    let latest = next - DAY;
+    let earliest = dates
+        .this_update
+        .map_or(latest, |this| this + (next - this) / 4 * 3);
+    if earliest >= latest {
+        return latest;
+    }
+    let random = std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), next);
+    earliest + (random % (latest - earliest) as u64) as i64
 }
 
 #[derive(Clone)]
@@ -138,6 +163,7 @@ fn check<C: Collateral>(
     Ok(Entry {
         body,
         issuer_chain,
+        refresh_at: refresh_at(&dates),
         dates,
         origin,
         #[cfg(not(target_arch = "wasm32"))]
@@ -423,8 +449,6 @@ mod native {
     use crate::collateral::disk::Disk;
     use crate::collateral::vendor::Vendor;
 
-    /// Refetch a piece this long before its nextUpdate.
-    const REFRESH_AHEAD: i64 = 24 * 3600;
     /// Refetch a piece without a nextUpdate (the NRAS key set) this often.
     const MAX_AGE: Duration = Duration::from_secs(3600);
 
@@ -450,16 +474,15 @@ mod native {
             }
         }
 
-        /// Whether to ask the vendor about `entry` again: never within
-        /// `recheck` of the last time; otherwise when it is within a day of
-        /// its nextUpdate (or, for the key set, old), or always when
-        /// `force`d.
+        /// Whether to ask the upstream about `entry` again: never within
+        /// `recheck` of the last time; otherwise from its refresh time (or,
+        /// for the key set, when old), or always when `force`d.
         fn due(&self, entry: &Entry, now: i64, force: bool) -> bool {
             let age = entry.checked_at.elapsed();
             age >= self.recheck
                 && (force
                     || match entry.dates.next_update {
-                        Some(next) => now >= next - REFRESH_AHEAD,
+                        Some(_) => now >= entry.refresh_at,
                         None => age >= MAX_AGE,
                     })
         }
@@ -473,12 +496,13 @@ mod native {
             match self.mem.get(&url).await {
                 Some(entry) if self.due(&entry, now, false) => {
                     let (held, replaced, _) = self.refresh::<C>(&url, id, false, now).await;
+                    let held = held.unwrap_or(entry);
                     let source = if replaced {
-                        Source::Vendor
+                        held.origin
                     } else {
                         Source::Memory
                     };
-                    Ok((held.unwrap_or(entry), source))
+                    Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
                 None => self
@@ -517,13 +541,15 @@ mod native {
                     return Err(failure);
                 }
             }
-            let (body, chain) = match vendor.fetch(url).await {
+            let (direct, fetched) = Box::pin(vendor.fetch(url)).await;
+            let (body, chain) = match fetched {
                 Ok(fetched) => fetched,
                 Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
                     // The vendor does not know the chip or platform the
                     // evidence names: for a piece the evidence names, the
-                    // evidence is at fault and retrying will not help.
-                    if !C::NAMED_BY_EVIDENCE {
+                    // evidence is at fault and retrying will not help. Only
+                    // the vendor itself can say so, not a cache in between.
+                    if !C::NAMED_BY_EVIDENCE || !direct {
                         return Err(Failure::Unavailable(e));
                     }
                     let failure =
@@ -535,7 +561,12 @@ mod native {
                 }
                 Err(e) => return Err(Failure::Unavailable(e)),
             };
-            check::<C>(id, body, chain, Source::Vendor)
+            let from = if direct {
+                Source::Vendor
+            } else {
+                Source::Cache
+            };
+            check::<C>(id, body, chain, from)
         }
 
         fn store(&self, url: &str, entry: &Entry) {
@@ -745,8 +776,20 @@ mod tests {
     /// A store fetching from `v` that may ask it about a piece any time.
     fn ctx(v: &Vendor) -> Context {
         Context::new()
-            .with_vendor_base(&v.base)
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::ZERO)
+    }
+
+    #[test]
+    fn refresh_is_random_in_the_last_quarter_and_a_day_before_next_update() {
+        let day = 24 * 3600;
+        let dates = Dates::window(0, 40 * day, None);
+        let times: Vec<i64> = (0..50).map(|_| refresh_at(&dates)).collect();
+        assert!(times.iter().all(|t| (30 * day..39 * day).contains(t)));
+        assert!(times.iter().any(|t| *t != times[0]));
+        // Too short a window for both rules: a day before nextUpdate wins.
+        assert_eq!(refresh_at(&Dates::window(0, 2 * day, None)), day);
+        assert_eq!(refresh_at(&Dates::default()), i64::MAX);
     }
 
     #[tokio::test]
@@ -858,6 +901,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_not_found_from_a_cache_is_retryable_and_cache_answers_say_cache() {
+        for code in [400, 404, 410] {
+            let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
+            let cache = Context::new().with_upstream(&v.base).unwrap();
+            let err = tcb_info(&cache, NOW).await.err().unwrap();
+            assert!(err.is_retryable(), "{code}: {err}");
+        }
+        let v = vendor(
+            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
+            Duration::ZERO,
+        )
+        .await;
+        let cache = Context::new().with_upstream(&v.base).unwrap();
+        assert_eq!(tcb_info(&cache, NOW).await.unwrap().1, Source::Cache);
+    }
+
+    #[tokio::test]
     async fn a_piece_the_evidence_does_not_name_is_asked_for_again_after_a_404() {
         let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
         let ctx = ctx(&v).with_recheck(Duration::from_secs(300));
@@ -872,7 +932,7 @@ mod tests {
     async fn the_vendor_is_asked_about_an_unpublished_piece_once_per_recheck() {
         let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
         let ctx = Context::new()
-            .with_vendor_base(&v.base)
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(300));
         for _ in 0..2 {
             let err = vcek(&ctx).await.err().unwrap();
@@ -1092,7 +1152,7 @@ mod tests {
         )
         .await;
         let ctx = Context::new()
-            .with_vendor_base(&v.base)
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(2));
         tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -1114,7 +1174,7 @@ mod tests {
         )
         .await;
         let ctx = Context::new()
-            .with_vendor_base(&v.base)
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(300));
         tcb_info(&ctx, NOW).await.unwrap();
         for _ in 0..5 {
@@ -1141,8 +1201,10 @@ mod tests {
             Duration::ZERO,
         )
         .await;
+        let nras = format!("{}/v3/attest/gpu", v.base);
         let ctx = Context::new()
-            .with_vendor_base(&v.base)
+            .with_nras_urls(nras.clone(), nras)
+            .unwrap()
             .with_recheck(Duration::from_secs(300));
         let bundle = NvidiaGpuEvidenceBundle {
             devices: vec![NvidiaGpuDeviceEvidence {

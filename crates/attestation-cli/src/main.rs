@@ -236,6 +236,12 @@ fn read_evidence(args: &VerifyArgs) -> Result<Vec<u8>, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     match cli.command {
@@ -583,7 +589,11 @@ async fn cmd_verify(args: VerifyArgs) {
     };
     #[cfg(feature = "test-vendor")]
     let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
-        Ok(base) => ctx.with_vendor_base(&base),
+        // A cache over vsock, or a fake vendor on loopback.
+        Ok(base) if base.starts_with("vsock://") => {
+            ctx.with_upstream(&base).expect("a vsock address")
+        }
+        Ok(base) => ctx.with_test_vendor(&base),
         Err(_) => ctx,
     };
     let verifier = attestation::Verifier::new(context(ctx));
