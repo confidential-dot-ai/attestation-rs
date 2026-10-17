@@ -107,7 +107,10 @@ async fn every_platform_verifies_with_roots_only_from_attached_collateral() {
         let verified = verify_at(&with, &Policies::all(), NOW).await.unwrap();
         assert!(verified.passed(), "{platform}");
         assert!(!verified.collateral.is_empty());
-        assert!(verified.collateral.iter().all(|c| c.from == Source::Held));
+        assert!(verified
+            .collateral
+            .iter()
+            .all(|c| c.from == Source::Attached));
         eprintln!(
             "envelope size {platform}: {} bytes without collateral, {} with ({} pieces)",
             evidence.len(),
@@ -277,6 +280,89 @@ async fn past_next_update_passes_stale_for_the_grace_period_then_fails() {
     assert!(!after.passed());
 }
 
+/// The TDX evidence with its collateral, the platform PCK CRL replaced by
+/// `file`.
+async fn tdx_with_pck_crl(file: &str) -> Vec<u8> {
+    let mut envelope: crate::AttestationEvidence =
+        serde_json::from_slice(&attached(&tdx()).await).unwrap();
+    let mut held = envelope.held_collateral();
+    for (url, body, _) in &mut held {
+        if url.contains("/pckcrl?ca=platform") {
+            *body = read(&format!("collateral/2026-10-14/{file}"));
+        }
+    }
+    envelope.attach(held);
+    serde_json::to_vec(&envelope).unwrap()
+}
+
+/// [`testing::intel`] with the QE Identity replaced by `file`.
+fn intel_with_qe_identity(file: &str) -> Vec<HeldResponse> {
+    let mut held = testing::intel();
+    for (url, body, _) in &mut held {
+        if url.ends_with("/qe/identity") {
+            *body = read(&format!("collateral/2026-10-14/{file}"));
+        }
+    }
+    held
+}
+
+fn piece<'a>(verified: &'a Verified, prefix: &str) -> &'a crate::CollateralUsed {
+    verified
+        .collateral
+        .iter()
+        .find(|c| c.name.starts_with(prefix))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_older_attached_piece_never_replaces_a_newer_held_one() {
+    let older = tdx_with_qe_identity("td_qe_identity_eval21.json").await;
+    let verifier = Verifier::new(testing::context(intel_with_qe_identity(
+        "td_qe_identity_early.json",
+    )));
+    let verified = verifier.verify(&older, &Policies::all()).await.unwrap();
+    let qe = qe_identity(&verified);
+    assert_eq!((qe.version, qe.from), (Some(22), Source::Held));
+
+    // Same CRL Number, older thisUpdate.
+    let older = tdx_with_pck_crl("pck_crl_platform_2026-03-16_expired.der").await;
+    let verifier = Verifier::new(testing::context(testing::intel()));
+    let verified = verifier.verify(&older, &Policies::all()).await.unwrap();
+    let crl = piece(&verified, "pck-crl");
+    assert_eq!(crl.from, Source::Held);
+    assert!(crl.current);
+    assert!(verified.passed());
+}
+
+#[tokio::test]
+async fn a_newer_attached_piece_replaces_an_older_held_one() {
+    let newer = tdx_with_qe_identity("td_qe_identity_eval21.json").await;
+    let verifier = Verifier::new(testing::context(testing::intel()));
+    let verified = verifier.verify(&newer, &Policies::all()).await.unwrap();
+    let qe = qe_identity(&verified);
+    assert_eq!((qe.version, qe.from), (Some(21), Source::Attached));
+}
+
+#[tokio::test]
+async fn an_older_attached_piece_never_replaces_a_newer_cached_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, body, chain) = intel_with_qe_identity("td_qe_identity_early.json")
+        .into_iter()
+        .find(|(url, ..)| url.ends_with("/qe/identity"))
+        .unwrap();
+    crate::collateral::save_to_cache_dir(dir.path(), &url, &body, chain.as_deref());
+    let verifier = Verifier::new(
+        Context::offline()
+            .with_cache_dir(dir.path())
+            .at(NOW)
+            .unwrap(),
+    );
+    let older = tdx_with_qe_identity("td_qe_identity_eval21.json").await;
+    let verified = verifier.verify(&older, &Policies::all()).await.unwrap();
+    let qe = qe_identity(&verified);
+    assert_eq!((qe.version, qe.from), (Some(22), Source::Disk));
+}
+
 #[cfg(feature = "nvidia-gpu")]
 #[tokio::test]
 async fn gpu_collateral_is_attached_and_used_without_network() {
@@ -349,4 +435,23 @@ async fn gpu_collateral_is_attached_and_used_without_network() {
     let err = verifier.verify(&with, &policies).await.unwrap_err();
     assert!(verifier.context().store().missing().is_empty());
     assert!(matches!(err, AttestationError::JwsVerification(_)), "{err}");
+
+    // An attached key set without the tokens' key: not genuine, as a retry
+    // gets the same set.
+    let mut renamed: serde_json::Value = serde_json::from_slice(&with).unwrap();
+    for piece in renamed["collateral"].as_array_mut().unwrap() {
+        if piece["url"] == jwks_url.as_str() {
+            let mut keys: serde_json::Value =
+                serde_json::from_slice(&BASE64.decode(piece["body"].as_str().unwrap()).unwrap())
+                    .unwrap();
+            keys["keys"][0]["kid"] = "another".into();
+            piece["body"] = BASE64.encode(serde_json::to_vec(&keys).unwrap()).into();
+        }
+    }
+    let renamed = serde_json::to_vec(&renamed).unwrap();
+    let err = roots_only(NOW)
+        .verify(&renamed, &policies)
+        .await
+        .unwrap_err();
+    assert!(!err.is_retryable(), "{err}");
 }

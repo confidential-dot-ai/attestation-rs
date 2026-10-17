@@ -69,8 +69,10 @@ pub struct AttestationEvidence {
 
 /// A vendor response: the vendor URL, the body (base64 in JSON), and the
 /// issuer chain Intel PCS sends in a header (PEM, without the root). In an
-/// envelope, a piece without an issuer chain takes the one of the piece
-/// before it, so a chain shared by several pieces appears once.
+/// envelope, a piece without an issuer chain takes the one of the nearest
+/// piece before it that has one, so a chain shared by several pieces appears
+/// once. Order therefore matters: a piece moved under another chain is
+/// refused for its signer, as any wrong chain is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachedCollateral {

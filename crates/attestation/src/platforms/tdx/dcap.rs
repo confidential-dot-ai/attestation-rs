@@ -304,8 +304,9 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Res
 
     let mut der_certs = split_pem_to_der(pem_str)?;
 
-    // Collateral attached to evidence carries no roots: the bundled root
-    // stands in, and its key is checked against the pin like any other.
+    // A chain of only the signing certificate (as attached to evidence):
+    // the bundled root completes it, after the signing certificate, and its
+    // key is checked against the pin as a sent root's would be.
     if der_certs.len() == 1 {
         der_certs.push(INTEL_SGX_ROOT_CA.to_vec());
     }
