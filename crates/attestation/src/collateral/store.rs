@@ -549,7 +549,7 @@ mod native {
                     return Err(failure);
                 }
             }
-            let (direct, fetched) = vendor.fetch(url).await;
+            let (direct, fetched) = Box::pin(vendor.fetch(url)).await;
             let (body, chain) = match fetched {
                 Ok(fetched) => fetched,
                 Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
