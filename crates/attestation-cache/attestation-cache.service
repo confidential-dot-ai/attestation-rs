@@ -1,0 +1,19 @@
+[Unit]
+Description=attestation-cache: verified TEE attestation collateral
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/attestation-cache --config /etc/attestation-cache/config.toml
+DynamicUser=yes
+StateDirectory=attestation-cache
+StateDirectoryMode=0700
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_VSOCK AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

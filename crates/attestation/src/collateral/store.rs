@@ -126,10 +126,13 @@ fn refresh_at(dates: &Dates) -> i64 {
 }
 
 #[derive(Clone)]
-enum Failure {
+pub(super) enum Failure {
     Unavailable(Unavailable),
     /// Why the piece does not verify.
     Refused(String),
+    /// The vendor does not publish the piece the evidence names.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    NotPublished(String),
 }
 
 impl Failure {
@@ -143,7 +146,7 @@ impl Failure {
     fn into_error(self, name: &str) -> AttestationError {
         match self {
             Failure::Unavailable(e) => e.into_error(name),
-            Failure::Refused(why) => {
+            Failure::Refused(why) | Failure::NotPublished(why) => {
                 AttestationError::CertChainError(format!("{name} refused: {why}"))
             }
         }
@@ -289,7 +292,7 @@ impl Store {
         }
     }
 
-    async fn lookup<C: Collateral>(
+    pub(super) async fn lookup<C: Collateral>(
         &self,
         id: &C::Id,
         now: i64,
@@ -433,6 +436,13 @@ impl Store {
         self.native.as_ref()?.vendor.as_ref()
     }
 
+    /// Whether the piece at vendor `url` is in memory.
+    pub fn holds(&self, url: &str) -> bool {
+        self.native
+            .as_ref()
+            .is_some_and(|n| n.mem.contains_key(url))
+    }
+
     /// About how many pieces are held in memory.
     pub fn count(&self) -> u64 {
         self.native.as_ref().map_or(0, |n| n.mem.entry_count())
@@ -449,28 +459,63 @@ mod native {
     use crate::collateral::disk::Disk;
     use crate::collateral::vendor::Vendor;
 
+    /// How long a failed fetch stands before the upstream is asked again
+    /// (never longer than `recheck`).
+    const OUTAGE: Duration = Duration::from_secs(10);
     /// Refetch a piece without a nextUpdate (the NRAS key set) this often.
     const MAX_AGE: Duration = Duration::from_secs(3600);
+    /// After a 429 or 503 without a Retry-After, leave that vendor host
+    /// alone this long (never longer than `recheck`).
+    const HOST_PAUSE: Duration = Duration::from_secs(10);
+    /// At most this many pieces not held anywhere are fetched from one
+    /// vendor host per second.
+    pub(crate) const COLD_PER_SECOND: u32 = 10;
+
+    /// One vendor host: until when it asked to be left alone, and the cold
+    /// fetches started in the current second.
+    #[derive(Default)]
+    struct Host {
+        paused_until: Option<Instant>,
+        second: Option<Instant>,
+        cold: u32,
+    }
+
+    /// The vendor host of `url`.
+    fn host(url: &str) -> &str {
+        let rest = url.strip_prefix("https://").unwrap_or(url);
+        rest.split(['/', '?']).next().unwrap_or(rest)
+    }
+
+    fn wait(seconds: u64, detail: &str) -> Failure {
+        Failure::Unavailable(Unavailable {
+            status: None,
+            retry_after: Some(seconds.max(1)),
+            detail: detail.into(),
+        })
+    }
 
     pub(crate) struct Native {
         pub(super) mem: moka::future::Cache<String, Entry>,
         /// Pieces the evidence names that the vendor answered "not
-        /// published" for, and when.
-        not_published: moka::future::Cache<String, (Instant, Failure)>,
+        /// published" for, and pieces the upstream failed to send, with the
+        /// answer and when.
+        failed: moka::future::Cache<String, (Instant, Failure)>,
         pub(crate) disk: Option<Disk>,
         pub(crate) vendor: Option<Vendor>,
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
+        hosts: Mutex<HashMap<String, Host>>,
     }
 
     impl Native {
         pub(crate) fn new(vendor: Option<Vendor>) -> Self {
             Self {
                 mem: moka::future::Cache::new(4096),
-                not_published: moka::future::Cache::new(4096),
+                failed: moka::future::Cache::new(4096),
                 disk: None,
                 vendor,
                 recheck: Duration::from_secs(300),
+                hosts: Mutex::default(),
             }
         }
 
@@ -536,12 +581,38 @@ mod native {
                 .vendor
                 .as_ref()
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
-            if let Some((at, failure)) = self.not_published.get(url).await {
-                if at.elapsed() < self.recheck {
+            if let Some((at, failure)) = self.failed.get(url).await {
+                let stands = match &failure {
+                    Failure::Unavailable(e) => self
+                        .recheck
+                        .min(e.retry_after.map_or(OUTAGE, Duration::from_secs)),
+                    _ => self.recheck,
+                };
+                if at.elapsed() < stands {
                     return Err(failure);
                 }
             }
+            if let Some(until) = self
+                .lock_hosts()
+                .get(host(url))
+                .and_then(|h| h.paused_until)
+            {
+                if let Some(left) = until.checked_duration_since(Instant::now()) {
+                    return Err(wait(left.as_secs(), "the vendor asked to wait"));
+                }
+            }
             let (direct, fetched) = Box::pin(vendor.fetch(url)).await;
+            if let Err(e) = &fetched {
+                if matches!(e.status, Some(429 | 503)) {
+                    let pause = self
+                        .recheck
+                        .min(e.retry_after.map_or(HOST_PAUSE, Duration::from_secs));
+                    self.lock_hosts()
+                        .entry(host(url).to_string())
+                        .or_default()
+                        .paused_until = Some(Instant::now() + pause);
+                }
+            }
             let (body, chain) = match fetched {
                 Ok(fetched) => fetched,
                 Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
@@ -552,14 +623,27 @@ mod native {
                     if !C::NAMED_BY_EVIDENCE || !direct {
                         return Err(Failure::Unavailable(e));
                     }
-                    let failure =
-                        Failure::Refused(format!("the vendor does not publish it ({})", e.detail));
-                    self.not_published
+                    let failure = Failure::NotPublished(format!(
+                        "the vendor does not publish it ({})",
+                        e.detail
+                    ));
+                    self.failed
                         .insert(url.to_string(), (Instant::now(), failure.clone()))
                         .await;
                     return Err(failure);
                 }
-                Err(e) => return Err(Failure::Unavailable(e)),
+                Err(e) => {
+                    // The upstream is down or overloaded: let its clients
+                    // wait out an outage rather than each try again.
+                    let outage = e.status.is_none_or(|s| s >= 500 || matches!(s, 408 | 429));
+                    let failure = Failure::Unavailable(e);
+                    if outage {
+                        self.failed
+                            .insert(url.to_string(), (Instant::now(), failure.clone()))
+                            .await;
+                    }
+                    return Err(failure);
+                }
             };
             let from = if direct {
                 Source::Vendor
@@ -567,6 +651,28 @@ mod native {
                 Source::Cache
             };
             check::<C>(id, body, chain, from)
+        }
+
+        fn lock_hosts(&self) -> std::sync::MutexGuard<'_, HashMap<String, Host>> {
+            self.hosts.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// Count a fetch of a piece held nowhere against its vendor host's
+        /// [`COLD_PER_SECOND`].
+        fn admit_cold(&self, url: &str) -> std::result::Result<(), Failure> {
+            let mut hosts = self.lock_hosts();
+            let h = hosts.entry(host(url).to_string()).or_default();
+            if h.second
+                .is_none_or(|s| s.elapsed() >= Duration::from_secs(1))
+            {
+                h.second = Some(Instant::now());
+                h.cold = 0;
+            }
+            if h.cold >= COLD_PER_SECOND {
+                return Err(wait(1, "too many new pieces from this vendor at once"));
+            }
+            h.cold += 1;
+            Ok(())
         }
 
         fn store(&self, url: &str, entry: &Entry) {
@@ -604,7 +710,14 @@ mod native {
                     return Ok(e.clone());
                 }
             }
-            match (self.fetch::<C>(url, id).await, on_disk) {
+            let fetched = match &on_disk {
+                Some(_) => self.fetch::<C>(url, id).await,
+                None => match self.admit_cold(url) {
+                    Ok(()) => self.fetch::<C>(url, id).await,
+                    Err(e) => Err(e),
+                },
+            };
+            match (fetched, on_disk) {
                 (Ok(new), Some(old)) if !new.dates.not_older_than(&old.dates) => Ok(old),
                 (Ok(new), _) => {
                     self.store(url, &new);
@@ -790,6 +903,40 @@ mod tests {
         // Too short a window for both rules: a day before nextUpdate wins.
         assert_eq!(refresh_at(&Dates::window(0, 2 * day, None)), day);
         assert_eq!(refresh_at(&Dates::default()), i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn a_vendor_that_says_wait_is_left_alone_for_every_piece() {
+        let v = vendor(vec![status(429, vec![])], Duration::ZERO).await;
+        let ctx = Context::new().with_test_vendor(&v.base);
+        for i in 0..20u8 {
+            let err = ctx
+                .store()
+                .get::<TcbInfo>(&[0, 0, 0, 0, 0, i], NOW)
+                .await
+                .err()
+                .unwrap();
+            assert!(err.is_retryable(), "{err}");
+        }
+        // The first piece: one try and its retry.
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn new_pieces_are_fetched_from_one_vendor_host_at_a_bounded_rate() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = ctx(&v);
+        let gets = (0..30u8).map(|i| {
+            let ctx = &ctx;
+            async move { ctx.store().get::<TcbInfo>(&[0, 0, 0, 0, 1, i], NOW).await }
+        });
+        let refused = futures_util::future::join_all(gets)
+            .await
+            .into_iter()
+            .filter(|r| r.as_ref().is_err_and(|e| !e.is_retryable()))
+            .count();
+        let limit = native::COLD_PER_SECOND as usize;
+        assert_eq!((refused, v.hits.load(Ordering::SeqCst)), (limit, limit));
     }
 
     #[tokio::test]
