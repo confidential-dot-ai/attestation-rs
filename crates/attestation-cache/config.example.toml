@@ -1,0 +1,22 @@
+# attestation-cache configuration. Every key is optional.
+
+# Where verified collateral is kept across restarts.
+dir = "/var/lib/attestation-cache"
+
+# Where to fetch collateral. Absent: the vendors (AMD KDS, Intel PCS,
+# Google, NVIDIA). A host cache points at its site cache:
+# upstream = "https://attestation-cache.site.example"
+# (plain http:// only to a loopback address; vsock://CID:PORT also works)
+
+# HTTP listen address.
+listen = "127.0.0.1:8455"
+
+# Host mode: also serve the VMs of this host over vsock. Guests look for
+# their host's cache at this port (8455) by themselves.
+# vsock_port = 8455
+
+# Vendor URLs fetched at start and kept fresh, for example the AMD CRLs:
+# warm = [
+#   "https://kdsintf.amd.com/vcek/v1/Genoa/crl",
+#   "https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity",
+# ]

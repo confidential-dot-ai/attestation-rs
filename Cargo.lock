@@ -208,6 +208,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "attestation-cache"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "attestation",
+ "axum",
+ "clap",
+ "reqwest",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-vsock",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "attestation-cli"
 version = "0.5.0"
 dependencies = [

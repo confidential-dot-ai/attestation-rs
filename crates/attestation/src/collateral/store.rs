@@ -120,10 +120,13 @@ fn refresh_at(dates: &Dates) -> i64 {
 }
 
 #[derive(Clone)]
-enum Failure {
+pub(super) enum Failure {
     Unavailable(Unavailable),
     /// Why the piece does not verify.
     Refused(String),
+    /// The vendor does not publish the piece the evidence names.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    NotPublished(String),
 }
 
 impl Failure {
@@ -137,7 +140,7 @@ impl Failure {
     fn into_error(self, name: &str) -> AttestationError {
         match self {
             Failure::Unavailable(e) => e.into_error(name),
-            Failure::Refused(why) => {
+            Failure::Refused(why) | Failure::NotPublished(why) => {
                 AttestationError::CertChainError(format!("{name} refused: {why}"))
             }
         }
@@ -273,7 +276,7 @@ impl Store {
         }
     }
 
-    async fn lookup<C: Collateral>(
+    pub(super) async fn lookup<C: Collateral>(
         &self,
         id: &C::Id,
         now: i64,
@@ -471,8 +474,10 @@ mod native {
                     if !C::NAMED_BY_EVIDENCE {
                         return Err(Failure::Unavailable(e));
                     }
-                    let failure =
-                        Failure::Refused(format!("the vendor does not publish it ({})", e.detail));
+                    let failure = Failure::NotPublished(format!(
+                        "the vendor does not publish it ({})",
+                        e.detail
+                    ));
                     self.not_published
                         .insert(url.to_string(), (Instant::now(), failure.clone()))
                         .await;
