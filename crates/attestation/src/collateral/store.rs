@@ -265,8 +265,9 @@ impl Store {
     }
 
     /// The piece `id` names, verified, and what the verdict should say about
-    /// it at `now` (Unix seconds). A copy that does not verify is refused
-    /// when no good copy exists.
+    /// it at `now` (Unix seconds). Any copy on hand that does not verify
+    /// refuses the piece, even when another copy is good: a bad attached
+    /// piece makes the evidence not genuine.
     pub async fn get<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<(C, CollateralUsed)> {
         self.lookup(id, now)
             .await
@@ -310,12 +311,10 @@ impl Store {
         let acceptable = |p: &C| {
             CollateralUsed::new(String::new(), Source::Held, p.dates(), floor, now).acceptable()
         };
-        // Nothing on hand, or nothing that passes: the fallback may have
-        // better.
-        if best
-            .as_ref()
-            .is_none_or(|(p, ..)| !acceptable(p) && self.fetches())
-        {
+        // Nothing on hand, or nothing that passes (a piece in grace passes):
+        // the fallback may have better. A held-only store lists the URL as
+        // missing, so the caller can fetch it.
+        if best.as_ref().is_none_or(|(p, ..)| !acceptable(p)) {
             match self.load::<C>(url.clone(), id, now).await {
                 Ok((entry, from)) => {
                     if best
@@ -328,6 +327,7 @@ impl Store {
                     }
                 }
                 Err(e) if best.is_none() => return Err(e),
+                // The kept copy already verified; it just does not pass.
                 Err(_) => {}
             }
         }
@@ -360,14 +360,6 @@ impl Store {
             copies.push((body.clone(), chain.clone(), Source::Attached));
         }
         copies
-    }
-
-    /// Whether a lookup can get a copy beyond those on hand.
-    fn fetches(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        return self.native.is_some();
-        #[cfg(target_arch = "wasm32")]
-        false
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
@@ -992,6 +984,53 @@ mod tests {
             took >= Duration::from_secs(10) && took < Duration::from_secs(12),
             "{took:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn attaching_retries_once_after_a_short_retry_after_then_attaches_what_it_got() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let quote = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/tdx_quote_00a06d080000.dat"
+        ))
+        .unwrap();
+        let evidence = serde_json::to_vec(&serde_json::json!({
+            "platform": "tdx",
+            "evidence": { "quote": STANDARD.encode(quote) },
+        }))
+        .unwrap();
+        let qe = QeIdentity::url(&());
+        let held: Vec<_> = crate::testing::intel()
+            .into_iter()
+            .filter(|(url, ..)| *url != qe)
+            .collect();
+        let attach = |v: &Vendor| {
+            let attester = crate::Verifier::new(ctx(v).with_held(held.clone()).at(NOW).unwrap());
+            let evidence = evidence.clone();
+            async move {
+                let with = attester.attach_collateral(&evidence, &[]).await.unwrap();
+                serde_json::from_slice::<crate::AttestationEvidence>(&with)
+                    .unwrap()
+                    .collateral
+                    .into_iter()
+                    .map(|c| c.url)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let busy = || status(429, vec![("Retry-After", "1".into())]);
+
+        let v = vendor(
+            vec![busy(), busy(), pcs("2026-10-14/td_qe_identity.json")],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(attach(&v).await.contains(&qe));
+        assert_eq!(v.hits.load(Ordering::SeqCst), 3);
+
+        let v = vendor(vec![busy()], Duration::ZERO).await;
+        let urls = attach(&v).await;
+        assert!(!urls.is_empty() && !urls.contains(&qe), "{urls:?}");
+        assert_eq!(v.hits.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
