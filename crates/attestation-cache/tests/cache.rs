@@ -86,13 +86,21 @@ async fn vendor(delay: Duration) -> Vendor {
 
 /// A running cache over `dir` fetching from `upstream`, at [`NOW`] or `at`.
 async fn cache(dir: &std::path::Path, upstream: &str, at: i64) -> String {
-    let ctx = Context::new()
+    serve(Cache::new(context(dir, upstream, None, at), &[])).await
+}
+
+fn context(dir: &std::path::Path, upstream: &str, key: Option<&str>, at: i64) -> Context {
+    Context::new()
         .with_cache_dir(dir)
         .with_upstream(upstream)
         .unwrap()
+        .with_upstream_key(key.map(String::from))
         .at(at)
-        .unwrap();
-    let router = Cache::new(ctx, &[]).router();
+        .unwrap()
+}
+
+async fn serve(cache: Cache) -> String {
+    let router = cache.router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(attestation_cache::serve(listener, router));
@@ -304,4 +312,48 @@ async fn a_connection_slow_to_send_its_headers_is_closed() {
     let took = start.elapsed();
     assert!(took < Duration::from_secs(15), "{took:?}");
     assert!(!String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
+}
+
+#[tokio::test]
+async fn health_is_always_up_and_ready_once_a_piece_was_served() {
+    let v = vendor(Duration::ZERO).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = cache(dir.path(), &v.base, NOW).await;
+    assert_eq!(get(&cache, "/health").await.status(), 200);
+    assert_eq!(get(&cache, "/ready").await.status(), 503);
+    assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
+    assert_eq!(get(&cache, "/ready").await.status(), 200);
+}
+
+#[tokio::test]
+async fn with_keys_only_clients_with_a_key_are_answered() {
+    let v = vendor(Duration::ZERO).await;
+    let (site_dir, host_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let keys = vec!["k1".to_string(), "k2".to_string()];
+    let site =
+        serve(Cache::new(context(site_dir.path(), &v.base, None, NOW), &[]).with_keys(keys)).await;
+    let client = reqwest::Client::new();
+    let ask = |key: Option<&'static str>| {
+        let mut request = client.get(format!("{site}{TCB_INFO}"));
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        async move { request.send().await.unwrap().status() }
+    };
+    assert_eq!(ask(None).await, 401);
+    assert_eq!(ask(Some("k3")).await, 401);
+    assert_eq!(ask(Some("k")).await, 401);
+    assert_eq!(ask(Some("k2")).await, 200);
+    assert_eq!(get(&site, "/health").await.status(), 200);
+
+    // A host cache sends its key upstream.
+    let host = serve(Cache::new(
+        context(host_dir.path(), &site, Some("k1"), NOW),
+        &[],
+    ))
+    .await;
+    assert_eq!(get(&host, AMD_CRL).await.status(), 200);
+    let other = tempfile::tempdir().unwrap();
+    let keyless = cache(other.path(), &site, NOW).await;
+    assert_eq!(get(&keyless, AMD_CRL).await.status(), 503);
 }

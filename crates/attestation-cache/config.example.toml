@@ -8,6 +8,14 @@ dir = "/var/lib/attestation-cache"
 # upstream = "https://attestation-cache.site.example"
 # (plain http:// only to a loopback address; vsock://CID:PORT also works)
 
+# The bearer key the upstream cache asks for, if any.
+# upstream_key = "..."
+
+# Bearer keys clients must send (Authorization: Bearer KEY). Empty (the
+# default): anyone who can reach the listener may fetch. /health and /ready
+# are always open.
+# keys = ["..."]
+
 # HTTP listen address.
 listen = "127.0.0.1:8455"
 

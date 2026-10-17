@@ -146,6 +146,8 @@ pub(crate) struct Vendor {
     client: reqwest::Client,
     pub(crate) upstream: Upstream,
     found: Discovery,
+    /// Sent as a bearer token to a [`Upstream::Cache`].
+    pub(crate) upstream_key: Option<String>,
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) nras: Nras,
 }
@@ -161,6 +163,7 @@ impl Vendor {
                 .expect("HTTP client with static config"),
             upstream: Upstream::Auto,
             found: Discovery::new(REPROBE),
+            upstream_key: None,
             #[cfg(feature = "nvidia-gpu")]
             nras: Nras::from_env(),
         }
@@ -234,7 +237,11 @@ impl Vendor {
             _ => url.to_string(),
         };
         let unreachable = |e: reqwest::Error| Unavailable::detail(format!("unreachable ({e})"));
-        let response = self.client.get(url).send().await.map_err(unreachable)?;
+        let mut request = self.client.get(url);
+        if let (Upstream::Cache(_), Some(key)) = (upstream, &self.upstream_key) {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await.map_err(unreachable)?;
         let headers = response.headers().clone();
         check_status(response.status().as_u16(), &headers)?;
         let body = read_body(response).await?;

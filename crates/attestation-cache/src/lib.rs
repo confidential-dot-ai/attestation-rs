@@ -32,6 +32,11 @@ pub struct Config {
     pub vsock_port: Option<u32>,
     /// Vendor URLs fetched at start and kept fresh.
     pub warm: Vec<String>,
+    /// The bearer key to send to `upstream` when it asks for one.
+    pub upstream_key: Option<String>,
+    /// Bearer keys a client must send (`Authorization: Bearer KEY`); empty:
+    /// anyone may fetch. `/health` and `/ready` are always open.
+    pub keys: Vec<String>,
 }
 
 impl Default for Config {
@@ -42,6 +47,8 @@ impl Default for Config {
             listen: "127.0.0.1:8455".into(),
             vsock_port: None,
             warm: Vec::new(),
+            keys: Vec::new(),
+            upstream_key: None,
         }
     }
 }
@@ -51,7 +58,9 @@ impl Config {
     pub fn context(&self) -> anyhow::Result<Context> {
         let ctx = Context::new().with_cache_dir(&self.dir);
         Ok(match &self.upstream {
-            Some(upstream) => ctx.with_upstream(upstream)?,
+            Some(upstream) => ctx
+                .with_upstream(upstream)?
+                .with_upstream_key(self.upstream_key.clone()),
             None => ctx.with_vendors(),
         })
     }
@@ -85,6 +94,9 @@ pub struct Cache {
     known: Arc<Mutex<BTreeSet<String>>>,
     /// URLs not in memory being fetched now.
     cold: Arc<Mutex<HashSet<String>>>,
+    keys: Arc<Vec<String>>,
+    /// The warm pieces were looked at once, or a piece was served.
+    ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Cache {
@@ -93,7 +105,19 @@ impl Cache {
             ctx: Arc::new(ctx),
             known: Arc::new(Mutex::new(warm.iter().cloned().collect())),
             cold: Arc::default(),
+            keys: Arc::default(),
+            ready: Arc::default(),
         }
+    }
+
+    /// Answer only clients that send one of `keys` (none: everyone).
+    pub fn with_keys(mut self, keys: Vec<String>) -> Self {
+        self.keys = Arc::new(keys);
+        self
+    }
+
+    fn set_ready(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The HTTP service.
@@ -115,16 +139,27 @@ impl Cache {
                     tracing::warn!(%url, %detail, "could not refresh");
                 }
             }
+            self.set_ready();
             tokio::time::sleep(SWEEP).await;
         }
     }
 }
 
 async fn handle(State(cache): State<Cache>, request: Request) -> Response {
-    let mut response = if request.method() == Method::GET {
-        answer(&cache, request.uri()).await
-    } else {
+    let ready = cache.ready.load(std::sync::atomic::Ordering::Relaxed);
+    let mut response = if request.method() != Method::GET {
         status(StatusCode::METHOD_NOT_ALLOWED, "GET only".into())
+    } else if request.uri().path() == "/health" {
+        status(StatusCode::OK, "ok".into())
+    } else if request.uri().path() == "/ready" {
+        match ready {
+            true => status(StatusCode::OK, "ready".into()),
+            false => status(StatusCode::SERVICE_UNAVAILABLE, "warming up".into()),
+        }
+    } else if !authorized(&cache.keys, request.headers()) {
+        status(StatusCode::UNAUTHORIZED, "a bearer key is required".into())
+    } else {
+        answer(&cache, request.uri()).await
     };
     let headers = response.headers_mut();
     headers.insert(
@@ -162,6 +197,7 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
     };
     match store.serve(&url, cache.ctx.now()).await {
         Served::Piece((_, body, chain), shared) => {
+            cache.set_ready();
             let mut known = cache.known.lock().unwrap();
             if shared && known.len() < MAX_KNOWN {
                 known.insert(url.clone());
@@ -195,6 +231,26 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
             response
         }
     }
+}
+
+/// Whether the request carries one of `keys`, or no key is needed.
+fn authorized(keys: &[String], headers: &axum::http::HeaderMap) -> bool {
+    if keys.is_empty() {
+        return true;
+    }
+    let sent = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    keys.iter().fold(false, |found, key| {
+        found | same(key.as_bytes(), sent.as_bytes())
+    })
+}
+
+/// `a == b` in time that depends only on the lengths.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
 /// A URL in [`Cache::cold`] until dropped.

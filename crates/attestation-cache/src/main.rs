@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(path = %cli.config.display(), "no config file, using defaults");
         Config::default()
     };
-    let cache = Cache::new(config.context()?, &config.warm);
+    let cache = Cache::new(config.context()?, &config.warm).with_keys(config.keys.clone());
     let router = cache.router();
     tokio::spawn(cache.keep_fresh());
 

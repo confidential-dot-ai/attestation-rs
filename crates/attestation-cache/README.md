@@ -63,7 +63,29 @@ systemctl enable --now attestation-cache
 Configuration: see `config.example.toml` (`dir`, `upstream`, `listen`,
 `vsock_port`, `warm`). The listener speaks plain HTTP.
 
-It is an unauthenticated mirror of public vendor collateral: anyone who can
+`GET /health` answers 200 while the process runs; `GET /ready` answers 200
+once the `warm` pieces were looked at or any piece was served, 503 before.
+
+With `keys` set, every other request needs `Authorization: Bearer KEY` with
+one of them (else 401); a host cache sends its site's key with
+`upstream_key`. Keys are compared in constant time and never logged. Use
+keys only over HTTPS (behind the TLS terminator).
+
+## Replicas
+
+A hosted site cache can run as N replicas behind a load balancer (health
+check `/health`, traffic once `/ready`). Replicas share nothing: each has its
+own `dir` and its own memory, and each fetches from the vendors by itself.
+So vendor load grows with N: each replica fetches each piece once when first
+asked, then about once per piece validity (Intel and AMD CRLs, TCB Info and
+QE Identity: about monthly; the NRAS key set: hourly while used), plus one
+VCEK and one GCE endorsement per chip or image it is asked for. With about
+15 shared pieces this is on the order of a thousand requests per replica per
+month, most of them for the NRAS key set. A host cache whose upstream is the load balancer may reach a
+different replica each time; that is fine, as every replica serves verified
+vendor bytes.
+
+Without `keys`, it is an unauthenticated mirror of public vendor collateral: anyone who can
 reach it can make it fetch from the vendors, within the limits above. Make it
 reachable only by its intended clients (loopback and the host's guests over
 vsock for a host cache; the host caches, for a site cache). A site cache that host
