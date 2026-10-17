@@ -22,6 +22,9 @@ pub struct VerifyRequest {
     /// When present, `policies.nvidia_gpu` must be set.
     #[serde(default)]
     pub nvidia_gpu: Option<Value>,
+    /// The collateral /attest attached, `[{url, body, issuer_chain}]`.
+    #[serde(default)]
+    pub collateral: Option<Value>,
     /// Accepted platforms and their params. Evidence for a platform without an
     /// entry is refused.
     #[serde(default)]
@@ -141,7 +144,8 @@ pub async fn handler(
             "issue_token requires policies.{platform}.report_data"
         )));
     }
-    let evidence_json = build_evidence_envelope(platform, req.evidence, req.nvidia_gpu)?;
+    let evidence_json =
+        build_evidence_envelope(platform, req.evidence, req.nvidia_gpu, req.collateral)?;
 
     let result = state.verifier.verify(&evidence_json, &policies).await?;
     let passed = PassedVerification::new(&result);
@@ -403,6 +407,7 @@ fn build_evidence_envelope(
     platform: &str,
     evidence: Value,
     nvidia_gpu: Option<Value>,
+    collateral: Option<Value>,
 ) -> Result<Vec<u8>, ApiError> {
     if is_attestation_envelope(&evidence) {
         return Err(ApiError::BadRequest(
@@ -417,6 +422,9 @@ fn build_evidence_envelope(
     });
     if let Some(gpu) = nvidia_gpu {
         envelope["nvidia_gpu"] = gpu;
+    }
+    if let Some(collateral) = collateral {
+        envelope["collateral"] = collateral;
     }
 
     serde_json::to_vec(&envelope)
@@ -446,6 +454,7 @@ mod tests {
                 canonical_platform(Some("SNP")).unwrap(),
                 json!({ "report": "abc" }),
                 None,
+                None,
             )
             .unwrap(),
         )
@@ -460,7 +469,8 @@ mod tests {
     fn build_evidence_envelope_includes_gpu_bundle_when_present() {
         let gpu = json!({ "devices": [], "binding": { "kind": "concat" } });
         let normalized: Value = serde_json::from_slice(
-            &build_evidence_envelope("tdx", json!({ "quote": "abc" }), Some(gpu.clone())).unwrap(),
+            &build_evidence_envelope("tdx", json!({ "quote": "abc" }), Some(gpu.clone()), None)
+                .unwrap(),
         )
         .expect("normalized evidence should be JSON");
 
@@ -476,6 +486,7 @@ mod tests {
                 "platform": "snp",
                 "evidence": { "report": "abc" }
             }),
+            None,
             None,
         )
         .unwrap_err();

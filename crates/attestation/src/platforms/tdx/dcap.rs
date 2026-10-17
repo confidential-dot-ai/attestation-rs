@@ -302,8 +302,13 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Res
         AttestationError::CertChainError(format!("signing chain PEM not UTF-8: {e}"))
     })?;
 
-    let der_certs = split_pem_to_der(pem_str)?;
+    let mut der_certs = split_pem_to_der(pem_str)?;
 
+    // Collateral attached to evidence carries no roots: the bundled root
+    // stands in, and its key is checked against the pin like any other.
+    if der_certs.len() == 1 {
+        der_certs.push(INTEL_SGX_ROOT_CA.to_vec());
+    }
     if der_certs.len() < 2 {
         return Err(AttestationError::CertChainError(format!(
             "expected at least 2 certificates in signing chain, got {}",

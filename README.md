@@ -157,15 +157,35 @@ valid copy that is not older, refetched when it nears its nextUpdate, and kept
 when a refetch fails. The CLI also saves collateral in the user cache directory
 and reuses it in later runs; `--offline` uses only that.
 
+Evidence carries its own collateral. `Verifier::attach_collateral(evidence,
+report_data)` gathers, through the store, what a verifier of the evidence
+needs and adds it to the envelope as `collateral: [{url, body (base64),
+issuer_chain}]`: vendor bytes, never roots, each issuer chain once (a piece
+without one takes the chain of the piece before it), and for NVIDIA the NRAS
+answer and only the NRAS key that signed it. The CLI's `attest` and the API's
+`/attest` attach it. A verifier uses attached collateral before any other
+source and checks it like a fetched copy, so a verifier with only the
+compiled-in roots (a browser, a server without egress) can judge the evidence.
+Fetching what the evidence lacks is a fallback: on in the CLI and servers,
+off with `Context::offline()` (`--offline`); in the browser the JS wrapper
+fetches what `collateral_needed` lists.
+
 - No copy anywhere is `CollateralUnavailable { collateral, retry_after,
   detail }`, the only retryable error: it names the piece, the vendor's
   Retry-After when it sent one, and why in `detail`.
 - A piece that is not the vendor's (bad signature, wrong piece) is
   refused like evidence that is not genuine, and so is a VCEK or TCB Info the
   vendor does not publish (404) for the chip or platform the evidence names.
-- A piece past its nextUpdate is a value: the result lists every piece used
-  (`collateral`: `name`, `from`, `version`, `next_update`, `current`), and
-  `passed()` is false unless all are current.
+- The result lists every piece used (`collateral`: `name`, `from`,
+  `version`, `next_update`, `current`, `stale`, `floor`). A piece past its
+  nextUpdate passes for 7 days marked `stale` (AMD publishes its
+  fixed-calendar CRL late at times); after that `passed()` is false.
+- Version floors (`Policies::floors`: AMD CRL Number per generation, Intel
+  tcbEvaluationDataNumber of TCB Info and QE Identity) default to the versions
+  served when the release was made; callers may raise them. A piece below its
+  floor is a value, not an error: `passed()` is false. This stops an older,
+  validly signed copy from being replayed. Intel's PCK and Root CA CRLs always
+  carry CRL Number 1, so they have no floor.
 
 SEV-SNP (`snp`, `gcp-snp`, `az-snp`) checks the VEK's issuing ASK/ASVK against
 the AMD CRL (`crl_ok`). TDX platforms check the PCK chain against Intel's CRLs

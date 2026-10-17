@@ -13,7 +13,7 @@ use std::future::Future;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::collateral::{CollateralUsed, Store};
+use crate::collateral::{CollateralUsed, Store, VersionFloors};
 use crate::error::{AttestationError, Result};
 use crate::types::{Claims, PlatformType};
 
@@ -92,6 +92,8 @@ pub struct Policies {
     /// Evidence that carries a bundle is rejected when this is `None`.
     #[cfg(feature = "nvidia-gpu")]
     pub gpu: Option<NvidiaGpuParams>,
+    /// The lowest collateral versions accepted.
+    pub floors: VersionFloors,
 }
 
 impl Policies {
@@ -118,6 +120,7 @@ impl Policies {
             dstack: Some(DstackParams::default()),
             #[cfg(feature = "nvidia-gpu")]
             gpu: None,
+            floors: VersionFloors::default(),
         }
     }
 
@@ -320,13 +323,14 @@ pub struct Verified {
 
 impl Verified {
     /// True when the platform result and the GPU result (if any) both
-    /// passed, and every piece of collateral was current.
+    /// passed, and every piece of collateral was current (or stale, inside
+    /// the grace period) and not below its version floor.
     pub fn passed(&self) -> bool {
         #[cfg(feature = "nvidia-gpu")]
         if self.gpu.as_ref().is_some_and(|gpu| !gpu.passed()) {
             return false;
         }
-        self.platform.passed() && self.collateral.iter().all(|c| c.current)
+        self.platform.passed() && self.collateral.iter().all(CollateralUsed::acceptable)
     }
 }
 

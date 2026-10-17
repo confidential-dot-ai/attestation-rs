@@ -7,11 +7,12 @@
 //! replaces it; a failed refetch keeps the old copy.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Collateral, Dates};
+use super::{Collateral, Dates, VersionFloors, GRACE};
+use crate::context::HeldResponse;
 use crate::error::{AttestationError, Result, Unavailable};
 
 /// Where a piece of collateral used for a verdict came from.
@@ -41,7 +42,8 @@ impl std::fmt::Display for Source {
 }
 
 /// A piece of collateral a verdict used: which, from where, its version and
-/// nextUpdate, and whether it was current at the evaluation time.
+/// nextUpdate, whether it was current at the evaluation time, and the lowest
+/// version the policies accept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollateralUsed {
     /// For example `amd-crl genoa`, `tcb-info 70a06d070000`.
@@ -50,17 +52,37 @@ pub struct CollateralUsed {
     pub version: Option<u64>,
     pub next_update: Option<i64>,
     pub current: bool,
+    /// Past its nextUpdate, but by less than [`GRACE`]: it still passes.
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<u64>,
 }
 
 impl CollateralUsed {
-    fn new(name: String, from: Source, dates: Dates, now: i64) -> Self {
+    fn new(name: String, from: Source, dates: Dates, floor: Option<u64>, now: i64) -> Self {
+        let current = dates.current(now);
+        let in_grace = Dates {
+            next_update: dates.next_update.map(|n| n.saturating_add(GRACE)),
+            ..dates
+        };
         Self {
             name,
             from,
             version: dates.version,
             next_update: dates.next_update,
-            current: dates.current(now),
+            current,
+            stale: !current && in_grace.current(now),
+            floor,
         }
+    }
+
+    /// True when the piece is current or stale, and not below its floor.
+    pub fn acceptable(&self) -> bool {
+        (self.current || self.stale)
+            && self
+                .floor
+                .is_none_or(|f| self.version.is_some_and(|v| v >= f))
     }
 }
 
@@ -125,9 +147,12 @@ pub struct Store {
     /// Vendor responses supplied by the caller, by URL.
     held: HashMap<String, (Vec<u8>, Option<String>)>,
     /// The URLs a held-only store was asked for and did not hold.
-    missing: Mutex<Vec<String>>,
+    missing: Arc<Mutex<Vec<String>>>,
+    floors: VersionFloors,
+    /// When set, every response a lookup used, each once.
+    used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    native: Option<native::Native>,
+    native: Option<Arc<native::Native>>,
 }
 
 impl Store {
@@ -135,10 +160,57 @@ impl Store {
     pub(crate) fn held_only() -> Self {
         Self {
             held: HashMap::new(),
-            missing: Mutex::default(),
+            missing: Arc::default(),
+            floors: VersionFloors::default(),
+            used: None,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
         }
+    }
+
+    /// This store for one verdict: `attached` held before anything else,
+    /// judged against `floors`, and recording what it used when `record`.
+    pub(crate) fn view(
+        &self,
+        attached: Vec<HeldResponse>,
+        floors: &VersionFloors,
+        record: bool,
+    ) -> Self {
+        let mut held = self.held.clone();
+        for (url, body, chain) in attached {
+            held.insert(url, (body, chain));
+        }
+        Self {
+            held,
+            missing: self.missing.clone(),
+            floors: floors.clone(),
+            used: record.then(Arc::default),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: self.native.clone(),
+        }
+    }
+
+    /// Keep `url`'s response in what a recording view used.
+    pub(crate) fn record(&self, url: String, body: Vec<u8>, chain: Option<String>) {
+        if let Some(record) = &self.used {
+            let mut record = record.lock().unwrap_or_else(|e| e.into_inner());
+            if !record.iter().any(|(u, _, _)| *u == url) {
+                record.push((url, body, chain));
+            }
+        }
+    }
+
+    /// The held body for `url`, if any.
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) fn held_body(&self, url: &str) -> Option<&[u8]> {
+        self.held.get(url).map(|(body, _)| body.as_slice())
+    }
+
+    /// The responses a recording view used, in the order first used.
+    pub(crate) fn used(&self) -> Vec<HeldResponse> {
+        self.used.as_ref().map_or_else(Vec::new, |u| {
+            u.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        })
     }
 
     pub(crate) fn hold(&mut self, url: String, body: Vec<u8>, issuer_chain: Option<String>) {
@@ -187,12 +259,15 @@ impl Store {
         let (body, chain, from) = match self.held.get(&url) {
             Some((body, chain)) => (body.clone(), chain.clone(), Source::Held),
             None => {
-                let (entry, from) = self.load::<C>(url, id, now).await?;
+                let (entry, from) = self.load::<C>(url.clone(), id, now).await?;
                 (entry.body, entry.issuer_chain, from)
             }
         };
         let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
-        let used = CollateralUsed::new(C::name(id), from, piece.dates(), now);
+        let dates = piece.dates();
+        self.record(url, body, chain);
+        let floor = C::floor(id, &self.floors);
+        let used = CollateralUsed::new(C::name(id), from, dates, floor, now);
         Ok((piece, used))
     }
 
@@ -252,13 +327,14 @@ impl Store {
     pub(crate) fn new(offline: bool) -> Self {
         let vendor = (!offline).then(crate::collateral::vendor::Vendor::new);
         Self {
-            native: Some(native::Native::new(vendor)),
+            native: Some(Arc::new(native::Native::new(vendor))),
             ..Self::held_only()
         }
     }
 
+    /// Only while the context is being built, before any view shares it.
     pub(crate) fn native_mut(&mut self) -> Option<&mut native::Native> {
-        self.native.as_mut()
+        self.native.as_mut().and_then(Arc::get_mut)
     }
 
     #[cfg(feature = "nvidia-gpu")]

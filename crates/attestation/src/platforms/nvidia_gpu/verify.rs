@@ -71,8 +71,46 @@ pub async fn gather_bundle(
     Ok((GpuCollateralSet { nras, jwks }, used))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// NRAS's answer for `request`: held (attached by the attester, which asked
+/// NRAS with the same nonce), else asked now. The answer is NVIDIA-signed and
+/// bound to the nonce, so who asked does not matter.
 async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
+    let key = nras_answer_url(store, request);
+    let body = match store.held_body(&key) {
+        Some(body) => body.to_vec(),
+        None => ask_nras(store, request).await?,
+    };
+    let answer = serde_json::from_slice(&body)
+        .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))?;
+    store.record(key, body, None);
+    Ok(answer)
+}
+
+/// Where an NRAS answer is held: the NRAS endpoint and the request nonce.
+fn nras_answer_url(store: &Store, request: &NrasRequest) -> String {
+    use crate::platforms::nvidia_gpu::provider::{NRAS_GPU_URL, NRAS_SWITCH_URL};
+    #[cfg(not(target_arch = "wasm32"))]
+    let configured = store.vendor().map(|v| match request.arch {
+        NvidiaGpuArch::Ls10 => v.nras.switch_url.clone(),
+        _ => v.nras.gpu_url.clone(),
+    });
+    #[cfg(target_arch = "wasm32")]
+    let configured: Option<String> = {
+        let _ = store;
+        None
+    };
+    let url = configured.unwrap_or_else(|| {
+        match request.arch {
+            NvidiaGpuArch::Ls10 => NRAS_SWITCH_URL,
+            _ => NRAS_GPU_URL,
+        }
+        .to_string()
+    });
+    format!("{url}#nonce={}", request.nonce)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn ask_nras(store: &Store, request: &NrasRequest) -> Result<Vec<u8>> {
     match store.vendor() {
         Some(vendor) => vendor.nras_attest(request).await,
         None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
@@ -80,8 +118,28 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn nras_attest(_store: &Store, _request: &NrasRequest) -> Result<serde_json::Value> {
+async fn ask_nras(_store: &Store, _request: &NrasRequest) -> Result<Vec<u8>> {
     Err(crate::error::Unavailable::offline().into_error("NRAS attestation"))
+}
+
+/// `jwks` (a key set) with only the keys the tokens in `answers` name.
+pub(crate) fn keys_used(jwks: &[u8], answers: &GpuCollateralSet) -> Vec<u8> {
+    let kids: Vec<String> = answers
+        .nras
+        .values()
+        .filter_map(|a| split_eat_response(a).ok())
+        .flat_map(|(overall, subs)| {
+            std::iter::once(overall)
+                .chain(subs.into_iter().map(|(_, t)| t))
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|t| jwt_kid(&t))
+        .collect();
+    let Ok(mut set) = serde_json::from_slice::<Jwks>(jwks) else {
+        return jwks.to_vec();
+    };
+    set.keys.retain(|k| kids.contains(&k.kid));
+    serde_json::to_vec(&set).expect("a key set serializes")
 }
 
 /// The `kid` a compact JWS names, if it can be read.
