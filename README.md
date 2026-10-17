@@ -172,12 +172,18 @@ fetches what `collateral_needed` lists.
 
 Where evidence is made, collateral comes from an `attestation-cache` rather
 than the vendors (see `crates/attestation-cache`). Inside a confidential VM
-the library finds the host's cache by itself: the first fetch connects to
-vsock port 8455 of the host (CID 2); when it accepts, every fetch of the
-process goes there and the vendors are never asked directly; when nothing
-listens, the vendors are used. `Context::with_upstream` sets a cache
-explicitly (`https://` base URL, `http://` on loopback only, or
-`vsock://CID:PORT`). Answers from a cache are verified like the vendors'. Each
+the library finds the host's cache by itself: fetches connect to vsock port
+8455 of the host (CID 2); once it accepts, every fetch of the process goes
+there and the vendors are never asked directly; while nothing listens, the
+vendors are used and the host is tried again every minute. Outside a
+confidential VM the vendors are used. `Context::with_upstream` sets a cache
+explicitly (`https://` base URL without query, `http://` on loopback only, or
+`vsock://CID:PORT`). Answers from a cache are verified like the vendors' and
+reported `from: cache`; a cache's "not found" is `CollateralUnavailable`, as
+only the vendor itself can say a piece is not published. A cache can still
+hand a fresh process an older copy that is valid: that copy is bounded by the
+version floors and its own nextUpdate (plus the grace), and is never taken
+over a newer copy the process already has. Each
 piece is refreshed at a random time in the last quarter of its validity, and
 at least a day before its nextUpdate. NRAS attestation requests (GPU) go to
 NRAS directly.

@@ -31,9 +31,13 @@ pub(crate) enum Upstream {
     /// A cache at this vsock address (CID, port).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Vsock(u32, u32),
-    /// The host's cache at [`VSOCK_PORT`] when it accepts a connection the
-    /// first time collateral is fetched, else the vendors.
+    /// Inside a confidential VM, the host's cache at [`VSOCK_PORT`] once it
+    /// accepts a connection (then for good), else the vendors.
     Auto,
+    /// A fake vendor at this base, for tests: its answers count as the
+    /// vendor's own.
+    #[cfg(any(test, feature = "test-vendor"))]
+    TestVendor(String),
 }
 
 /// The vsock port a host's attestation-cache listens on, found by guests
@@ -42,6 +46,8 @@ pub const VSOCK_PORT: u32 = 8455;
 /// The host, as a guest addresses it over vsock.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const HOST_CID: u32 = 2;
+/// While no host cache has answered, look for it again after this long.
+const REPROBE: Duration = Duration::from_secs(60);
 
 impl Upstream {
     /// `vsock://CID:PORT`, or a cache base URL: `https://`, or plain
@@ -51,8 +57,74 @@ impl Upstream {
             let (cid, port) = address.split_once(':')?;
             return Some(Upstream::Vsock(cid.parse().ok()?, port.parse().ok()?));
         }
-        allowed(url).then(|| Upstream::Cache(url.trim_end_matches('/').to_string()))
+        let bare =
+            reqwest::Url::parse(url).is_ok_and(|u| u.query().is_none() && u.fragment().is_none());
+        (bare && allowed(url)).then(|| Upstream::Cache(url.trim_end_matches('/').to_string()))
     }
+
+    /// Whether an answer from here is the vendor's own.
+    fn is_vendor(&self) -> bool {
+        match self {
+            Upstream::Vendors => true,
+            #[cfg(any(test, feature = "test-vendor"))]
+            Upstream::TestVendor(_) => true,
+            _ => false,
+        }
+    }
+}
+
+/// What [`Upstream::Auto`] found: the host cache once it answered, kept for
+/// good (a CVM with a cache never asks the vendors); until then the vendors,
+/// probing again every `reprobe`.
+struct Discovery {
+    host: std::sync::OnceLock<Upstream>,
+    last_probe: tokio::sync::Mutex<Option<std::time::Instant>>,
+    reprobe: Duration,
+}
+
+impl Discovery {
+    fn new(reprobe: Duration) -> Self {
+        Self {
+            host: std::sync::OnceLock::new(),
+            last_probe: tokio::sync::Mutex::new(None),
+            reprobe,
+        }
+    }
+
+    async fn upstream<F: std::future::Future<Output = bool>>(
+        &self,
+        host: Upstream,
+        probe: impl FnOnce() -> F,
+    ) -> Upstream {
+        if let Some(found) = self.host.get() {
+            return found.clone();
+        }
+        let mut last = self.last_probe.lock().await;
+        if let Some(found) = self.host.get() {
+            return found.clone();
+        }
+        if last.is_some_and(|t| t.elapsed() < self.reprobe) {
+            return Upstream::Vendors;
+        }
+        *last = Some(std::time::Instant::now());
+        if probe().await {
+            log::info!("collateral: using the host cache at {host:?}");
+            return self.host.get_or_init(|| host).clone();
+        }
+        Upstream::Vendors
+    }
+}
+
+/// Whether this is a confidential VM guest, where a host cache may be.
+fn in_cvm() -> bool {
+    cfg!(target_os = "linux")
+        && [
+            "/dev/tdx_guest",
+            "/dev/sev-guest",
+            "/sys/kernel/config/tsm/report",
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
 }
 
 /// `https` with a host, or `http` to a loopback address.
@@ -73,8 +145,7 @@ pub(crate) fn allowed(url: &str) -> bool {
 pub(crate) struct Vendor {
     client: reqwest::Client,
     pub(crate) upstream: Upstream,
-    /// What [`Upstream::Auto`] found.
-    found: tokio::sync::OnceCell<Upstream>,
+    found: Discovery,
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) nras: Nras,
 }
@@ -89,24 +160,25 @@ impl Vendor {
                 .build()
                 .expect("HTTP client with static config"),
             upstream: Upstream::Auto,
-            found: tokio::sync::OnceCell::new(),
+            found: Discovery::new(REPROBE),
             #[cfg(feature = "nvidia-gpu")]
             nras: Nras::from_env(),
         }
     }
 
-    async fn upstream(&self) -> &Upstream {
+    async fn upstream(&self) -> Upstream {
         if self.upstream != Upstream::Auto {
-            return &self.upstream;
+            return self.upstream.clone();
+        }
+        if !in_cvm() {
+            return Upstream::Vendors;
         }
         self.found
-            .get_or_init(|| async {
+            .upstream(Upstream::Vsock(HOST_CID, VSOCK_PORT), || async {
                 #[cfg(target_os = "linux")]
-                if vsock::connect(HOST_CID, VSOCK_PORT).await.is_ok() {
-                    log::info!("collateral: using the host cache at vsock port {VSOCK_PORT}");
-                    return Upstream::Vsock(HOST_CID, VSOCK_PORT);
-                }
-                Upstream::Vendors
+                return vsock::connect(HOST_CID, VSOCK_PORT).await.is_ok();
+                #[cfg(not(target_os = "linux"))]
+                false
             })
             .await
     }
@@ -114,28 +186,42 @@ impl Vendor {
     /// GET `url` and the issuer chain Intel PCS sends in a header, from the
     /// upstream, retrying once on network errors, 408, 429 and 5xx
     /// (honouring a short Retry-After), never on 404/410. A hung upstream
-    /// costs about 10 s.
-    pub(crate) async fn fetch(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Unavailable> {
-        let err = match Box::pin(self.get_once(url)).await {
-            Ok(raw) => return Ok(raw),
+    /// costs about 10 s. Also says whether the answer is the vendor's own
+    /// rather than a cache's.
+    pub(crate) async fn fetch(
+        &self,
+        url: &str,
+    ) -> (bool, Result<(Vec<u8>, Option<String>), Unavailable>) {
+        let upstream = self.upstream().await;
+        let err = match Box::pin(self.get_once(&upstream, url)).await {
+            Ok(raw) => return (upstream.is_vendor(), Ok(raw)),
             Err(e) => e,
         };
         let wait = match (err.status, err.retry_after) {
-            _ if err.not_found() => return Err(err),
-            (_, Some(s)) if s > MAX_RETRY_AFTER => return Err(err),
+            _ if err.not_found() => return (upstream.is_vendor(), Err(err)),
+            (_, Some(s)) if s > MAX_RETRY_AFTER => return (upstream.is_vendor(), Err(err)),
             (_, Some(s)) => Duration::from_secs(s),
             (None | Some(408 | 429), None) => retry_delay(),
             (Some(s), None) if s >= 500 => retry_delay(),
-            _ => return Err(err),
+            _ => return (upstream.is_vendor(), Err(err)),
         };
         tokio::time::sleep(wait).await;
-        Box::pin(self.get_once(url)).await
+        (
+            upstream.is_vendor(),
+            Box::pin(self.get_once(&upstream, url)).await,
+        )
     }
 
-    async fn get_once(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Unavailable> {
+    async fn get_once(
+        &self,
+        upstream: &Upstream,
+        url: &str,
+    ) -> Result<(Vec<u8>, Option<String>), Unavailable> {
         let path = url.strip_prefix("https://");
-        let url = match (self.upstream().await, path) {
+        let url = match (upstream, path) {
             (Upstream::Cache(base), Some(path)) => format!("{base}/{path}"),
+            #[cfg(any(test, feature = "test-vendor"))]
+            (Upstream::TestVendor(base), Some(path)) => format!("{base}/{path}"),
             #[cfg(target_os = "linux")]
             (Upstream::Vsock(cid, port), Some(path)) => {
                 return tokio::time::timeout(
@@ -242,11 +328,25 @@ pub(crate) struct Nras {
 #[cfg(feature = "nvidia-gpu")]
 impl Nras {
     fn from_env() -> Self {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// From these variables; an NRAS URL that is not `https` (or plain
+    /// `http` on loopback) is ignored, so the service key never goes out in
+    /// clear.
+    fn from_vars(env: impl Fn(&str) -> Option<String>) -> Self {
         use crate::platforms::nvidia_gpu::provider::{NRAS_GPU_URL, NRAS_SWITCH_URL};
-        let env = |name: &str| std::env::var(name).ok();
+        let url = |name: &str, default: &str| match env(name) {
+            Some(url) if allowed(&url) => url,
+            Some(url) => {
+                log::error!("ignoring {name}={url:?}: not https");
+                default.into()
+            }
+            None => default.into(),
+        };
         Self {
-            gpu_url: env("NV_NRAS_GPU_URL").unwrap_or_else(|| NRAS_GPU_URL.into()),
-            switch_url: env("NV_NRAS_SWITCH_URL").unwrap_or_else(|| NRAS_SWITCH_URL.into()),
+            gpu_url: url("NV_NRAS_GPU_URL", NRAS_GPU_URL),
+            switch_url: url("NV_NRAS_SWITCH_URL", NRAS_SWITCH_URL),
             allow_hold_cert: env("NV_ALLOW_HOLD_CERT").as_deref() == Some("true"),
             service_key: env("NVIDIA_ATTESTATION_SERVICE_KEY"),
         }
@@ -372,6 +472,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn auto_probes_again_until_a_host_cache_answers_then_keeps_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let host = Upstream::Vsock(HOST_CID, VSOCK_PORT);
+        let probes = AtomicUsize::new(0);
+        let probe = |answers: bool| {
+            probes.fetch_add(1, Ordering::SeqCst);
+            async move { answers }
+        };
+
+        let waits = Discovery::new(Duration::from_secs(3600));
+        for _ in 0..3 {
+            assert_eq!(
+                waits.upstream(host.clone(), || probe(false)).await,
+                Upstream::Vendors
+            );
+        }
+        assert_eq!(probes.swap(0, Ordering::SeqCst), 1);
+
+        let found = Discovery::new(Duration::ZERO);
+        assert_eq!(
+            found.upstream(host.clone(), || probe(false)).await,
+            Upstream::Vendors
+        );
+        assert_eq!(found.upstream(host.clone(), || probe(true)).await, host);
+        // Found: kept, never back to the vendors, not probed again.
+        assert_eq!(found.upstream(host.clone(), || probe(false)).await, host);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[test]
+    fn nras_urls_from_the_environment_must_be_https() {
+        use crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL;
+        let nras = |url: &'static str| {
+            Nras::from_vars(move |name| (name == "NV_NRAS_GPU_URL").then(|| url.to_string()))
+                .gpu_url
+        };
+        assert_eq!(nras("http://nras.example/v3/attest/gpu"), NRAS_GPU_URL);
+        assert_eq!(
+            nras("https://nras.example/v3/attest/gpu"),
+            "https://nras.example/v3/attest/gpu"
+        );
+        assert_eq!(nras("http://127.0.0.1:1/gpu"), "http://127.0.0.1:1/gpu");
+    }
+
     #[test]
     fn an_upstream_cache_is_https_or_plain_http_on_loopback() {
         for good in [
@@ -398,6 +544,8 @@ mod tests {
             "cache.example",
             "vsock://host",
             "vsock://8455",
+            "https://cache.example/?x=1",
+            "https://cache.example/#x",
         ] {
             assert_eq!(Upstream::parse(bad), None, "{bad}");
         }
