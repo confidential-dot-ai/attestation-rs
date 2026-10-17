@@ -1,17 +1,16 @@
-//! The verifier for browsers and other JS runtimes. WASM does no network or
-//! disk I/O, so the caller fetches the vendor URLs for the evidence
-//! ([`collateral_needed`]) and hands the responses to [`evaluate`], which
-//! verifies each piece of collateral exactly as the native verifier does.
+//! The verifier for browsers and other JS runtimes. Evidence normally
+//! carries its own collateral, which is used first. WASM does no network or
+//! disk I/O, so for anything the evidence lacks the caller fetches the vendor
+//! URLs [`collateral_needed`] lists and hands the responses to [`evaluate`],
+//! which verifies each piece exactly as the native verifier does.
 
-use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use attestation::types::{PlatformType, SnpTcb};
 use attestation::{
-    AttestationError, AzSnpParams, AzTdxParams, Context, GcpSnpParams, GcpTdxParams, Policies,
-    SnpParams, TdxParams, Verifier,
+    AttachedCollateral, AttestationError, AzSnpParams, AzTdxParams, Context, GcpSnpParams,
+    GcpTdxParams, Policies, SnpParams, TdxParams, Verifier,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 /// Why a call failed. Thrown as a JS `Error` with this `kind`, named like
 /// the API's error keys:
@@ -57,18 +56,6 @@ impl From<Failure> for JsValue {
             .expect("setting a property on a new Error");
         error.into()
     }
-}
-
-/// A vendor response: the URL [`collateral_needed`] listed, the body
-/// base64, and the URL-decoded value of the `*-Issuer-Chain` header Intel
-/// PCS sends with TCB Info, QE Identity and PCK CRLs.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Held {
-    url: String,
-    body: String,
-    #[serde(default)]
-    issuer_chain: Option<String>,
 }
 
 /// The vendor URLs to fetch to verify `envelope_json` (an `{ platform,
@@ -211,16 +198,9 @@ async fn evaluate_impl(
     now: Option<i64>,
 ) -> Result<String, Failure> {
     let policies = request.policies().map_err(Failure::bad_request)?;
-    let held: Vec<Held> = serde_json::from_str(collateral_json)
+    let held: Vec<AttachedCollateral> = serde_json::from_str(collateral_json)
         .map_err(|e| Failure::bad_request(format!("collateral deserialize: {e}")))?;
-    let mut responses = Vec::with_capacity(held.len());
-    for h in held {
-        let body = BASE64
-            .decode(&h.body)
-            .map_err(|e| Failure::bad_request(format!("{}: body base64: {e}", h.url)))?;
-        responses.push((h.url, body, h.issuer_chain));
-    }
-    let ctx = Context::held(responses);
+    let ctx = Context::held(held.into_iter().map(|h| (h.url, h.body, h.issuer_chain)));
     let ctx = match now {
         Some(t) => ctx.at(t)?,
         None => ctx,
@@ -239,6 +219,7 @@ async fn evaluate_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
     const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../attestation/test_data/");
     /// 2026-10-16T00:00:00Z: the fixture collateral is current.
@@ -401,13 +382,10 @@ mod tests {
             let wasm = evaluate_impl(&envelope, request(&[platform]), &collateral, Some(NOW))
                 .await
                 .unwrap();
-            let held: Vec<Held> = serde_json::from_str(&collateral).unwrap();
-            let ctx = Context::held(
-                held.into_iter()
-                    .map(|h| (h.url, BASE64.decode(h.body).unwrap(), h.issuer_chain)),
-            )
-            .at(NOW)
-            .unwrap();
+            let held: Vec<AttachedCollateral> = serde_json::from_str(&collateral).unwrap();
+            let ctx = Context::held(held.into_iter().map(|h| (h.url, h.body, h.issuer_chain)))
+                .at(NOW)
+                .unwrap();
             let policies = request(&[platform]).policies().unwrap();
             let lib = Verifier::new(ctx)
                 .verify(envelope.as_bytes(), &policies)

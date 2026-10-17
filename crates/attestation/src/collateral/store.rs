@@ -7,11 +7,12 @@
 //! replaces it; a failed refetch keeps the old copy.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Collateral, Dates};
+use super::{Collateral, Dates, VersionFloors, GRACE};
+use crate::context::HeldResponse;
 use crate::error::{AttestationError, Result, Unavailable};
 
 /// Where a piece of collateral used for a verdict came from.
@@ -20,6 +21,8 @@ use crate::error::{AttestationError, Result, Unavailable};
 pub enum Source {
     /// Supplied by the caller (WASM, tests).
     Held,
+    /// Attached to the evidence by the attester.
+    Attached,
     /// This process already held it.
     Memory,
     /// The disk cache.
@@ -33,6 +36,7 @@ impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Source::Held => "held",
+            Source::Attached => "attached",
             Source::Memory => "memory",
             Source::Disk => "disk",
             Source::Vendor => "vendor",
@@ -41,7 +45,8 @@ impl std::fmt::Display for Source {
 }
 
 /// A piece of collateral a verdict used: which, from where, its version and
-/// nextUpdate, and whether it was current at the evaluation time.
+/// nextUpdate, whether it was current at the evaluation time, and the lowest
+/// version the policies accept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollateralUsed {
     /// For example `amd-crl genoa`, `tcb-info 70a06d070000`.
@@ -50,17 +55,37 @@ pub struct CollateralUsed {
     pub version: Option<u64>,
     pub next_update: Option<i64>,
     pub current: bool,
+    /// Past its nextUpdate, but by less than [`GRACE`]: it still passes.
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<u64>,
 }
 
 impl CollateralUsed {
-    fn new(name: String, from: Source, dates: Dates, now: i64) -> Self {
+    fn new(name: String, from: Source, dates: Dates, floor: Option<u64>, now: i64) -> Self {
+        let current = dates.current(now);
+        let in_grace = Dates {
+            next_update: dates.next_update.map(|n| n.saturating_add(GRACE)),
+            ..dates
+        };
         Self {
             name,
             from,
             version: dates.version,
             next_update: dates.next_update,
-            current: dates.current(now),
+            current,
+            stale: !current && in_grace.current(now),
+            floor,
         }
+    }
+
+    /// True when the piece is current or stale, and not below its floor.
+    pub fn acceptable(&self) -> bool {
+        (self.current || self.stale)
+            && self
+                .floor
+                .is_none_or(|f| self.version.is_some_and(|v| v >= f))
     }
 }
 
@@ -120,29 +145,88 @@ fn check<C: Collateral>(
     })
 }
 
+/// Vendor responses by URL: body and issuer chain.
+type Responses = HashMap<String, (Vec<u8>, Option<String>)>;
+
 /// Collateral for verifiers, from held copies, memory, disk and the vendors.
 pub struct Store {
     /// Vendor responses supplied by the caller, by URL.
-    held: HashMap<String, (Vec<u8>, Option<String>)>,
+    held: Arc<Responses>,
+    /// Vendor responses attached to the evidence of one verdict, by URL.
+    attached: Responses,
     /// The URLs a held-only store was asked for and did not hold.
-    missing: Mutex<Vec<String>>,
+    missing: Arc<Mutex<Vec<String>>>,
+    floors: VersionFloors,
+    /// When set, every response a lookup used, each once.
+    used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    native: Option<native::Native>,
+    native: Option<Arc<native::Native>>,
 }
 
 impl Store {
     /// Holds only what the caller supplies: no memory, disk or network.
     pub(crate) fn held_only() -> Self {
         Self {
-            held: HashMap::new(),
-            missing: Mutex::default(),
+            held: Arc::default(),
+            attached: HashMap::new(),
+            missing: Arc::default(),
+            floors: VersionFloors::default(),
+            used: None,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
         }
     }
 
+    /// This store for one verdict: with the `attached` pieces, judged
+    /// against `floors`, and recording what it used when `record`.
+    pub(crate) fn view(
+        &self,
+        attached: Vec<HeldResponse>,
+        floors: &VersionFloors,
+        record: bool,
+    ) -> Self {
+        Self {
+            held: self.held.clone(),
+            attached: attached
+                .into_iter()
+                .map(|(url, body, chain)| (url, (body, chain)))
+                .collect(),
+            missing: self.missing.clone(),
+            floors: floors.clone(),
+            used: record.then(Arc::default),
+            #[cfg(not(target_arch = "wasm32"))]
+            native: self.native.clone(),
+        }
+    }
+
+    /// Keep `url`'s response in what a recording view used.
+    pub(crate) fn record(&self, url: String, body: Vec<u8>, chain: Option<String>) {
+        if let Some(record) = &self.used {
+            let mut record = record.lock().unwrap_or_else(|e| e.into_inner());
+            if !record.iter().any(|(u, _, _)| *u == url) {
+                record.push((url, body, chain));
+            }
+        }
+    }
+
+    /// The held or attached body for `url`, if any.
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) fn held_body(&self, url: &str) -> Option<&[u8]> {
+        self.held
+            .get(url)
+            .or_else(|| self.attached.get(url))
+            .map(|(body, _)| body.as_slice())
+    }
+
+    /// The responses a recording view used, in the order first used.
+    pub(crate) fn used(&self) -> Vec<HeldResponse> {
+        self.used.as_ref().map_or_else(Vec::new, |u| {
+            u.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        })
+    }
+
     pub(crate) fn hold(&mut self, url: String, body: Vec<u8>, issuer_chain: Option<String>) {
-        self.held.insert(url, (body, issuer_chain));
+        Arc::make_mut(&mut self.held).insert(url, (body, issuer_chain));
     }
 
     /// The vendor URLs a held-only store was asked for and did not hold,
@@ -155,8 +239,9 @@ impl Store {
     }
 
     /// The piece `id` names, verified, and what the verdict should say about
-    /// it at `now` (Unix seconds). A copy that does not verify is refused
-    /// when no good copy exists.
+    /// it at `now` (Unix seconds). Any copy on hand that does not verify
+    /// refuses the piece, even when another copy is good: a bad attached
+    /// piece makes the evidence not genuine.
     pub async fn get<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<(C, CollateralUsed)> {
         self.lookup(id, now)
             .await
@@ -184,16 +269,71 @@ impl Store {
         now: i64,
     ) -> std::result::Result<(C, CollateralUsed), Failure> {
         let url = C::url(id);
-        let (body, chain, from) = match self.held.get(&url) {
-            Some((body, chain)) => (body.clone(), chain.clone(), Source::Held),
-            None => {
-                let (entry, from) = self.load::<C>(url, id, now).await?;
-                (entry.body, entry.issuer_chain, from)
+        let floor = C::floor(id, &self.floors);
+        // The newest of the copies on hand; on a tie, the first of held,
+        // cached, attached. Attached pieces never push the verifier back.
+        let mut best: Option<(C, Vec<u8>, Option<String>, Source)> = None;
+        for (body, chain, from) in self.on_hand::<C>(&url, id).await {
+            let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
+            if best
+                .as_ref()
+                .is_none_or(|(b, ..)| !b.dates().not_older_than(&piece.dates()))
+            {
+                best = Some((piece, body, chain, from));
             }
+        }
+        let acceptable = |p: &C| {
+            CollateralUsed::new(String::new(), Source::Held, p.dates(), floor, now).acceptable()
         };
-        let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
-        let used = CollateralUsed::new(C::name(id), from, piece.dates(), now);
+        // Nothing on hand, or nothing that passes (a piece in grace passes):
+        // the fallback may have better. A held-only store lists the URL as
+        // missing, so the caller can fetch it.
+        if best.as_ref().is_none_or(|(p, ..)| !acceptable(p)) {
+            match self.load::<C>(url.clone(), id, now).await {
+                Ok((entry, from)) => {
+                    if best
+                        .as_ref()
+                        .is_none_or(|(b, ..)| !b.dates().not_older_than(&entry.dates))
+                    {
+                        let piece = C::verify(&entry.body, entry.issuer_chain.as_deref(), id)
+                            .map_err(Failure::refused)?;
+                        best = Some((piece, entry.body, entry.issuer_chain, from));
+                    }
+                }
+                Err(e) if best.is_none() => return Err(e),
+                // The kept copy already verified; it just does not pass.
+                Err(_) => {}
+            }
+        }
+        let (piece, body, chain, from) = best.expect("a copy or an error");
+        let dates = piece.dates();
+        self.record(url, body, chain);
+        let used = CollateralUsed::new(C::name(id), from, dates, floor, now);
         Ok((piece, used))
+    }
+
+    /// The copies of `url` this store has without asking anyone: held,
+    /// cached in memory or on disk, attached.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    async fn on_hand<C: Collateral>(
+        &self,
+        url: &str,
+        id: &C::Id,
+    ) -> Vec<(Vec<u8>, Option<String>, Source)> {
+        let mut copies = Vec::new();
+        if let Some((body, chain)) = self.held.get(url) {
+            copies.push((body.clone(), chain.clone(), Source::Held));
+        }
+        if let Some((body, chain)) = self.attached.get(url) {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(native) = &self.native {
+                if let Some(e) = native.cached::<C>(url, id).await {
+                    copies.push((e.body, e.issuer_chain, e.origin));
+                }
+            }
+            copies.push((body.clone(), chain.clone(), Source::Attached));
+        }
+        copies
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
@@ -252,13 +392,14 @@ impl Store {
     pub(crate) fn new(offline: bool) -> Self {
         let vendor = (!offline).then(crate::collateral::vendor::Vendor::new);
         Self {
-            native: Some(native::Native::new(vendor)),
+            native: Some(Arc::new(native::Native::new(vendor))),
             ..Self::held_only()
         }
     }
 
+    /// Only while the context is being built, before any view shares it.
     pub(crate) fn native_mut(&mut self) -> Option<&mut native::Native> {
-        self.native.as_mut()
+        self.native.as_mut().and_then(Arc::get_mut)
     }
 
     #[cfg(feature = "nvidia-gpu")]
@@ -350,6 +491,16 @@ mod native {
                     })
                     .map_err(|e| (*e).clone()),
             }
+        }
+
+        /// The copy in memory, else a valid copy on disk; nothing fetched.
+        pub(super) async fn cached<C: Collateral>(&self, url: &str, id: &C::Id) -> Option<Entry> {
+            if let Some(mut e) = self.mem.get(url).await {
+                e.origin = Source::Memory;
+                return Some(e);
+            }
+            let (body, chain) = self.disk.as_ref()?.read(url)?;
+            check::<C>(id, body, chain, Source::Disk).ok()
         }
 
         async fn fetch<C: Collateral>(
@@ -776,6 +927,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attaching_retries_once_after_a_short_retry_after_then_attaches_what_it_got() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let quote = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_data/tdx_quote_00a06d080000.dat"
+        ))
+        .unwrap();
+        let evidence = serde_json::to_vec(&serde_json::json!({
+            "platform": "tdx",
+            "evidence": { "quote": STANDARD.encode(quote) },
+        }))
+        .unwrap();
+        let qe = QeIdentity::url(&());
+        let held: Vec<_> = crate::testing::intel()
+            .into_iter()
+            .filter(|(url, ..)| *url != qe)
+            .collect();
+        let attach = |v: &Vendor| {
+            let attester = crate::Verifier::new(ctx(v).with_held(held.clone()).at(NOW).unwrap());
+            let evidence = evidence.clone();
+            async move {
+                let with = attester.attach_collateral(&evidence, &[]).await.unwrap();
+                serde_json::from_slice::<crate::AttestationEvidence>(&with)
+                    .unwrap()
+                    .collateral
+                    .into_iter()
+                    .map(|c| c.url)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let busy = || status(429, vec![("Retry-After", "1".into())]);
+
+        let v = vendor(
+            vec![busy(), busy(), pcs("2026-10-14/td_qe_identity.json")],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(attach(&v).await.contains(&qe));
+        assert_eq!(v.hits.load(Ordering::SeqCst), 3);
+
+        let v = vendor(vec![busy()], Duration::ZERO).await;
+        let urls = attach(&v).await;
+        assert!(!urls.is_empty() && !urls.contains(&qe), "{urls:?}");
+        assert_eq!(v.hits.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
     async fn a_short_retry_after_is_honoured_once_then_returned() {
         let v = vendor(
             vec![status(429, vec![("Retry-After", "1".into())])],
@@ -984,6 +1182,28 @@ mod tests {
         };
         let genoa = crate::types::ProcessorGeneration::Genoa;
         ctx.store().get(&(genoa, chip_id, tcb), NOW).await
+    }
+
+    #[tokio::test]
+    async fn an_attached_piece_that_does_not_pass_is_replaced_by_a_fetched_one() {
+        let expired = raw(
+            "2026-10-14/td_qe_identity_2026-03-16_eval18_expired.json",
+            Some(CHAIN),
+        );
+        let attached = || vec![(QeIdentity::url(&()), expired.0.clone(), expired.1.clone())];
+        let floors = VersionFloors::default();
+
+        let v = vendor(vec![pcs("2026-10-14/td_qe_identity.json")], Duration::ZERO).await;
+        let view = ctx(&v).store().view(attached(), &floors, false);
+        let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
+        assert_eq!((used.version, used.from), (Some(20), Source::Vendor));
+        assert!(used.acceptable());
+
+        let v = vendor(vec![status(503, vec![])], Duration::ZERO).await;
+        let view = ctx(&v).store().view(attached(), &floors, false);
+        let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
+        assert_eq!((used.version, used.from), (Some(18), Source::Attached));
+        assert!(!used.acceptable());
     }
 
     #[tokio::test]

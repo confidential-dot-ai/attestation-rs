@@ -62,6 +62,58 @@ pub trait Collateral: Sized {
     /// piece `id` names.
     fn verify(bytes: &[u8], issuer_chain: Option<&str>, id: &Self::Id) -> Result<Self>;
     fn dates(&self) -> Dates;
+    /// The lowest version of this piece `floors` accept, if it has a version.
+    fn floor(_id: &Self::Id, _floors: &VersionFloors) -> Option<u64> {
+        None
+    }
+}
+
+/// How long past its nextUpdate a piece still passes, marked stale. AMD
+/// publishes its fixed-calendar CRL late at times.
+pub const GRACE: i64 = 7 * 24 * 3600;
+
+/// The lowest collateral versions a verdict accepts. A piece below its floor
+/// is a value (`passed()` is false), not an error. The defaults are the
+/// versions the vendors served when this release was made; callers may raise
+/// them. Intel's PCK and Root CA CRLs always carry CRL Number 1, so they get
+/// no floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionFloors {
+    /// AMD CRL Number, per generation.
+    pub amd_crl_milan: u64,
+    pub amd_crl_genoa: u64,
+    pub amd_crl_turin: u64,
+    /// Intel tcbEvaluationDataNumber of TDX TCB Info.
+    pub intel_tcb_info: u64,
+    /// Intel tcbEvaluationDataNumber of the TD QE Identity.
+    pub intel_qe_identity: u64,
+}
+
+impl Default for VersionFloors {
+    /// As served on 2026-10-14.
+    fn default() -> Self {
+        Self {
+            amd_crl_milan: 12,
+            amd_crl_genoa: 11,
+            amd_crl_turin: 8,
+            intel_tcb_info: 20,
+            intel_qe_identity: 20,
+        }
+    }
+}
+
+/// `pem` without the certificates compiled into this crate as roots: the
+/// verifier has them already.
+pub(crate) fn without_roots(pem: &str) -> String {
+    #[cfg(feature = "tdx")]
+    if let Ok(certs) = ::pem::parse_many(pem) {
+        let kept: Vec<_> = certs
+            .into_iter()
+            .filter(|c| c.contents() != crate::platforms::tdx::dcap::INTEL_SGX_ROOT_CA)
+            .collect();
+        return ::pem::encode_many(&kept);
+    }
+    pem.to_string()
 }
 
 /// A piece's own validity window and version, in Unix seconds.

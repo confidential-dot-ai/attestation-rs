@@ -2,7 +2,7 @@
 
 use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 
-use super::{crl_number, refused, AmdKey, Collateral, Dates};
+use super::{crl_number, refused, AmdKey, Collateral, Dates, VersionFloors};
 use crate::error::Result;
 use crate::platforms::snp::certs;
 use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
@@ -144,6 +144,14 @@ impl Collateral for AmdCrl {
 
     fn dates(&self) -> Dates {
         Dates::window(self.this_update, self.next_update, self.number)
+    }
+
+    fn floor((generation, _): &Self::Id, floors: &VersionFloors) -> Option<u64> {
+        Some(match generation {
+            ProcessorGeneration::Milan => floors.amd_crl_milan,
+            ProcessorGeneration::Genoa => floors.amd_crl_genoa,
+            ProcessorGeneration::Turin => floors.amd_crl_turin,
+        })
     }
 }
 

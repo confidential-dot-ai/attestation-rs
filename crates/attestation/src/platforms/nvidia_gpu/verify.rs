@@ -43,7 +43,7 @@ pub async fn gather_bundle(
             arch,
             claims_version: "2.0".into(),
         };
-        nras.insert(arch, nras_attest(store, &request).await?);
+        nras.insert(arch, nras_attest(store, &request, now).await?);
     }
     let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
     let known = |jwks: &NrasJwks| {
@@ -58,6 +58,13 @@ pub async fn gather_bundle(
         })
     };
     if !known(&jwks.0) {
+        if jwks.1.from == crate::collateral::Source::Attached {
+            // The attester cut the set to the keys its tokens name: a
+            // missing one will not appear on retry.
+            return Err(AttestationError::JwsVerification(
+                "the attached NRAS key set lacks a key the tokens name".into(),
+            ));
+        }
         store.refresh::<NrasJwks>(&jwks_url, now).await?;
         jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
         if !known(&jwks.0) {
@@ -71,8 +78,51 @@ pub async fn gather_bundle(
     Ok((GpuCollateralSet { nras, jwks }, used))
 }
 
+/// NRAS's answer for `request`: held (attached by the attester, which asked
+/// NRAS with the same nonce) unless expired at `now`, else asked now. The
+/// answer is NVIDIA-signed and bound to the nonce, so who asked does not
+/// matter. Only the answer is verified: a held answer is not checked against
+/// the bundle's device evidence, which then carries no weight (an attester
+/// could always relay another GPU's evidence under the same nonce).
+async fn nras_attest(store: &Store, request: &NrasRequest, now: i64) -> Result<serde_json::Value> {
+    let key = nras_answer_url(request);
+    let body = match store.held_body(&key).filter(|b| !expired(b, now)) {
+        Some(body) => body.to_vec(),
+        None => ask_nras(store, request).await?,
+    };
+    let answer = serde_json::from_slice(&body)
+        .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))?;
+    store.record(key, body, None);
+    Ok(answer)
+}
+
+/// Whether the overall token of an NRAS answer has an `exp` before `now`.
+/// Any other answer is left to verification.
+fn expired(answer: &[u8], now: i64) -> bool {
+    let exp = || -> Option<f64> {
+        let (overall, _) = split_eat_response(&serde_json::from_slice(answer).ok()?).ok()?;
+        let payload = URL_SAFE_NO_PAD.decode(overall.split('.').nth(1)?).ok()?;
+        serde_json::from_slice::<serde_json::Value>(&payload)
+            .ok()?
+            .get("exp")?
+            .as_f64()
+    };
+    exp().is_some_and(|exp| now > exp.floor() as i64)
+}
+
+/// Where an NRAS answer is held: NVIDIA's NRAS endpoint for the request's
+/// architecture and the request nonce, whichever NRAS URL either side uses.
+fn nras_answer_url(request: &NrasRequest) -> String {
+    use crate::platforms::nvidia_gpu::provider::{NRAS_GPU_URL, NRAS_SWITCH_URL};
+    let url = match request.arch {
+        NvidiaGpuArch::Ls10 => NRAS_SWITCH_URL,
+        _ => NRAS_GPU_URL,
+    };
+    format!("{url}#nonce={}", request.nonce)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
+async fn ask_nras(store: &Store, request: &NrasRequest) -> Result<Vec<u8>> {
     match store.vendor() {
         Some(vendor) => vendor.nras_attest(request).await,
         None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
@@ -80,8 +130,28 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn nras_attest(_store: &Store, _request: &NrasRequest) -> Result<serde_json::Value> {
+async fn ask_nras(_store: &Store, _request: &NrasRequest) -> Result<Vec<u8>> {
     Err(crate::error::Unavailable::offline().into_error("NRAS attestation"))
+}
+
+/// `jwks` (a key set) with only the keys the tokens in `answers` name.
+pub(crate) fn keys_used(jwks: &[u8], answers: &GpuCollateralSet) -> Vec<u8> {
+    let kids: Vec<String> = answers
+        .nras
+        .values()
+        .filter_map(|a| split_eat_response(a).ok())
+        .flat_map(|(overall, subs)| {
+            std::iter::once(overall)
+                .chain(subs.into_iter().map(|(_, t)| t))
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|t| jwt_kid(&t))
+        .collect();
+    let Ok(mut set) = serde_json::from_slice::<Jwks>(jwks) else {
+        return jwks.to_vec();
+    };
+    set.keys.retain(|k| kids.contains(&k.kid));
+    serde_json::to_vec(&set).expect("a key set serializes")
 }
 
 /// The `kid` a compact JWS names, if it can be read.

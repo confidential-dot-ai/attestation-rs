@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-use super::{refused, Collateral, Dates, Fmspc, PckCa};
+use super::{refused, Collateral, Dates, Fmspc, PckCa, VersionFloors};
 use crate::error::Result;
 use crate::platforms::tdx::dcap;
 
@@ -148,6 +148,9 @@ impl Collateral for TcbInfo {
             Some(self.evaluation_number),
         )
     }
+    fn floor(_: &Fmspc, floors: &VersionFloors) -> Option<u64> {
+        Some(floors.intel_tcb_info)
+    }
 }
 
 impl Collateral for QeIdentity {
@@ -187,6 +190,9 @@ impl Collateral for QeIdentity {
             self.next_update,
             Some(self.evaluation_number),
         )
+    }
+    fn floor(_: &(), floors: &VersionFloors) -> Option<u64> {
+        Some(floors.intel_qe_identity)
     }
 }
 

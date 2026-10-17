@@ -35,6 +35,10 @@ pub struct AttestResponse {
     /// collection succeeded. Round-trips through `/verify` unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvidia_gpu: Option<Value>,
+    /// The collateral a verifier needs, as the vendors served it. Round-trips
+    /// through `/verify` unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collateral: Option<Value>,
 }
 
 pub async fn handler(
@@ -75,12 +79,27 @@ pub async fn handler(
             attestation::attest(platform, &report_data, &options).await?
         };
 
+        let evidence_bytes = match state
+            .verifier
+            .attach_collateral(&evidence_bytes, &report_data)
+            .await
+        {
+            Ok(with_collateral) => with_collateral,
+            Err(e) => {
+                tracing::warn!(%e, "collateral not attached");
+                evidence_bytes
+            }
+        };
+
         let mut envelope: Value = serde_json::from_slice(&evidence_bytes)
             .map_err(|e| ApiError::Internal(format!("failed to parse evidence: {e}")))?;
 
         let gpu_field = envelope
             .as_object_mut()
             .and_then(|obj| obj.remove("nvidia_gpu"));
+        let collateral = envelope
+            .as_object_mut()
+            .and_then(|obj| obj.remove("collateral"));
 
         // Keep the service response shape stable: top-level `platform` plus
         // platform-specific `evidence` (+ optional `nvidia_gpu`). /verify
@@ -89,6 +108,7 @@ pub async fn handler(
             platform: format!("{platform}"),
             evidence: envelope.get("evidence").cloned().unwrap_or(envelope),
             nvidia_gpu: gpu_field,
+            collateral,
         }))
     }
 

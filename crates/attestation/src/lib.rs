@@ -55,6 +55,15 @@ pub mod utils;
 #[cfg(all(test, any(feature = "snp", feature = "tdx")))]
 mod testing;
 
+#[cfg(all(
+    test,
+    feature = "tdx",
+    feature = "snp",
+    feature = "gcp-tdx",
+    feature = "gcp-snp"
+))]
+mod attached_tests;
+
 pub use collateral::CollateralUsed;
 pub use context::{Context, HeldResponse};
 pub use error::{AttestationError, Result};
@@ -248,6 +257,7 @@ pub async fn attest(
         platform,
         evidence: evidence_value,
         nvidia_gpu: None,
+        collateral: Vec::new(),
     };
 
     serde_json::to_vec(&envelope).map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
@@ -281,6 +291,21 @@ pub async fn attest_with_nvidia_gpu(
 
 /// Maximum accepted evidence size (10 MiB).
 pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
+
+/// The longest Retry-After [`Verifier::attach_collateral`] waits out, in
+/// seconds.
+pub const ATTACH_RETRY_AFTER: u64 = 5;
+
+fn parse_envelope(evidence_json: &[u8]) -> Result<AttestationEvidence> {
+    if evidence_json.len() > MAX_EVIDENCE_SIZE {
+        return Err(AttestationError::EvidenceTooLarge {
+            size: evidence_json.len(),
+            max: MAX_EVIDENCE_SIZE,
+        });
+    }
+    serde_json::from_slice(evidence_json)
+        .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
+}
 
 /// Reusable verifier: reads the envelope's platform, takes that platform's
 /// params from [`Policies`], and runs its [`Platform::verify`].
@@ -320,16 +345,109 @@ impl Verifier {
     /// `policies`, invalid params, evidence that is not genuine, or
     /// collateral that could not be fetched.
     pub async fn verify(&self, evidence_json: &[u8], policies: &Policies) -> Result<Verified> {
-        if evidence_json.len() > MAX_EVIDENCE_SIZE {
-            return Err(AttestationError::EvidenceTooLarge {
-                size: evidence_json.len(),
-                max: MAX_EVIDENCE_SIZE,
-            });
+        let envelope = parse_envelope(evidence_json)?;
+        let store = self
+            .ctx
+            .store()
+            .view(envelope.held_collateral(), &policies.floors, false);
+        self.verify_envelope(envelope, policies, &store).await
+    }
+
+    /// Evidence made here, with the collateral its verifier needs attached:
+    /// every piece is gathered through this verifier's store (and checked)
+    /// as a verification would. `report_data` is what the evidence was made
+    /// with; it is the GPU nonce when the envelope carries a GPU bundle.
+    ///
+    /// When collateral is unavailable, it tries once more after a short
+    /// Retry-After (at most [`ATTACH_RETRY_AFTER`] seconds, 1 s when none is
+    /// given), then attaches the pieces it got: the verifier fetches the
+    /// rest.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::verify`] (with `Policies::all()` for the CPU evidence),
+    /// except that unavailable collateral is not an error.
+    pub async fn attach_collateral(
+        &self,
+        evidence_json: &[u8],
+        report_data: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut envelope = parse_envelope(evidence_json)?;
+        let policies = Policies::all();
+        let store = self
+            .ctx
+            .store()
+            .view(envelope.held_collateral(), &policies.floors, true);
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut gathered = self.gather(&envelope, report_data, &store).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Err(e) = &gathered {
+            let wait = e.retry_after().unwrap_or(1);
+            if e.is_retryable() && wait <= ATTACH_RETRY_AFTER {
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                gathered = self.gather(&envelope, report_data, &store).await;
+            }
         }
+        let used = match gathered {
+            Ok(used) => used,
+            Err(e) if e.is_retryable() => {
+                log::warn!("attaching the collateral it got: {e}");
+                store.used()
+            }
+            Err(e) => return Err(e),
+        };
+        envelope.attach(used);
+        serde_json::to_vec(&envelope)
+            .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))
+    }
 
-        let envelope: AttestationEvidence = serde_json::from_slice(evidence_json)
-            .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
+    /// The collateral a verifier of `envelope` uses, gathered through the
+    /// recording `store`.
+    #[cfg_attr(not(feature = "nvidia-gpu"), allow(unused_variables))]
+    async fn gather(
+        &self,
+        envelope: &AttestationEvidence,
+        report_data: &[u8],
+        store: &collateral::Store,
+    ) -> Result<Vec<context::HeldResponse>> {
+        let policies = Policies::all();
+        let now = self.ctx.now();
+        let _ = self
+            .verify_platform(
+                store,
+                envelope.platform,
+                envelope.evidence.clone(),
+                &policies,
+                now,
+            )
+            .await?;
+        #[allow(unused_mut)]
+        let mut used = store.used();
+        #[cfg(feature = "nvidia-gpu")]
+        if let Some(bundle) = &envelope.nvidia_gpu {
+            let params = NvidiaGpuParams {
+                user_nonce: Some(report_data.to_vec()),
+                ..Default::default()
+            };
+            let (set, _) =
+                platforms::nvidia_gpu::gather_bundle(bundle, &params, store, now).await?;
+            let jwks_url = store.nras_jwks_url()?;
+            used = store.used();
+            for (url, body, _) in &mut used {
+                if *url == jwks_url {
+                    *body = platforms::nvidia_gpu::verify::keys_used(body, &set);
+                }
+            }
+        }
+        Ok(used)
+    }
 
+    async fn verify_envelope(
+        &self,
+        envelope: AttestationEvidence,
+        policies: &Policies,
+        store: &collateral::Store,
+    ) -> Result<Verified> {
         // Rules that need no verification run first, so caller misuse is never
         // reported after (or as) a collateral fetch.
         policies.check_allowed(envelope.platform)?;
@@ -368,15 +486,14 @@ impl Verifier {
 
         let now = self.ctx.now();
         let (platform, used) = self
-            .verify_platform(envelope.platform, envelope.evidence, policies, now)
+            .verify_platform(store, envelope.platform, envelope.evidence, policies, now)
             .await?;
 
         #[cfg(feature = "nvidia-gpu")]
         let (gpu, used) = match (envelope.nvidia_gpu, &policies.gpu) {
             (Some(bundle), Some(params)) => {
                 let (collateral, jwks) =
-                    platforms::nvidia_gpu::gather_bundle(&bundle, params, self.ctx.store(), now)
-                        .await?;
+                    platforms::nvidia_gpu::gather_bundle(&bundle, params, store, now).await?;
                 let gpu = platforms::nvidia_gpu::verify_bundle(&bundle, params, &collateral, now)?;
                 (Some(gpu), [used, vec![jwks]].concat())
             }
@@ -394,12 +511,12 @@ impl Verifier {
     #[allow(unused_variables)]
     async fn verify_platform(
         &self,
+        store: &collateral::Store,
         platform: PlatformType,
         evidence: serde_json::Value,
         policies: &Policies,
         now: i64,
     ) -> Result<(PlatformResult, Vec<CollateralUsed>)> {
-        let store = self.ctx.store();
         match platform {
             #[cfg(feature = "snp")]
             PlatformType::Snp => {
