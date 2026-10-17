@@ -25,8 +25,13 @@ vendors  <-  site cache (upstream: the vendors; the only egress to vendors)
   needs (CRLs, TCB Info, QE Identity, the NRAS key set) are looked at every
   10 minutes; per-chip VCEKs and GCE endorsements are not refreshed ahead.
 - At most 16 pieces not in memory are fetched at once; a request for another
-  one gets `503` with `Retry-After: 5`. After an upstream outage, a piece is
-  not asked for again for 10 seconds; its clients get `503` meanwhile.
+  one gets `503` with `Retry-After: 5`. At most 10 pieces held nowhere (not
+  in memory, not on disk) are fetched from one vendor host per second; more
+  get `503` with `Retry-After: 1`. After an upstream outage, a piece is not
+  asked for again for 10 seconds (or the upstream's Retry-After); its
+  clients get `503` meanwhile. A `429` or `503` from the upstream pauses
+  every fetch to that vendor host for its Retry-After (10 seconds without
+  one).
 - A connection must send its request headers within 10 seconds, and is
   closed after 60 seconds.
 - When the upstream is down, the last good copy is served; after a restart
@@ -42,8 +47,8 @@ vendors  <-  site cache (upstream: the vendors; the only egress to vendors)
 ## Guests
 
 Inside a confidential VM the attestation library finds the host's cache by
-itself: it connects to vsock port 8455 of the host (CID 2). Once that
-succeeds, all collateral comes from there and the vendors are never contacted
+itself: it asks `GET /health` at vsock port 8455 of the host (CID 2). Once
+that answers 200, all collateral comes from there and the vendors are never contacted
 from the guest; while nothing listens, the guest uses the vendors and tries
 the host again every minute. A `404` from a cache is not taken as the
 vendor's word: to the guest it is `CollateralUnavailable`, not a refusal.
@@ -64,12 +69,29 @@ Configuration: see `config.example.toml` (`dir`, `upstream`, `listen`,
 `vsock_port`, `warm`). The listener speaks plain HTTP.
 
 `GET /health` answers 200 while the process runs; `GET /ready` answers 200
-once the `warm` pieces were looked at or any piece was served, 503 before.
+once a piece was fetched (a `warm` one or any served), or at once when
+`warm` is empty; 503 before.
+
+Every request is logged at info level (target `attestation_cache::request`):
+method, path, status, where a served piece came from (`memory`, `disk`,
+`vendor`, `cache`) and the time taken. A request without a valid key is
+logged at warn, and a piece refused for not verifying at warn. Keys,
+`Authorization` headers and bodies are never logged. Set `RUST_LOG` (default
+`info`) to change the level.
 
 With `keys` set, every other request needs `Authorization: Bearer KEY` with
 one of them (else 401); a host cache sends its site's key with
 `upstream_key`. Keys are compared in constant time and never logged. Use
-keys only over HTTPS (behind the TLS terminator).
+keys only over HTTPS (behind the TLS terminator). Keys apply to every
+listener, vsock included, and guests never send a key: so set `keys` on site
+caches, not on a host cache that serves guests (keep its TCP listener on
+loopback instead).
+
+A site cache reachable by anyone beyond its intended clients must set
+`keys`: without them, anyone can make it fetch new pieces (for example many
+made-up VCEKs) and use up the site's request budget at the vendor. The rate
+limits above bound this, but also slow the site's real clients while it
+lasts.
 
 ## Replicas
 
@@ -86,7 +108,7 @@ different replica each time; that is fine, as every replica serves verified
 vendor bytes.
 
 Without `keys`, it is an unauthenticated mirror of public vendor collateral: anyone who can
-reach it can make it fetch from the vendors, within the limits above. Make it
+reach it can make it fetch from the vendors, within the limits above (see keys). Make it
 reachable only by its intended clients (loopback and the host's guests over
 vsock for a host cache; the host caches, for a site cache). A site cache that host
 caches reach over the network must be served over HTTPS, for example behind

@@ -464,6 +464,35 @@ mod native {
     const OUTAGE: Duration = Duration::from_secs(10);
     /// Refetch a piece without a nextUpdate (the NRAS key set) this often.
     const MAX_AGE: Duration = Duration::from_secs(3600);
+    /// After a 429 or 503 without a Retry-After, leave that vendor host
+    /// alone this long (never longer than `recheck`).
+    const HOST_PAUSE: Duration = Duration::from_secs(10);
+    /// At most this many pieces not held anywhere are fetched from one
+    /// vendor host per second.
+    pub(crate) const COLD_PER_SECOND: u32 = 10;
+
+    /// One vendor host: until when it asked to be left alone, and the cold
+    /// fetches started in the current second.
+    #[derive(Default)]
+    struct Host {
+        paused_until: Option<Instant>,
+        second: Option<Instant>,
+        cold: u32,
+    }
+
+    /// The vendor host of `url`.
+    fn host(url: &str) -> &str {
+        let rest = url.strip_prefix("https://").unwrap_or(url);
+        rest.split(['/', '?']).next().unwrap_or(rest)
+    }
+
+    fn wait(seconds: u64, detail: &str) -> Failure {
+        Failure::Unavailable(Unavailable {
+            status: None,
+            retry_after: Some(seconds.max(1)),
+            detail: detail.into(),
+        })
+    }
 
     pub(crate) struct Native {
         pub(super) mem: moka::future::Cache<String, Entry>,
@@ -475,6 +504,7 @@ mod native {
         pub(crate) vendor: Option<Vendor>,
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
+        hosts: Mutex<HashMap<String, Host>>,
     }
 
     impl Native {
@@ -485,6 +515,7 @@ mod native {
                 disk: None,
                 vendor,
                 recheck: Duration::from_secs(300),
+                hosts: Mutex::default(),
             }
         }
 
@@ -551,15 +582,37 @@ mod native {
                 .as_ref()
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
             if let Some((at, failure)) = self.failed.get(url).await {
-                let stands = match failure {
-                    Failure::Unavailable(_) => self.recheck.min(OUTAGE),
+                let stands = match &failure {
+                    Failure::Unavailable(e) => self
+                        .recheck
+                        .min(e.retry_after.map_or(OUTAGE, Duration::from_secs)),
                     _ => self.recheck,
                 };
                 if at.elapsed() < stands {
                     return Err(failure);
                 }
             }
+            if let Some(until) = self
+                .lock_hosts()
+                .get(host(url))
+                .and_then(|h| h.paused_until)
+            {
+                if let Some(left) = until.checked_duration_since(Instant::now()) {
+                    return Err(wait(left.as_secs(), "the vendor asked to wait"));
+                }
+            }
             let (direct, fetched) = Box::pin(vendor.fetch(url)).await;
+            if let Err(e) = &fetched {
+                if matches!(e.status, Some(429 | 503)) {
+                    let pause = self
+                        .recheck
+                        .min(e.retry_after.map_or(HOST_PAUSE, Duration::from_secs));
+                    self.lock_hosts()
+                        .entry(host(url).to_string())
+                        .or_default()
+                        .paused_until = Some(Instant::now() + pause);
+                }
+            }
             let (body, chain) = match fetched {
                 Ok(fetched) => fetched,
                 Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
@@ -600,6 +653,28 @@ mod native {
             check::<C>(id, body, chain, from)
         }
 
+        fn lock_hosts(&self) -> std::sync::MutexGuard<'_, HashMap<String, Host>> {
+            self.hosts.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// Count a fetch of a piece held nowhere against its vendor host's
+        /// [`COLD_PER_SECOND`].
+        fn admit_cold(&self, url: &str) -> std::result::Result<(), Failure> {
+            let mut hosts = self.lock_hosts();
+            let h = hosts.entry(host(url).to_string()).or_default();
+            if h.second
+                .is_none_or(|s| s.elapsed() >= Duration::from_secs(1))
+            {
+                h.second = Some(Instant::now());
+                h.cold = 0;
+            }
+            if h.cold >= COLD_PER_SECOND {
+                return Err(wait(1, "too many new pieces from this vendor at once"));
+            }
+            h.cold += 1;
+            Ok(())
+        }
+
         fn store(&self, url: &str, entry: &Entry) {
             if let Some(disk) = &self.disk {
                 disk.write(url, &entry.body, entry.issuer_chain.as_deref());
@@ -635,7 +710,14 @@ mod native {
                     return Ok(e.clone());
                 }
             }
-            match (self.fetch::<C>(url, id).await, on_disk) {
+            let fetched = match &on_disk {
+                Some(_) => self.fetch::<C>(url, id).await,
+                None => match self.admit_cold(url) {
+                    Ok(()) => self.fetch::<C>(url, id).await,
+                    Err(e) => Err(e),
+                },
+            };
+            match (fetched, on_disk) {
                 (Ok(new), Some(old)) if !new.dates.not_older_than(&old.dates) => Ok(old),
                 (Ok(new), _) => {
                     self.store(url, &new);
@@ -821,6 +903,40 @@ mod tests {
         // Too short a window for both rules: a day before nextUpdate wins.
         assert_eq!(refresh_at(&Dates::window(0, 2 * day, None)), day);
         assert_eq!(refresh_at(&Dates::default()), i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn a_vendor_that_says_wait_is_left_alone_for_every_piece() {
+        let v = vendor(vec![status(429, vec![])], Duration::ZERO).await;
+        let ctx = Context::new().with_test_vendor(&v.base);
+        for i in 0..20u8 {
+            let err = ctx
+                .store()
+                .get::<TcbInfo>(&[0, 0, 0, 0, 0, i], NOW)
+                .await
+                .err()
+                .unwrap();
+            assert!(err.is_retryable(), "{err}");
+        }
+        // The first piece: one try and its retry.
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn new_pieces_are_fetched_from_one_vendor_host_at_a_bounded_rate() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = ctx(&v);
+        let gets = (0..30u8).map(|i| {
+            let ctx = &ctx;
+            async move { ctx.store().get::<TcbInfo>(&[0, 0, 0, 0, 1, i], NOW).await }
+        });
+        let refused = futures_util::future::join_all(gets)
+            .await
+            .into_iter()
+            .filter(|r| r.as_ref().is_err_and(|e| !e.is_retryable()))
+            .count();
+        let limit = native::COLD_PER_SECOND as usize;
+        assert_eq!((refused, v.hits.load(Ordering::SeqCst)), (limit, limit));
     }
 
     #[tokio::test]

@@ -294,7 +294,16 @@ async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
             (status, _) => assert_eq!(status, 404),
         }
     }
-    assert_eq!(busy, 40 - attestation_cache::MAX_COLD);
+    // Over the cap, and over the vendor host's rate of new pieces.
+    assert!(busy >= 40 - attestation_cache::MAX_COLD, "{busy}");
+    let asked = v
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains("fmspc=0000"))
+        .count();
+    assert!(asked <= attestation_cache::MAX_COLD, "{asked}");
 }
 
 #[tokio::test]
@@ -323,6 +332,22 @@ async fn health_is_always_up_and_ready_once_a_piece_was_served() {
     assert_eq!(get(&cache, "/ready").await.status(), 503);
     assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
     assert_eq!(get(&cache, "/ready").await.status(), 200);
+}
+
+#[tokio::test]
+async fn ready_only_once_a_warm_piece_was_fetched() {
+    let warm = vec![format!("https:/{AMD_CRL}")];
+    for (upstream, ready) in [
+        (dead_upstream().await, 503),
+        (vendor(Duration::ZERO).await.base, 200),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(context(dir.path(), &upstream, None, NOW), &warm);
+        tokio::spawn(cache.clone().keep_fresh());
+        let base = serve(cache).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(get(&base, "/ready").await.status(), ready, "{upstream}");
+    }
 }
 
 #[tokio::test]

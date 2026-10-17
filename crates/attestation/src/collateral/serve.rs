@@ -12,8 +12,8 @@ pub enum Served {
     /// The vendor's response, verified as the piece the URL names, and
     /// whether every client of its kind needs it (CRLs, TCB Info, QE
     /// Identity, the NRAS key set) rather than one chip or image (a VCEK, a
-    /// GCE endorsement).
-    Piece(HeldResponse, bool),
+    /// GCE endorsement), and where the store got it.
+    Piece(HeldResponse, bool, super::Source),
     /// The vendor does not publish it (404).
     NotPublished(String),
     /// The only copies found do not verify.
@@ -103,9 +103,9 @@ impl Store {
     async fn raw<C: Collateral>(&self, id: &C::Id, now: i64, shared: bool) -> Served {
         let view = self.view(Vec::new(), &Default::default(), true);
         match view.lookup::<C>(id, now).await {
-            Ok(_) => match view.used().pop() {
-                Some(piece) => Served::Piece(piece, shared),
-                None => Served::Unknown,
+            Ok((_, used)) => match view.used().pop() {
+                Some(piece) => Served::Piece(piece, shared, used.from),
+                None => Served::Refused("internal error: the store kept no response".into()),
             },
             Err(Failure::NotPublished(why)) => Served::NotPublished(why),
             Err(Failure::Unavailable(e)) if e.not_found() => Served::NotPublished(e.detail),
@@ -192,7 +192,7 @@ mod tests {
         let store = testing::context(held.clone());
         for (url, body, chain) in held {
             match store.store().serve(&url, testing::NOW).await {
-                Served::Piece(piece, _) => assert_eq!(piece, (url, body, chain)),
+                Served::Piece(piece, ..) => assert_eq!(piece, (url, body, chain)),
                 other => panic!("{url}: {other:?}"),
             }
         }

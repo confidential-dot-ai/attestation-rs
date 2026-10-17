@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use attestation::collateral::Served;
+use attestation::collateral::{Served, Source};
 use attestation::Context;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -18,7 +18,7 @@ use axum::response::Response;
 use serde::Deserialize;
 
 /// The operator's configuration file (TOML).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Where verified collateral is kept across restarts.
@@ -50,6 +50,23 @@ impl Default for Config {
             keys: Vec::new(),
             upstream_key: None,
         }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("dir", &self.dir)
+            .field("upstream", &self.upstream)
+            .field("listen", &self.listen)
+            .field("vsock_port", &self.vsock_port)
+            .field("warm", &self.warm)
+            .field(
+                "upstream_key",
+                &self.upstream_key.as_ref().map(|_| "redacted"),
+            )
+            .field("keys", &format_args!("[{} redacted]", self.keys.len()))
+            .finish()
     }
 }
 
@@ -128,39 +145,71 @@ impl Cache {
     }
 
     /// Fetch every known piece now and then on every sweep; each is
-    /// refetched when its refresh time has come.
+    /// refetched when its refresh time has come. Ready once a piece was
+    /// served, or there is nothing to warm.
     pub async fn keep_fresh(self) {
         loop {
-            let urls: Vec<String> = self.known.lock().unwrap().iter().cloned().collect();
+            let urls: Vec<String> = lock(&self.known).iter().cloned().collect();
+            let mut any = urls.is_empty();
             for url in urls {
-                if let Served::Unavailable { detail, .. } =
-                    self.ctx.store().serve(&url, self.ctx.now()).await
-                {
-                    tracing::warn!(%url, %detail, "could not refresh");
+                match self.ctx.store().serve(&url, self.ctx.now()).await {
+                    Served::Piece(..) => any = true,
+                    Served::Unavailable { detail, .. } => {
+                        tracing::warn!(%url, %detail, "could not refresh")
+                    }
+                    _ => {}
                 }
             }
-            self.set_ready();
+            if any {
+                self.set_ready();
+            }
             tokio::time::sleep(SWEEP).await;
+        }
+    }
+
+    /// Keep `url` fresh on every sweep, up to [`MAX_KNOWN`] pieces.
+    fn remember(&self, url: &str) {
+        let mut known = lock(&self.known);
+        if known.len() < MAX_KNOWN {
+            known.insert(url.to_string());
         }
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 async fn handle(State(cache): State<Cache>, request: Request) -> Response {
+    let started = std::time::Instant::now();
     let ready = cache.ready.load(std::sync::atomic::Ordering::Relaxed);
+    let path = request.uri().path();
+    let mut from = None;
     let mut response = if request.method() != Method::GET {
         status(StatusCode::METHOD_NOT_ALLOWED, "GET only".into())
-    } else if request.uri().path() == "/health" {
+    } else if path == "/health" {
         status(StatusCode::OK, "ok".into())
-    } else if request.uri().path() == "/ready" {
+    } else if path == "/ready" {
         match ready {
             true => status(StatusCode::OK, "ready".into()),
             false => status(StatusCode::SERVICE_UNAVAILABLE, "warming up".into()),
         }
     } else if !authorized(&cache.keys, request.headers()) {
+        tracing::warn!(target: "attestation_cache::request", path = %request.uri(), "no valid bearer key");
         status(StatusCode::UNAUTHORIZED, "a bearer key is required".into())
     } else {
-        answer(&cache, request.uri()).await
+        let (response, source) = answer(&cache, request.uri()).await;
+        from = source;
+        response
     };
+    tracing::info!(
+        target: "attestation_cache::request",
+        method = %request.method(),
+        path = %request.uri(),
+        status = response.status().as_u16(),
+        from = from.map(|f| f.to_string()),
+        ms = started.elapsed().as_millis() as u64,
+    );
     let headers = response.headers_mut();
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -175,7 +224,8 @@ async fn handle(State(cache): State<Cache>, request: Request) -> Response {
     response
 }
 
-async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
+/// The answer for a vendor URL, and where the piece came from when served.
+async fn answer(cache: &Cache, uri: &axum::http::Uri) -> (Response, Option<Source>) {
     let url = match uri.query() {
         Some(query) => format!("https:/{}?{query}", uri.path()),
         None => format!("https:/{}", uri.path()),
@@ -184,25 +234,25 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
     let _fetching = if store.holds(&url) {
         None
     } else {
-        let mut fetching = cache.cold.lock().unwrap();
+        let mut fetching = lock(&cache.cold);
         if fetching.len() >= MAX_COLD && !fetching.contains(&url) {
             let mut response = status(StatusCode::SERVICE_UNAVAILABLE, "busy".into());
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from(BUSY_RETRY_AFTER));
-            return response;
+            return (response, None);
         }
-        fetching.insert(url.clone());
-        Some(Fetching(&cache.cold, url.clone()))
+        // A second request for a URL being fetched waits for that fetch.
+        fetching
+            .insert(url.clone())
+            .then(|| Fetching(&cache.cold, url.clone()))
     };
-    match store.serve(&url, cache.ctx.now()).await {
-        Served::Piece((_, body, chain), shared) => {
+    let response = match store.serve(&url, cache.ctx.now()).await {
+        Served::Piece((_, body, chain), shared, from) => {
             cache.set_ready();
-            let mut known = cache.known.lock().unwrap();
-            if shared && known.len() < MAX_KNOWN {
-                known.insert(url.clone());
+            if shared {
+                cache.remember(&url);
             }
-            drop(known);
             let mut response = Response::new(Body::from(body));
             let name = ISSUER_CHAIN_HEADERS
                 .iter()
@@ -213,11 +263,14 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
                     .expect("percent-encoded text is a header value");
                 response.headers_mut().insert(name, value);
             }
-            response
+            return (response, Some(from));
         }
         Served::NotPublished(why) => status(StatusCode::NOT_FOUND, why),
         Served::Unknown => status(StatusCode::NOT_FOUND, "not a collateral URL".into()),
-        Served::Refused(why) => status(StatusCode::BAD_GATEWAY, why),
+        Served::Refused(why) => {
+            tracing::warn!(%url, %why, "refused");
+            status(StatusCode::BAD_GATEWAY, why)
+        }
         Served::Unavailable {
             retry_after,
             detail,
@@ -230,7 +283,8 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
             }
             response
         }
-    }
+    };
+    (response, None)
 }
 
 /// Whether the request carries one of `keys`, or no key is needed.
@@ -258,7 +312,7 @@ struct Fetching<'a>(&'a Mutex<HashSet<String>>, String);
 
 impl Drop for Fetching<'_> {
     fn drop(&mut self) {
-        self.0.lock().unwrap().remove(&self.1);
+        lock(self.0).remove(&self.1);
     }
 }
 
@@ -332,7 +386,24 @@ pub async fn serve_vsock(router: axum::Router, port: u32) -> std::io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::*;
+
+    #[test]
+    fn at_most_max_known_pieces_are_kept_fresh() {
+        let cache = Cache::new(Context::offline(), &[]);
+        for i in 0..MAX_KNOWN + 10 {
+            cache.remember(&format!("https://example/{i}"));
+        }
+        assert_eq!(lock(&cache.known).len(), MAX_KNOWN);
+    }
+
+    #[test]
+    fn the_keys_are_not_in_the_debug_output() {
+        let config: Config =
+            toml::from_str("keys = [\"k-secret-1\"]\nupstream_key = \"u-secret-2\"").unwrap();
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+    }
 
     #[test]
     fn the_example_config_loads_and_unknown_keys_are_refused() {
