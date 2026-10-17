@@ -95,7 +95,7 @@ async fn cache(dir: &std::path::Path, upstream: &str, at: i64) -> String {
     let router = Cache::new(ctx, &[]).router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    tokio::spawn(attestation_cache::serve(listener, router));
     base
 }
 
@@ -218,4 +218,90 @@ async fn what_the_upstream_does_not_publish_is_404() {
     let cache = cache(dir.path(), &v.base, NOW).await;
     let response = get(&cache, "/kdsintf.amd.com/vcek/v1/Milan/crl").await;
     assert_eq!(response.status(), 404);
+}
+
+/// An upstream that answers every request 503, counting requests.
+async fn failing_upstream() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = vec![0; 8192];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 503 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    (base, hits)
+}
+
+#[tokio::test]
+async fn while_the_upstream_is_down_cold_clients_do_not_each_ask_it() {
+    let (upstream, hits) = failing_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = cache(dir.path(), &upstream, NOW).await;
+    for _ in 0..20 {
+        assert_eq!(get(&cache, AMD_CRL).await.status(), 503);
+    }
+    // One fetch: a try and its one retry.
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
+    let v = vendor(Duration::from_millis(500)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = cache(dir.path(), &v.base, NOW).await;
+    assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
+    let clients: Vec<_> = (0..40)
+        .map(|i| {
+            let cache = cache.clone();
+            let path = format!(
+                "/api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=0000000000{i:02x}"
+            );
+            tokio::spawn(async move {
+                let response = get(&cache, &path).await;
+                (
+                    response.status(),
+                    response.headers().contains_key("retry-after"),
+                )
+            })
+        })
+        .collect();
+    // A piece in memory is still served while cold fetches are at the cap.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
+    let mut busy = 0;
+    for client in clients {
+        match client.await.unwrap() {
+            (status, retry_after) if status == 503 => {
+                assert!(retry_after);
+                busy += 1;
+            }
+            (status, _) => assert_eq!(status, 404),
+        }
+    }
+    assert_eq!(busy, 40 - attestation_cache::MAX_COLD);
+}
+
+#[tokio::test]
+async fn a_connection_slow_to_send_its_headers_is_closed() {
+    let v = vendor(Duration::ZERO).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = cache(dir.path(), &v.base, NOW).await;
+    let mut sock = tokio::net::TcpStream::connect(cache.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    sock.write_all(b"GET /x HTTP/1.1\r\n").await.unwrap();
+    let start = std::time::Instant::now();
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(20), sock.read_to_end(&mut buf)).await;
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(15), "{took:?}");
+    assert!(!String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
 }

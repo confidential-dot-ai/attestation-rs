@@ -4,7 +4,7 @@
 //! another attestation-cache; every piece is verified against the roots
 //! compiled into the attestation library before it is kept or served.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,12 +67,24 @@ const ISSUER_CHAIN_HEADERS: [(&str, &str); 3] = [
 /// How often pieces are looked at again; each is refetched when its own
 /// refresh time has come.
 const SWEEP: Duration = Duration::from_secs(600);
+/// At most this many shared pieces served are kept fresh, besides `warm`.
+const MAX_KNOWN: usize = 1024;
+/// At most this many pieces not in memory are fetched at once; requests for
+/// more are answered 503 with [`BUSY_RETRY_AFTER`].
+pub const MAX_COLD: usize = 16;
+const BUSY_RETRY_AFTER: u32 = 5;
+/// A connection may take this long to send its request headers, and stay
+/// open this long in all.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct Cache {
     ctx: Arc<Context>,
-    /// Every URL served or warmed, looked at again on each sweep.
+    /// Warmed URLs and shared pieces served, looked at again on each sweep.
     known: Arc<Mutex<BTreeSet<String>>>,
+    /// URLs not in memory being fetched now.
+    cold: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Cache {
@@ -80,12 +92,15 @@ impl Cache {
         Self {
             ctx: Arc::new(ctx),
             known: Arc::new(Mutex::new(warm.iter().cloned().collect())),
+            cold: Arc::default(),
         }
     }
 
     /// The HTTP service.
     pub fn router(&self) -> axum::Router {
-        axum::Router::new().fallback(serve).with_state(self.clone())
+        axum::Router::new()
+            .fallback(handle)
+            .with_state(self.clone())
     }
 
     /// Fetch every known piece now and then on every sweep; each is
@@ -105,7 +120,7 @@ impl Cache {
     }
 }
 
-async fn serve(State(cache): State<Cache>, request: Request) -> Response {
+async fn handle(State(cache): State<Cache>, request: Request) -> Response {
     let mut response = if request.method() == Method::GET {
         answer(&cache, request.uri()).await
     } else {
@@ -130,9 +145,28 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
         Some(query) => format!("https:/{}?{query}", uri.path()),
         None => format!("https:/{}", uri.path()),
     };
-    match cache.ctx.store().serve(&url, cache.ctx.now()).await {
-        Served::Piece((_, body, chain)) => {
-            cache.known.lock().unwrap().insert(url.clone());
+    let store = cache.ctx.store();
+    let _fetching = if store.holds(&url) {
+        None
+    } else {
+        let mut fetching = cache.cold.lock().unwrap();
+        if fetching.len() >= MAX_COLD && !fetching.contains(&url) {
+            let mut response = status(StatusCode::SERVICE_UNAVAILABLE, "busy".into());
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(BUSY_RETRY_AFTER));
+            return response;
+        }
+        fetching.insert(url.clone());
+        Some(Fetching(&cache.cold, url.clone()))
+    };
+    match store.serve(&url, cache.ctx.now()).await {
+        Served::Piece((_, body, chain), shared) => {
+            let mut known = cache.known.lock().unwrap();
+            if shared && known.len() < MAX_KNOWN {
+                known.insert(url.clone());
+            }
+            drop(known);
             let mut response = Response::new(Body::from(body));
             let name = ISSUER_CHAIN_HEADERS
                 .iter()
@@ -163,6 +197,15 @@ async fn answer(cache: &Cache, uri: &axum::http::Uri) -> Response {
     }
 }
 
+/// A URL in [`Cache::cold`] until dropped.
+struct Fetching<'a>(&'a Mutex<HashSet<String>>, String);
+
+impl Drop for Fetching<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
+}
+
 fn status(code: StatusCode, detail: String) -> Response {
     let mut response = Response::new(Body::from(detail));
     *response.status_mut() = code;
@@ -179,6 +222,23 @@ fn percent_encode(text: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// Serve `router` on `listener`, dropping connections that are slow to send
+/// their headers or open too long.
+pub async fn serve<L: axum::serve::Listener>(mut listener: L, router: axum::Router) {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    loop {
+        let (io, _) = listener.accept().await;
+        let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        tokio::spawn(async move {
+            let connection = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_TIMEOUT)
+                .serve_connection(TokioIo::new(io), service);
+            let _ = tokio::time::timeout(CONNECTION_TIMEOUT, connection).await;
+        });
+    }
 }
 
 /// Serve `router` to the guests of this host on vsock `port`.
@@ -210,7 +270,8 @@ pub async fn serve_vsock(router: axum::Router, port: u32) -> std::io::Result<()>
     }
 
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
-    axum::serve(Listener(listener), router).await
+    serve(Listener(listener), router).await;
+    Ok(())
 }
 
 #[cfg(test)]

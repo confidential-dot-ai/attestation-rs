@@ -52,6 +52,6 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     tracing::info!(listen = %config.listen, upstream = ?config.upstream, dir = %config.dir.display(), "serving collateral");
-    axum::serve(listener, router).await?;
+    attestation_cache::serve(listener, router).await;
     Ok(())
 }

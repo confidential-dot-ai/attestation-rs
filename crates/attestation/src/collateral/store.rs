@@ -444,6 +444,13 @@ impl Store {
         self.native.as_ref()?.vendor.as_ref()
     }
 
+    /// Whether the piece at vendor `url` is in memory.
+    pub fn holds(&self, url: &str) -> bool {
+        self.native
+            .as_ref()
+            .is_some_and(|n| n.mem.contains_key(url))
+    }
+
     /// About how many pieces are held in memory.
     pub fn count(&self) -> u64 {
         self.native.as_ref().map_or(0, |n| n.mem.entry_count())
@@ -460,14 +467,18 @@ mod native {
     use crate::collateral::disk::Disk;
     use crate::collateral::vendor::Vendor;
 
+    /// How long a failed fetch stands before the upstream is asked again
+    /// (never longer than `recheck`).
+    const OUTAGE: Duration = Duration::from_secs(10);
     /// Refetch a piece without a nextUpdate (the NRAS key set) this often.
     const MAX_AGE: Duration = Duration::from_secs(3600);
 
     pub(crate) struct Native {
         pub(super) mem: moka::future::Cache<String, Entry>,
         /// Pieces the evidence names that the vendor answered "not
-        /// published" for, and when.
-        not_published: moka::future::Cache<String, (Instant, Failure)>,
+        /// published" for, and pieces the upstream failed to send, with the
+        /// answer and when.
+        failed: moka::future::Cache<String, (Instant, Failure)>,
         pub(crate) disk: Option<Disk>,
         pub(crate) vendor: Option<Vendor>,
         /// Do not ask the vendor about one piece more often than this.
@@ -478,7 +489,7 @@ mod native {
         pub(crate) fn new(vendor: Option<Vendor>) -> Self {
             Self {
                 mem: moka::future::Cache::new(4096),
-                not_published: moka::future::Cache::new(4096),
+                failed: moka::future::Cache::new(4096),
                 disk: None,
                 vendor,
                 recheck: Duration::from_secs(300),
@@ -547,8 +558,12 @@ mod native {
                 .vendor
                 .as_ref()
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
-            if let Some((at, failure)) = self.not_published.get(url).await {
-                if at.elapsed() < self.recheck {
+            if let Some((at, failure)) = self.failed.get(url).await {
+                let stands = match failure {
+                    Failure::Unavailable(_) => self.recheck.min(OUTAGE),
+                    _ => self.recheck,
+                };
+                if at.elapsed() < stands {
                     return Err(failure);
                 }
             }
@@ -567,12 +582,23 @@ mod native {
                         "the vendor does not publish it ({})",
                         e.detail
                     ));
-                    self.not_published
+                    self.failed
                         .insert(url.to_string(), (Instant::now(), failure.clone()))
                         .await;
                     return Err(failure);
                 }
-                Err(e) => return Err(Failure::Unavailable(e)),
+                Err(e) => {
+                    // The upstream is down or overloaded: let its clients
+                    // wait out an outage rather than each try again.
+                    let outage = e.status.is_none_or(|s| s >= 500 || matches!(s, 408 | 429));
+                    let failure = Failure::Unavailable(e);
+                    if outage {
+                        self.failed
+                            .insert(url.to_string(), (Instant::now(), failure.clone()))
+                            .await;
+                    }
+                    return Err(failure);
+                }
             };
             let from = if direct {
                 Source::Vendor

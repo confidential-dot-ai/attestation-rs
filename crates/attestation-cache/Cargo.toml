@@ -10,6 +10,8 @@ attestation = { workspace = true, features = ["nvidia-gpu"] }
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }

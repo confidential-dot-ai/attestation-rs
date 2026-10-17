@@ -9,8 +9,11 @@ use crate::context::HeldResponse;
 /// What the store has for a vendor URL.
 #[derive(Debug)]
 pub enum Served {
-    /// The vendor's response, verified as the piece the URL names.
-    Piece(HeldResponse),
+    /// The vendor's response, verified as the piece the URL names, and
+    /// whether every client of its kind needs it (CRLs, TCB Info, QE
+    /// Identity, the NRAS key set) rather than one chip or image (a VCEK, a
+    /// GCE endorsement).
+    Piece(HeldResponse, bool),
     /// The vendor does not publish it (404).
     NotPublished(String),
     /// The only copies found do not verify.
@@ -35,13 +38,13 @@ impl Store {
             for generation in [Milan, Genoa, Turin] {
                 for key in [AmdKey::Vcek, AmdKey::Vlek] {
                     if AmdCrl::url(&(generation, key)) == url {
-                        return self.raw::<AmdCrl>(&(generation, key), now).await;
+                        return self.raw::<AmdCrl>(&(generation, key), now, true).await;
                     }
                 }
             }
             if let Some(id) = vcek_id(url) {
                 if Vcek::url(&id) == url {
-                    return self.raw::<Vcek>(&id, now).await;
+                    return self.raw::<Vcek>(&id, now, false).await;
                 }
             }
         }
@@ -49,14 +52,14 @@ impl Store {
         {
             use super::{PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
             if QeIdentity::url(&()) == url {
-                return self.raw::<QeIdentity>(&(), now).await;
+                return self.raw::<QeIdentity>(&(), now, true).await;
             }
             if RootCrl::url(&()) == url {
-                return self.raw::<RootCrl>(&(), now).await;
+                return self.raw::<RootCrl>(&(), now, true).await;
             }
             for ca in [PckCa::Platform, PckCa::Processor] {
                 if PckCrl::url(&ca) == url {
-                    return self.raw::<PckCrl>(&ca, now).await;
+                    return self.raw::<PckCrl>(&ca, now, true).await;
                 }
             }
             let fmspc = url
@@ -64,7 +67,7 @@ impl Store {
                 .and_then(|(_, f)| hex::decode(f).ok())
                 .and_then(|f| <[u8; 6]>::try_from(f).ok());
             if let Some(fmspc) = fmspc.filter(|f| TcbInfo::url(f) == url) {
-                return self.raw::<TcbInfo>(&fmspc, now).await;
+                return self.raw::<TcbInfo>(&fmspc, now, true).await;
             }
         }
         #[cfg(any(feature = "gcp-tdx", feature = "gcp-snp"))]
@@ -79,24 +82,29 @@ impl Store {
                 if let Some(m) = &measurement {
                     let id = (platform, m.clone());
                     if GceEndorsement::url(&id) == url {
-                        return self.raw::<GceEndorsement>(&id, now).await;
+                        return self.raw::<GceEndorsement>(&id, now, false).await;
                     }
                 }
             }
         }
         #[cfg(feature = "nvidia-gpu")]
-        if url.starts_with("https://nras.attestation.nvidia.com/") && url.ends_with("/jwks.json") {
-            return self.raw::<super::NrasJwks>(&url.to_string(), now).await;
+        {
+            use crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL;
+            let jwks = crate::platforms::nvidia_gpu::jwks_url_for_endpoint(NRAS_GPU_URL)
+                .expect("the built-in NRAS URL has a host");
+            if jwks == url {
+                return self.raw::<super::NrasJwks>(&jwks, now, true).await;
+            }
         }
         let _ = (url, now);
         Served::Unknown
     }
 
-    async fn raw<C: Collateral>(&self, id: &C::Id, now: i64) -> Served {
+    async fn raw<C: Collateral>(&self, id: &C::Id, now: i64, shared: bool) -> Served {
         let view = self.view(Vec::new(), &Default::default(), true);
         match view.lookup::<C>(id, now).await {
             Ok(_) => match view.used().pop() {
-                Some(piece) => Served::Piece(piece),
+                Some(piece) => Served::Piece(piece, shared),
                 None => Served::Unknown,
             },
             Err(Failure::NotPublished(why)) => Served::NotPublished(why),
@@ -184,14 +192,21 @@ mod tests {
         let store = testing::context(held.clone());
         for (url, body, chain) in held {
             match store.store().serve(&url, testing::NOW).await {
-                Served::Piece(piece) => assert_eq!(piece, (url, body, chain)),
+                Served::Piece(piece, _) => assert_eq!(piece, (url, body, chain)),
                 other => panic!("{url}: {other:?}"),
             }
         }
-        let unknown = "https://kdsintf.amd.com/vcek/v1/Genoa/00?blSPL=1";
-        assert!(matches!(
-            store.store().serve(unknown, testing::NOW).await,
-            Served::Unknown
-        ));
+        for unknown in [
+            "https://kdsintf.amd.com/vcek/v1/Genoa/00?blSPL=1",
+            "https://nras.attestation.nvidia.com/zz/jwks.json",
+        ] {
+            assert!(
+                matches!(
+                    store.store().serve(unknown, testing::NOW).await,
+                    Served::Unknown
+                ),
+                "{unknown}"
+            );
+        }
     }
 }

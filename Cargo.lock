@@ -215,6 +215,8 @@ dependencies = [
  "attestation",
  "axum",
  "clap",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "serde",
  "tempfile",
