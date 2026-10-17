@@ -509,7 +509,8 @@ const GENOA_CRL: &[u8] =
 fn online_state(base: &str) -> AppState {
     let mut state = test_state();
     let ctx = attestation::Context::new()
-        .with_vendor_base(base)
+        .with_upstream(base)
+        .unwrap()
         .at(1_792_108_800)
         .unwrap();
     state.verifier = Arc::new(attestation::Verifier::new(ctx));

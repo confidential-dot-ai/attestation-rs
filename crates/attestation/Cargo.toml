@@ -25,7 +25,7 @@ dstack = ["tdx"]       # dstack proxies TDX quotes via Unix socket
 # Verification is pure JWS (ES384) + JSON parsing, so it works on any target
 # including wasm32.
 nvidia-gpu = []
-# Tests only: `Context::with_vendor_base` reroutes vendor fetches, plain HTTP allowed.
+# Tests only: `collateral::save_to_cache_dir` seeds a cache directory.
 test-vendor = []
 # `nvidia-gpu-attest` pulls in NVIDIA's official Rust attestation SDK
 # (nv-attestation-sdk). Build prereqs documented in README.md.
@@ -93,9 +93,17 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 moka = { version = "0.12", features = ["future"] }
 tempfile = "3"
+url = "2"
 
 # Guest-side attestation crates — Linux-only (require TEE hardware / vTPM)
 [target.'cfg(target_os = "linux")'.dependencies]
+# HTTP over vsock to the host's collateral cache.
+tokio-vsock = "0.7"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
 az-cvm-vtpm = { version = "0.8.1", default-features = false, features = ["attester"], optional = true }
 nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev = "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3", optional = true }
 

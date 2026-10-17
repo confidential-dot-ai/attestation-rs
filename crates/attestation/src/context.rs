@@ -71,13 +71,34 @@ impl Context {
         self
     }
 
-    /// Fetch all collateral from `{base}/{vendor host}/{path}`, plain HTTP
-    /// allowed. Only for tests.
-    #[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
+    /// Fetch collateral from an attestation-cache instead of the vendors:
+    /// `https://{host}/{path}` is fetched as `{upstream}/{host}/{path}`, and
+    /// checked like a vendor's answer. `upstream` is an `https://` base URL,
+    /// plain `http://` only on loopback, or `vsock://CID:PORT` (the VM host
+    /// is CID 2). Anything else is [`AttestationError::InvalidParams`].
+    ///
+    /// Without it, the first fetch looks for the host's cache at vsock port
+    /// [`VSOCK_PORT`](crate::collateral::VSOCK_PORT) and uses the vendors
+    /// when nothing answers there. With an upstream, the vendors are never
+    /// asked directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_upstream(mut self, upstream: &str) -> Result<Self> {
+        let parsed = crate::collateral::vendor::Upstream::parse(upstream).ok_or_else(|| {
+            AttestationError::InvalidParams(format!("invalid collateral upstream {upstream:?}"))
+        })?;
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.upstream = parsed;
+        }
+        Ok(self)
+    }
+
+    /// Fetch collateral from the vendors themselves, without looking for a
+    /// host cache.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn with_vendor_base(mut self, base: &str) -> Self {
-        if let Some(native) = self.store.native_mut() {
-            native.vendor = native.vendor.take().map(|v| v.with_base(base));
+    pub fn with_vendors(mut self) -> Self {
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.upstream = crate::collateral::vendor::Upstream::Vendors;
         }
         self
     }
@@ -92,14 +113,12 @@ impl Context {
 
     /// Send NVIDIA GPU evidence to these NRAS endpoints instead of the
     /// default ones (or `NV_NRAS_GPU_URL` / `NV_NRAS_SWITCH_URL`). A URL
-    /// that is not `https` with a host is [`AttestationError::InvalidParams`].
+    /// that is not `https` with a host (or plain `http` on loopback) is
+    /// [`AttestationError::InvalidParams`].
     #[cfg(all(feature = "nvidia-gpu", not(target_arch = "wasm32")))]
     pub fn with_nras_urls(mut self, gpu_url: String, switch_url: String) -> Result<Self> {
         for url in [&gpu_url, &switch_url] {
-            let parsed = reqwest::Url::parse(url).ok();
-            if !parsed.is_some_and(|u| {
-                u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty())
-            }) {
+            if !crate::collateral::vendor::allowed(url) {
                 return Err(AttestationError::InvalidParams(format!(
                     "invalid NRAS URL {url:?}"
                 )));

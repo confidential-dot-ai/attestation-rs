@@ -170,6 +170,18 @@ Fetching what the evidence lacks is a fallback: on in the CLI and servers,
 off with `Context::offline()` (`--offline`); in the browser the JS wrapper
 fetches what `collateral_needed` lists.
 
+Where evidence is made, collateral comes from an `attestation-cache` rather
+than the vendors (see `crates/attestation-cache`). Inside a confidential VM
+the library finds the host's cache by itself: the first fetch connects to
+vsock port 8455 of the host (CID 2); when it accepts, every fetch of the
+process goes there and the vendors are never asked directly; when nothing
+listens, the vendors are used. `Context::with_upstream` sets a cache
+explicitly (`https://` base URL, `http://` on loopback only, or
+`vsock://CID:PORT`). Answers from a cache are verified like the vendors'. Each
+piece is refreshed at a random time in the last quarter of its validity, and
+at least a day before its nextUpdate. NRAS attestation requests (GPU) go to
+NRAS directly.
+
 - No copy anywhere is `CollateralUnavailable { collateral, retry_after,
   detail }`, the only retryable error: it names the piece, the vendor's
   Retry-After when it sent one, and why in `detail`.
