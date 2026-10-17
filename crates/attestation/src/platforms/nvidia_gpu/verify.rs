@@ -58,6 +58,13 @@ pub async fn gather_bundle(
         })
     };
     if !known(&jwks.0) {
+        if jwks.1.from == crate::collateral::Source::Attached {
+            // The attester cut the set to the keys its tokens name: a
+            // missing one will not appear on retry.
+            return Err(AttestationError::JwsVerification(
+                "the attached NRAS key set lacks a key the tokens name".into(),
+            ));
+        }
         store.refresh::<NrasJwks>(&jwks_url, now).await?;
         jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
         if !known(&jwks.0) {
@@ -75,7 +82,7 @@ pub async fn gather_bundle(
 /// NRAS with the same nonce), else asked now. The answer is NVIDIA-signed and
 /// bound to the nonce, so who asked does not matter.
 async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
-    let key = nras_answer_url(store, request);
+    let key = nras_answer_url(request);
     let body = match store.held_body(&key) {
         Some(body) => body.to_vec(),
         None => ask_nras(store, request).await?,
@@ -86,26 +93,14 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
     Ok(answer)
 }
 
-/// Where an NRAS answer is held: the NRAS endpoint and the request nonce.
-fn nras_answer_url(store: &Store, request: &NrasRequest) -> String {
+/// Where an NRAS answer is held: NVIDIA's NRAS endpoint for the request's
+/// architecture and the request nonce, whichever NRAS URL either side uses.
+fn nras_answer_url(request: &NrasRequest) -> String {
     use crate::platforms::nvidia_gpu::provider::{NRAS_GPU_URL, NRAS_SWITCH_URL};
-    #[cfg(not(target_arch = "wasm32"))]
-    let configured = store.vendor().map(|v| match request.arch {
-        NvidiaGpuArch::Ls10 => v.nras.switch_url.clone(),
-        _ => v.nras.gpu_url.clone(),
-    });
-    #[cfg(target_arch = "wasm32")]
-    let configured: Option<String> = {
-        let _ = store;
-        None
+    let url = match request.arch {
+        NvidiaGpuArch::Ls10 => NRAS_SWITCH_URL,
+        _ => NRAS_GPU_URL,
     };
-    let url = configured.unwrap_or_else(|| {
-        match request.arch {
-            NvidiaGpuArch::Ls10 => NRAS_SWITCH_URL,
-            _ => NRAS_GPU_URL,
-        }
-        .to_string()
-    });
     format!("{url}#nonce={}", request.nonce)
 }
 
