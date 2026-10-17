@@ -583,7 +583,11 @@ async fn cmd_verify(args: VerifyArgs) {
     };
     #[cfg(feature = "test-vendor")]
     let ctx = match std::env::var("ATTESTATION_TEST_VENDOR") {
-        Ok(base) => ctx.with_upstream(&base).expect("a loopback test vendor"),
+        // A cache over vsock, or a fake vendor on loopback.
+        Ok(base) if base.starts_with("vsock://") => {
+            ctx.with_upstream(&base).expect("a vsock address")
+        }
+        Ok(base) => ctx.with_test_vendor(&base),
         Err(_) => ctx,
     };
     let verifier = attestation::Verifier::new(context(ctx));

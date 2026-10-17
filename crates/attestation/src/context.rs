@@ -77,10 +77,12 @@ impl Context {
     /// plain `http://` only on loopback, or `vsock://CID:PORT` (the VM host
     /// is CID 2). Anything else is [`AttestationError::InvalidParams`].
     ///
-    /// Without it, the first fetch looks for the host's cache at vsock port
-    /// [`VSOCK_PORT`](crate::collateral::VSOCK_PORT) and uses the vendors
-    /// when nothing answers there. With an upstream, the vendors are never
-    /// asked directly.
+    /// Without it, inside a confidential VM, fetches look for the host's
+    /// cache at vsock port [`VSOCK_PORT`](crate::collateral::VSOCK_PORT),
+    /// again every minute while nothing answers there, and use the vendors
+    /// until it does; once found, it is used for good. With an upstream, the
+    /// vendors are never asked directly. A cache's "not found" is never
+    /// taken as the vendor's: it is [`AttestationError::CollateralUnavailable`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_upstream(mut self, upstream: &str) -> Result<Self> {
         let parsed = crate::collateral::vendor::Upstream::parse(upstream).ok_or_else(|| {
@@ -99,6 +101,19 @@ impl Context {
     pub fn with_vendors(mut self) -> Self {
         if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
             vendor.upstream = crate::collateral::vendor::Upstream::Vendors;
+        }
+        self
+    }
+
+    /// Fetch collateral from a fake vendor at `base` (`{base}/{host}/{path}`),
+    /// whose answers count as the vendor's own. Only for tests.
+    #[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_vendor(mut self, base: &str) -> Self {
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.upstream =
+                crate::collateral::vendor::Upstream::TestVendor(base.trim_end_matches('/').into());
         }
         self
     }

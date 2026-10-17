@@ -30,6 +30,8 @@ pub enum Source {
     /// Fetched from the vendor by this call, or by a concurrent call it
     /// waited for.
     Vendor,
+    /// Fetched, as [`Source::Vendor`], from an upstream collateral cache.
+    Cache,
 }
 
 impl std::fmt::Display for Source {
@@ -40,6 +42,7 @@ impl std::fmt::Display for Source {
             Source::Memory => "memory",
             Source::Disk => "disk",
             Source::Vendor => "vendor",
+            Source::Cache => "cache",
         })
     }
 }
@@ -501,12 +504,13 @@ mod native {
             match self.mem.get(&url).await {
                 Some(entry) if self.due(&entry, now, false) => {
                     let (held, replaced, _) = self.refresh::<C>(&url, id, false, now).await;
+                    let held = held.unwrap_or(entry);
                     let source = if replaced {
-                        Source::Vendor
+                        held.origin
                     } else {
                         Source::Memory
                     };
-                    Ok((held.unwrap_or(entry), source))
+                    Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
                 None => self
@@ -545,13 +549,15 @@ mod native {
                     return Err(failure);
                 }
             }
-            let (body, chain) = match vendor.fetch(url).await {
+            let (direct, fetched) = vendor.fetch(url).await;
+            let (body, chain) = match fetched {
                 Ok(fetched) => fetched,
                 Err(e) if e.not_found() || (C::NAMED_BY_EVIDENCE && e.status == Some(400)) => {
                     // The vendor does not know the chip or platform the
                     // evidence names: for a piece the evidence names, the
-                    // evidence is at fault and retrying will not help.
-                    if !C::NAMED_BY_EVIDENCE {
+                    // evidence is at fault and retrying will not help. Only
+                    // the vendor itself can say so, not a cache in between.
+                    if !C::NAMED_BY_EVIDENCE || !direct {
                         return Err(Failure::Unavailable(e));
                     }
                     let failure =
@@ -563,7 +569,12 @@ mod native {
                 }
                 Err(e) => return Err(Failure::Unavailable(e)),
             };
-            check::<C>(id, body, chain, Source::Vendor)
+            let from = if direct {
+                Source::Vendor
+            } else {
+                Source::Cache
+            };
+            check::<C>(id, body, chain, from)
         }
 
         fn store(&self, url: &str, entry: &Entry) {
@@ -773,8 +784,7 @@ mod tests {
     /// A store fetching from `v` that may ask it about a piece any time.
     fn ctx(v: &Vendor) -> Context {
         Context::new()
-            .with_upstream(&v.base)
-            .unwrap()
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::ZERO)
     }
 
@@ -899,6 +909,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_not_found_from_a_cache_is_retryable_and_cache_answers_say_cache() {
+        for code in [400, 404, 410] {
+            let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
+            let cache = Context::new().with_upstream(&v.base).unwrap();
+            let err = tcb_info(&cache, NOW).await.err().unwrap();
+            assert!(err.is_retryable(), "{code}: {err}");
+        }
+        let v = vendor(
+            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
+            Duration::ZERO,
+        )
+        .await;
+        let cache = Context::new().with_upstream(&v.base).unwrap();
+        assert_eq!(tcb_info(&cache, NOW).await.unwrap().1, Source::Cache);
+    }
+
+    #[tokio::test]
     async fn a_piece_the_evidence_does_not_name_is_asked_for_again_after_a_404() {
         let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
         let ctx = ctx(&v).with_recheck(Duration::from_secs(300));
@@ -913,8 +940,7 @@ mod tests {
     async fn the_vendor_is_asked_about_an_unpublished_piece_once_per_recheck() {
         let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
         let ctx = Context::new()
-            .with_upstream(&v.base)
-            .unwrap()
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(300));
         for _ in 0..2 {
             let err = vcek(&ctx).await.err().unwrap();
@@ -1087,8 +1113,7 @@ mod tests {
         )
         .await;
         let ctx = Context::new()
-            .with_upstream(&v.base)
-            .unwrap()
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(2));
         tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -1110,8 +1135,7 @@ mod tests {
         )
         .await;
         let ctx = Context::new()
-            .with_upstream(&v.base)
-            .unwrap()
+            .with_test_vendor(&v.base)
             .with_recheck(Duration::from_secs(300));
         tcb_info(&ctx, NOW).await.unwrap();
         for _ in 0..5 {
