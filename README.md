@@ -163,8 +163,12 @@ needs and adds it to the envelope as `collateral: [{url, body (base64),
 issuer_chain}]`: vendor bytes, never roots, each issuer chain once (a piece
 without one takes the chain of the piece before it), and for NVIDIA the NRAS
 answer and only the NRAS key that signed it. The CLI's `attest` and the API's
-`/attest` attach it. A verifier uses attached collateral before any other
-source and checks it like a fetched copy, so a verifier with only the
+`/attest` attach it. When a piece is unavailable, it waits out a short
+Retry-After (at most 5 s) once, then attaches what it got. An attached NRAS
+answer is used until its `exp`, then NRAS is asked again. A verifier uses the
+newest of the attached collateral and its own copies, and checks it like a
+fetched copy (one attached piece that does not verify makes the evidence not
+genuine), so a verifier with only the
 compiled-in roots (a browser, a server without egress) can judge the evidence.
 Fetching what the evidence lacks is a fallback: on in the CLI and servers,
 off with `Context::offline()` (`--offline`); in the browser the JS wrapper
@@ -172,13 +176,18 @@ fetches what `collateral_needed` lists.
 
 Where evidence is made, collateral comes from an `attestation-cache` rather
 than the vendors (see `crates/attestation-cache`). Inside a confidential VM
-the library finds the host's cache by itself: fetches connect to vsock port
-8455 of the host (CID 2); once it accepts, every fetch of the process goes
-there and the vendors are never asked directly; while nothing listens, the
-vendors are used and the host is tried again every minute. Outside a
-confidential VM the vendors are used. `Context::with_upstream` sets a cache
+(a `/dev/tdx_guest`, `/dev/sev-guest` or configfs-tsm guest) the library finds
+the host's cache by itself: a `Context` asks `GET /health` at vsock port 8455
+of the host (CID 2); once that answers, every fetch of that `Context` goes
+there and the vendors are never asked directly; while nothing answers, the
+vendors are used and the host is tried again every minute. Each `Context`
+looks on its own. Outside a confidential VM, and in Azure vTPM guests and
+dstack containers (which show none of those devices), the vendors are used.
+`Context::with_upstream` sets a cache
 explicitly (`https://` base URL without query, `http://` on loopback only, or
-`vsock://CID:PORT`). Answers from a cache are verified like the vendors' and
+`vsock://CID:PORT`). The choice is logged at info level (the CLI logs per
+`RUST_LOG`), and a `CollateralUnavailable` detail names the upstream asked.
+Answers from a cache are verified like the vendors' and
 reported `from: cache`; a cache's "not found" is `CollateralUnavailable`, as
 only the vendor itself can say a piece is not published. A cache can still
 hand a fresh process an older copy that is valid: that copy is bounded by the

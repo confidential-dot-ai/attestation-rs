@@ -73,6 +73,19 @@ impl Upstream {
     }
 }
 
+impl std::fmt::Display for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Upstream::Vendors => f.write_str("the vendors"),
+            Upstream::Cache(base) => write!(f, "the cache at {base}"),
+            Upstream::Vsock(cid, port) => write!(f, "the cache at vsock://{cid}:{port}"),
+            Upstream::Auto => f.write_str("a host cache if found, else the vendors"),
+            #[cfg(any(test, feature = "test-vendor"))]
+            Upstream::TestVendor(base) => write!(f, "the test vendor at {base}"),
+        }
+    }
+}
+
 /// What [`Upstream::Auto`] found: the host cache once it answered, kept for
 /// good (a CVM with a cache never asks the vendors); until then the vendors,
 /// probing again every `reprobe`.
@@ -108,14 +121,21 @@ impl Discovery {
         }
         *last = Some(std::time::Instant::now());
         if probe().await {
-            log::info!("collateral: using the host cache at {host:?}");
+            log::info!("collateral: using the host cache at {host}");
             return self.host.get_or_init(|| host).clone();
         }
+        log::info!(
+            "collateral: no host cache at {host}, using the vendors (looking again in {}s)",
+            self.reprobe.as_secs()
+        );
         Upstream::Vendors
     }
 }
 
 /// Whether this is a confidential VM guest, where a host cache may be.
+/// Azure vTPM guests and dstack containers show none of these files (a TPM
+/// alone does not mark a CVM, and a container rarely reaches the host's
+/// vsock), so they use the vendors unless an upstream is set.
 fn in_cvm() -> bool {
     cfg!(target_os = "linux")
         && [
@@ -143,29 +163,48 @@ pub(crate) fn allowed(url: &str) -> bool {
 }
 
 pub(crate) struct Vendor {
+    /// HTTPS only.
     client: reqwest::Client,
+    /// Also plain HTTP, only for loopback URLs ([`allowed`]).
+    loopback: reqwest::Client,
     pub(crate) upstream: Upstream,
     found: Discovery,
     /// Sent as a bearer token to a [`Upstream::Cache`].
     pub(crate) upstream_key: Option<String>,
+    not_in_cvm: std::sync::Once,
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) nras: Nras,
 }
 
 impl Vendor {
     pub(crate) fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
+        let client = |https_only| {
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(REQUEST_TIMEOUT)
+                .https_only(https_only)
                 .build()
-                .expect("HTTP client with static config"),
+                .expect("HTTP client with static config")
+        };
+        Self {
+            client: client(true),
+            loopback: client(false),
             upstream: Upstream::Auto,
             found: Discovery::new(REPROBE),
             upstream_key: None,
+            not_in_cvm: std::sync::Once::new(),
             #[cfg(feature = "nvidia-gpu")]
             nras: Nras::from_env(),
+        }
+    }
+
+    /// The HTTPS-only client, unless `url` is plain HTTP to loopback.
+    fn client_for(&self, url: &str) -> &reqwest::Client {
+        if url.starts_with("http://") && allowed(url) {
+            &self.loopback
+        } else {
+            &self.client
         }
     }
 
@@ -174,12 +213,20 @@ impl Vendor {
             return self.upstream.clone();
         }
         if !in_cvm() {
+            self.not_in_cvm.call_once(|| {
+                log::info!("collateral: not in a confidential VM, using the vendors")
+            });
             return Upstream::Vendors;
         }
         self.found
             .upstream(Upstream::Vsock(HOST_CID, VSOCK_PORT), || async {
                 #[cfg(target_os = "linux")]
-                return vsock::connect(HOST_CID, VSOCK_PORT).await.is_ok();
+                return tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    vsock::get(HOST_CID, VSOCK_PORT, "health"),
+                )
+                .await
+                .is_ok_and(|r| r.is_ok());
                 #[cfg(not(target_os = "linux"))]
                 false
             })
@@ -196,23 +243,33 @@ impl Vendor {
         url: &str,
     ) -> (bool, Result<(Vec<u8>, Option<String>), Unavailable>) {
         let upstream = self.upstream().await;
-        let err = match Box::pin(self.get_once(&upstream, url)).await {
-            Ok(raw) => return (upstream.is_vendor(), Ok(raw)),
+        let fetched = Box::pin(self.fetch_from(&upstream, url)).await;
+        let fetched = fetched.map_err(|mut e| {
+            e.detail = format!("{} (from {upstream})", e.detail);
+            e
+        });
+        (upstream.is_vendor(), fetched)
+    }
+
+    async fn fetch_from(
+        &self,
+        upstream: &Upstream,
+        url: &str,
+    ) -> Result<(Vec<u8>, Option<String>), Unavailable> {
+        let err = match Box::pin(self.get_once(upstream, url)).await {
+            Ok(raw) => return Ok(raw),
             Err(e) => e,
         };
         let wait = match (err.status, err.retry_after) {
-            _ if err.not_found() => return (upstream.is_vendor(), Err(err)),
-            (_, Some(s)) if s > MAX_RETRY_AFTER => return (upstream.is_vendor(), Err(err)),
+            _ if err.not_found() => return Err(err),
+            (_, Some(s)) if s > MAX_RETRY_AFTER => return Err(err),
             (_, Some(s)) => Duration::from_secs(s),
             (None | Some(408 | 429), None) => retry_delay(),
             (Some(s), None) if s >= 500 => retry_delay(),
-            _ => return (upstream.is_vendor(), Err(err)),
+            _ => return Err(err),
         };
         tokio::time::sleep(wait).await;
-        (
-            upstream.is_vendor(),
-            Box::pin(self.get_once(&upstream, url)).await,
-        )
+        Box::pin(self.get_once(upstream, url)).await
     }
 
     async fn get_once(
@@ -237,7 +294,7 @@ impl Vendor {
             _ => url.to_string(),
         };
         let unreachable = |e: reqwest::Error| Unavailable::detail(format!("unreachable ({e})"));
-        let mut request = self.client.get(url);
+        let mut request = self.client_for(&url).get(url);
         if let (Upstream::Cache(_), Some(key)) = (upstream, &self.upstream_key) {
             request = request.bearer_auth(key);
         }
@@ -373,7 +430,7 @@ impl Vendor {
             crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
             _ => &self.nras.gpu_url,
         };
-        let mut req = self.client.post(url).json(request);
+        let mut req = self.client_for(url).post(url).json(request);
         if self.nras.allow_hold_cert {
             req = req.header(
                 crate::platforms::nvidia_gpu::provider::HEADER_OCSP_ALLOW_CERT_HOLD,
@@ -507,6 +564,68 @@ mod tests {
         // Found: kept, never back to the vendors, not probed again.
         assert_eq!(found.upstream(host.clone(), || probe(false)).await, host);
         assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn plain_http_goes_out_only_to_loopback() {
+        let v = Vendor::new();
+        for url in ["http://192.0.2.1/x", "http://cache.example/x"] {
+            let err = v.client_for(url).get(url).send().await.unwrap_err();
+            assert!(err.is_builder(), "{url}: {err}");
+        }
+    }
+
+    /// vsock loopback (CID 1) needs the vsock_loopback module, which the
+    /// Linux docker gate loads; where it is missing the test has nothing to
+    /// talk to and returns.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_vsock_client_reads_status_chain_and_caps_the_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_vsock::{VsockAddr, VsockListener};
+        let Ok(listener) = VsockListener::bind(VsockAddr::new(1, u32::MAX)) else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let (status, header, body) = match request.split(' ').nth(1) {
+                        Some("/health") => (200, "", b"ok".to_vec()),
+                        Some("/chain") => {
+                            (200, "TCB-Info-Issuer-Chain: a%20b\r\n", b"body".to_vec())
+                        }
+                        Some("/big") => (200, "", vec![0; MAX_BODY + 1]),
+                        Some("/busy") => (503, "Retry-After: 7\r\n", Vec::new()),
+                        _ => (404, "", Vec::new()),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{header}Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                });
+            }
+        });
+        if vsock::connect(1, port).await.is_err() {
+            return;
+        }
+        assert!(vsock::get(1, port, "health").await.is_ok());
+        assert_eq!(
+            vsock::get(1, port, "chain").await.unwrap(),
+            (b"body".to_vec(), Some("a b".to_string()))
+        );
+        assert_eq!(
+            vsock::get(1, port, "missing").await.unwrap_err().status,
+            Some(404)
+        );
+        let busy = vsock::get(1, port, "busy").await.unwrap_err();
+        assert_eq!((busy.status, busy.retry_after), (Some(503), Some(7)));
+        assert_eq!(vsock::get(1, port, "big").await.unwrap_err().status, None);
     }
 
     #[cfg(feature = "nvidia-gpu")]

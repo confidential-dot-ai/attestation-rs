@@ -236,6 +236,12 @@ fn read_evidence(args: &VerifyArgs) -> Result<Vec<u8>, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     match cli.command {

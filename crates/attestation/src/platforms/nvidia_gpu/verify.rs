@@ -43,7 +43,7 @@ pub async fn gather_bundle(
             arch,
             claims_version: "2.0".into(),
         };
-        nras.insert(arch, nras_attest(store, &request).await?);
+        nras.insert(arch, nras_attest(store, &request, now).await?);
     }
     let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
     let known = |jwks: &NrasJwks| {
@@ -79,11 +79,14 @@ pub async fn gather_bundle(
 }
 
 /// NRAS's answer for `request`: held (attached by the attester, which asked
-/// NRAS with the same nonce), else asked now. The answer is NVIDIA-signed and
-/// bound to the nonce, so who asked does not matter.
-async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json::Value> {
+/// NRAS with the same nonce) unless expired at `now`, else asked now. The
+/// answer is NVIDIA-signed and bound to the nonce, so who asked does not
+/// matter. Only the answer is verified: a held answer is not checked against
+/// the bundle's device evidence, which then carries no weight (an attester
+/// could always relay another GPU's evidence under the same nonce).
+async fn nras_attest(store: &Store, request: &NrasRequest, now: i64) -> Result<serde_json::Value> {
     let key = nras_answer_url(request);
-    let body = match store.held_body(&key) {
+    let body = match store.held_body(&key).filter(|b| !expired(b, now)) {
         Some(body) => body.to_vec(),
         None => ask_nras(store, request).await?,
     };
@@ -91,6 +94,20 @@ async fn nras_attest(store: &Store, request: &NrasRequest) -> Result<serde_json:
         .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))?;
     store.record(key, body, None);
     Ok(answer)
+}
+
+/// Whether the overall token of an NRAS answer has an `exp` before `now`.
+/// Any other answer is left to verification.
+fn expired(answer: &[u8], now: i64) -> bool {
+    let exp = || -> Option<f64> {
+        let (overall, _) = split_eat_response(&serde_json::from_slice(answer).ok()?).ok()?;
+        let payload = URL_SAFE_NO_PAD.decode(overall.split('.').nth(1)?).ok()?;
+        serde_json::from_slice::<serde_json::Value>(&payload)
+            .ok()?
+            .get("exp")?
+            .as_f64()
+    };
+    exp().is_some_and(|exp| now > exp.floor() as i64)
 }
 
 /// Where an NRAS answer is held: NVIDIA's NRAS endpoint for the request's

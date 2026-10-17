@@ -85,7 +85,9 @@ fn roots_only(at: i64) -> Verifier {
 async fn verify_at(envelope: &[u8], policies: &Policies, at: i64) -> crate::Result<Verified> {
     let verifier = roots_only(at);
     let verified = verifier.verify(envelope, policies).await;
-    assert!(verifier.context().store().missing().is_empty());
+    // A piece that does not pass is listed for the caller to fetch.
+    let passed = verified.as_ref().map_or(true, |v| v.passed());
+    assert_eq!(verifier.context().store().missing().is_empty(), passed);
     verified
 }
 
@@ -199,13 +201,18 @@ async fn an_older_valid_copy_passes_only_at_or_above_the_floor() {
         },
         ..Policies::all()
     };
-    let verified = verify_at(&older, &raised, NOW)
+    let verifier = roots_only(NOW);
+    let verified = verifier
+        .verify(&older, &raised)
         .await
         .expect("below the floor is a value");
     assert_eq!(qe_identity(&verified).version, Some(21));
     assert_eq!(qe_identity(&verified).floor, Some(22));
     assert!(verified.platform.passed());
     assert!(!verified.passed());
+    // Listed, so a held-only caller (the WASM wrapper) fetches a newer one.
+    let missing = verifier.context().store().missing();
+    assert!(missing.len() == 1 && missing[0].ends_with("/qe/identity"));
     assert!(verify_at(&newest, &raised, NOW).await.unwrap().passed());
 }
 
@@ -454,4 +461,69 @@ async fn gpu_collateral_is_attached_and_used_without_network() {
         .await
         .unwrap_err();
     assert!(!err.is_retryable(), "{err}");
+}
+
+#[cfg(feature = "nvidia-gpu")]
+#[tokio::test]
+async fn an_expired_attached_nras_answer_is_not_used() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let quote = read("tdx_quote_00a06d080000.dat");
+    let report_data = crate::platforms::tdx::verify::parse_tdx_quote(&quote)
+        .unwrap()
+        .body
+        .report_data
+        .to_vec();
+    let bundle = crate::types::NvidiaGpuEvidenceBundle {
+        devices: vec![crate::types::NvidiaGpuDeviceEvidence {
+            arch: crate::types::NvidiaGpuArch::Hopper,
+            uuid: "GPU-0".into(),
+            evidence_b64: String::new(),
+            cert_chain_b64: String::new(),
+        }],
+        binding: Default::default(),
+    };
+    let jwks = read("collateral/2026-10-14/nras_jwks.json");
+    let set: serde_json::Value = serde_json::from_slice(&jwks).unwrap();
+    let kid = set["keys"][0]["kid"].as_str().unwrap();
+    let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES384","kid":"{kid}"}}"#));
+    let claims = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{}}}"#, NOW - 1));
+    let token = format!("{header}.{claims}.{}", URL_SAFE_NO_PAD.encode([0u8; 96]));
+    let answer = serde_json::json!([["JWT", token], { "GPU-0": token }]);
+    let nonce = hex::encode(crate::platforms::nvidia_gpu::gpu_nonce(
+        &report_data,
+        &bundle.binding,
+    ));
+    let nras = crate::platforms::nvidia_gpu::provider::NRAS_GPU_URL;
+    let jwks_url = crate::platforms::nvidia_gpu::jwks_url_for_endpoint(nras).unwrap();
+    let mut envelope: crate::AttestationEvidence =
+        serde_json::from_slice(&attached(&tdx()).await).unwrap();
+    envelope.nvidia_gpu = Some(bundle);
+    let mut held = envelope.held_collateral();
+    held.push((
+        format!("{nras}#nonce={nonce}"),
+        serde_json::to_vec(&answer).unwrap(),
+        None,
+    ));
+    held.push((jwks_url, jwks, None));
+    envelope.attach(held);
+    let envelope = serde_json::to_vec(&envelope).unwrap();
+    let policies = Policies {
+        gpu: Some(crate::NvidiaGpuParams {
+            user_nonce: Some(report_data.clone()),
+            ..Default::default()
+        }),
+        ..Policies::all().with_report_data(&report_data)
+    };
+    // NRAS is asked again, which a verifier without network cannot do.
+    let err = roots_only(NOW)
+        .verify(&envelope, &policies)
+        .await
+        .unwrap_err();
+    assert!(err.is_retryable(), "{err}");
+    // Before its exp the same answer is used (and its forged signature refused).
+    let err = roots_only(NOW - 2)
+        .verify(&envelope, &policies)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AttestationError::JwsVerification(_)), "{err}");
 }

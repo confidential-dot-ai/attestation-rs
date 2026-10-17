@@ -77,12 +77,15 @@ impl Context {
     /// plain `http://` only on loopback, or `vsock://CID:PORT` (the VM host
     /// is CID 2). Anything else is [`AttestationError::InvalidParams`].
     ///
-    /// Without it, inside a confidential VM, fetches look for the host's
-    /// cache at vsock port [`VSOCK_PORT`](crate::collateral::VSOCK_PORT),
-    /// again every minute while nothing answers there, and use the vendors
-    /// until it does; once found, it is used for good. With an upstream, the
-    /// vendors are never asked directly. A cache's "not found" is never
-    /// taken as the vendor's: it is [`AttestationError::CollateralUnavailable`].
+    /// Without it, inside a confidential VM, this context looks for the
+    /// host's cache (`GET /health` at vsock port
+    /// [`VSOCK_PORT`](crate::collateral::VSOCK_PORT)), again every minute
+    /// while nothing answers there, and uses the vendors until it does; once
+    /// found, this context uses it for good. Each context looks on its own.
+    /// With an upstream, the vendors are never asked directly. A cache's "not
+    /// found" is never taken as the vendor's: it is
+    /// [`AttestationError::CollateralUnavailable`]. On an offline context,
+    /// which fetches nothing, the upstream has no effect.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_upstream(mut self, upstream: &str) -> Result<Self> {
         let parsed = crate::collateral::vendor::Upstream::parse(upstream).ok_or_else(|| {
@@ -106,7 +109,7 @@ impl Context {
     }
 
     /// Fetch collateral from the vendors themselves, without looking for a
-    /// host cache.
+    /// host cache (an attestation-cache never asks another one).
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn with_vendors(mut self) -> Self {
