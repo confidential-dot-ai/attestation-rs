@@ -61,11 +61,9 @@ mod tests {
 
         // launch_digest should be the hex encoding of the measurement
         assert_eq!(claims.launch_digest, hex::encode(&report.measurement[..]));
-        assert!(!claims.launch_digest.is_empty());
-        assert!(
-            claims.launch_digest.starts_with("a1f3"),
-            "launch_digest should start with a1f3, got: {}",
-            &claims.launch_digest[..8]
+        assert_eq!(
+            claims.launch_digest,
+            "a1f3930413247bb38cfc171579ea3c12d5fe4901f0c792f63fd75d98f1ef827c23500644e0e692e6be917f9050d3d38c"
         );
 
         // report_data should be the raw 64-byte report_data
@@ -115,8 +113,7 @@ mod tests {
 
         // chip_id should be a valid hex string
         let chip_id_str = claims.platform_data["chip_id"].as_str().unwrap();
-        assert_eq!(chip_id_str.len(), 128); // 64 bytes * 2 hex chars
-        assert!(chip_id_str.starts_with("c384"));
+        assert_eq!(chip_id_str, "c38427a30d4c7af9d96f7a15b97269825a64cb76a2352ffd5d18115d89ad473f8e8c0bcd9a5d9286612bad4aadfb4426205a3b9e4fea82301135a170e477524e");
     }
 
     #[test]
@@ -132,6 +129,9 @@ mod tests {
 
         // launch_digest should match the VLEK report measurement
         assert_eq!(claims.launch_digest, hex::encode(&report.measurement[..]));
-        assert!(claims.launch_digest.starts_with("8922"));
+        assert_eq!(
+            claims.launch_digest,
+            "8922ebbdd00ec2c541f36a6e7a82a8773a7accb451ed67bc94e740dbe92c93c4e8c9af857f5ceeb5a493df2a570d7bf0"
+        );
     }
 }

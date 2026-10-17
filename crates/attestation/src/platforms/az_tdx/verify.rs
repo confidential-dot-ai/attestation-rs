@@ -176,21 +176,6 @@ mod tests {
         }
     }
 
-    fn build_hcl_report(report_type: u32, content: &[u8]) -> Vec<u8> {
-        let tee_end = 0x20 + 1184;
-        let content_start = tee_end + 20;
-        let mut hcl = vec![0u8; content_start + content.len()];
-        hcl[0..4].copy_from_slice(b"HCLA");
-        let total = (20 + content.len()) as u32;
-        hcl[tee_end..tee_end + 4].copy_from_slice(&total.to_le_bytes());
-        hcl[tee_end + 4..tee_end + 8].copy_from_slice(&1u32.to_le_bytes());
-        hcl[tee_end + 8..tee_end + 12].copy_from_slice(&report_type.to_le_bytes());
-        hcl[tee_end + 12..tee_end + 16].copy_from_slice(&1u32.to_le_bytes());
-        hcl[tee_end + 16..tee_end + 20].copy_from_slice(&(content.len() as u32).to_le_bytes());
-        hcl[content_start..].copy_from_slice(content);
-        hcl
-    }
-
     #[test]
     fn test_invalid_base64_hcl_report() {
         let evidence = AzTdxEvidence {
@@ -201,49 +186,64 @@ mod tests {
         };
 
         let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("base64") || err.contains("Base64"),
-            "error: {err}"
+            matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
+            "{result:?}"
         );
     }
 
     #[test]
     fn test_evidence_version_rejected() {
-        let evidence = AzTdxEvidence {
-            version: 99,
-            tpm_quote: build_dummy_tpm_quote(),
-            hcl_report: "dGVzdA".to_string(),
-            td_quote: "AAAA".to_string(),
+        let verify = |version| {
+            let evidence = AzTdxEvidence {
+                version,
+                tpm_quote: build_dummy_tpm_quote(),
+                hcl_report: "dGVzdA".to_string(),
+                td_quote: "AAAA".to_string(),
+            };
+            verify_evidence(&evidence, &AzTdxParams::default(), 0)
         };
 
-        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
+        let current = verify(1);
         assert!(
-            err.contains("version"),
-            "error should mention version: {err}"
+            !matches!(current, Err(AttestationError::EvidenceDeserialize(_))),
+            "{current:?}"
+        );
+        let result = verify(99);
+        assert!(
+            matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
+            "{result:?}"
         );
     }
 
     #[test]
     fn test_hcl_report_type_must_be_tdx() {
-        let hcl = build_hcl_report(tpm_common::HCL_REPORT_TYPE_SNP, b"{}");
-
-        let evidence = AzTdxEvidence {
-            version: 1,
-            tpm_quote: build_dummy_tpm_quote(),
-            hcl_report: BASE64URL.encode(&hcl),
-            td_quote: BASE64URL.encode([0u8; 100]),
+        let verify = |hcl: &[u8]| {
+            let evidence = AzTdxEvidence {
+                version: 1,
+                tpm_quote: build_dummy_tpm_quote(),
+                hcl_report: BASE64URL.encode(hcl),
+                td_quote: BASE64URL.encode([0u8; 100]),
+            };
+            verify_evidence(&evidence, &AzTdxParams::default(), 0)
         };
-
-        let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
+        // A TDX HCL report gets past the type check to the TPM signature.
+        let result = verify(COCO_TDX_HCL_REPORT);
         assert!(
-            err.contains("report_type") || err.contains("expected"),
-            "error: {err}"
+            matches!(
+                result,
+                Err(AttestationError::SignatureVerificationFailed(_))
+            ),
+            "{result:?}"
+        );
+        let mut snp = COCO_TDX_HCL_REPORT.to_vec();
+        let report_type = 0x20 + 1184 + 8;
+        snp[report_type..report_type + 4]
+            .copy_from_slice(&tpm_common::HCL_REPORT_TYPE_SNP.to_le_bytes());
+        let result = verify(&snp);
+        assert!(
+            matches!(result, Err(AttestationError::QuoteParseFailed(_))),
+            "{result:?}"
         );
     }
 
@@ -259,12 +259,12 @@ mod tests {
         };
 
         let result = verify_evidence(&evidence, &AzTdxParams::default(), 0);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("too short"),
-            "error should mention too short: {err}"
+            matches!(result, Err(AttestationError::QuoteParseFailed(_))),
+            "{result:?}"
         );
+        assert!(tpm_common::parse_hcl_report(&short_hcl).is_err());
+        assert!(tpm_common::parse_hcl_report(COCO_TDX_HCL_REPORT).is_ok());
     }
 
     // --- Tests using real CoCo TDX HCL report fixture ---

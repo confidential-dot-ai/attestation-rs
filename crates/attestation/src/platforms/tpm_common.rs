@@ -1071,11 +1071,12 @@ mod tests {
         var_data.extend_from_slice(&content);
 
         let result = extract_ak_pub_from_var_data(&var_data);
-        assert!(result.is_err(), "non-RSA key type should be rejected");
-        let err_msg = format!("{:?}", result.err().unwrap());
         assert!(
-            err_msg.contains("not RSA"),
-            "error should mention RSA: {err_msg}"
+            matches!(
+                result,
+                Err(AttestationError::SignatureVerificationFailed(_))
+            ),
+            "{result:?}"
         );
     }
 
@@ -1298,24 +1299,22 @@ mod tests {
 
     #[test]
     fn test_verify_tpm_signature_tries_jwk_then_tpm2b() {
-        // verify_tpm_signature should accept both JWK JSON and TPM2B_PUBLIC
-        // formats for var_data. This test verifies the TPM2B_PUBLIC fallback
-        // still works even though JWK JSON is tried first.
         let modulus = vec![0xAB; 256];
         let var_data = build_tpm2b_public_rsa(&modulus);
-
-        // This will fail at signature verification (dummy data) but should
-        // successfully extract the key from TPM2B_PUBLIC format
         let dummy_sig = vec![0u8; 256];
         let dummy_msg = vec![0xFF, 0x54, 0x43, 0x47, 0x80, 0x18, 0x00, 0x00, 0x00, 0x00];
 
+        assert!(extract_ak_pub_from_jwk_json(&var_data).is_err());
+        let (n, _) = extract_ak_pub_from_var_data(&var_data).expect("TPM2B_PUBLIC key");
+        assert_eq!(n, modulus);
+
         let result = verify_tpm_signature(&dummy_sig, &dummy_msg, &var_data);
-        // Should fail at verification step, not at key extraction
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("RSA") || err.contains("sig") || err.contains("Signature"),
-            "error should be about signature verification, not key extraction: {err}"
+            matches!(
+                result,
+                Err(AttestationError::SignatureVerificationFailed(_))
+            ),
+            "{result:?}"
         );
     }
 

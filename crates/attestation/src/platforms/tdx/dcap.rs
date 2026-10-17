@@ -1522,14 +1522,17 @@ mod tests {
         let first_cert_end = pem_str.find(end_marker).unwrap() + end_marker.len();
         let single_cert_pem = &pem_str[..first_cert_end];
 
-        let bogus_crl = vec![0x30, 0x00];
+        let root_crl = include_bytes!("../../../test_data/collateral/2026-10-14/root_ca_crl.der");
+        let full_chain = parse_pem_to_der(auth.pck_cert_chain_pem).unwrap();
+        assert!(intermediate_ca_revoked_from_der(&full_chain, root_crl).is_ok());
         let result = intermediate_ca_revoked_from_der(
             &parse_pem_to_der(single_cert_pem.as_bytes()).unwrap(),
-            &bogus_crl,
+            root_crl,
         );
-        assert!(result.is_err());
-        let err = format!("{:?}", result.unwrap_err());
-        assert!(err.contains("at least 2 certs"), "error: {err}");
+        assert!(
+            matches!(result, Err(AttestationError::CertChainError(_))),
+            "{result:?}"
+        );
     }
 
     #[test]

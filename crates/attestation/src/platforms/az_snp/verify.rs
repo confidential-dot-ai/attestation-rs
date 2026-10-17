@@ -283,12 +283,13 @@ mod tests {
         };
 
         let result = verify_report(&evidence, &AzSnpParams::default(), 0);
-        assert!(result.is_err(), "short HCL report should fail");
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("too short"),
-            "error should mention too short: {err}"
+            matches!(result, Err(AttestationError::QuoteParseFailed(_))),
+            "{:?}",
+            result.as_ref().err()
         );
+        assert!(tpm_common::parse_hcl_report(&short_hcl).is_err());
+        assert!(tpm_common::parse_hcl_report(COCO_HCL_REPORT).is_ok());
     }
 
     #[test]
@@ -301,11 +302,10 @@ mod tests {
         };
 
         let result = verify_report(&evidence, &AzSnpParams::default(), 0);
-        assert!(result.is_err());
-        let err = format!("{:?}", result.err().unwrap());
         assert!(
-            err.contains("base64") || err.contains("Base64"),
-            "error: {err}"
+            matches!(result, Err(AttestationError::EvidenceDeserialize(_))),
+            "{:?}",
+            result.as_ref().err()
         );
     }
 
