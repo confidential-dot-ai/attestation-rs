@@ -47,6 +47,8 @@ pub use store::{CollateralUsed, Source, Store};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vendor::VSOCK_PORT;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 
 /// One piece of vendor-signed collateral: something we download, check
@@ -83,7 +85,8 @@ pub const GRACE: i64 = 7 * 24 * 3600;
 /// versions the vendors served when this release was made; callers may raise
 /// them. Intel's PCK and Root CA CRLs always carry CRL Number 1, so they get
 /// no floor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct VersionFloors {
     /// AMD CRL Number, per generation.
     pub amd_crl_milan: u64,
@@ -105,6 +108,24 @@ impl Default for VersionFloors {
             intel_tcb_info: 20,
             intel_qe_identity: 20,
         }
+    }
+}
+
+impl VersionFloors {
+    /// True when any floor here is below the same floor in `other`.
+    pub fn lowers(&self, other: &Self) -> bool {
+        let Self {
+            amd_crl_milan,
+            amd_crl_genoa,
+            amd_crl_turin,
+            intel_tcb_info,
+            intel_qe_identity,
+        } = self;
+        *amd_crl_milan < other.amd_crl_milan
+            || *amd_crl_genoa < other.amd_crl_genoa
+            || *amd_crl_turin < other.amd_crl_turin
+            || *intel_tcb_info < other.intel_tcb_info
+            || *intel_qe_identity < other.intel_qe_identity
     }
 }
 

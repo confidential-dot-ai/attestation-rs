@@ -5,6 +5,8 @@ use scroll::Pread;
 
 use serde::{Deserialize, Serialize};
 
+use crate::utils::b64;
+
 use crate::collateral::{
     CollateralUsed, Fmspc, PckCa, PckCrl, QeIdentity, RootCrl, Store, TcbInfo,
 };
@@ -349,21 +351,33 @@ pub fn verify_quote_signature(quote_bytes: &[u8], quote: &TdxQuote) -> Result<bo
     }
 }
 
-/// What a caller can ask of TDX evidence.
-#[derive(Debug, Clone)]
+/// What a caller can ask of TDX evidence. In JSON, byte values are base64
+/// and each allowed set is one value or an array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TdxParams {
     /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
     /// [`TdxResult::report_data_match`]. On Azure (vTPM) this is checked
     /// against the vTPM quote nonce instead.
+    #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected init data: MRCONFIGID (at most 48 bytes, zero-padded). On
     /// Azure (vTPM) a 32-byte hash checked against PCR[8].
+    #[serde(with = "b64::bytes")]
     pub init_data: Option<Vec<u8>>,
     /// Allowed MRTD values: the MRTD must equal one of them. Cloud firmware
     /// varies by host build, memory size and machine type. Must not be empty.
+    #[serde(with = "b64::digests")]
     pub mrtd: Option<Vec<[u8; 48]>>,
     /// Allowed RTMR[0..4] values, as for `mrtd`.
-    pub rtmr: [Option<Vec<[u8; 48]>>; 4],
+    #[serde(with = "b64::digests")]
+    pub rtmr0: Option<Vec<[u8; 48]>>,
+    #[serde(with = "b64::digests")]
+    pub rtmr1: Option<Vec<[u8; 48]>>,
+    #[serde(with = "b64::digests")]
+    pub rtmr2: Option<Vec<[u8; 48]>>,
+    #[serde(with = "b64::digests")]
+    pub rtmr3: Option<Vec<[u8; 48]>>,
     /// Accept a TD with the debug attribute set. Default: false.
     pub allow_debug: bool,
     /// TCB statuses the caller accepts when DCAP collateral is evaluated.
@@ -378,7 +392,10 @@ impl Default for TdxParams {
             report_data: None,
             init_data: None,
             mrtd: None,
-            rtmr: [None, None, None, None],
+            rtmr0: None,
+            rtmr1: None,
+            rtmr2: None,
+            rtmr3: None,
             allow_debug: false,
             accepted_tcb_statuses: vec![
                 TdxTcbStatus::UpToDate,
@@ -410,7 +427,8 @@ impl TdxParams {
             ));
         }
         crate::utils::check_allowed_set("mrtd", self.mrtd.as_deref())?;
-        for (i, rtmr) in self.rtmr.iter().enumerate() {
+        let rtmrs = [&self.rtmr0, &self.rtmr1, &self.rtmr2, &self.rtmr3];
+        for (i, rtmr) in rtmrs.into_iter().enumerate() {
             crate::utils::check_allowed_set(&format!("rtmr{i}"), rtmr.as_deref())?;
         }
         Ok(())
@@ -633,10 +651,10 @@ pub(crate) fn verify_quote(
         init_data_match: None,
         mrtd_match: compare(&params.mrtd, &body.mr_td),
         rtmr_match: [
-            compare(&params.rtmr[0], &body.rtmr_0),
-            compare(&params.rtmr[1], &body.rtmr_1),
-            compare(&params.rtmr[2], &body.rtmr_2),
-            compare(&params.rtmr[3], &body.rtmr_3),
+            compare(&params.rtmr0, &body.rtmr_0),
+            compare(&params.rtmr1, &body.rtmr_1),
+            compare(&params.rtmr2, &body.rtmr_2),
+            compare(&params.rtmr3, &body.rtmr_3),
         ],
         debug: body.td_attributes[0] & 0x01 != 0,
         allow_debug: params.allow_debug,
@@ -1209,7 +1227,7 @@ mod tests {
         let evidence = make_tdx_evidence(V4_QUOTE);
         let params = TdxParams {
             allow_debug: true,
-            rtmr: [Some(vec![quote.body.rtmr_0]), None, None, None],
+            rtmr0: Some(vec![quote.body.rtmr_0]),
             ..Default::default()
         };
         let r = verify(&evidence, &params).await.unwrap();
@@ -1223,12 +1241,9 @@ mod tests {
         let params = TdxParams {
             allow_debug: true,
             // rtmr0 matches, rtmr1 does not, rtmr2 is not asked, rtmr3 matches
-            rtmr: [
-                Some(vec![quote.body.rtmr_0]),
-                Some(vec![[0xFF; 48]]),
-                None,
-                Some(vec![quote.body.rtmr_3]),
-            ],
+            rtmr0: Some(vec![quote.body.rtmr_0]),
+            rtmr1: Some(vec![[0xFF; 48]]),
+            rtmr3: Some(vec![quote.body.rtmr_3]),
             ..Default::default()
         };
         let r = verify(&evidence, &params).await.unwrap();

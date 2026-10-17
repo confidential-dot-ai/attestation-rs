@@ -33,7 +33,9 @@ use crate::platforms::tdx::{Tdx, TdxParams, TdxResult};
 use crate::types::PlatformType;
 
 /// What a caller can ask of GCP TDX evidence.
-#[derive(Debug, Clone, Default)]
+/// In JSON, the `tdx` params.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GcpTdxParams {
     pub tdx: TdxParams,
 }

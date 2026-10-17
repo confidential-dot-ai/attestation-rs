@@ -10,7 +10,6 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::api::verify::PoliciesInput;
 use crate::error::ApiError;
 
 /// A verification result that passed every rule in its policies. It is the only
@@ -91,7 +90,7 @@ impl TokenIssuer {
     pub fn issue(
         &self,
         passed: &PassedVerification<'_>,
-        policy: &PoliciesInput,
+        policy: &attestation::Policies,
     ) -> Result<String, ApiError> {
         let verified = passed.0;
         let now = SystemTime::now()

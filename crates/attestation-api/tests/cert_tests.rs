@@ -1,4 +1,3 @@
-use attestation_api::api::verify::PoliciesInput;
 use attestation_api::token::issuer::{PassedVerification, TokenIssuer};
 
 #[test]
@@ -79,7 +78,9 @@ fn token_issuer_produces_valid_jwt() {
     });
     let verified: attestation::Verified = serde_json::from_value(verified_json.clone()).unwrap();
     let passed = PassedVerification::new(&verified).expect("verification passed");
-    let token = issuer.issue(&passed, &PoliciesInput::default()).unwrap();
+    let token = issuer
+        .issue(&passed, &attestation::Policies::default())
+        .unwrap();
 
     verified_json["report_data_match"] = false.into();
     let failed: attestation::Verified = serde_json::from_value(verified_json).unwrap();

@@ -14,6 +14,7 @@ use crate::collateral::{AmdCrl, AmdKey, CollateralUsed, Store, Vcek};
 use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::types::{Claims, PlatformType, ProcessorGeneration, SnpTcb};
+use crate::utils::b64;
 
 // OID constants for CRL signature algorithm identification.
 // x509-parser's verify_signature does not support OID_RSA_PSS (rsaPSS with parameters),
@@ -32,18 +33,23 @@ const MIN_REPORT_VERSION: u32 = 3;
 /// Matches Trustee's upper bound — future versions may change field layout.
 pub const MAX_REPORT_VERSION: u32 = 5;
 
-/// What a caller can ask of SEV-SNP evidence.
-#[derive(Debug, Clone, Default)]
+/// What a caller can ask of SEV-SNP evidence. In JSON, byte values are
+/// base64 and `launch_digest` is one value or an array.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SnpParams {
     /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
     /// [`SnpResult::report_data_match`]. On Azure (vTPM) this is checked
     /// against the vTPM quote nonce instead.
+    #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
     /// 32-byte init-data hash checked against PCR[8].
+    #[serde(with = "b64::bytes")]
     pub host_data: Option<Vec<u8>>,
     /// Allowed launch digests (`report.measurement`): the measurement must
     /// equal one of them. Must not be empty.
+    #[serde(with = "b64::digests")]
     pub launch_digest: Option<Vec<[u8; 48]>>,
     /// Accept a guest whose policy allows debug. Default: false.
     pub allow_debug: bool,

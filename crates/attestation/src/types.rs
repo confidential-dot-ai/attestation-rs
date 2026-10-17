@@ -159,12 +159,15 @@ impl std::fmt::Display for PlatformType {
 
 /// NVIDIA GPU verification parameters, applied when an envelope carries a GPU
 /// bundle.
+/// In JSON, `user_nonce` is base64.
 #[cfg(feature = "nvidia-gpu")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct NvidiaGpuParams {
     /// User nonce used to derive the GPU SPDM nonce. Required when verifying
     /// an envelope that carries a `gpu` bundle, and must equal the platform
     /// params' `report_data`.
+    #[serde(with = "crate::utils::b64::bytes")]
     pub user_nonce: Option<Vec<u8>>,
     /// If true, reject envelopes that do not include an NVIDIA GPU bundle.
     pub required: bool,
@@ -195,6 +198,7 @@ pub struct NvidiaGpuParams {
 /// Defaults mirror `allow_debug`'s security posture: fail closed.
 #[cfg(feature = "nvidia-gpu")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct NvidiaGpuDevicePolicy {
     /// If true, accept devices reporting `dbgstat != "disabled"`. Default false
     /// (debug-enabled GPUs fail the policy).

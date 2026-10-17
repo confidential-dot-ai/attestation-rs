@@ -51,16 +51,17 @@ for (const url of needed) {
   });
 }
 
-const evaluate = (reportData) =>
-  JSON.parse(
-    // evaluate(envelope, platforms, report_data, init_data, rtmr3, min_tcb, collateral)
-    wasm.evaluate(envelope, ['snp'], reportData, undefined, undefined, undefined,
-      JSON.stringify(collateral))
+// policies: the attestation-api `/verify` `policies` shape, bytes in base64.
+const evaluate = async (reportData) => {
+  const policies = { snp: { report_data: Buffer.from(reportData).toString('base64') } };
+  return JSON.parse(
+    await wasm.evaluate(envelope, JSON.stringify(policies), JSON.stringify(collateral))
   );
+};
 
-const result = await evaluate(new TextEncoder().encode(nonce));
+const result = await evaluate(nonce);
 console.log(JSON.stringify(result, null, 2));
-const mismatch = await evaluate(new TextEncoder().encode('wrong-nonce'));
+const mismatch = await evaluate('wrong-nonce');
 
 if (result.passed !== true || result.report_data_match !== true) {
   console.error('FAILED: evidence did not pass');
