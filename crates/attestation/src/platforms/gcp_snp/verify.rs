@@ -33,7 +33,9 @@ use crate::platforms::snp::{Snp, SnpParams, SnpResult};
 use crate::types::PlatformType;
 
 /// What a caller can ask of GCP SEV-SNP evidence.
-#[derive(Debug, Clone, Default)]
+/// In JSON, the `snp` params.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GcpSnpParams {
     pub snp: SnpParams,
 }

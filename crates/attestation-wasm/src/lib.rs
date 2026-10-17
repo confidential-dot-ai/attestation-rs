@@ -6,11 +6,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use attestation::types::{PlatformType, SnpTcb};
-use attestation::{
-    AttachedCollateral, AttestationError, AzSnpParams, AzTdxParams, Context, GcpSnpParams,
-    GcpTdxParams, Policies, SnpParams, TdxParams, Verifier,
-};
+use attestation::{AttachedCollateral, AttestationError, Context, Policies, Verifier};
 
 /// Why a call failed. Thrown as a JS `Error` with this `kind`, named like
 /// the API's error keys:
@@ -87,16 +83,9 @@ async fn collateral_needed_impl(envelope_json: &str) -> Result<String, Failure> 
 /// collateral the caller fetched.
 ///
 /// - `envelope_json`: `{ platform, evidence }` envelope JSON
-/// - `platforms`: accepted platform tags (`snp`, `tdx`, `az-snp`, `az-tdx`,
-///   `gcp-snp`, `gcp-tdx`), at least one; evidence for any other platform
-///   throws
-/// - `expected_report_data`: optional freshness anchor bytes (the hardware
-///   report's `report_data`, or the vTPM quote nonce on Azure)
-/// - `expected_init_data_hash`: optional init-data binding (SNP HOST_DATA /
-///   TDX MRCONFIGID / vTPM PCR[8])
-/// - `expected_rtmr3`: optional 48 bytes the TD's RTMR[3] must equal (TDX
-///   platforms)
-/// - `min_tcb_json`: optional minimum SNP TCB policy (`SnpTcb` JSON)
+/// - `policies_json`: the accepted platforms and their params, in the shape
+///   of the attestation-api `/verify` `policies` (`{ "snp": { "report_data":
+///   "<base64>" } }`); evidence for a platform without an entry throws
 /// - `collateral_json`: the responses for the URLs [`collateral_needed`]
 ///   listed
 ///
@@ -108,96 +97,21 @@ async fn collateral_needed_impl(envelope_json: &str) -> Result<String, Failure> 
 #[wasm_bindgen]
 pub async fn evaluate(
     envelope_json: String,
-    platforms: Vec<String>,
-    expected_report_data: Option<Vec<u8>>,
-    expected_init_data_hash: Option<Vec<u8>>,
-    expected_rtmr3: Option<Vec<u8>>,
-    min_tcb_json: Option<String>,
+    policies_json: String,
     collateral_json: String,
 ) -> Result<String, JsValue> {
-    let request = Request {
-        platforms,
-        expected_report_data,
-        expected_init_data_hash,
-        expected_rtmr3,
-        min_tcb_json,
-    };
-    Ok(evaluate_impl(&envelope_json, request, &collateral_json, None).await?)
-}
-
-struct Request {
-    platforms: Vec<String>,
-    expected_report_data: Option<Vec<u8>>,
-    expected_init_data_hash: Option<Vec<u8>>,
-    expected_rtmr3: Option<Vec<u8>>,
-    min_tcb_json: Option<String>,
-}
-
-impl Request {
-    fn policies(self) -> Result<Policies, String> {
-        if self.platforms.is_empty() {
-            return Err("platforms: name at least one accepted platform".into());
-        }
-        let min_tcb: Option<SnpTcb> = self
-            .min_tcb_json
-            .map(|s| serde_json::from_str(&s).map_err(|e| format!("min_tcb deserialize: {e}")))
-            .transpose()?;
-        // A pin that silently does not apply is worse than no pin at all.
-        let rtmr3: Option<[u8; 48]> = self
-            .expected_rtmr3
-            .map(|bytes| {
-                <[u8; 48]>::try_from(bytes.as_slice())
-                    .map_err(|_| format!("expected_rtmr3 is {} bytes, want 48", bytes.len()))
-            })
-            .transpose()?;
-        let tdx = TdxParams {
-            report_data: self.expected_report_data.clone(),
-            init_data: self.expected_init_data_hash.clone(),
-            rtmr: [None, None, None, rtmr3.map(|v| vec![v])],
-            ..Default::default()
-        };
-        let snp = SnpParams {
-            report_data: self.expected_report_data,
-            host_data: self.expected_init_data_hash,
-            min_tcb,
-            ..Default::default()
-        };
-        let mut policies = Policies::default();
-        for tag in &self.platforms {
-            let platform: PlatformType = serde_json::from_value(tag.as_str().into())
-                .map_err(|_| format!("platforms: unknown platform {tag:?}"))?;
-            match platform {
-                PlatformType::Tdx => policies.tdx = Some(tdx.clone()),
-                PlatformType::AzTdx => {
-                    policies.az_tdx = Some(AzTdxParams {
-                        tdx: tdx.clone(),
-                        ..Default::default()
-                    })
-                }
-                PlatformType::GcpTdx => policies.gcp_tdx = Some(GcpTdxParams { tdx: tdx.clone() }),
-                PlatformType::Snp => policies.snp = Some(snp.clone()),
-                PlatformType::AzSnp => {
-                    policies.az_snp = Some(AzSnpParams {
-                        snp: snp.clone(),
-                        ..Default::default()
-                    })
-                }
-                PlatformType::GcpSnp => policies.gcp_snp = Some(GcpSnpParams { snp: snp.clone() }),
-                PlatformType::Dstack => return Err(format!("platforms: {tag} is not compiled in")),
-            }
-        }
-        Ok(policies)
-    }
+    Ok(evaluate_impl(&envelope_json, &policies_json, &collateral_json, None).await?)
 }
 
 /// `now` fixes the evaluation time (Unix seconds); `None` is the clock.
 async fn evaluate_impl(
     envelope_json: &str,
-    request: Request,
+    policies_json: &str,
     collateral_json: &str,
     now: Option<i64>,
 ) -> Result<String, Failure> {
-    let policies = request.policies().map_err(Failure::bad_request)?;
+    let policies: Policies = serde_json::from_str(policies_json)
+        .map_err(|e| Failure::bad_request(format!("policies deserialize: {e}")))?;
     let held: Vec<AttachedCollateral> = serde_json::from_str(collateral_json)
         .map_err(|e| Failure::bad_request(format!("collateral deserialize: {e}")))?;
     let ctx = Context::held(held.into_iter().map(|h| (h.url, h.body, h.issuer_chain)));
@@ -241,14 +155,9 @@ mod tests {
         String::from_utf8(read("snp/live-evidence-genoa.json")).unwrap()
     }
 
-    fn request(platforms: &[&str]) -> Request {
-        Request {
-            platforms: platforms.iter().map(|p| p.to_string()).collect(),
-            expected_report_data: None,
-            expected_init_data_hash: None,
-            expected_rtmr3: None,
-            min_tcb_json: None,
-        }
+    /// `platform` accepted with its default params.
+    fn request(platform: &str) -> String {
+        serde_json::json!({ platform: {} }).to_string()
     }
 
     /// Fetch what `collateral_needed` lists from the fixtures, by URL.
@@ -286,9 +195,9 @@ mod tests {
         serde_json::Value::from(held).to_string()
     }
 
-    async fn evaluate(envelope: &str, request: Request) -> Result<serde_json::Value, Failure> {
+    async fn evaluate(envelope: &str, policies: &str) -> Result<serde_json::Value, Failure> {
         let collateral = fetch(envelope).await;
-        evaluate_impl(envelope, request, &collateral, Some(NOW))
+        evaluate_impl(envelope, policies, &collateral, Some(NOW))
             .await
             .map(|json| serde_json::from_str(&json).unwrap())
     }
@@ -298,10 +207,21 @@ mod tests {
         let needed: Vec<serde_json::Value> =
             serde_json::from_str(&collateral_needed_impl(&tdx_envelope()).await.unwrap()).unwrap();
         assert_eq!(needed.len(), 4);
-        let r = evaluate(&tdx_envelope(), request(&["tdx"])).await.unwrap();
+        let r = evaluate(&tdx_envelope(), &request("tdx")).await.unwrap();
         assert_eq!(r["passed"], true);
         assert_eq!(r["tcb_status"]["tcb_status"], "UpToDate");
         assert_eq!(r["crl_ok"], true);
+    }
+
+    #[tokio::test]
+    async fn dstack_passes_with_the_tdx_pieces() {
+        let mut envelope: serde_json::Value = serde_json::from_str(&tdx_envelope()).unwrap();
+        envelope["platform"] = "dstack".into();
+        let r = evaluate(&envelope.to_string(), &request("dstack"))
+            .await
+            .unwrap();
+        assert_eq!(r["passed"], true);
+        assert_eq!(r["platform"], "dstack");
     }
 
     #[tokio::test]
@@ -309,14 +229,14 @@ mod tests {
         let needed: Vec<serde_json::Value> =
             serde_json::from_str(&collateral_needed_impl(&snp_envelope()).await.unwrap()).unwrap();
         assert_eq!(needed.len(), 1);
-        let r = evaluate(&snp_envelope(), request(&["snp"])).await.unwrap();
+        let r = evaluate(&snp_envelope(), &request("snp")).await.unwrap();
         assert_eq!(r["passed"], true);
         assert_eq!(r["crl_ok"], true);
     }
 
     #[tokio::test]
     async fn missing_or_forged_collateral_throws() {
-        let err = evaluate_impl(&tdx_envelope(), request(&["tdx"]), "[]", Some(NOW))
+        let err = evaluate_impl(&tdx_envelope(), &request("tdx"), "[]", Some(NOW))
             .await
             .unwrap_err();
         assert_eq!(err.kind, "collateral_unavailable", "{err:?}");
@@ -328,7 +248,7 @@ mod tests {
         held[0]["body"] = BASE64.encode(crl).into();
         let err = evaluate_impl(
             &snp_envelope(),
-            request(&["snp"]),
+            &request("snp"),
             &serde_json::Value::from(held).to_string(),
             Some(NOW),
         )
@@ -352,10 +272,12 @@ mod tests {
 
     #[tokio::test]
     async fn rules_are_values() {
-        let mut req = request(&["tdx"]);
-        req.expected_rtmr3 = Some(vec![0; 48]);
-        req.expected_report_data = Some(b"another nonce".to_vec());
-        let r = evaluate(&tdx_envelope(), req).await.unwrap();
+        let policies = serde_json::json!({
+            "tdx": { "rtmr3": BASE64.encode([0; 48]), "report_data": BASE64.encode("another nonce") },
+        });
+        let r = evaluate(&tdx_envelope(), &policies.to_string())
+            .await
+            .unwrap();
         assert_eq!(r["passed"], false);
         assert_eq!(r["rtmr_match"][3], false);
         assert_eq!(r["report_data_match"], false);
@@ -363,12 +285,17 @@ mod tests {
 
     #[tokio::test]
     async fn bad_requests_throw_before_verification() {
-        let mut short_pin = request(&["tdx"]);
-        short_pin.expected_rtmr3 = Some(vec![0; 47]);
-        let mut bad_tcb = request(&["snp"]);
-        bad_tcb.min_tcb_json = Some("{".into());
-        for req in [request(&[]), request(&["nope"]), short_pin, bad_tcb] {
-            let err = evaluate_impl(&tdx_envelope(), req, "[]", Some(NOW))
+        let short_pin = serde_json::json!({ "tdx": { "rtmr3": BASE64.encode([0; 47]) } });
+        let bad_tcb = serde_json::json!({ "snp": { "min_tcb": { "tee": 1 } } });
+        let empty_set = serde_json::json!({ "tdx": { "accepted_tcb_statuses": [] } });
+        for policies in [
+            "{".to_string(),
+            request("nope"),
+            short_pin.to_string(),
+            bad_tcb.to_string(),
+            empty_set.to_string(),
+        ] {
+            let err = evaluate_impl(&tdx_envelope(), &policies, "[]", Some(NOW))
                 .await
                 .unwrap_err();
             assert_eq!(err.kind, "bad_request", "{err:?}");
@@ -379,14 +306,14 @@ mod tests {
     async fn the_answer_is_the_librarys() {
         for (envelope, platform) in [(tdx_envelope(), "tdx"), (snp_envelope(), "snp")] {
             let collateral = fetch(&envelope).await;
-            let wasm = evaluate_impl(&envelope, request(&[platform]), &collateral, Some(NOW))
+            let wasm = evaluate_impl(&envelope, &request(platform), &collateral, Some(NOW))
                 .await
                 .unwrap();
             let held: Vec<AttachedCollateral> = serde_json::from_str(&collateral).unwrap();
             let ctx = Context::held(held.into_iter().map(|h| (h.url, h.body, h.issuer_chain)))
                 .at(NOW)
                 .unwrap();
-            let policies = request(&[platform]).policies().unwrap();
+            let policies = serde_json::from_str(&request(platform)).unwrap();
             let lib = Verifier::new(ctx)
                 .verify(envelope.as_bytes(), &policies)
                 .await
@@ -402,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn evidence_for_a_platform_not_listed_throws() {
-        let err = evaluate(&tdx_envelope(), request(&["snp"]))
+        let err = evaluate(&tdx_envelope(), &request("snp"))
             .await
             .unwrap_err();
         assert_eq!(err.kind, "platform_not_allowed", "{err:?}");

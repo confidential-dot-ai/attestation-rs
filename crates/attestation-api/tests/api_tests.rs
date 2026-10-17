@@ -353,6 +353,39 @@ async fn verify_refuses_policies_below_the_server_floors_unless_enabled() {
         serde_json::json!({ "tdx": {}, "snp": { "max_vmpl": 1 } }),
     )
     .await;
+    assert_floor(
+        |c| c.attestation.allow_debug = false,
+        serde_json::json!({ "tdx": { "allow_debug": true }, "nvidia_gpu": { "device_policy": { "allow_debug": true } } }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn verify_refuses_collateral_floors_or_gpu_checks_below_the_defaults() {
+    let shipped = attestation::collateral::VersionFloors::default().intel_tcb_info;
+    for (policies, status) in [
+        (
+            serde_json::json!({ "floors": { "intel_tcb_info": shipped - 1 } }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "nvidia_gpu": { "device_policy": { "require_secboot": false } } }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "floors": { "intel_tcb_info": shipped + 1 } }),
+            StatusCode::OK,
+        ),
+    ] {
+        let mut policies = policies;
+        policies["tdx"] = serde_json::json!({ "allow_debug": true });
+        let (got, json) = post_verify(
+            offline_state_with(enable_all_floors),
+            serde_json::json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": policies }),
+        )
+        .await;
+        assert_eq!(got, status, "{policies}: {json}");
+    }
 }
 
 #[tokio::test]
@@ -1130,4 +1163,238 @@ async fn attest_then_verify_roundtrip() {
     }
     let verify_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(verify_json["passed"], true);
+}
+
+/// Request `policies` bodies from these tests and the README, each with the
+/// verdict `/verify` gave before it took `attestation::Policies` directly.
+#[tokio::test]
+async fn policies_requests_keep_their_verdicts() {
+    use serde_json::json;
+    const GCP_QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
+    let gcp_mrtd = BASE64.encode(hex::decode("c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5").unwrap());
+    let rd = tdx_v4_report_data();
+    let d48 = BASE64.encode([0u8; 48]);
+    let d32 = BASE64.encode([0u8; 32]);
+    let tcb = json!({ "bootloader": 1, "tee": 0, "snp": 1, "microcode": 1 });
+    // (floors open, platform, quote, policies, verdict)
+    let cases = [
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({}),
+            "platform_not_allowed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": null }),
+            "platform_not_allowed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "snp": {} }),
+            "platform_not_allowed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "snp": { "launch_digest": "AAAA" } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "snp": { "mrtd": d48 } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "pcrs": { "4": d32 } } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "unknown": 1 } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "report_data": "!!" } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": {}, "snp": { "launch_digest": [] } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": {}, "az-snp": { "pcrs": { "4": "AA==" } } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true, "report_data": rd } }),
+            "bad_request",
+        ),
+        (
+            true,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true, "report_data": rd } }),
+            "passed",
+        ),
+        (
+            true,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true, "accepted_tcb_statuses": [] } }),
+            "bad_request",
+        ),
+        (
+            true,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true, "report_data": BASE64.encode([0u8; 65]) } }),
+            "bad_request",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "accepted_tcb_statuses": ["UpToDate", "Revoked"] } }),
+            "bad_request",
+        ),
+        (
+            true,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true, "accepted_tcb_statuses": ["UpToDate", "Revoked"] } }),
+            "not passed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": {}, "snp": { "max_vmpl": 1 } }),
+            "bad_request",
+        ),
+        (
+            true,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==", "max_vmpl": 1 } }),
+            "passed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({ "tdx": {}, "az-tdx": { "pcrs": { "24": d32 } } }),
+            "not passed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({
+                "az-tdx": { "pcrs": { "4": d32 }, "init_data": d32 },
+                "gcp-snp": { "min_tcb": tcb, "launch_digest": [d48] },
+            }),
+            "platform_not_allowed",
+        ),
+        // README
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({
+                "snp": { "report_data": "AQIDBA==", "launch_digest": d48 },
+                "tdx": { "report_data": "AQIDBA==", "mrtd": d48 },
+            }),
+            "not passed",
+        ),
+        (
+            false,
+            "tdx",
+            TDX_V4_QUOTE,
+            json!({
+                "tdx": { "report_data": rd },
+                "nvidia_gpu": { "user_nonce": rd, "required": true, "expected_archs": ["HOPPER"] },
+            }),
+            "verification_failed",
+        ),
+        (
+            false,
+            "gcp-tdx",
+            GCP_QUOTE,
+            json!({ "gcp-tdx": {} }),
+            "passed",
+        ),
+        (
+            false,
+            "tdx",
+            GCP_QUOTE,
+            json!({ "tdx": { "mrtd": [d48, gcp_mrtd] } }),
+            "passed",
+        ),
+        (
+            false,
+            "tdx",
+            GCP_QUOTE,
+            json!({ "tdx": { "mrtd": [d48, d48] } }),
+            "not passed",
+        ),
+        (
+            false,
+            "tdx",
+            GCP_QUOTE,
+            json!({ "tdx": { "mrtd": gcp_mrtd, "rtmr3": BASE64.encode([0xAA; 48]) } }),
+            "not passed",
+        ),
+        (
+            false,
+            "tdx",
+            GCP_QUOTE,
+            json!({ "tdx": { "mrtd": [] } }),
+            "bad_request",
+        ),
+    ];
+    for (open, platform, quote, policies, verdict) in cases {
+        let state = offline_state_with(|c| {
+            if open {
+                enable_all_floors(c)
+            }
+        });
+        let body = serde_json::json!({
+            "platform": platform,
+            "evidence": { "quote": BASE64.encode(quote) },
+            "policies": policies,
+        });
+        let (status, json) = post_verify(state, body).await;
+        let got = match json["passed"].as_bool() {
+            Some(true) => "passed",
+            Some(false) => "not passed",
+            None => json["error"].as_str().unwrap_or("?"),
+        };
+        assert_eq!(got, verdict, "{policies}: {status} {json}");
+    }
 }

@@ -459,12 +459,10 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         (!values.is_empty()).then(|| values.iter().map(|h| parse_digest(h, flag)).collect())
     };
     let mrtd = digests(&args.expected_mrtd, "expected-mrtd");
-    let rtmr = [
-        digests(&args.expected_rtmr0, "expected-rtmr0"),
-        digests(&args.expected_rtmr1, "expected-rtmr1"),
-        digests(&args.expected_rtmr2, "expected-rtmr2"),
-        digests(&args.expected_rtmr3, "expected-rtmr3"),
-    ];
+    let rtmr0 = digests(&args.expected_rtmr0, "expected-rtmr0");
+    let rtmr1 = digests(&args.expected_rtmr1, "expected-rtmr1");
+    let rtmr2 = digests(&args.expected_rtmr2, "expected-rtmr2");
+    let rtmr3 = digests(&args.expected_rtmr3, "expected-rtmr3");
     let launch_digest = digests(&args.expected_launch_digest, "expected-launch-digest");
     let mut pcrs = std::collections::BTreeMap::<u8, [u8; 32]>::new();
     for pin in &args.expected_pcr {
@@ -522,7 +520,10 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         report_data: report_data.clone(),
         init_data: init_data.clone(),
         mrtd: mrtd.clone(),
-        rtmr: rtmr.clone(),
+        rtmr0: rtmr0.clone(),
+        rtmr1: rtmr1.clone(),
+        rtmr2: rtmr2.clone(),
+        rtmr3: rtmr3.clone(),
         ..Default::default()
     };
     let snp = || SnpParams {

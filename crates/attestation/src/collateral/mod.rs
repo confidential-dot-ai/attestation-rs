@@ -47,6 +47,8 @@ pub use store::{CollateralUsed, Source, Store};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vendor::VSOCK_PORT;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Result;
 
 /// One piece of vendor-signed collateral: something we download, check
@@ -83,7 +85,8 @@ pub const GRACE: i64 = 7 * 24 * 3600;
 /// versions the vendors served when this release was made; callers may raise
 /// them. Intel's PCK and Root CA CRLs always carry CRL Number 1, so they get
 /// no floor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct VersionFloors {
     /// AMD CRL Number, per generation.
     pub amd_crl_milan: u64,
