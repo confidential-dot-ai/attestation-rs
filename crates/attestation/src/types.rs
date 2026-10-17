@@ -61,8 +61,11 @@ pub struct AttestationEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nvidia_gpu: Option<serde_json::Value>,
     /// The collateral the evidence needs, as the vendors served it. The
-    /// verifier checks each piece against its compiled-in roots and uses it
-    /// before any other source.
+    /// verifier checks each piece against its compiled-in roots and uses the
+    /// newest copy among these and its own. One attached piece that does not
+    /// verify makes the evidence not genuine, even when the verifier has a
+    /// good copy: do not strip or reorder pieces. A piece past its
+    /// nextUpdate but within grace is used as is, not refetched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collateral: Vec<AttachedCollateral>,
 }

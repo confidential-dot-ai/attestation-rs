@@ -87,4 +87,25 @@ mod tests {
         let only_foreign = serde_json::to_vec(&serde_json::json!({ "keys": [foreign] })).unwrap();
         assert!(NrasJwks::verify(&only_foreign, None, &url).is_err());
     }
+
+    #[test]
+    fn a_key_is_refused_once_its_leaf_certificate_has_expired() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use x509_cert::der::Decode;
+        let body = include_bytes!("../../test_data/collateral/2026-10-14/nras_jwks.json");
+        let key = &NrasJwks::verify(body, None, &String::new())
+            .unwrap()
+            .jwks
+            .keys[0];
+        let leaf = STANDARD.decode(&key.x5c.as_ref().unwrap()[0]).unwrap();
+        let validity = x509_cert::Certificate::from_der(&leaf)
+            .unwrap()
+            .tbs_certificate
+            .validity;
+        let not_after = validity.not_after.to_unix_duration().as_secs() as i64;
+        let not_before = validity.not_before.to_unix_duration().as_secs() as i64;
+        assert!(es384_verifying_key_from_jwks_entry(key, Some(not_before)).is_ok());
+        assert!(es384_verifying_key_from_jwks_entry(key, Some(not_after)).is_ok());
+        assert!(es384_verifying_key_from_jwks_entry(key, Some(not_after + 1)).is_err());
+    }
 }

@@ -163,8 +163,12 @@ needs and adds it to the envelope as `collateral: [{url, body (base64),
 issuer_chain}]`: vendor bytes, never roots, each issuer chain once (a piece
 without one takes the chain of the piece before it), and for NVIDIA the NRAS
 answer and only the NRAS key that signed it. The CLI's `attest` and the API's
-`/attest` attach it. A verifier uses attached collateral before any other
-source and checks it like a fetched copy, so a verifier with only the
+`/attest` attach it. When a piece is unavailable, it waits out a short
+Retry-After (at most 5 s) once, then attaches what it got. An attached NRAS
+answer is used until its `exp`, then NRAS is asked again. A verifier uses the
+newest of the attached collateral and its own copies, and checks it like a
+fetched copy (one attached piece that does not verify makes the evidence not
+genuine), so a verifier with only the
 compiled-in roots (a browser, a server without egress) can judge the evidence.
 Fetching what the evidence lacks is a fallback: on in the CLI and servers,
 off with `Context::offline()` (`--offline`); in the browser the JS wrapper
