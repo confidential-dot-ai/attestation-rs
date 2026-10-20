@@ -590,35 +590,37 @@ mod tests {
         let listener = VsockListener::bind(VsockAddr::new(1, u32::MAX))
             .expect("vsock_loopback must be loaded for this gate");
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    while !buf.ends_with(b"\r\n\r\n") {
-                        buf.push(sock.read_u8().await.unwrap());
-                    }
-                    let request = String::from_utf8(buf).unwrap();
-                    let (status, header, body) = match request.split(' ').nth(1) {
-                        Some("/health") => (200, "", b"ok".to_vec()),
-                        Some("/chain") => {
-                            (200, "TCB-Info-Issuer-Chain: a%20b\r\n", b"body".to_vec())
-                        }
-                        Some("/big") => (200, "", vec![0; MAX_BODY + 1]),
-                        Some("/busy") => (503, "Retry-After: 7\r\n", Vec::new()),
-                        _ => (404, "", Vec::new()),
-                    };
-                    let head = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{header}Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = sock.write_all(head.as_bytes()).await;
-                    let _ = sock.write_all(&body).await;
-                });
+        // Each real HTTP request exercises connect; a separate connect-only
+        // probe would send no headers and add no coverage.
+        let server = tokio::spawn(async move {
+            for _ in 0..5 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                while !buf.ends_with(b"\r\n\r\n") {
+                    buf.push(sock.read_u8().await.expect("complete HTTP request headers"));
+                }
+                let request = String::from_utf8(buf).unwrap();
+                let path = request.split(' ').nth(1).unwrap();
+                let (status, header, body) = match path {
+                    "/health" => (200, "", b"ok".to_vec()),
+                    "/chain" => (200, "TCB-Info-Issuer-Chain: a%20b\r\n", b"body".to_vec()),
+                    "/big" => (200, "", vec![0; MAX_BODY + 1]),
+                    "/busy" => (503, "Retry-After: 7\r\n", Vec::new()),
+                    "/missing" => (404, "", Vec::new()),
+                    _ => panic!("unexpected request path: {path}"),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{header}Connection: close\r\n\r\n",
+                    body.len()
+                );
+                sock.write_all(head.as_bytes()).await.unwrap();
+                let written = sock.write_all(&body).await;
+                if path != "/big" {
+                    written.unwrap();
+                }
+                // The size-limited client may close /big before reading its body.
             }
         });
-        if vsock::connect(1, port).await.is_err() {
-            return;
-        }
         assert!(vsock::get(1, port, "health").await.is_ok());
         assert_eq!(
             vsock::get(1, port, "chain").await.unwrap(),
@@ -631,6 +633,9 @@ mod tests {
         let busy = vsock::get(1, port, "busy").await.unwrap_err();
         assert_eq!((busy.status, busy.retry_after), (Some(503), Some(7)));
         assert_eq!(vsock::get(1, port, "big").await.unwrap_err().status, None);
+        server
+            .await
+            .expect("vsock server task must finish without panicking");
     }
 
     #[cfg(feature = "nvidia-gpu")]
