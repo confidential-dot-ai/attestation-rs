@@ -131,12 +131,13 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// The JSON encodings of params values (`#[serde(with = ...)]`): bytes are
 /// standard base64.
-#[cfg(any(feature = "tdx", feature = "snp", feature = "nvidia-gpu"))]
 pub(crate) mod b64 {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[cfg(any(feature = "tdx", feature = "snp", feature = "nvidia-gpu"))]
+    use serde::Serialize;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     fn decode<E: Error>(value: &str) -> Result<Vec<u8>, E> {
         STANDARD
@@ -151,7 +152,19 @@ pub(crate) mod b64 {
             .map_err(|b: Vec<u8>| E::custom(format!("must be {N} bytes, got {}", b.len())))
     }
 
+    /// Required bytes, including attached collateral bodies.
+    pub mod vec {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_str(&STANDARD.encode(value))
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+            decode(&String::deserialize(d)?)
+        }
+    }
+
     /// Optional bytes.
+    #[cfg(any(feature = "tdx", feature = "snp", feature = "nvidia-gpu"))]
     pub mod bytes {
         use super::*;
 

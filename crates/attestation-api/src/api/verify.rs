@@ -20,14 +20,60 @@ pub struct VerifyRequest {
     #[serde(default)]
     pub nvidia_gpu: Option<Value>,
     /// The collateral /attest attached, `[{url, body, issuer_chain}]`.
-    #[serde(default)]
     pub collateral: Option<Value>,
     /// Accepted platforms and their params. Evidence for a platform without an
     /// entry is refused. Issued tokens carry it as their `policy` claim.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "api_policies")]
     pub policies: attestation::Policies,
     #[serde(default)]
     pub issue_token: bool,
+}
+
+// Filter keys while streaming, so library serde still rejects duplicate keys.
+// Feature unification must not expand the service's accepted policy surface.
+fn api_policies<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<attestation::Policies, D::Error> {
+    struct ApiPolicies;
+    impl<'de> serde::de::Visitor<'de> for ApiPolicies {
+        type Value = attestation::Policies;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("supported API policies")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+            struct Supported<M>(M);
+            impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for Supported<M> {
+                type Error = M::Error;
+                fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+                    &mut self,
+                    seed: K,
+                ) -> Result<Option<K::Value>, Self::Error> {
+                    use serde::de::IntoDeserializer;
+                    let Some(key) = self.0.next_key::<String>()? else {
+                        return Ok(None);
+                    };
+                    if !crate::config::SUPPORTED_ATTESTATION_PLATFORMS.contains(&key.as_str())
+                        && !matches!(key.as_str(), "floors" | "nvidia_gpu")
+                    {
+                        return Err(serde::de::Error::custom(format!(
+                            "unsupported policy: {key}"
+                        )));
+                    }
+                    seed.deserialize(key.into_deserializer()).map(Some)
+                }
+                fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+                    &mut self,
+                    seed: V,
+                ) -> Result<V::Value, Self::Error> {
+                    self.0.next_value_seed(seed)
+                }
+            }
+            attestation::Policies::deserialize(serde::de::value::MapAccessDeserializer::new(
+                Supported(map),
+            ))
+        }
+    }
+    deserializer.deserialize_map(ApiPolicies)
 }
 
 #[derive(Serialize)]
@@ -225,6 +271,20 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn policy_boundary_preserves_duplicate_key_rejection() {
+        let valid = r#"{"evidence":{},"policies":{"tdx":{}}}"#;
+        assert!(serde_json::from_str::<super::VerifyRequest>(valid).is_ok());
+        for policies in [
+            r#"{"tdx":{},"tdx":{}}"#,
+            r#"{"dstack":null}"#,
+            r#"{"future":{}}"#,
+        ] {
+            let request = format!(r#"{{"evidence":{{}},"policies":{policies}}}"#);
+            assert!(serde_json::from_str::<super::VerifyRequest>(&request).is_err());
+        }
     }
 
     #[test]

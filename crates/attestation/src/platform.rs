@@ -419,8 +419,8 @@ mod tests {
         let mut keys: Vec<_> = claim.as_object().unwrap().keys().collect();
         keys.sort();
         assert_eq!(keys, ["az-tdx", "floors", "snp"]);
-        let again: Policies = serde_json::from_value(claim).unwrap();
-        assert_eq!(format!("{again:?}"), format!("{policies:?}"));
+        let again: Policies = serde_json::from_value(claim.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&again).unwrap(), claim);
 
         for refused in [
             format!(r#"{{"az-snp":{{"pcrs":{{"4":"{pin}","4":"{pin}"}}}}}}"#),

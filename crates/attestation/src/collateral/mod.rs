@@ -98,6 +98,7 @@ pub struct VersionFloors {
     pub intel_qe_identity: u64,
 }
 
+// Raising a shipped floor requires refreshing the fixed-clock test fixtures.
 impl Default for VersionFloors {
     /// As served on 2026-10-14.
     fn default() -> Self {

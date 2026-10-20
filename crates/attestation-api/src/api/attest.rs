@@ -122,7 +122,7 @@ pub async fn handler(
 #[cfg(target_os = "linux")]
 fn resolve_platform(name: &str) -> Result<attestation::PlatformType, ApiError> {
     match name {
-        "auto" => attestation::detect().map_err(|_| ApiError::NoPlatform),
+        "auto" => super::detect_platform(),
         "snp" => Ok(attestation::PlatformType::Snp),
         "tdx" => Ok(attestation::PlatformType::Tdx),
         "az-snp" => Ok(attestation::PlatformType::AzSnp),

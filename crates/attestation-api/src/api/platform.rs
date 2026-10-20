@@ -11,7 +11,7 @@ pub struct PlatformResponse {
 pub async fn handler() -> Result<Json<PlatformResponse>, ApiError> {
     #[cfg(target_os = "linux")]
     {
-        let platform = attestation::detect().map_err(|_| ApiError::NoPlatform)?;
+        let platform = super::detect_platform()?;
         Ok(Json(PlatformResponse {
             platform: format!("{platform}"),
         }))

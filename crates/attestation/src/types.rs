@@ -80,7 +80,7 @@ pub struct AttestationEvidence {
 #[serde(deny_unknown_fields)]
 pub struct AttachedCollateral {
     pub url: String,
-    #[serde(with = "base64_bytes")]
+    #[serde(with = "crate::utils::b64::vec")]
     pub body: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_chain: Option<String>,
@@ -125,21 +125,6 @@ impl AttestationEvidence {
                 }
             })
             .collect();
-    }
-}
-
-mod base64_bytes {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        STANDARD
-            .decode(String::deserialize(d)?)
-            .map_err(serde::de::Error::custom)
     }
 }
 
