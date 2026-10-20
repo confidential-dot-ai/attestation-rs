@@ -1108,12 +1108,12 @@ async fn jwks_returns_error_when_token_not_configured() {
 // Captured evidence and a local vendor isolate API logic from AMD availability.
 #[tokio::test]
 async fn snp_fixture_verify_accepts_valid_evidence_and_rejects_bad_signature() {
+    let base = vendor(vec![
+        ("/crl", 200, GENOA_CRL.to_vec()),
+        ("/Genoa/", 200, SNP_VCEK.to_vec()),
+    ])
+    .await;
     for corrupt in [false, true] {
-        let base = vendor(vec![
-            ("/crl", 200, GENOA_CRL.to_vec()),
-            ("/Genoa/", 200, SNP_VCEK.to_vec()),
-        ])
-        .await;
         let mut body = snp_body(false);
         if corrupt {
             let mut report = SNP_REPORT.to_vec();
