@@ -1732,6 +1732,27 @@ mod tests {
         assert!(!json.contains("runtime_registers"), "{json}");
     }
 
+    #[tokio::test]
+    async fn runtime_mode_without_an_event_log_fails_even_on_the_callers_bytes() {
+        // An image without the provider passes the caller's bytes through as
+        // REPORT_DATA; the evidence carries no event log.
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let plain = SnpParams {
+            report_data: Some(report.report_data.to_vec()),
+            launch_digest: Some(vec![report.measurement]),
+            ..Default::default()
+        };
+        assert!(verify(&plain).await.unwrap().passed());
+        let r = verify(&SnpParams {
+            runtime_registers: Some(vec![]),
+            ..plain
+        })
+        .await
+        .unwrap();
+        assert_eq!(r.report_data_match, Some(false));
+        assert!(r.runtime_registers.is_none() && !r.passed());
+    }
+
     #[test]
     fn a_result_without_migrate_ma_deserializes() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
