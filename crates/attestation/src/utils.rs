@@ -235,6 +235,29 @@ pub(crate) mod b64 {
                 .map(|v| decode_fixed(v))
                 .collect()
         }
+
+        /// Optional; `null` is none.
+        pub mod option {
+            use super::*;
+
+            pub fn serialize<S: Serializer>(
+                value: &Option<Vec<[u8; 48]>>,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                match value {
+                    Some(v) => super::serialize(v, s),
+                    None => s.serialize_none(),
+                }
+            }
+
+            pub fn deserialize<'de, D: Deserializer<'de>>(
+                d: D,
+            ) -> Result<Option<Vec<[u8; 48]>>, D::Error> {
+                Option::<Vec<String>>::deserialize(d)?
+                    .map(|vs| vs.iter().map(|v| decode_fixed(v)).collect())
+                    .transpose()
+            }
+        }
     }
 
     /// vTPM PCR pins: an object of index to 32 bytes. An index given twice

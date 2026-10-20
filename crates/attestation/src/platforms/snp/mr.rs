@@ -62,33 +62,44 @@ pub fn report_data(
     out
 }
 
-/// Replay the first `event_count` entries of `log` from zero registers.
-pub fn replay(log: &[u8], event_count: u32) -> Result<[Register; REGISTER_COUNT]> {
-    if log.len() / ENTRY_LEN < event_count as usize {
+/// Replay the first `event_count` entries of `log` from zero registers;
+/// `None` when the log has fewer entries. A log that is not whole entries
+/// naming registers 0 to 15 is malformed, whatever the count.
+pub fn replay(log: &[u8], event_count: u32) -> Result<Option<[Register; REGISTER_COUNT]>> {
+    if !log.len().is_multiple_of(ENTRY_LEN) {
         return Err(bad_log(format!(
-            "{event_count} events committed, log is shorter"
+            "length {} is not whole entries",
+            log.len()
         )));
+    }
+    if let Some(entry) = log
+        .chunks_exact(ENTRY_LEN)
+        .find(|e| e[0] as usize >= REGISTER_COUNT)
+    {
+        return Err(bad_log(format!("register index {} above 15", entry[0])));
+    }
+    if log.len() / ENTRY_LEN < event_count as usize {
+        return Ok(None);
     }
     let mut registers = [[0u8; 48]; REGISTER_COUNT];
     for entry in log.chunks_exact(ENTRY_LEN).take(event_count as usize) {
-        let register = registers
-            .get_mut(entry[0] as usize)
-            .ok_or_else(|| bad_log(format!("register index {} above 15", entry[0])))?;
-        extend(register, &entry[1..]);
+        extend(&mut registers[entry[0] as usize], &entry[1..]);
     }
-    Ok(registers)
+    Ok(Some(registers))
 }
 
 /// The registers that `reported` (a report's `REPORT_DATA`) commits to with
 /// `caller_data`, replayed from `log`; `None` when `reported` is not that
-/// commitment.
+/// commitment. Err only for a malformed log.
 pub fn verify(
     reported: &[u8; 64],
     log: &[u8],
     caller_data: &[u8; 64],
 ) -> Result<Option<RuntimeRegisters>> {
     let event_count = u32::from_le_bytes(reported[..4].try_into().unwrap());
-    let registers = replay(log, event_count)?;
+    let Some(registers) = replay(log, event_count)? else {
+        return Ok(None);
+    };
     let expected = report_data(event_count, &registers, caller_data);
     Ok(
         crate::utils::constant_time_eq(reported, &expected).then(|| RuntimeRegisters {
@@ -152,7 +163,7 @@ mod tests {
     #[test]
     fn golden_vectors() {
         for v in vectors() {
-            let registers = replay(&v.log, v.event_count).unwrap();
+            let registers = replay(&v.log, v.event_count).unwrap().unwrap();
             assert_eq!(registers.to_vec(), v.registers);
             assert_eq!(
                 report_data(v.event_count, &registers, &v.caller_data),
@@ -180,6 +191,39 @@ mod tests {
         assert!(verify_vector(&v).unwrap().is_none());
         v.log[0] = 16;
         assert!(verify_vector(&v).is_err());
+    }
+
+    #[test]
+    fn a_malformed_log_is_an_error_whatever_the_count() {
+        let v = prefix_vector();
+        assert!(verify_vector(&v).unwrap().is_some());
+        let mut past_the_count = v.log.clone();
+        past_the_count[4 * ENTRY_LEN] = 16;
+        let mut trailing = v.log.clone();
+        trailing.push(0);
+        for log in [past_the_count, trailing] {
+            assert!(verify(&v.report_data, &log, &v.caller_data).is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_golden_vectors() {
+        let json: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+        let hex = |v: &serde_json::Value| hex::decode(v.as_str().unwrap()).unwrap();
+        let rejected = json["rejected"].as_array().unwrap();
+        assert!(!rejected.is_empty());
+        for v in rejected {
+            let result = verify(
+                &hex(&v["report_data"]).try_into().unwrap(),
+                &hex(&v["event_log"]),
+                &hex(&v["caller_data"]).try_into().unwrap(),
+            );
+            match v["expect"].as_str().unwrap() {
+                "malformed" => assert!(result.is_err(), "{}", v["name"]),
+                "mismatch" => assert!(result.unwrap().is_none(), "{}", v["name"]),
+                other => panic!("unknown expectation {other}"),
+            }
+        }
     }
 
     #[test]
@@ -212,7 +256,10 @@ mod tests {
         v.report_data[0] = 3;
         assert!(verify_vector(&v).unwrap().is_none());
         v.report_data[0] = 6;
-        assert!(verify_vector(&v).is_err(), "log shorter than the count");
+        assert!(
+            verify_vector(&v).unwrap().is_none(),
+            "log shorter than the count"
+        );
     }
 
     #[test]

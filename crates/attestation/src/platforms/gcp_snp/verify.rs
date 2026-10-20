@@ -82,7 +82,7 @@ impl Platform for GcpSnp {
     type CollateralSet = GcpSnpCollateralSet;
 
     fn validate(params: &GcpSnpParams) -> Result<()> {
-        if params.snp.caller_data.is_some() {
+        if params.snp.runtime_registers.is_some() {
             return Err(AttestationError::InvalidParams(
                 "runtime registers are bare-metal SNP only".into(),
             ));
@@ -119,6 +119,7 @@ impl Platform for GcpSnp {
         collateral: &GcpSnpCollateralSet,
         now: i64,
     ) -> Result<GcpSnpResult> {
+        Self::validate(params)?;
         let snp = Snp::verify(evidence, &params.snp, &collateral.snp, now)?;
         let report = gcp_endorsement::snp_report(evidence)?;
         let measurement = report.measurement.to_vec();
@@ -178,15 +179,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_registers_are_bare_metal_only() {
+    #[tokio::test]
+    async fn runtime_registers_are_bare_metal_only() {
+        let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let snp = SnpParams {
+            report_data: Some(parse_report(LIVE_REPORT_V5).unwrap().report_data.to_vec()),
             launch_digest: Some(vec![[1; 48]]),
-            caller_data: Some(vec![7; 64]),
+            runtime_registers: Some(vec![]),
             ..Default::default()
         };
-        Snp::validate(&snp).unwrap();
-        assert!(GcpSnp::validate(&GcpSnpParams { snp }).is_err());
+        let ctx = testing::context(vec![testing::amd_crl(ProcessorGeneration::Genoa)]);
+        let collateral = GcpSnpCollateralSet {
+            snp: Snp::gather(&evidence, ctx.store(), testing::NOW)
+                .await
+                .unwrap()
+                .0,
+            endorsement: None,
+        };
+        assert!(Snp::verify(&evidence, &snp, &collateral.snp, testing::NOW).is_ok());
+        let params = GcpSnpParams { snp };
+        assert!(GcpSnp::validate(&params).is_err());
+        let err = GcpSnp::verify(&evidence, &params, &collateral, testing::NOW)
+            .err()
+            .unwrap();
+        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
     }
 
     #[tokio::test]

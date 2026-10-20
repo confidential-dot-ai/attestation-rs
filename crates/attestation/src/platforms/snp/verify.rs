@@ -41,7 +41,8 @@ pub const MAX_REPORT_VERSION: u32 = 5;
 pub struct SnpParams {
     /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
     /// [`SnpResult::report_data_match`]. On Azure (vTPM) this is checked
-    /// against the vTPM quote nonce instead.
+    /// against the vTPM quote nonce instead. With `runtime_registers`, the
+    /// exact 64 bytes the requester passed, which `REPORT_DATA` must commit to.
     #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
@@ -54,22 +55,25 @@ pub struct SnpParams {
     pub launch_digest: Option<Vec<[u8; 48]>>,
     /// Accept a guest whose policy allows debug. Default: false.
     pub allow_debug: bool,
-    /// Minimum reported TCB; each component must be at least this.
+    /// Minimum TCB: each component of the reported, committed and launch
+    /// TCB must be at least this.
     pub min_tcb: Option<SnpTcb>,
     /// Highest VMPL accepted. Default: 0.
     pub max_vmpl: u32,
-    /// Bare-metal guest kernel runtime registers: the exact 64 bytes the
-    /// requester passed as `REPORT_DATA`. Setting it selects the mode:
-    /// `REPORT_DATA` must then commit to the evidence's event log and this
-    /// value, and it needs `launch_digest` pinned to an image with the
-    /// provider, no `report_data` and VMPL 0. Unset: no runtime registers.
+    /// Bare-metal guest kernel runtime registers: the expected final values
+    /// in index order, at most 16; registers past the list must be zero (`[]`:
+    /// all zero). Setting it selects the mode: `REPORT_DATA` must commit to
+    /// the evidence's event log and `report_data`. It needs a 64-byte
+    /// `report_data`, `launch_digest` and VMPL 0.
+    ///
+    /// **Every `launch_digest` value must be an image whose kernel has the
+    /// runtime-register provider.** On an image without it, guest root
+    /// chooses `REPORT_DATA` and can forge any registers; never pin such an
+    /// image here, not even next to provider images.
+    ///
     /// With debug allowed, the host can read and change guest memory, so
     /// register values are not protected against the host.
-    #[serde(with = "b64::bytes")]
-    pub caller_data: Option<Vec<u8>>,
-    /// Expected final runtime registers in index order; registers past the
-    /// list must be zero. Needs `caller_data`.
-    #[serde(with = "b64::digests")]
+    #[serde(with = "b64::digest_list::option")]
     pub runtime_registers: Option<Vec<[u8; 48]>>,
 }
 
@@ -85,22 +89,16 @@ impl SnpParams {
                 "host_data exceeds 32 bytes".into(),
             ));
         }
-        if let Some(caller_data) = &self.caller_data {
-            if caller_data.len() != 64 {
-                return Err(AttestationError::InvalidParams(
-                    "caller_data must be 64 bytes".into(),
-                ));
-            }
-            if self.launch_digest.is_none() || self.report_data.is_some() || self.max_vmpl != 0 {
-                return Err(AttestationError::InvalidParams(
-                    "caller_data needs launch_digest, no report_data and VMPL 0".into(),
-                ));
-            }
-        }
         if let Some(registers) = &self.runtime_registers {
-            if self.caller_data.is_none() || registers.len() > mr::REGISTER_COUNT {
+            if registers.len() > mr::REGISTER_COUNT
+                || self.report_data.as_ref().is_none_or(|d| d.len() != 64)
+                || self.launch_digest.is_none()
+                || self.max_vmpl != 0
+            {
                 return Err(AttestationError::InvalidParams(
-                    "runtime_registers needs caller_data and at most 16 values".into(),
+                    "runtime_registers needs at most 16 values, a 64-byte report_data, \
+                     launch_digest and VMPL 0"
+                        .into(),
                 ));
             }
         }
@@ -122,6 +120,7 @@ pub struct SnpResult {
     /// The params allowed a debug guest.
     pub allow_debug: bool,
     /// The guest policy allows a migration agent (never accepted).
+    #[serde(default)]
     pub migrate_ma: bool,
     /// VMPL the report was requested from.
     pub vmpl: u32,
@@ -129,15 +128,18 @@ pub struct SnpResult {
     pub max_vmpl: u32,
     /// TCB the report was signed under.
     pub reported_tcb: SnpTcb,
-    /// `reported_tcb` is at or above `min_tcb` (`None` if no minimum given).
+    /// The reported, committed and launch TCB are each at or above `min_tcb`
+    /// (`None` if no minimum given).
     pub min_tcb_met: Option<bool>,
     /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` only on
     /// results not from [`Snp::verify`]).
     pub crl_ok: Option<bool>,
     /// The guest kernel's runtime registers that `REPORT_DATA` commits to
-    /// (`None`: no runtime registers).
+    /// (`None`: no runtime registers, or the commitment or the launch digest
+    /// pin failed).
     pub runtime_registers: Option<RuntimeRegisters>,
-    /// `runtime_registers` equal the expected ones (`None` if none expected).
+    /// `runtime_registers` equal the expected ones (`None` outside runtime
+    /// mode).
     pub runtime_registers_match: Option<bool>,
 }
 
@@ -180,10 +182,15 @@ pub fn evaluate_report(
         migrate_ma: report.policy.migrate_ma_allowed(),
         vmpl: report.vmpl,
         max_vmpl: params.max_vmpl,
-        min_tcb_met: params
-            .min_tcb
-            .as_ref()
-            .map(|min| min_tcb_met(&reported_tcb, min)),
+        min_tcb_met: params.min_tcb.as_ref().map(|min| {
+            [
+                &report.reported_tcb,
+                &report.committed_tcb,
+                &report.launch_tcb,
+            ]
+            .into_iter()
+            .all(|tcb| min_tcb_met(&snp_tcb(tcb), min))
+        }),
         reported_tcb,
         crl_ok,
         runtime_registers: None,
@@ -291,47 +298,53 @@ impl Platform for Snp {
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
         check_report_bindings(&mut result, &report, params)?;
-        if let Some(caller_data) = &params.caller_data {
+        if let Some(expected) = &params.runtime_registers {
+            let caller_data = params
+                .report_data
+                .as_deref()
+                .unwrap_or_default()
+                .try_into()
+                .map_err(|_| {
+                    AttestationError::InvalidParams("report_data must be 64 bytes".into())
+                })?;
             check_runtime_registers(
                 &mut result,
                 &report.report_data,
                 evidence.event_log.as_deref(),
                 caller_data,
-                params.runtime_registers.as_deref(),
+                expected,
             )?;
         }
         Ok(result)
     }
 }
 
-/// Replay the event log prefix that `report_data` names, check that
-/// `report_data` commits to it and `caller_data` (into `report_data_match`),
-/// and compare the registers with the expected ones.
+/// Replay the event log prefix that `report_data` names and replace
+/// `report_data_match` with whether `report_data` commits to it and
+/// `caller_data`. Registers are exposed and compared with `expected` only
+/// when the launch digest pin also held: without the provider the commitment
+/// means nothing.
 fn check_runtime_registers(
     result: &mut SnpResult,
     report_data: &[u8; 64],
     event_log: Option<&str>,
-    caller_data: &[u8],
-    expected: Option<&[[u8; 48]]>,
+    caller_data: &[u8; 64],
+    expected: &[[u8; 48]],
 ) -> Result<()> {
     let event_log = event_log.unwrap_or_default();
     crate::utils::check_field_size("event_log", event_log.len())?;
     let log = BASE64
         .decode(event_log)
         .map_err(|e| AttestationError::EvidenceDeserialize(format!("event_log base64: {e}")))?;
-    let caller_data = caller_data
-        .try_into()
-        .map_err(|_| AttestationError::InvalidParams("caller_data must be 64 bytes".into()))?;
-    let registers = mr::verify(report_data, &log, caller_data)?;
+    let registers = mr::verify(report_data, &log, caller_data)?
+        .filter(|_| result.launch_digest_match == Some(true));
     result.report_data_match = Some(registers.is_some());
-    result.runtime_registers_match = expected.map(|expected| {
-        registers.as_ref().is_some_and(|r| {
-            r.registers
-                .iter()
-                .enumerate()
-                .all(|(i, value)| *value == expected.get(i).copied().unwrap_or([0; 48]))
-        })
-    });
+    result.runtime_registers_match = Some(registers.as_ref().is_some_and(|r| {
+        r.registers
+            .iter()
+            .enumerate()
+            .all(|(i, value)| *value == expected.get(i).copied().unwrap_or([0; 48]))
+    }));
     result.runtime_registers = registers;
     Ok(())
 }
@@ -1519,8 +1532,9 @@ mod tests {
 
     fn runtime_params(report: &AttestationReport) -> SnpParams {
         SnpParams {
+            report_data: Some(vec![7; 64]),
             launch_digest: Some(vec![report.measurement]),
-            caller_data: Some(vec![7; 64]),
+            runtime_registers: Some(vec![]),
             ..Default::default()
         }
     }
@@ -1536,6 +1550,67 @@ mod tests {
     }
 
     #[test]
+    fn a_report_above_the_accepted_vmpl_fails() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        assert_eq!(report.vmpl, 0);
+        let vmpl1 = SnpParams {
+            max_vmpl: 1,
+            ..Default::default()
+        };
+        assert!(evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+        for (vmpl, passes_at_vmpl1) in [(1, true), (2, false), (0xFFFF_FFFF, false)] {
+            report.vmpl = vmpl;
+            assert!(!evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+            assert_eq!(
+                evaluate_report(&report, &vmpl1, Some(true)).passed(),
+                passes_at_vmpl1,
+                "VMPL {vmpl:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_debug_guest_passes_only_when_allowed() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        let allow_debug = SnpParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        assert!(evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+        report.policy.set_debug_allowed(true);
+        let r = evaluate_report(&report, &SnpParams::default(), Some(true));
+        assert!(r.debug && !r.passed());
+        assert!(evaluate_report(&report, &allow_debug, Some(true)).passed());
+    }
+
+    #[test]
+    fn the_tcb_floor_applies_to_the_reported_committed_and_launch_tcb() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        report.committed_tcb = report.reported_tcb;
+        report.launch_tcb = report.reported_tcb;
+        let params = SnpParams {
+            min_tcb: Some(snp_tcb(&report.reported_tcb)),
+            ..Default::default()
+        };
+        let met =
+            |report: &AttestationReport| evaluate_report(report, &params, Some(true)).min_tcb_met;
+        assert_eq!(met(&report), Some(true));
+        for field in 0..3 {
+            let mut below = report;
+            let tcb = [
+                &mut below.reported_tcb,
+                &mut below.committed_tcb,
+                &mut below.launch_tcb,
+            ]
+            .into_iter()
+            .nth(field)
+            .unwrap();
+            tcb.microcode -= 1;
+            assert_eq!(met(&below), Some(false), "TCB {field}");
+        }
+    }
+
+    #[test]
     fn runtime_register_params_need_the_strict_mode() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
         let ok = runtime_params(&report);
@@ -1547,9 +1622,19 @@ mod tests {
         }
         .validate()
         .unwrap();
+        SnpParams {
+            runtime_registers: Some(vec![[1; 48]; 16]),
+            ..ok.clone()
+        }
+        .validate()
+        .unwrap();
         let bad = [
             SnpParams {
-                caller_data: Some(vec![7; 63]),
+                report_data: Some(vec![7; 63]),
+                ..ok.clone()
+            },
+            SnpParams {
+                report_data: None,
                 ..ok.clone()
             },
             SnpParams {
@@ -1557,16 +1642,11 @@ mod tests {
                 ..ok.clone()
             },
             SnpParams {
-                report_data: Some(vec![7; 64]),
-                ..ok.clone()
-            },
-            SnpParams {
                 max_vmpl: 1,
                 ..ok.clone()
             },
             SnpParams {
-                caller_data: None,
-                runtime_registers: Some(vec![[0; 48]]),
+                runtime_registers: Some(vec![[1; 48]; 17]),
                 ..ok.clone()
             },
         ];
@@ -1575,20 +1655,65 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_report_data_without_a_commitment_is_rejected() {
-        // The fixture's REPORT_DATA is caller bytes, as an unpatched kernel
-        // passes through: its "event count" names more events than the log has.
+    #[test]
+    fn runtime_registers_are_an_ordered_list_in_json() {
+        let parse = |registers: &str| {
+            serde_json::from_str::<SnpParams>(&format!(r#"{{"runtime_registers":{registers}}}"#))
+                .map(|p| p.runtime_registers)
+        };
+        let r0 = BASE64.encode([1; 48]);
+        assert_eq!(parse("null").unwrap(), None);
+        assert_eq!(parse("[]").unwrap(), Some(vec![]));
+        assert_eq!(
+            parse(&format!(r#"["{r0}","{}"]"#, BASE64.encode([0; 48]))).unwrap(),
+            Some(vec![[1; 48], [0; 48]])
+        );
+        assert!(
+            parse(&format!(r#""{r0}""#)).is_err(),
+            "one value is not a list"
+        );
+        let params = SnpParams {
+            runtime_registers: Some(vec![]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(json.contains(r#""runtime_registers":[]"#), "{json}");
+    }
+
+    #[test]
+    fn a_result_without_migrate_ma_deserializes() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let mut params = runtime_params(&report);
-        params.caller_data = None;
-        assert!(verify(&params).await.unwrap().passed());
-        assert!(verify(&runtime_params(&report)).await.is_err());
+        let mut json =
+            serde_json::to_value(evaluate_report(&report, &SnpParams::default(), None)).unwrap();
+        json.as_object_mut().unwrap().remove("migrate_ma").unwrap();
+        let r: SnpResult = serde_json::from_value(json).unwrap();
+        assert!(!r.migrate_ma);
+    }
+
+    #[tokio::test]
+    async fn a_report_data_without_a_commitment_fails() {
+        // The fixture's REPORT_DATA is caller bytes, as an unpatched kernel
+        // passes through.
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let plain = SnpParams {
+            report_data: Some(report.report_data.to_vec()),
+            launch_digest: Some(vec![report.measurement]),
+            ..Default::default()
+        };
+        assert!(verify(&plain).await.unwrap().passed());
+        let r = verify(&SnpParams {
+            runtime_registers: Some(vec![]),
+            ..plain
+        })
+        .await
+        .unwrap();
+        assert_eq!(r.report_data_match, Some(false));
+        assert!(r.runtime_registers.is_none() && !r.passed());
     }
 
     /// A vector from the kernel/verifier golden set: REPORT_DATA, the log and
     /// the caller data, and its registers.
-    fn kmr_vector(name: &str) -> ([u8; 64], String, Vec<u8>, Vec<[u8; 48]>) {
+    fn kmr_vector(name: &str) -> ([u8; 64], String, [u8; 64], Vec<[u8; 48]>) {
         let json: serde_json::Value =
             serde_json::from_str(include_str!("../../../test_data/snp/kmr-vectors.json")).unwrap();
         let v = json["vectors"]
@@ -1602,7 +1727,7 @@ mod tests {
         (
             hex(&v["report_data"]).try_into().unwrap(),
             BASE64.encode(hex(&v["event_log"])),
-            hex(&v["caller_data"]),
+            hex(&v["caller_data"]).try_into().unwrap(),
             registers
                 .iter()
                 .map(|r| hex(r).try_into().unwrap())
@@ -1610,19 +1735,18 @@ mod tests {
         )
     }
 
-    fn check_kmr(name: &str, caller_data: Option<&[u8]>, expected: &[[u8; 48]]) -> SnpResult {
+    /// Check a vector's registers on a report whose launch digest pin held.
+    fn check_kmr(name: &str, caller_data: Option<&[u8; 64]>, expected: &[[u8; 48]]) -> SnpResult {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let mut result = evaluate_report(&report, &SnpParams::default(), Some(true));
+        let params = SnpParams {
+            launch_digest: Some(vec![report.measurement]),
+            ..Default::default()
+        };
+        let mut result = evaluate_report(&report, &params, Some(true));
         let (report_data, log, vector_caller_data, _) = kmr_vector(name);
         let caller_data = caller_data.unwrap_or(&vector_caller_data);
-        check_runtime_registers(
-            &mut result,
-            &report_data,
-            Some(&log),
-            caller_data,
-            Some(expected),
-        )
-        .unwrap();
+        check_runtime_registers(&mut result, &report_data, Some(&log), caller_data, expected)
+            .unwrap();
         result
     }
 
@@ -1649,7 +1773,7 @@ mod tests {
 
     #[test]
     fn genesis_registers_match_an_empty_expectation() {
-        let r = check_kmr("genesis", None, &[[0; 48]]);
+        let r = check_kmr("genesis", None, &[]);
         assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
         assert_eq!(r.runtime_registers_match, Some(true));
         assert!(r.passed());
@@ -1685,20 +1809,24 @@ mod tests {
         caller_data: &[u8],
         expected: Vec<[u8; 48]>,
     ) -> SnpResult {
-        const AT: i64 = 1_792_454_400;
-        let mut evidence = make_snp_evidence_with_vcek(report, KMR_VCEK);
-        evidence.event_log = Some(BASE64.encode(event_log));
         let params = SnpParams {
+            report_data: Some(caller_data.to_vec()),
             launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
-            caller_data: Some(caller_data.to_vec()),
             runtime_registers: Some(expected),
             ..Default::default()
         };
+        verify_kmr_with(report, event_log, &params).await
+    }
+
+    async fn verify_kmr_with(report: &[u8], event_log: &[u8], params: &SnpParams) -> SnpResult {
+        const AT: i64 = 1_792_454_400;
+        let mut evidence = make_snp_evidence_with_vcek(report, KMR_VCEK);
+        evidence.event_log = Some(BASE64.encode(event_log));
         let ctx = crate::context::Context::held(vec![testing::amd_crl(ProcessorGeneration::Genoa)])
             .at(AT)
             .unwrap();
         let (collateral, _) = Snp::gather(&evidence, ctx.store(), AT).await.unwrap();
-        Snp::verify(&evidence, &params, &collateral, AT).unwrap()
+        Snp::verify(&evidence, params, &collateral, AT).unwrap()
     }
 
     fn kmr_expected() -> Vec<[u8; 48]> {
@@ -1739,10 +1867,29 @@ mod tests {
 
     #[tokio::test]
     async fn the_earliest_kernel_report_commits_to_zero_registers() {
-        let r = verify_kmr(KMR_BOOT_REPORT, &[], KMR_BOOT_CALLER_DATA, vec![[0; 48]]).await;
+        let r = verify_kmr(KMR_BOOT_REPORT, &[], KMR_BOOT_CALLER_DATA, vec![]).await;
         assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
         assert_eq!(r.runtime_registers_match, Some(true));
         assert!(r.passed());
+    }
+
+    #[tokio::test]
+    async fn registers_are_not_exposed_when_the_launch_digest_pin_fails() {
+        let mut params = SnpParams {
+            report_data: Some(KMR_CALLER_DATA.to_vec()),
+            launch_digest: Some(vec![parse_report(KMR_REPORT).unwrap().measurement]),
+            runtime_registers: Some(kmr_expected()),
+            ..Default::default()
+        };
+        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
+        assert!(r.runtime_registers.is_some() && r.passed());
+
+        params.launch_digest = Some(vec![[0x77; 48]]);
+        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
+        assert_eq!(r.launch_digest_match, Some(false));
+        assert_eq!(r.report_data_match, Some(false));
+        assert_eq!(r.runtime_registers_match, Some(false));
+        assert!(r.runtime_registers.is_none() && !r.passed());
     }
 
     #[tokio::test]
