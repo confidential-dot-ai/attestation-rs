@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attaching_retries_once_after_a_short_retry_after_then_attaches_what_it_got() {
+    async fn attaching_keeps_partial_collateral_after_the_vendor_retry() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let quote = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1020,17 +1020,17 @@ mod tests {
         let busy = || status(429, vec![("Retry-After", "1".into())]);
 
         let v = vendor(
-            vec![busy(), busy(), pcs("2026-10-14/td_qe_identity.json")],
+            vec![busy(), pcs("2026-10-14/td_qe_identity.json")],
             Duration::ZERO,
         )
         .await;
         assert!(attach(&v).await.contains(&qe));
-        assert_eq!(v.hits.load(Ordering::SeqCst), 3);
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
 
         let v = vendor(vec![busy()], Duration::ZERO).await;
         let urls = attach(&v).await;
         assert!(!urls.is_empty() && !urls.contains(&qe), "{urls:?}");
-        assert_eq!(v.hits.load(Ordering::SeqCst), 4);
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -292,10 +292,6 @@ pub async fn attest_with_nvidia_gpu(
 /// Maximum accepted evidence size (10 MiB).
 pub const MAX_EVIDENCE_SIZE: usize = 10 * 1024 * 1024;
 
-/// The longest Retry-After [`Verifier::attach_collateral`] waits out, in
-/// seconds.
-pub const ATTACH_RETRY_AFTER: u64 = 5;
-
 fn parse_envelope(evidence_json: &[u8]) -> Result<AttestationEvidence> {
     if evidence_json.len() > MAX_EVIDENCE_SIZE {
         return Err(AttestationError::EvidenceTooLarge {
@@ -358,10 +354,9 @@ impl Verifier {
     /// as a verification would. `report_data` is what the evidence was made
     /// with; it is the GPU nonce when the envelope carries a GPU bundle.
     ///
-    /// When collateral is unavailable, it tries once more after a short
-    /// Retry-After (at most [`ATTACH_RETRY_AFTER`] seconds, 1 s when none is
-    /// given), then attaches the pieces it got: the verifier fetches the
-    /// rest.
+    /// The vendor client retries short outages once. When collateral remains
+    /// unavailable, attaches the pieces gathered so far; the verifier fetches
+    /// the rest. An incomplete GPU signing key set is never attached.
     ///
     /// # Errors
     ///
@@ -378,21 +373,18 @@ impl Verifier {
             .ctx
             .store()
             .view(envelope.held_collateral(), &policies.floors, true);
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-        let mut gathered = self.gather(&envelope, report_data, &store).await;
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Err(e) = &gathered {
-            let wait = e.retry_after().unwrap_or(1);
-            if e.is_retryable() && wait <= ATTACH_RETRY_AFTER {
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                gathered = self.gather(&envelope, report_data, &store).await;
-            }
-        }
+        let gathered = self.gather(&envelope, report_data, &policies, &store).await;
         let used = match gathered {
             Ok(used) => used,
             Err(e) if e.is_retryable() => {
                 log::warn!("attaching the collateral it got: {e}");
-                store.used()
+                #[allow(unused_mut)]
+                let mut used = store.used();
+                #[cfg(feature = "nvidia-gpu")]
+                if let Ok(url) = store.nras_jwks_url() {
+                    used.retain(|(u, ..)| *u != url);
+                }
+                used
             }
             Err(e) => return Err(e),
         };
@@ -408,16 +400,16 @@ impl Verifier {
         &self,
         envelope: &AttestationEvidence,
         report_data: &[u8],
+        policies: &Policies,
         store: &collateral::Store,
     ) -> Result<Vec<context::HeldResponse>> {
-        let policies = Policies::all();
         let now = self.ctx.now();
         let _ = self
             .verify_platform(
                 store,
                 envelope.platform,
                 envelope.evidence.clone(),
-                &policies,
+                policies,
                 now,
             )
             .await?;
