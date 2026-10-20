@@ -1476,6 +1476,52 @@ mod tests {
         assert!(!vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(amd), gen).unwrap());
     }
 
+    #[tokio::test]
+    async fn a_host_data_mismatch_alone_fails() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut params = SnpParams {
+            report_data: Some(report.report_data.to_vec()),
+            host_data: Some(report.host_data.to_vec()),
+            ..Default::default()
+        };
+        let r = verify(&params).await.unwrap();
+        assert_eq!(r.host_data_match, Some(true));
+        assert!(r.passed());
+        params.host_data.as_mut().unwrap()[0] ^= 1;
+        let r = verify(&params).await.unwrap();
+        assert_eq!(r.report_data_match, Some(true));
+        assert_eq!(r.host_data_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[test]
+    fn snp_verify_fails_a_report_whose_ask_is_revoked() {
+        let ask = super::super::certs::get_ask(ProcessorGeneration::Genoa);
+        let (_, ask_cert) = X509Certificate::from_der(ask).unwrap();
+        let (this_update, next_update) = valid_window();
+        let listing = mint_crl(
+            &mint_issuer("TEST-ARK"),
+            Some(ask_cert.raw_serial()),
+            this_update,
+            next_update,
+        );
+        let amd = testing::raw("2026-10-14/amd_crl_genoa.der", None).0;
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let verify = |crl: Vec<u8>| {
+            let collateral = SnpCollateralSet {
+                vek: LIVE_VCEK_GENOA.to_vec(),
+                crl: genoa_crl(crl),
+            };
+            Snp::verify(&evidence, &SnpParams::default(), &collateral, now_secs()).unwrap()
+        };
+        let r = verify(amd);
+        assert_eq!(r.crl_ok, Some(true));
+        assert!(r.passed());
+        let r = verify(listing);
+        assert_eq!(r.crl_ok, Some(false));
+        assert!(!r.passed());
+    }
+
     #[test]
     fn a_crl_for_another_generation_or_key_is_refused() {
         let mut crl = genoa_crl(Vec::new());
@@ -1957,6 +2003,52 @@ mod tests {
             assert_eq!(r.report_data_match, Some(false));
             assert!(r.runtime_registers.is_none() && !r.passed());
         }
+    }
+
+    #[tokio::test]
+    async fn snp_verify_refuses_params_validate_refuses() {
+        let ok = kmr_full_params();
+        assert!(verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &ok)
+            .await
+            .passed());
+        let bad = [
+            SnpParams {
+                max_vmpl: 1,
+                ..ok.clone()
+            },
+            SnpParams {
+                runtime_registers: Some(vec![[1; 48]; 17]),
+                ..ok.clone()
+            },
+            SnpParams {
+                report_data: Some(vec![7; 63]),
+                ..ok.clone()
+            },
+            SnpParams {
+                launch_digest: None,
+                ..ok.clone()
+            },
+        ];
+        for params in bad {
+            let r = try_verify_kmr(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &params).await;
+            assert!(
+                matches!(r, Err(AttestationError::InvalidParams(_))),
+                "{params:?}: {r:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_event_log_above_the_field_limit_is_refused() {
+        // Whole zero entries, just over the 1 MiB base64 limit: without the
+        // limit this decodes to a well-formed log that is only a mismatch.
+        let log = vec![0; 147 * 5350];
+        assert!(BASE64.encode(&log).len() > crate::utils::MAX_EVIDENCE_FIELD_SIZE);
+        let r = try_verify_kmr(KMR_FULL_REPORT, &log, &kmr_full_params()).await;
+        assert!(
+            matches!(&r, Err(AttestationError::EvidenceDeserialize(m)) if m.contains("too large")),
+            "{r:?}"
+        );
     }
 
     #[tokio::test]
