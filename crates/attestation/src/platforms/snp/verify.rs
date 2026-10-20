@@ -1819,6 +1819,14 @@ mod tests {
     }
 
     async fn verify_kmr_with(report: &[u8], event_log: &[u8], params: &SnpParams) -> SnpResult {
+        try_verify_kmr(report, event_log, params).await.unwrap()
+    }
+
+    async fn try_verify_kmr(
+        report: &[u8],
+        event_log: &[u8],
+        params: &SnpParams,
+    ) -> Result<SnpResult> {
         const AT: i64 = 1_792_454_400;
         let mut evidence = make_snp_evidence_with_vcek(report, KMR_VCEK);
         evidence.event_log = Some(BASE64.encode(event_log));
@@ -1826,7 +1834,7 @@ mod tests {
             .at(AT)
             .unwrap();
         let (collateral, _) = Snp::gather(&evidence, ctx.store(), AT).await.unwrap();
-        Snp::verify(&evidence, params, &collateral, AT).unwrap()
+        Snp::verify(&evidence, params, &collateral, AT)
     }
 
     fn kmr_expected() -> Vec<[u8; 48]> {
@@ -1871,6 +1879,85 @@ mod tests {
         assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
         assert_eq!(r.runtime_registers_match, Some(true));
         assert!(r.passed());
+    }
+
+    // The kernel guest's full log: 4096 events, then extend fails with ENOSPC.
+    const KMR_FULL_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-full-report.bin");
+    const KMR_FULL_EVENT_LOG: &[u8] =
+        include_bytes!("../../../test_data/snp/kmr-full-event-log.bin");
+    const KMR_FULL_CALLER_DATA: &[u8] =
+        include_bytes!("../../../test_data/snp/kmr-full-caller-data.bin");
+    /// The 16 final registers, replayed by an independent hashlib script.
+    const KMR_FULL_REGISTERS: &[u8] =
+        include_bytes!("../../../test_data/snp/kmr-full-registers.bin");
+
+    fn kmr_full_params() -> SnpParams {
+        SnpParams {
+            report_data: Some(KMR_FULL_CALLER_DATA.to_vec()),
+            launch_digest: Some(vec![parse_report(KMR_FULL_REPORT).unwrap().measurement]),
+            runtime_registers: Some(
+                KMR_FULL_REGISTERS
+                    .chunks_exact(48)
+                    .map(|r| r.try_into().unwrap())
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_kernel_log_verifies() {
+        assert_eq!(KMR_FULL_EVENT_LOG.len(), 4096 * mr::ENTRY_LEN);
+        let encoded = BASE64.encode(KMR_FULL_EVENT_LOG).len();
+        assert!(
+            encoded < crate::utils::MAX_EVIDENCE_FIELD_SIZE / 3,
+            "{encoded}"
+        );
+        let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &kmr_full_params()).await;
+        let registers = r.runtime_registers.as_ref().unwrap();
+        assert_eq!(registers.event_count, 4096);
+        assert!(registers.registers.iter().all(|r| *r != [0; 48]));
+        assert_eq!(r.runtime_registers_match, Some(true));
+        assert!(r.passed());
+
+        let mut other = kmr_full_params();
+        other.runtime_registers.as_mut().unwrap()[15][47] ^= 1;
+        let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &other).await;
+        assert_eq!(r.runtime_registers_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[tokio::test]
+    async fn a_full_log_follows_the_error_contract() {
+        let params = kmr_full_params();
+        let log = |change: &dyn Fn(&mut Vec<u8>)| {
+            let mut log = KMR_FULL_EVENT_LOG.to_vec();
+            change(&mut log);
+            log
+        };
+        // Bytes that are not whole entries are malformed, whatever the count.
+        for junk in [1, 48] {
+            let bad = log(&|l| l.extend(vec![0; junk]));
+            let err = try_verify_kmr(KMR_FULL_REPORT, &bad, &params).await;
+            assert!(
+                matches!(err, Err(AttestationError::EvidenceDeserialize(_))),
+                "{junk} trailing bytes: {err:?}"
+            );
+        }
+        // A whole entry past the count is not attested and changes nothing.
+        let longer = log(&|l| {
+            l.push(3);
+            l.extend([9; 48]);
+        });
+        let r = verify_kmr_with(KMR_FULL_REPORT, &longer, &params).await;
+        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 4096);
+        assert!(r.passed());
+        // A log shorter than the count is a mismatch, not an error.
+        for shorter in [log(&|l| l.truncate(4095 * mr::ENTRY_LEN)), Vec::new()] {
+            let r = verify_kmr_with(KMR_FULL_REPORT, &shorter, &params).await;
+            assert_eq!(r.report_data_match, Some(false));
+            assert!(r.runtime_registers.is_none() && !r.passed());
+        }
     }
 
     #[tokio::test]
