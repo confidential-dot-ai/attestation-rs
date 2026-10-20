@@ -284,7 +284,7 @@ async fn while_the_upstream_is_down_cold_clients_do_not_each_ask_it() {
 }
 
 #[tokio::test]
-async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
+async fn combined_cold_backpressure_preserves_warm_reads() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let v = gated_vendor(Duration::ZERO, Some(gate.clone())).await;
     let dir = tempfile::tempdir().unwrap();
@@ -305,7 +305,8 @@ async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
             })
         })
         .collect();
-    // A piece in memory is still served while cold fetches are at the cap.
+    // A piece in memory is still served while cold requests are held.
+    // The host rate may act before MAX_COLD: this tests combined backpressure.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if v.hits
