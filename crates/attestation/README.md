@@ -109,7 +109,9 @@ The verifier replays the log prefix the report names and sets
 `report_data_match` from the commitment; `runtime_registers` in the result
 holds the replayed registers only when the whole result passes. A malformed `event_log` is an error. With debug allowed
 (`allow_debug`), the host can read and change guest memory, so register values
-are not protected against the host. Azure and GCP refuse `runtime_registers`
+are not protected against the host. Likewise with `min_tcb` unset: a host on
+firmware with known bugs can forge registers, so production verifiers should
+set `min_tcb`. Azure and GCP refuse `runtime_registers`
 with an invalid-params error; they never pass it. On a provider image
 `REPORT_DATA` is always the kernel's commitment, so plain `report_data` cannot
 bind a nonce there: nonce-binding consumers (API tokens, the GPU binding) must

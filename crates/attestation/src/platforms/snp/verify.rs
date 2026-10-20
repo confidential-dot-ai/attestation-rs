@@ -74,7 +74,9 @@ pub struct SnpParams {
     /// image here, not even next to provider images.
     ///
     /// With debug allowed, the host can read and change guest memory, so
-    /// register values are not protected against the host.
+    /// register values are not protected against the host. Likewise with
+    /// `min_tcb` unset: a host on firmware with known bugs can forge
+    /// registers, so production verifiers should set `min_tcb`.
     #[serde(
         with = "b64::digest_list::option",
         skip_serializing_if = "Option::is_none"
