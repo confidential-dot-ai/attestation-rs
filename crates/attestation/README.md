@@ -114,7 +114,8 @@ are not protected against the host. Azure and GCP refuse `runtime_registers`
 with an invalid-params error; they never pass it. On a provider image
 `REPORT_DATA` is always the kernel's commitment, so plain `report_data` cannot
 bind a nonce there: nonce-binding consumers (API tokens, the GPU binding) must
-use this mode. Deploy the verifier before the images.
+use this mode. Upgrade verifiers (library, API, WASM, CLI) before deploying
+provider images: older verifiers reject evidence that carries `event_log`.
 Every SNP result refuses a guest policy that allows a migration agent.
 
 ## Results, errors and retry
