@@ -220,9 +220,9 @@ pub fn verify_qe_report_signature(
 /// Validate the PCK certificate chain and return the PCK leaf's public key.
 ///
 /// Expects a PEM blob with 3 certificates:
-///   [0] PCK leaf cert
-///   [1] PCK Platform CA (intermediate)
-///   [2] Intel SGX Root CA
+///   `[0]` PCK leaf cert
+///   `[1]` PCK Platform CA (intermediate)
+///   `[2]` Intel SGX Root CA
 ///
 /// Validates:
 ///   - Root CA public key matches hardcoded Intel trust anchor
@@ -809,7 +809,7 @@ pub fn verify_tcb_info_signature(
 }
 
 /// Evaluate TCB status for a TDX quote against Intel TCB Info collateral
-/// whose signature has been checked ([`crate::collateral::IntelTcbInfo`]).
+/// whose signature has been checked ([`crate::collateral::TcbInfo`]).
 ///
 /// Matches the quote's TCB SVNs against the TCB levels from Intel PCS,
 /// returning the status and any security advisories.

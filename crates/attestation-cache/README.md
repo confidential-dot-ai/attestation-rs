@@ -46,7 +46,10 @@ vendors  <-  site cache (upstream: the vendors; the only egress to vendors)
 
 ## Guests
 
-Guests discover the host cache automatically; see [Collateral](../../README.md#collateral).
+Guests with the supported Linux device interfaces discover the host cache; see
+[upstream selection](../../docs/collateral.md#upstream-selection). Azure vTPM and
+dstack guests without those interfaces do not auto-discover it. This is a
+verification-collateral service, not Intel PCCS / `pccsd` or a quote generator.
 
 ## Running
 
@@ -58,7 +61,53 @@ install -m 0644 crates/attestation-cache/attestation-cache.service /etc/systemd/
 systemctl enable --now attestation-cache
 ```
 
-Configuration: see `config.example.toml`. The listener speaks plain HTTP.
+Configuration: see [config.example.toml](config.example.toml). The listener
+speaks plain HTTP; terminate TLS in front of a network-facing site cache.
+Use an explicit `--config /etc/attestation-cache/config.toml` in managed
+launches. An explicit missing file, any unreadable/invalid file, or unknown
+TOML key fails startup. Only a missing *implicit* default file permits defaults
+(loopback listener, no authentication). vsock is Linux-only.
+
+### Site cache
+
+Behind an HTTPS terminator reachable only by intended clients:
+
+```toml
+dir = "/var/lib/attestation-cache"
+listen = "127.0.0.1:8455"
+keys = ["replace-with-a-secret"]
+warm = ["https://kdsintf.amd.com/vcek/v1/Genoa/crl"]
+```
+
+No `upstream` means direct vendor fetching, with host discovery disabled.
+Allow vendor egress here. The terminator must preserve paths, queries,
+Authorization and issuer-chain headers.
+
+### Host cache
+
+On a Linux host serving its guests:
+
+```toml
+dir = "/var/lib/attestation-cache"
+listen = "127.0.0.1:8455"
+vsock_port = 8455
+upstream = "https://cache.example"
+upstream_key = "replace-with-the-site-secret"
+```
+
+Replace the example URL with the TLS site-cache endpoint. Do not set `keys`
+on this host listener: automatically discovering guests send no key. Restrict
+host access to loopback and intended vsock guests. A configured upstream
+failure never falls back to direct vendors.
+
+### Persistence and health
+
+The service user needs write access to `dir`; use a persistent volume for
+containers and protect configuration containing keys. Disk copies survive
+process restarts and are verified on load. Disk is a cache, not a trust anchor
+or a guarantee of latest vendor state. An empty/replaced volume starts cold;
+a stored piece can still be too old for a verifier. See
+[freshness](../../docs/collateral.md#freshness-and-version-floors).
 
 `GET /health` answers 200 while the process runs; `GET /ready` answers 200
 once a piece was fetched (a `warm` one or any served), or at once when
@@ -71,7 +120,16 @@ logged at warn, and a piece refused for not verifying at warn. Keys,
 `Authorization` headers and bodies are never logged. Set `RUST_LOG` (default
 `info`) to change the level.
 
-With `keys` set, every other request needs `Authorization: Bearer KEY` with
+## Authentication and CORS
+
+Unauthenticated `OPTIONS` returns empty 204 with allow-methods `GET` and
+allow-headers `Authorization`; it does not fetch collateral. Actual collateral
+GET remains authenticated when keys are configured. This is bearer-token
+CORS with wildcard origins, not cookie credential support. CORS is not access
+control. Never put a private site-wide key into a publicly distributed browser
+application.
+
+With `keys` set, collateral GET requests need `Authorization: Bearer KEY` with
 one of them (else 401); a host cache sends its site's key with
 `upstream_key`. Keys are compared in constant time. Use
 keys only over HTTPS (behind the TLS terminator). Keys apply to every
@@ -90,12 +148,9 @@ lasts.
 A hosted site cache can run as N replicas behind a load balancer (health
 check `/health`, traffic once `/ready`). Replicas share nothing: each has its
 own `dir` and its own memory, and each fetches from the vendors by itself.
-So vendor load grows with N: each replica fetches each piece once when first
-asked, then about once per piece validity (Intel and AMD CRLs, TCB Info and
-QE Identity: about monthly; the NRAS key set: hourly while used), plus one
-VCEK and one GCE endorsement per chip or image it is asked for. With about
-15 shared pieces this is on the order of a thousand requests per replica per
-month, most of them for the NRAS key set. A host cache whose upstream is the load balancer may reach a
+Vendor load grows with replica count and the distinct chips/images requested.
+Do not assume a fixed request budget: refresh cadence and NRAS key use also
+matter. A host cache whose upstream is the load balancer may reach a
 different replica each time; that is fine, as every replica serves verified
 vendor bytes.
 

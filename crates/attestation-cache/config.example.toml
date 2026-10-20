@@ -1,4 +1,6 @@
-# attestation-cache configuration. Every key is optional.
+# attestation-cache configuration. Every key is optional; unknown keys fail startup.
+# Use --config explicitly in managed deployments: a missing explicit file fails.
+# Only a missing implicit /etc/attestation-cache/config.toml permits defaults.
 
 # Where verified collateral is kept across restarts.
 dir = "/var/lib/attestation-cache"
@@ -13,7 +15,8 @@ dir = "/var/lib/attestation-cache"
 
 # Bearer keys clients must send (Authorization: Bearer KEY). Empty (the
 # default): anyone who can reach the listener may fetch. /health and /ready
-# are always open.
+# are always open. OPTIONS preflight is also unauthenticated; GET still needs a key.
+# Set keys on network-facing site caches, not auto-discovered guest-facing hosts.
 # keys = ["..."]
 
 # HTTP listen address.

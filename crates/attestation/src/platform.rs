@@ -71,7 +71,7 @@ pub trait Platform {
 
 /// The platforms a caller accepts, each with its params. Evidence for a
 /// platform left at `None` is rejected with
-/// [`AttestationError::PlatformNotAllowed`](crate::AttestationError::PlatformNotAllowed).
+/// [`AttestationError::PlatformNotAllowed`].
 ///
 /// In JSON, an object keyed by platform tag (`tdx`, `az-tdx`, ...), plus
 /// `nvidia_gpu` and `floors`; an unknown key is refused.

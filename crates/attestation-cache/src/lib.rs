@@ -79,7 +79,7 @@ const SWEEP: Duration = Duration::from_secs(600);
 /// At most this many shared pieces served are kept fresh, besides `warm`.
 const MAX_KNOWN: usize = 1024;
 /// At most this many pieces not in memory are fetched at once; requests for
-/// more are answered 503 with [`BUSY_RETRY_AFTER`].
+/// more are answered 503 with `Retry-After: 5`.
 pub const MAX_COLD: usize = 16;
 const BUSY_RETRY_AFTER: u32 = 5;
 /// A connection may take this long to send its request headers, and stay

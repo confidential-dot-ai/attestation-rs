@@ -15,15 +15,25 @@
 //!
 //! **Verifier** (any machine, including WASM): say which platforms you accept
 //! and what each must satisfy.
-//! ```rust,ignore
+//! ```no_run
+//! # #[cfg(feature = "tdx")]
+//! # mod example {
 //! use attestation::{Policies, TdxParams};
 //!
-//! let policies = Policies {
-//!     tdx: Some(TdxParams { report_data: Some(nonce.to_vec()), ..Default::default() }),
-//!     ..Default::default()
-//! };
-//! let verified = attestation::verify(&evidence_json, &policies).await?;
-//! assert!(verified.passed());
+//! async fn check(evidence: &[u8], nonce: &[u8], mrtd: [u8; 48])
+//!     -> attestation::Result<bool>
+//! {
+//!     let policies = Policies {
+//!         tdx: Some(TdxParams {
+//!             report_data: Some(nonce.to_vec()),
+//!             mrtd: Some(vec![mrtd]),
+//!             ..Default::default()
+//!         }),
+//!         ..Default::default()
+//!     };
+//!     Ok(attestation::verify(evidence, &policies).await?.passed())
+//! }
+//! # }
 //! ```
 //!
 //! An `Err` means the evidence could not be verified (malformed, not
@@ -97,7 +107,7 @@ pub use types::*;
 /// On a GCP Confidential VM, both `gcp-snp` and `snp` detection would succeed;
 /// `gcp-snp` must win to produce the correct envelope tag.
 ///
-/// Order: `az-tdx` → `az-snp` → `gcp-tdx` → `gcp-snp` → `tdx` → `snp`
+/// Order: `az-tdx` → `az-snp` → `gcp-tdx` → `gcp-snp` → `dstack` → `tdx` → `snp`
 ///
 /// The result is memoized: the underlying hardware probes (which open a vTPM
 /// context on vTPM-backed platforms) run once for the process, so callers on
@@ -162,7 +172,7 @@ fn detect_uncached() -> Result<PlatformType> {
 
 /// Platform-specific attestation options.
 ///
-/// Pass to [`attest_with_options`] to control quote generation behavior.
+/// Pass to [`attest`] to control quote generation behavior.
 /// Non-TDX platforms ignore TDX-specific fields.
 #[cfg(all(feature = "attest", target_os = "linux"))]
 #[derive(Debug, Clone, Default)]
@@ -176,7 +186,9 @@ pub struct AttestOptions {
 /// Generate attestation evidence and wrap it in a self-describing envelope.
 ///
 /// Returns JSON bytes containing an [`AttestationEvidence`] envelope with
-/// the platform tag and platform-specific evidence payload.
+/// the platform tag and platform-specific evidence payload. This call does not
+/// attach collateral; use [`Verifier::attach_collateral`] on the returned bytes
+/// when the recipient needs it.
 ///
 /// Pass `AttestOptions::default()` for standard behavior (auto-detects the
 /// fastest available quote method for TDX platforms).

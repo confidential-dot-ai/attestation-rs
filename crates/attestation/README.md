@@ -1,356 +1,160 @@
-# Attestation
+# attestation: Rust library and shared policy contract
 
-[![CI](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/confidential-dot-ai/attestation-rs/actions/workflows/ci.yml)
+Generate and verify TEE evidence with one policy-driven Rust interface across
+AMD SEV-SNP, Intel TDX, Azure, GCP and dstack. Verification runs natively or in
+WebAssembly, with pure-Rust cryptography and shared vendor collateral handling.
 
-A Rust library providing a unified interface for TEE (Trusted Execution Environment) attestation evidence generation and verification.
+See the [supported platform matrix](../../README.md#capabilities) and
+[generate/verify walkthrough](../../README.md#verify-evidence-in-rust) to get
+started; this guide covers policy fields, results and integration choices.
 
-## Supported Platforms
+## Rust verification
 
-| Platform                      | Attest | Verify | WASM Verify |
-| ----------------------------- | ------ | ------ | ----------- |
-| AMD SEV-SNP (bare-metal)      | Yes    | Yes    | Yes         |
-| Intel TDX (bare-metal)        | Yes    | Yes    | Yes         |
-| Azure SEV-SNP (vTPM)          | Yes    | Yes    | Yes         |
-| Azure TDX (vTPM)              | Yes    | Yes    | Yes         |
-| GCP SEV-SNP (non-vTPM)        | Yes    | Yes    | Yes         |
-| GCP TDX (non-vTPM)            | Yes    | Yes    | Yes         |
-| Dstack TDX                    | Yes    | Yes    | Yes         |
-
-## Feature Flags
-
-```toml
-[dependencies]
-attestation = { path = "crates/attestation", features = ["snp", "tdx"] }
-```
-
-| Feature  | Description                                                               |
-| -------- | ------------------------------------------------------------------------- |
-| `snp`    | AMD SEV-SNP support (verify always, attest when `attest` also enabled)    |
-| `tdx`    | Intel TDX support                                                         |
-| `az-snp`  | Azure SEV-SNP vTPM support (implies `snp`)                               |
-| `az-tdx`  | Azure TDX vTPM support (implies `tdx`)                                   |
-| `gcp-snp` | GCP SEV-SNP non-vTPM support (implies `snp`)                             |
-| `gcp-tdx` | GCP TDX non-vTPM support (implies `tdx`)                                 |
-| `dstack`  | Dstack TDX support via Unix socket (implies `tdx`)                       |
-| `attest` | Enable guest-side evidence generation for enabled platforms (Linux-only, requires TEE hardware) |
-| `az-snp-attest` | Compatibility alias for `attest` + `az-snp`                      |
-| `az-tdx-attest` | Compatibility alias for `attest` + `az-tdx`                      |
-
-All six platform features are enabled by default. Verification is always compiled when a platform feature is enabled. The `attest` feature gates guest-side code that requires hardware access and includes the default SEV-SNP + TDX attestation set.
-
-## Usage
-
-### Verifier (Server-Side or WASM)
-
-Say which platforms you accept and what each must satisfy:
+This function accepts TDX only. Supply a fresh relying-party challenge and a
+trusted expected MRTD; do not derive either from the untrusted evidence.
 
 ```rust
 use attestation::{Policies, TdxParams};
 
-#[tokio::main]
-async fn main() {
-    // evidence_json is a self-describing AttestationEvidence envelope
-    let evidence_json: &[u8] = b"...";
-
+async fn check(
+    evidence: &[u8], nonce: &[u8], expected_mrtd: [u8; 48],
+) -> attestation::Result<bool> {
     let policies = Policies {
         tdx: Some(TdxParams {
             report_data: Some(nonce.to_vec()),
-            mrtd: Some(vec![expected_mrtd]), // any of the allowed values
+            mrtd: Some(vec![expected_mrtd]),
             ..Default::default()
         }),
         ..Default::default()
     };
-
-    match attestation::verify(evidence_json, &policies).await {
-        Ok(verified) if verified.passed() => { /* accept */ }
-        Ok(verified) => { /* genuine, but a rule failed: read the fields */ }
-        Err(e) if e.is_retryable() => { /* collateral unavailable: retry */ }
-        Err(e) => { /* not verifiable: refuse */ }
-    }
+    let verified = attestation::verify(evidence, &policies).await?;
+    Ok(verified.passed())
 }
 ```
 
-`Policies::all()` accepts every compiled-in platform with its default params,
-and `.with_report_data(&nonce)` requires your nonce on each of them:
+For explicit storage and time control, reuse `Verifier::new(context)` and call
+`verifier.verify(evidence, &policies).await`. `Context::new()` uses native
+network access; `Context::offline()` does not. Both accept attached collateral.
+Native `.with_cache_dir(dir)` persists copies; `.with_upstream(url)?` chooses a
+cache; `.at(unix_seconds)?` fixes evaluation time. See the
+[collateral lifecycle](../../docs/collateral.md) for their limits.
 
-```rust
-let verified = attestation::verify(evidence_json, &Policies::all().with_report_data(&nonce)).await?;
+## Policies
+
+`Policies` is the shared Rust/serde contract used by API `/verify` and WASM
+`evaluate`. Enabled platform features determine the library policy keys; see
+the [API](../attestation-api/README.md) and [WASM](../attestation-wasm/README.md)
+guides for their interface-specific choices.
+
+- `Policies::default()` / `{}` accepts **no CPU platform**.
+- `Policies::all()` accepts every compiled-in CPU platform with default checks,
+  not GPU bundles. Use only when every such platform is acceptable.
+- `.with_report_data(&nonce)` sets the nonce on CPU policies already present;
+  it does not add platforms or set GPU params.
+- Each absent or null CPU policy refuses that platform. `{ "tdx": {} }`
+  accepts TDX with defaults, but pins neither workload nor challenge.
+- Unknown keys and fields are refused, including irrelevant fields set to null.
+- Bytes in policy JSON use standard base64, not hex. Rust digest sets are
+  `Option<Vec<[u8; 48]>>`. JSON accepts one 48-byte value or a nonempty array;
+  serialization emits arrays. A measurement must equal one of the values.
+
+Minimal JSON (illustrative challenge only; use a fresh random challenge):
+
+```json
+{"tdx":{"report_data":"AQIDBA==","accepted_tcb_statuses":["UpToDate"]}}
 ```
 
-Each platform has its own params and result (`TdxParams`/`TdxResult`,
-`SnpParams`/`SnpResult`, `AzTdxParams`, `AzSnpParams`, `GcpTdxParams`,
-`GcpSnpParams`, `DstackParams`). To accept one platform only, give params
-for it alone, and read its result from `verified.platform`:
-
-```rust
-use attestation::{PlatformResult, Policies, TdxParams};
-
-let policies = Policies {
-    tdx: Some(TdxParams::default()),
-    ..Default::default()
-};
-let verified = attestation::verify(evidence_json, &policies).await?;
-if let PlatformResult::Tdx(result) = &verified.platform {
-    println!("TCB status: {:?}", result.tcb_status);
-}
-```
-
-### What is an error
-
-| Case | Result |
+| Policy | Fields |
 | --- | --- |
-| Malformed or too large evidence, platform not compiled in, invalid params | `Err` |
-| Evidence for a platform with no params in `Policies` | `Err(PlatformNotAllowed)` |
-| Bad signature, cert chain, QE binding, event log, GPU nonce binding (overall or per device) | `Err` |
-| Collateral could not be fetched (AMD KDS, Intel PCS, NRAS) | `Err(CollateralUnavailable)`, retryable |
-| Collateral that is not the vendor's, or a VCEK or TCB Info the vendor does not publish for this chip or platform | `Err`, not retryable |
-| Measurement, RTMR, launch digest, `report_data` or init data mismatch | value: `*_match: Some(false)` |
-| Debug, VMPL, minimum TCB, TDX TCB status (including no matching level), revoked TDX PCK, GPU device policy | value |
-| A check you did not ask for | value: `None` |
+| `tdx`, `gcp-tdx`, `az-tdx`, `dstack` | `report_data`, `init_data`, `mrtd`, `rtmr0`–`rtmr3`, `allow_debug`, `accepted_tcb_statuses` |
+| `snp`, `gcp-snp`, `az-snp` | `report_data`, `host_data`, `launch_digest`, `allow_debug`, `min_tcb`, `max_vmpl` |
+| `az-tdx`, `az-snp` additionally | `pcrs`: map of index 0–23 to 32-byte SHA-256 value; duplicate indices refused |
+| `nvidia_gpu` (Rust field `gpu`) | `user_nonce`, `required`, `expected_archs`, `allowed_bindings`, `device_policy` |
+| `floors` | [Collateral version floors](../../docs/collateral.md#freshness-and-version-floors) |
 
-`passed()` is true only when every rule in the params held. Results are
-`#[must_use]`.
+Rust cloud wrapper params contain `tdx: TdxParams` or `snp: SnpParams`; JSON
+flattens them. `DstackParams` wraps `TdxParams`. Azure params additionally
+contain a `BTreeMap<u8, [u8; 32]>` of PCR pins.
 
-### Collateral and Time
+Default CPU checks disallow debug; SNP requires VMPL 0 and applies no caller
+minimum TCB unless set. TDX defaults accept `UpToDate`, `SWHardeningNeeded`,
+`ConfigurationNeeded`, `ConfigurationAndSWHardeningNeeded`, `OutOfDate` and
+`OutOfDateConfigurationNeeded`, **not just UpToDate**. They refuse `Revoked`
+and `NoMatchingLevel`. Choose a narrower nonempty set when required.
 
-```rust
-use attestation::{Context, Verifier};
+`report_data` is at most 64 bytes and zero-padded for CPU reports; Azure binds
+it to the vTPM quote nonce instead. `host_data` is at most 32 bytes; TDX
+`init_data` is at most 48. On Azure the init-data pin is a 32-byte hash checked
+against PCR[8]. Empty report data is an all-zero pin, not a fresh challenge.
 
-let verifier = Verifier::new(Context::new().with_cache_dir("/var/cache/attestation"));
-let verified = verifier.verify(evidence_json, &policies).await?;
+SNP `min_tcb` is an object with `bootloader`, `tee`, `snp`, `microcode` and
+optional `fmc`; minimum checks compare components, not an aggregate version.
+See generated rustdocs for exact field types. API adds
+[server-side policy restrictions](../attestation-api/README.md#verification-and-tokens).
+
+## Results, errors and retry
+
+| Outcome | Library contract |
+| --- | --- |
+| Genuine evidence, every requested rule and collateral check passed | `Ok(v)` and `v.passed()` |
+| Measurement/nonce mismatch, debug/VMPL/TCB rejection, revocation, stale beyond grace or below-floor collateral | `Ok(v)` and `!v.passed()` |
+| Malformed evidence, invalid params, disabled/disallowed platform, bad signature/chain/event log or GPU nonce binding | Non-retryable `Err` |
+| Required collateral absent and unavailable | `Err(CollateralUnavailable { collateral, retry_after, detail })` |
+
+Only `is_retryable()` errors should enter a bounded retry/backoff path; honor
+`retry_after()` when present. Do not retry a policy mismatch as if it were a
+network outage. `*_match: None` means a check was not requested, not that it
+passed. Read platform fields via `verified.platform`, optional GPU result via
+`verified.gpu` with that feature, and freshness via `verified.collateral`.
+
+Plain serialization of `Verified` does not add a `passed` field; call
+`passed()` yourself. CLI, HTTP API and WASM add it to their own output. Results
+are `#[must_use]`, but callers still need an explicit acceptance decision.
+
+## Generation and features
+
+The default features are `snp`, `tdx`, `az-snp`, `az-tdx`, `gcp-snp`, `gcp-tdx`.
+Use `default-features = false` to choose fewer. `dstack` implies `tdx`.
+`attest` enables Linux guest generation and implies `snp` and `tdx`;
+`az-snp-attest` / `az-tdx-attest` are compatibility aliases. Native generation:
+
+```rust,ignore
+let platform = attestation::detect()?;
+let raw = attestation::attest(
+    platform, &nonce, &attestation::AttestOptions::default(),
+).await?;
+let verifier = attestation::Verifier::new(attestation::Context::new());
+let envelope = verifier.attach_collateral(&raw, &nonce).await?;
 ```
 
-A `Context` holds the collateral store. Each piece of collateral (a type
-implementing `collateral::Collateral`: a VCEK, an AMD CRL, TCB Info, ...) is
-fetched once with `store.get::<C>(&id, now)`, verified against the vendor
-roots compiled into the crate, kept in memory (and in `with_cache_dir`, if
-given) by its vendor URL, and refreshed near its nextUpdate.
-`Context::offline()` never touches the network: a piece not held is
-`CollateralUnavailable`. `Context::at(unix_seconds)` fixes the time used for
-certificate, CRL, collateral and token validity. A platform's
-`gather(evidence, store, now)` returns its collateral set (for example
-`TdxCollateralSet`); its `verify(evidence, params, collateral_set, now)` is
-pure.
+This integration fragment requires a Linux TEE, `attest`, and an application
+nonce. Attachment may be incomplete; see [lifecycle](../../docs/collateral.md).
+Platform examples are hardware-only, for example:
 
-### Attester (Guest-Side Agent)
-
-```rust
-#[tokio::main]
-async fn main() {
-    // Auto-detect the TEE platform
-    let platform = attestation::detect().expect("no TEE platform detected");
-    println!("Detected platform: {}", platform);
-
-    // Generate evidence with a challenge nonce
-    let nonce = b"server-provided-challenge-nonce";
-    let evidence_json = attestation::attest(platform, nonce, &attestation::AttestOptions::default()).await.unwrap();
-
-    // Send evidence_json to the verifier — it's a self-describing envelope
-    println!("Evidence: {} bytes", evidence_json.len());
-}
+```sh
+cargo run --locked -p attestation --example snp --features snp,attest
+cargo run --locked -p attestation --example tdx --features tdx,attest
+cargo run --locked -p attestation --example az_snp --features az-snp,attest
+cargo run --locked -p attestation --example az_tdx --features az-tdx,attest
+cargo run --locked -p attestation --example gcp_snp --features gcp-snp,attest
+cargo run --locked -p attestation --example gcp_tdx --features gcp-tdx,attest
 ```
 
-## Examples
+`nvidia-gpu` adds portable bundle verification. `nvidia-gpu-attest` adds the
+NVIDIA SDK dependency for collection; it also needs `attest` for combined CPU
+and GPU generation, compatible NVIDIA drivers/CC hardware, SDK build prerequisites
+and `libnvat` at runtime. See [NVIDIA's SDK](https://github.com/NVIDIA/attestation-sdk)
+for installation and service terms, and [NRAS limits](../../docs/collateral.md#nvidia-gpu).
 
-Each platform has a dedicated example. Run on the appropriate hardware:
+## Development
 
-```bash
-cargo run -p attestation --example snp     --features "snp,attest"
-cargo run -p attestation --example tdx     --features "tdx,attest"
-cargo run -p attestation --example az_snp  --features "az-snp,attest"
-cargo run -p attestation --example az_tdx  --features "az-tdx,attest"
-cargo run -p attestation --example gcp_snp --features "gcp-snp,attest"
-cargo run -p attestation --example gcp_tdx --features "gcp-tdx,attest"
+```sh
+cargo test --locked -p attestation
+cargo test --locked -p attestation --doc
+cargo doc --locked -p attestation --no-deps
+cargo check --locked -p attestation --target wasm32-unknown-unknown   --no-default-features --features snp,tdx,az-snp,az-tdx,gcp-snp,gcp-tdx,dstack
 ```
 
-Azure examples accept an optional nonce argument:
-
-```bash
-cargo run -p attestation --example az_snp --features "az-snp,attest" -- "my-custom-nonce"
-```
-
-GCP examples accept an optional nonce argument:
-
-```bash
-cargo run -p attestation --example gcp_snp --features "gcp-snp,attest" -- "my-custom-nonce"
-cargo run -p attestation --example gcp_tdx --features "gcp-tdx,attest" -- "my-custom-nonce"
-```
-
-## CLI
-
-The CLI lives in the `attestation-cli` package:
-
-```bash
-# Build the CLI
-cargo build -p attestation-cli --release
-
-# Generate evidence (on TEE hardware, Linux only)
-cargo build -p attestation-cli --release --features attest
-./target/release/attestation-cli attest --report-data "my-nonce"
-
-# Verify evidence (works anywhere)
-echo "$EVIDENCE" | ./target/release/attestation-cli verify
-```
-
-## Evidence JSON Schemas
-
-### SNP Evidence
-
-```json
-{
-  "attestation_report": "<base64-encoded 1184-byte SNP report>",
-  "cert_chain": {
-    "vcek": "<base64-encoded DER certificate>",
-    "ask": "<base64-encoded DER certificate, optional>",
-    "ark": "<base64-encoded DER certificate, optional>"
-  }
-}
-```
-
-### TDX Evidence
-
-```json
-{
-  "quote": "<base64-encoded TDX quote bytes>",
-  "cc_eventlog": "<base64-encoded CCEL eventlog, optional>"
-}
-```
-
-### Azure SNP Evidence
-
-```json
-{
-  "version": 1,
-  "tpm_quote": {
-    "signature": "<hex-encoded RSA signature>",
-    "message": "<hex-encoded TPMS_ATTEST>",
-    "pcrs": ["<hex-encoded 32-byte PCR value>", "...(24 entries)"]
-  },
-  "hcl_report": "<url-safe-base64-encoded HCL report (2600 bytes)>",
-  "vcek": "<url-safe-base64-encoded DER certificate>"
-}
-```
-
-### Azure TDX Evidence
-
-```json
-{
-  "version": 1,
-  "tpm_quote": {
-    "signature": "<hex-encoded RSA signature>",
-    "message": "<hex-encoded TPMS_ATTEST>",
-    "pcrs": ["<hex-encoded 32-byte PCR value>", "...(24 entries)"]
-  },
-  "hcl_report": "<url-safe-base64-encoded HCL report (2600 bytes)>",
-  "td_quote": "<url-safe-base64-encoded TD quote>"
-}
-```
-
-### GCP SNP Evidence
-
-GCP SEV-SNP uses the same wire format as bare-metal SNP. The `platform` field in the evidence envelope is set to `gcp-snp` to distinguish it from bare-metal SNP evidence.
-
-```json
-{
-  "attestation_report": "<base64-encoded 1184-byte SNP report>",
-  "cert_chain": {
-    "vcek": "<base64-encoded DER certificate>",
-    "ask": "<base64-encoded DER certificate, optional>",
-    "ark": "<base64-encoded DER certificate, optional>"
-  }
-}
-```
-
-### GCP TDX Evidence
-
-GCP TDX uses the same wire format as bare-metal TDX. The `platform` field in the evidence envelope is set to `gcp-tdx` to distinguish it from bare-metal TDX evidence.
-
-```json
-{
-  "quote": "<base64-encoded TDX quote bytes>",
-  "cc_eventlog": "<base64-encoded CCEL eventlog, optional>"
-}
-```
-
-### Dstack TDX Evidence
-
-```json
-{
-  "quote": "<base64-encoded TDX quote bytes>",
-  "event_log": "<JSON-encoded dstack event log, optional>",
-  "vm_config": "<VM configuration string, optional>"
-}
-```
-
-### Verification Result
-
-`Verified` serializes as the platform result plus a `platform` tag, and a `gpu`
-object when the evidence carried a GPU bundle. SNP example:
-
-```json
-{
-  "platform": "snp",
-  "claims": {
-    "launch_digest": "<96-char hex string (48 bytes)>",
-    "report_data": "<128-char hex string (64 bytes)>",
-    "signed_data": "<hex-encoded bytes>",
-    "init_data": "<hex-encoded bytes>",
-    "tcb": { "type": "Snp", "bootloader": 3, "tee": 0, "snp": 8, "microcode": 115 },
-    "platform_data": { "...": "..." }
-  },
-  "report_data_match": true,
-  "host_data_match": null,
-  "launch_digest_match": null,
-  "debug": false,
-  "allow_debug": false,
-  "vmpl": 0,
-  "max_vmpl": 0,
-  "reported_tcb": { "bootloader": 3, "tee": 0, "snp": 8, "microcode": 115 },
-  "min_tcb_met": null
-}
-```
-
-## Running Tests
-
-```bash
-# Unit tests (no hardware needed)
-cargo test --features snp
-cargo test --features tdx
-cargo test --features az-snp
-cargo test --features az-tdx
-cargo test --features gcp-snp
-cargo test --features gcp-tdx
-cargo test --features dstack
-
-# Integration tests on Azure SNP CVM
-cargo test --test az_snp_live --features "az-snp,attest" -- --ignored
-
-# Integration tests on Azure TDX CVM
-cargo test --test az_tdx_live --features "az-tdx,attest" -- --ignored
-
-# Benchmarks
-cargo bench --features snp
-cargo bench --features tdx
-cargo bench --features az-snp
-cargo bench --features az-tdx
-cargo bench --features gcp-snp
-cargo bench --features gcp-tdx
-```
-
-## WASM Support
-
-The library compiles to `wasm32-unknown-unknown` for verifier-only use:
-
-```bash
-cargo check --target wasm32-unknown-unknown --no-default-features --features snp,tdx,az-snp,az-tdx,gcp-snp,gcp-tdx,dstack
-```
-
-The `attest` feature is automatically excluded on WASM. All verification uses pure-Rust crypto (no OpenSSL dependency).
-
-## Bundled Certificates
-
-AMD root certificates (ARK + ASK) for Milan, Genoa, and Turin processors are embedded at compile time. Per-chip VCEK certificates are fetched on demand from AMD KDS or Azure IMDS.
-
-## License
-
-MIT
+The WASM target must be installed first. Verification uses pure-Rust crypto;
+Linux generation paths are not compiled on WASM. The library license is
+Apache-2.0, as specified in `Cargo.toml`.

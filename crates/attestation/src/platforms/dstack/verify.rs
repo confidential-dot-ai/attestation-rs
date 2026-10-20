@@ -22,8 +22,9 @@
 //!   available in `DstackEvidence::event_log` but is not replayed or verified
 //!   here. dstack uses a different event log format than the ACPI CCEL CC
 //!   eventlog used by bare-metal TDX.
-//! - **RTMR0-2 OS measurements**: platform/OS identity (firmware, kernel,
-//!   initrd) is in RTMR0-2 but not compared against expected values.
+//! - **Workload policy selection**: `TdxParams::rtmr0` through `rtmr3` enforce
+//!   supplied measurement allowlists. The caller must choose trusted values;
+//!   omitted pins do not identify an approved firmware, kernel or workload.
 //! - **Docker image digest pinning**: the compose-hash in RTMR3 covers the
 //!   docker-compose configuration; verifying that images use `@sha256:` digests
 //!   rather than mutable tags is the caller's responsibility.

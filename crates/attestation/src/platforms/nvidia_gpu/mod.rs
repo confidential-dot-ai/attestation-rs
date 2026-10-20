@@ -20,8 +20,15 @@
 //! that accepts both quotes proves that **both** the CPU and the GPU
 //! committed to the caller's nonce in the same attestation session.
 //!
-//! Relying on NRAS shifts trust to NVIDIA's signing key. A future
-//! `gpu-local` feature will perform the same checks locally without NRAS.
+//! Relying on NRAS shifts trust to NVIDIA's signing key. There is no local
+//! GPU-verification feature: when no usable nonce-bound NRAS answer is attached,
+//! native verification needs NRAS. The shipped JS/WASM harness does not enable
+//! this library feature.
+//!
+//! When an attached NRAS answer is used, the verifier authenticates its signed
+//! claims and nonce, but does not bind that answer to the supplied bundle's
+//! device-evidence bytes. This is separate from physical CPU/GPU co-location,
+//! which nonce binding does not prove.
 //!
 //! ## Submodule binding (RFC 9711 `submods`)
 //!

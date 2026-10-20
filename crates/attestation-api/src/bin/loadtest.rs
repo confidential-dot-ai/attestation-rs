@@ -5,7 +5,7 @@
 //! service (localhost) to avoid network overhead skewing results.
 //!
 //! Usage:
-//!   cargo run --release --bin loadtest -- [OPTIONS]
+//!   `cargo run --release --bin loadtest -- [OPTIONS]`
 //!
 //! Examples:
 //!   # Verify at 1000 RPS for 10s
