@@ -584,7 +584,9 @@ async fn a_runtime_register_token_carries_the_full_log_registers() {
     let report = read("kmr-full-report.bin");
     let caller_data = read("kmr-full-caller-data.bin");
     let registers: Vec<String> = read("kmr-full-registers.bin")
-        .chunks_exact(48)
+        .as_chunks::<48>()
+        .0
+        .iter()
         .map(|r| BASE64.encode(r))
         .collect();
     let body = |report_data: &[u8]| {

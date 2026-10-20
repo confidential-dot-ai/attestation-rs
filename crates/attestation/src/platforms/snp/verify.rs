@@ -1869,12 +1869,7 @@ mod tests {
         SnpParams {
             report_data: Some(KMR_FULL_CALLER_DATA.to_vec()),
             launch_digest: Some(vec![parse_report(KMR_FULL_REPORT).unwrap().measurement]),
-            runtime_registers: Some(
-                KMR_FULL_REGISTERS
-                    .chunks_exact(48)
-                    .map(|r| r.try_into().unwrap())
-                    .collect(),
-            ),
+            runtime_registers: Some(KMR_FULL_REGISTERS.as_chunks::<48>().0.to_vec()),
             ..Default::default()
         }
     }

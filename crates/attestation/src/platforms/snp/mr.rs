@@ -73,7 +73,9 @@ pub fn replay(log: &[u8], event_count: u32) -> Result<Option<[Register; REGISTER
         )));
     }
     if let Some(entry) = log
-        .chunks_exact(ENTRY_LEN)
+        .as_chunks::<ENTRY_LEN>()
+        .0
+        .iter()
         .find(|e| e[0] as usize >= REGISTER_COUNT)
     {
         return Err(bad_log(format!("register index {} above 15", entry[0])));
@@ -82,7 +84,12 @@ pub fn replay(log: &[u8], event_count: u32) -> Result<Option<[Register; REGISTER
         return Ok(None);
     }
     let mut registers = [[0u8; 48]; REGISTER_COUNT];
-    for entry in log.chunks_exact(ENTRY_LEN).take(event_count as usize) {
+    for entry in log
+        .as_chunks::<ENTRY_LEN>()
+        .0
+        .iter()
+        .take(event_count as usize)
+    {
         extend(&mut registers[entry[0] as usize], &entry[1..]);
     }
     Ok(Some(registers))
@@ -323,7 +330,9 @@ mod tests {
             let registers = replay(&log, event_count).unwrap().unwrap();
             for (i, register) in registers.iter().enumerate() {
                 let named = log
-                    .chunks_exact(ENTRY_LEN)
+                    .as_chunks::<ENTRY_LEN>()
+                    .0
+                    .iter()
                     .take(event_count as usize)
                     .any(|e| e[0] as usize == i);
                 assert_eq!(*register != [0; 48], named, "case {case}");
@@ -358,7 +367,7 @@ mod tests {
                 match result {
                     Ok(Some(r)) => assert_eq!(r, verified, "case {case}"),
                     Ok(None) => panic!("case {case}: a flip past the count changed the answer"),
-                    Err(_) => assert!(log2.chunks_exact(ENTRY_LEN).any(|e| e[0] > 15)),
+                    Err(_) => assert!(log2.as_chunks::<ENTRY_LEN>().0.iter().any(|e| e[0] > 15)),
                 }
             } else {
                 assert!(
@@ -391,7 +400,7 @@ mod tests {
                 _ => {}
             }
             let malformed = !log.len().is_multiple_of(ENTRY_LEN)
-                || log.chunks_exact(ENTRY_LEN).any(|e| e[0] > 15);
+                || log.as_chunks::<ENTRY_LEN>().0.iter().any(|e| e[0] > 15);
             match verify(&reported, &log, &rng.bytes::<64>()) {
                 Err(_) => assert!(malformed, "case {case}"),
                 Ok(answer) => assert!(!malformed && answer.is_none(), "case {case}"),

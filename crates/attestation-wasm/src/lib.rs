@@ -248,7 +248,9 @@ mod tests {
         .to_string();
         let held = fetch(&envelope).await;
         let registers: Vec<String> = read("snp/kmr-full-registers.bin")
-            .chunks_exact(48)
+            .as_chunks::<48>()
+            .0
+            .iter()
             .map(|r| BASE64.encode(r))
             .collect();
         let evaluate = |registers: &[String]| {
