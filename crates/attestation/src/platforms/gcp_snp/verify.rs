@@ -82,9 +82,9 @@ impl Platform for GcpSnp {
     type CollateralSet = GcpSnpCollateralSet;
 
     fn validate(params: &GcpSnpParams) -> Result<()> {
-        if params.snp.runtime_registers.is_some() {
+        if params.snp.measurement_registers.is_some() {
             return Err(AttestationError::InvalidParams(
-                "runtime registers are bare-metal SNP only".into(),
+                "measurement registers are bare-metal SNP only".into(),
             ));
         }
         Snp::validate(&params.snp)
@@ -180,12 +180,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_registers_are_bare_metal_only() {
+    async fn measurement_registers_are_bare_metal_only() {
         let evidence = make_snp_evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         let snp = SnpParams {
             report_data: Some(parse_report(LIVE_REPORT_V5).unwrap().report_data.to_vec()),
             launch_digest: Some(vec![[1; 48]]),
-            runtime_registers: Some(vec![]),
+            measurement_registers: Some(vec![]),
             ..Default::default()
         };
         let ctx = testing::context(vec![testing::amd_crl(ProcessorGeneration::Genoa)]);

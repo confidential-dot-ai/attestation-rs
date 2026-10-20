@@ -1,4 +1,4 @@
-//! Kernel runtime measurement registers for bare-metal SEV-SNP guests.
+//! Kernel measurement registers for bare-metal SEV-SNP guests.
 //!
 //! The guest kernel holds 16 SHA-384 registers and a log of every extend, and
 //! writes `H || C` into the `REPORT_DATA` of every report it requests:
@@ -25,7 +25,7 @@ pub type Register = [u8; 48];
 /// The registers a report commits to: the replay of the first
 /// `event_count` log entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeRegisters {
+pub struct MeasurementRegisters {
     pub event_count: u32,
     #[serde(with = "b64::digest_list")]
     pub registers: Vec<Register>,
@@ -102,14 +102,14 @@ pub fn verify(
     reported: &[u8; 64],
     log: &[u8],
     caller_data: &[u8; 64],
-) -> Result<Option<RuntimeRegisters>> {
+) -> Result<Option<MeasurementRegisters>> {
     let event_count = u32::from_le_bytes(reported[..4].try_into().unwrap());
     let Some(registers) = replay(log, event_count)? else {
         return Ok(None);
     };
     let expected = report_data(event_count, &registers, caller_data);
     Ok(
-        crate::utils::constant_time_eq(reported, &expected).then(|| RuntimeRegisters {
+        crate::utils::constant_time_eq(reported, &expected).then(|| MeasurementRegisters {
             event_count,
             registers: registers.to_vec(),
         }),
@@ -163,7 +163,7 @@ mod tests {
         v
     }
 
-    fn verify_vector(v: &Vector) -> Result<Option<RuntimeRegisters>> {
+    fn verify_vector(v: &Vector) -> Result<Option<MeasurementRegisters>> {
         verify(&v.report_data, &v.log, &v.caller_data)
     }
 

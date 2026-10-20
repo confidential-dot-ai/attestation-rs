@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate kmr-vectors.json: snp-kmr-v1 runtime-register vectors.
+"""Generate kmr-vectors.json: snp-kmr-v1 measurement-register vectors.
 
-An implementation independent of mr.rs (stdlib only). Run from this
+An implementation independent of measurement_registers.rs (stdlib only). Run from this
 directory: python3 kmr-vectors.py > kmr-vectors.json
 """
 import hashlib

@@ -25,7 +25,7 @@ const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 
 use super::claims::extract_claims;
 use super::evidence::SnpEvidence;
-use super::mr::{self, RuntimeRegisters};
+use super::measurement_registers::{self, MeasurementRegisters};
 
 /// SNP Attestation Report version (must be >= 3 for cpuid fields).
 const MIN_REPORT_VERSION: u32 = 3;
@@ -41,7 +41,7 @@ pub const MAX_REPORT_VERSION: u32 = 5;
 pub struct SnpParams {
     /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
     /// [`SnpResult::report_data_match`]. On Azure (vTPM) this is checked
-    /// against the vTPM quote nonce instead. With `runtime_registers`, the
+    /// against the vTPM quote nonce instead. With `measurement_registers`, the
     /// exact 64 bytes the requester passed, which `REPORT_DATA` must commit to.
     #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
@@ -60,7 +60,7 @@ pub struct SnpParams {
     pub min_tcb: Option<SnpTcb>,
     /// Highest VMPL accepted. Default: 0.
     pub max_vmpl: u32,
-    /// Bare-metal guest kernel runtime registers: the expected final values
+    /// Bare-metal guest kernel measurement registers: the expected final values
     /// in index order, at most 16; registers past the list must be zero (`[]`:
     /// all zero). Setting it selects the mode: `REPORT_DATA` must commit to
     /// the evidence's event log and `report_data`. It needs a 64-byte
@@ -69,7 +69,7 @@ pub struct SnpParams {
     /// commitment, so only this mode binds the requester's bytes there.
     ///
     /// **Every `launch_digest` value must be an image whose kernel has the
-    /// runtime-register provider.** On an image without it, guest root
+    /// measurement-register provider.** On an image without it, guest root
     /// chooses `REPORT_DATA` and can forge any registers; never pin such an
     /// image here, not even next to provider images.
     ///
@@ -81,7 +81,7 @@ pub struct SnpParams {
         with = "b64::digest_list::option",
         skip_serializing_if = "Option::is_none"
     )]
-    pub runtime_registers: Option<Vec<[u8; 48]>>,
+    pub measurement_registers: Option<Vec<[u8; 48]>>,
 }
 
 impl SnpParams {
@@ -96,14 +96,14 @@ impl SnpParams {
                 "host_data exceeds 32 bytes".into(),
             ));
         }
-        if let Some(registers) = &self.runtime_registers {
-            if registers.len() > mr::REGISTER_COUNT
+        if let Some(registers) = &self.measurement_registers {
+            if registers.len() > measurement_registers::REGISTER_COUNT
                 || self.report_data.as_ref().is_none_or(|d| d.len() != 64)
                 || self.launch_digest.is_none()
                 || self.max_vmpl != 0
             {
                 return Err(AttestationError::InvalidParams(
-                    "runtime_registers needs at most 16 values, a 64-byte report_data, \
+                    "measurement_registers needs at most 16 values, a 64-byte report_data, \
                      launch_digest and VMPL 0"
                         .into(),
                 ));
@@ -141,12 +141,12 @@ pub struct SnpResult {
     /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` only on
     /// results not from [`Snp::verify`]).
     pub crl_ok: Option<bool>,
-    /// The guest kernel's runtime registers that `REPORT_DATA` commits to;
+    /// The guest kernel's measurement registers that `REPORT_DATA` commits to;
     /// `None` unless the result [passed](Self::passed).
-    pub runtime_registers: Option<RuntimeRegisters>,
-    /// `runtime_registers` equal the expected ones (`None` outside runtime
-    /// mode).
-    pub runtime_registers_match: Option<bool>,
+    pub measurement_registers: Option<MeasurementRegisters>,
+    /// `measurement_registers` equal the expected ones (`None` outside
+    /// measurement-register mode).
+    pub measurement_registers_match: Option<bool>,
 }
 
 impl SnpResult {
@@ -158,7 +158,7 @@ impl SnpResult {
             self.launch_digest_match,
             self.min_tcb_met,
             self.crl_ok,
-            self.runtime_registers_match,
+            self.measurement_registers_match,
         ]) && (!self.debug || self.allow_debug)
             && !self.migrate_ma
             && self.vmpl <= self.max_vmpl
@@ -199,8 +199,8 @@ pub fn evaluate_report(
         }),
         reported_tcb,
         crl_ok,
-        runtime_registers: None,
-        runtime_registers_match: None,
+        measurement_registers: None,
+        measurement_registers_match: None,
     }
 }
 
@@ -304,13 +304,13 @@ impl Platform for Snp {
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
         check_report_bindings(&mut result, &report, params)?;
-        if let Some(expected) = &params.runtime_registers {
+        if let Some(expected) = &params.measurement_registers {
             let caller_data = params
                 .report_data
                 .as_deref()
                 .and_then(|d| d.try_into().ok())
-                .expect("validate: runtime_registers needs a 64-byte report_data");
-            check_runtime_registers(
+                .expect("validate: measurement_registers needs a 64-byte report_data");
+            check_measurement_registers(
                 &mut result,
                 &report.report_data,
                 evidence.event_log.as_deref(),
@@ -327,7 +327,7 @@ impl Platform for Snp {
 /// `caller_data`. Registers are compared with `expected` only when the
 /// launch digest pin also held (without the provider the commitment means
 /// nothing), and exposed only when the whole result passed.
-fn check_runtime_registers(
+fn check_measurement_registers(
     result: &mut SnpResult,
     report_data: &[u8; 64],
     event_log: Option<&str>,
@@ -339,16 +339,16 @@ fn check_runtime_registers(
     let log = BASE64
         .decode(event_log)
         .map_err(|e| AttestationError::EvidenceDeserialize(format!("event_log base64: {e}")))?;
-    let registers = mr::verify(report_data, &log, caller_data)?
+    let registers = measurement_registers::verify(report_data, &log, caller_data)?
         .filter(|_| result.launch_digest_match == Some(true));
     result.report_data_match = Some(registers.is_some());
-    result.runtime_registers_match = Some(registers.as_ref().is_some_and(|r| {
+    result.measurement_registers_match = Some(registers.as_ref().is_some_and(|r| {
         r.registers
             .iter()
             .enumerate()
             .all(|(i, value)| *value == expected.get(i).copied().unwrap_or([0; 48]))
     }));
-    result.runtime_registers = registers.filter(|_| result.passed());
+    result.measurement_registers = registers.filter(|_| result.passed());
     Ok(())
 }
 
@@ -1576,14 +1576,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Kernel runtime registers and guest policy
+    // Kernel measurement registers and guest policy
     // ---------------------------------------------------------------
 
-    fn runtime_params(report: &AttestationReport) -> SnpParams {
+    fn measurement_params(report: &AttestationReport) -> SnpParams {
         SnpParams {
             report_data: Some(vec![7; 64]),
             launch_digest: Some(vec![report.measurement]),
-            runtime_registers: Some(vec![]),
+            measurement_registers: Some(vec![]),
             ..Default::default()
         }
     }
@@ -1660,9 +1660,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_register_params_need_the_strict_mode() {
+    fn measurement_register_params_need_the_strict_mode() {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let ok = runtime_params(&report);
+        let ok = measurement_params(&report);
         ok.validate().unwrap();
         // Debug is the caller's choice, as for any SNP report.
         SnpParams {
@@ -1672,7 +1672,7 @@ mod tests {
         .validate()
         .unwrap();
         SnpParams {
-            runtime_registers: Some(vec![[1; 48]; 16]),
+            measurement_registers: Some(vec![[1; 48]; 16]),
             ..ok.clone()
         }
         .validate()
@@ -1695,7 +1695,7 @@ mod tests {
                 ..ok.clone()
             },
             SnpParams {
-                runtime_registers: Some(vec![[1; 48]; 17]),
+                measurement_registers: Some(vec![[1; 48]; 17]),
                 ..ok.clone()
             },
         ];
@@ -1705,10 +1705,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_registers_are_an_ordered_list_in_json() {
+    fn measurement_registers_are_an_ordered_list_in_json() {
         let parse = |registers: &str| {
-            serde_json::from_str::<SnpParams>(&format!(r#"{{"runtime_registers":{registers}}}"#))
-                .map(|p| p.runtime_registers)
+            serde_json::from_str::<SnpParams>(&format!(
+                r#"{{"measurement_registers":{registers}}}"#
+            ))
+            .map(|p| p.measurement_registers)
         };
         let r0 = BASE64.encode([1; 48]);
         assert_eq!(parse("null").unwrap(), None);
@@ -1722,18 +1724,18 @@ mod tests {
             "one value is not a list"
         );
         let params = SnpParams {
-            runtime_registers: Some(vec![]),
+            measurement_registers: Some(vec![]),
             ..Default::default()
         };
         let json = serde_json::to_string(&params).unwrap();
-        assert!(json.contains(r#""runtime_registers":[]"#), "{json}");
+        assert!(json.contains(r#""measurement_registers":[]"#), "{json}");
         // Unset, the field is left out, so parsers that predate it accept the JSON.
         let json = serde_json::to_string(&SnpParams::default()).unwrap();
-        assert!(!json.contains("runtime_registers"), "{json}");
+        assert!(!json.contains("measurement_registers"), "{json}");
     }
 
     #[tokio::test]
-    async fn runtime_mode_without_an_event_log_fails_even_on_the_callers_bytes() {
+    async fn measurement_register_mode_without_an_event_log_fails_even_on_the_callers_bytes() {
         // An image without the provider passes the caller's bytes through as
         // REPORT_DATA; the evidence carries no event log.
         let report = parse_report(LIVE_REPORT_V5).unwrap();
@@ -1744,13 +1746,13 @@ mod tests {
         };
         assert!(verify(&plain).await.unwrap().passed());
         let r = verify(&SnpParams {
-            runtime_registers: Some(vec![]),
+            measurement_registers: Some(vec![]),
             ..plain
         })
         .await
         .unwrap();
         assert_eq!(r.report_data_match, Some(false));
-        assert!(r.runtime_registers.is_none() && !r.passed());
+        assert!(r.measurement_registers.is_none() && !r.passed());
     }
 
     #[test]
@@ -1764,7 +1766,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Hardware fixture: a Genoa guest kernel with runtime registers
+    // Hardware fixture: a Genoa guest kernel with measurement registers
     // ---------------------------------------------------------------
 
     const KMR_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-report.bin");
@@ -1786,7 +1788,7 @@ mod tests {
         let params = SnpParams {
             report_data: Some(caller_data.to_vec()),
             launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
-            runtime_registers: Some(expected),
+            measurement_registers: Some(expected),
             ..Default::default()
         };
         verify_kmr_with(report, event_log, &params).await
@@ -1826,32 +1828,32 @@ mod tests {
     async fn a_kernel_report_verifies_with_its_registers() {
         let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, kmr_expected()).await;
         assert_eq!(r.report_data_match, Some(true));
-        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 3);
-        assert_eq!(r.runtime_registers_match, Some(true));
+        assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 3);
+        assert_eq!(r.measurement_registers_match, Some(true));
         assert!(r.passed());
 
         let mut other_caller = KMR_CALLER_DATA.to_vec();
         other_caller[0] ^= 1;
         let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &other_caller, kmr_expected()).await;
-        assert!(r.runtime_registers.is_none() && !r.passed());
+        assert!(r.measurement_registers.is_none() && !r.passed());
 
         let mut other_log = KMR_EVENT_LOG.to_vec();
         other_log[60] ^= 1;
         let r = verify_kmr(KMR_REPORT, &other_log, KMR_CALLER_DATA, kmr_expected()).await;
-        assert!(r.runtime_registers.is_none() && !r.passed());
+        assert!(r.measurement_registers.is_none() && !r.passed());
 
         let mut other_expected = kmr_expected();
         other_expected.truncate(3);
         let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, other_expected).await;
-        assert_eq!(r.runtime_registers_match, Some(false));
+        assert_eq!(r.measurement_registers_match, Some(false));
         assert!(!r.passed());
     }
 
     #[tokio::test]
     async fn the_earliest_kernel_report_commits_to_zero_registers() {
         let r = verify_kmr(KMR_BOOT_REPORT, &[], KMR_BOOT_CALLER_DATA, vec![]).await;
-        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
-        assert_eq!(r.runtime_registers_match, Some(true));
+        assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 0);
+        assert_eq!(r.measurement_registers_match, Some(true));
         assert!(r.passed());
     }
 
@@ -1869,30 +1871,33 @@ mod tests {
         SnpParams {
             report_data: Some(KMR_FULL_CALLER_DATA.to_vec()),
             launch_digest: Some(vec![parse_report(KMR_FULL_REPORT).unwrap().measurement]),
-            runtime_registers: Some(KMR_FULL_REGISTERS.as_chunks::<48>().0.to_vec()),
+            measurement_registers: Some(KMR_FULL_REGISTERS.as_chunks::<48>().0.to_vec()),
             ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn a_full_kernel_log_verifies() {
-        assert_eq!(KMR_FULL_EVENT_LOG.len(), 4096 * mr::ENTRY_LEN);
+        assert_eq!(
+            KMR_FULL_EVENT_LOG.len(),
+            4096 * measurement_registers::ENTRY_LEN
+        );
         let encoded = BASE64.encode(KMR_FULL_EVENT_LOG).len();
         assert!(
             encoded < crate::utils::MAX_EVIDENCE_FIELD_SIZE / 3,
             "{encoded}"
         );
         let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &kmr_full_params()).await;
-        let registers = r.runtime_registers.as_ref().unwrap();
+        let registers = r.measurement_registers.as_ref().unwrap();
         assert_eq!(registers.event_count, 4096);
         assert!(registers.registers.iter().all(|r| *r != [0; 48]));
-        assert_eq!(r.runtime_registers_match, Some(true));
+        assert_eq!(r.measurement_registers_match, Some(true));
         assert!(r.passed());
 
         let mut other = kmr_full_params();
-        other.runtime_registers.as_mut().unwrap()[15][47] ^= 1;
+        other.measurement_registers.as_mut().unwrap()[15][47] ^= 1;
         let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &other).await;
-        assert_eq!(r.runtime_registers_match, Some(false));
+        assert_eq!(r.measurement_registers_match, Some(false));
         assert!(!r.passed());
     }
 
@@ -1919,13 +1924,16 @@ mod tests {
             l.extend([9; 48]);
         });
         let r = verify_kmr_with(KMR_FULL_REPORT, &longer, &params).await;
-        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 4096);
+        assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 4096);
         assert!(r.passed());
         // A log shorter than the count is a mismatch, not an error.
-        for shorter in [log(&|l| l.truncate(4095 * mr::ENTRY_LEN)), Vec::new()] {
+        for shorter in [
+            log(&|l| l.truncate(4095 * measurement_registers::ENTRY_LEN)),
+            Vec::new(),
+        ] {
             let r = verify_kmr_with(KMR_FULL_REPORT, &shorter, &params).await;
             assert_eq!(r.report_data_match, Some(false));
-            assert!(r.runtime_registers.is_none() && !r.passed());
+            assert!(r.measurement_registers.is_none() && !r.passed());
         }
     }
 
@@ -1941,7 +1949,7 @@ mod tests {
                 ..ok.clone()
             },
             SnpParams {
-                runtime_registers: Some(vec![[1; 48]; 17]),
+                measurement_registers: Some(vec![[1; 48]; 17]),
                 ..ok.clone()
             },
             SnpParams {
@@ -1992,7 +2000,12 @@ mod tests {
             SnpParams {
                 report_data: Some(caller_data.to_vec()),
                 launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
-                runtime_registers: Some(mr::replay(log, count).unwrap().unwrap().to_vec()),
+                measurement_registers: Some(
+                    measurement_registers::replay(log, count)
+                        .unwrap()
+                        .unwrap()
+                        .to_vec(),
+                ),
                 ..Default::default()
             }
         };
@@ -2003,7 +2016,7 @@ mod tests {
         );
         let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
         assert_eq!(r.vmpl, 0);
-        assert!(r.passed() && r.runtime_registers.is_some());
+        assert!(r.passed() && r.measurement_registers.is_some());
 
         let (log, caller) = (kmr_vmpl!("event-log.bin"), kmr_vmpl!("caller-data.bin"));
         for (report, vmpl) in [
@@ -2018,9 +2031,9 @@ mod tests {
             let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
             assert_eq!(r.vmpl, vmpl);
             assert_eq!(r.report_data_match, Some(true), "VMPL {vmpl}");
-            assert_eq!(r.runtime_registers_match, Some(true), "VMPL {vmpl}");
+            assert_eq!(r.measurement_registers_match, Some(true), "VMPL {vmpl}");
             assert!(!r.passed(), "VMPL {vmpl}");
-            assert!(r.runtime_registers.is_none(), "VMPL {vmpl}");
+            assert!(r.measurement_registers.is_none(), "VMPL {vmpl}");
         }
     }
 
@@ -2044,20 +2057,20 @@ mod tests {
         let params = |launch_digest: Vec<[u8; 48]>| SnpParams {
             report_data: Some(caller.to_vec()),
             launch_digest: Some(launch_digest),
-            runtime_registers: Some(forged.clone()),
+            measurement_registers: Some(forged.clone()),
             ..Default::default()
         };
 
         let r = verify_kmr_with(report, log, &params(vec![provider])).await;
         assert_eq!(r.launch_digest_match, Some(false));
         assert_eq!(r.report_data_match, Some(false));
-        assert!(r.runtime_registers.is_none() && !r.passed());
+        assert!(r.measurement_registers.is_none() && !r.passed());
 
         // Pinning the image without the provider, even next to a provider
         // image, accepts the forged registers.
         let r = verify_kmr_with(report, log, &params(vec![provider, image])).await;
         assert_eq!(
-            r.runtime_registers.as_ref().unwrap().registers[..5],
+            r.measurement_registers.as_ref().unwrap().registers[..5],
             forged[..]
         );
         assert!(r.passed());
@@ -2074,7 +2087,7 @@ mod tests {
                 ..Default::default()
             };
             let mut result = evaluate_report(&report, &params, Some(true));
-            check_runtime_registers(
+            check_measurement_registers(
                 &mut result,
                 &report.report_data,
                 Some(&BASE64.encode(KMR_EVENT_LOG)),
@@ -2085,10 +2098,10 @@ mod tests {
             result
         };
         let r = check(true);
-        assert!(r.passed() && r.runtime_registers.is_some());
+        assert!(r.passed() && r.measurement_registers.is_some());
         let r = check(false);
-        assert_eq!(r.runtime_registers_match, Some(true));
-        assert!(!r.passed() && r.runtime_registers.is_none());
+        assert_eq!(r.measurement_registers_match, Some(true));
+        assert!(!r.passed() && r.measurement_registers.is_none());
     }
 
     #[tokio::test]
@@ -2096,18 +2109,18 @@ mod tests {
         let mut params = SnpParams {
             report_data: Some(KMR_CALLER_DATA.to_vec()),
             launch_digest: Some(vec![parse_report(KMR_REPORT).unwrap().measurement]),
-            runtime_registers: Some(kmr_expected()),
+            measurement_registers: Some(kmr_expected()),
             ..Default::default()
         };
         let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
-        assert!(r.runtime_registers.is_some() && r.passed());
+        assert!(r.measurement_registers.is_some() && r.passed());
 
         params.launch_digest = Some(vec![[0x77; 48]]);
         let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
         assert_eq!(r.launch_digest_match, Some(false));
         assert_eq!(r.report_data_match, Some(false));
-        assert_eq!(r.runtime_registers_match, Some(false));
-        assert!(r.runtime_registers.is_none() && !r.passed());
+        assert_eq!(r.measurement_registers_match, Some(false));
+        assert!(r.measurement_registers.is_none() && !r.passed());
     }
 
     #[tokio::test]

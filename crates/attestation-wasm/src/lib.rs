@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snp_runtime_registers_are_checked() {
+    async fn snp_measurement_registers_are_checked() {
         let report = read("snp/kmr-full-report.bin");
         let envelope = serde_json::json!({
             "platform": "snp",
@@ -257,7 +257,7 @@ mod tests {
             let policies = serde_json::json!({ "snp": {
                 "report_data": BASE64.encode(read("snp/kmr-full-caller-data.bin")),
                 "launch_digest": BASE64.encode(&report[0x90..0xC0]),
-                "runtime_registers": registers,
+                "measurement_registers": registers,
             } })
             .to_string();
             let (envelope, held) = (envelope.clone(), held.clone());
@@ -268,12 +268,12 @@ mod tests {
             }
         };
         let r = evaluate(&registers).await;
-        assert_eq!(r["runtime_registers"]["event_count"], 4096);
-        assert_eq!(r["runtime_registers_match"], true);
+        assert_eq!(r["measurement_registers"]["event_count"], 4096);
+        assert_eq!(r["measurement_registers_match"], true);
         assert_eq!(r["passed"], true);
 
         let r = evaluate(&registers[..15]).await;
-        assert_eq!(r["runtime_registers_match"], false);
+        assert_eq!(r["measurement_registers_match"], false);
         assert_eq!(r["passed"], false);
     }
 

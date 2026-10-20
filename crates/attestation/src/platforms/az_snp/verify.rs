@@ -31,9 +31,9 @@ impl AzSnpParams {
     /// Reject params that cannot be applied, before any I/O.
     pub fn validate(&self) -> Result<()> {
         self.snp.validate()?;
-        if self.snp.runtime_registers.is_some() {
+        if self.snp.measurement_registers.is_some() {
             return Err(AttestationError::InvalidParams(
-                "runtime registers are bare-metal SNP only".into(),
+                "measurement registers are bare-metal SNP only".into(),
             ));
         }
         tpm_common::check_init_data_len(self.snp.host_data.as_deref())?;
@@ -546,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_registers_are_bare_metal_only() {
+    async fn measurement_registers_are_bare_metal_only() {
         let evidence = load_az_snp_evidence(GENOA_V5_FIXTURE);
         let nonce = hex::decode(GENOA_V5_NONCE).unwrap();
         let ctx =
@@ -560,7 +560,7 @@ mod tests {
 
         params.snp.report_data = Some([nonce, vec![0; 16]].concat());
         params.snp.launch_digest = Some(vec![[1; 48]]);
-        params.snp.runtime_registers = Some(vec![]);
+        params.snp.measurement_registers = Some(vec![]);
         params.snp.validate().unwrap();
         assert!(params.validate().is_err());
         let err = AzSnp::verify(&evidence, &params, &collateral, crate::testing::NOW)

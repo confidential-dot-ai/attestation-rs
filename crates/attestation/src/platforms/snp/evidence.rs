@@ -10,7 +10,7 @@ pub struct SnpEvidence {
     /// each cert as base64-encoded DER.
     #[serde(default)]
     pub cert_chain: Option<SnpCertChain>,
-    /// The guest kernel's runtime-register event log (raw 49-byte entries),
+    /// The guest kernel's measurement-register event log (raw 49-byte entries),
     /// base64 encoded. Read after the report, so it extends the log prefix
     /// the report commits to.
     #[serde(default, skip_serializing_if = "Option::is_none")]

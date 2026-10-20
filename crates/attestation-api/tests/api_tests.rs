@@ -573,11 +573,11 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
     })
 }
 
-/// The kernel guest's full runtime-register log (4096 events) through
+/// The kernel guest's full measurement-register log (4096 events) through
 /// `/verify` with a token: the body fits the 1 MiB limit, the token carries
 /// the registers and the policy, and another nonce gets no token.
 #[tokio::test]
-async fn a_runtime_register_token_carries_the_full_log_registers() {
+async fn a_measurement_register_token_carries_the_full_log_registers() {
     use attestation::collateral::{AmdCrl, AmdKey, Collateral};
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../attestation/test_data/snp/");
     let read = |file: &str| std::fs::read(format!("{DIR}{file}")).unwrap();
@@ -600,7 +600,7 @@ async fn a_runtime_register_token_carries_the_full_log_registers() {
             "policies": { "snp": {
                 "report_data": BASE64.encode(report_data),
                 "launch_digest": BASE64.encode(&report[0x90..0xC0]),
-                "runtime_registers": registers,
+                "measurement_registers": registers,
             } },
             "issue_token": true,
         })
@@ -631,11 +631,11 @@ async fn a_runtime_register_token_carries_the_full_log_registers() {
     )
     .unwrap();
     assert_eq!(claims["result"], json["result"]);
-    let attested = &claims["result"]["runtime_registers"];
+    let attested = &claims["result"]["measurement_registers"];
     assert_eq!(attested["event_count"], 4096);
     assert_eq!(attested["registers"], serde_json::json!(registers));
     assert_eq!(
-        claims["policy"]["snp"]["runtime_registers"],
+        claims["policy"]["snp"]["measurement_registers"],
         serde_json::json!(registers)
     );
 
@@ -644,7 +644,7 @@ async fn a_runtime_register_token_carries_the_full_log_registers() {
     let (status, json) = post_verify(state(), body(&other)).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["passed"], false);
-    assert!(json["result"]["runtime_registers"].is_null());
+    assert!(json["result"]["measurement_registers"].is_null());
     assert!(json.get("token").is_none());
 }
 

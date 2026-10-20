@@ -102,11 +102,11 @@ fn launch_digest_mismatch_prints_result_and_exits_one() {
     assert_eq!(json["passed"], false);
 }
 
-/// The CLI has no runtime-register mode. On evidence from a kernel with the
+/// The CLI has no measurement-register mode. On evidence from a kernel with the
 /// provider, `REPORT_DATA` is the kernel's commitment, so pinning the
 /// requester's bytes fails.
 #[test]
-fn a_runtime_register_report_fails_the_requesters_report_data() {
+fn a_measurement_register_report_fails_the_requesters_report_data() {
     const DIR: &str = "../attestation/test_data/snp";
     let read = |file: &str| std::fs::read(format!("{DIR}/{file}")).unwrap();
     let report = read("kmr-report.bin");
@@ -138,7 +138,7 @@ fn a_runtime_register_report_fails_the_requesters_report_data() {
     assert_eq!(out.status.code(), Some(1));
     let json = stdout_json(&out);
     assert_eq!(json["report_data_match"], false);
-    assert!(json["runtime_registers"].is_null());
+    assert!(json["measurement_registers"].is_null());
     assert_eq!(json["passed"], false);
 }
 

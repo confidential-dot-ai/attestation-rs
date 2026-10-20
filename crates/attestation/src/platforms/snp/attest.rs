@@ -13,7 +13,7 @@ use super::evidence::{SnpCertChain, SnpEvidence};
 /// SNP guest attestation character device.
 const SEV_GUEST_DEVICE_PATH: &str = "/dev/sev-guest";
 
-/// The guest kernel's runtime-register event log (absent on kernels without
+/// The guest kernel's measurement-register event log (absent on kernels without
 /// the provider).
 const EVENT_LOG_PATH: &str = "/sys/class/misc/sev-guest/event_log";
 

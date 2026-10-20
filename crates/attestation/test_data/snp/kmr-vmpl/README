@@ -1,4 +1,4 @@
-Reports from the runtime-register kernel guest on an AMD Genoa host, 2026-10-20.
+Reports from the measurement-register kernel guest on an AMD Genoa host, 2026-10-20.
 Launch digest d6c2c431...121d, policy 0x30000,
 same chip and TCB as kmr-vcek.der.
 - vmpl{1,2,3,4}.report.bin: SNP_GET_REPORT with req.vmpl 1-4 (the firmware also signs VMPL 4).

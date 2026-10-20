@@ -68,7 +68,7 @@ Minimal JSON (illustrative challenge only; use a fresh random challenge):
 | --- | --- |
 | `tdx`, `gcp-tdx`, `az-tdx`, `dstack` | `report_data`, `init_data`, `mrtd`, `rtmr0`–`rtmr3`, `allow_debug`, `accepted_tcb_statuses` |
 | `snp`, `gcp-snp`, `az-snp` | `report_data`, `host_data`, `launch_digest`, `allow_debug`, `min_tcb`, `max_vmpl` |
-| `snp` additionally | `runtime_registers`: [guest kernel runtime registers](#snp-kernel-runtime-registers) |
+| `snp` additionally | `measurement_registers`: [guest kernel measurement registers](#snp-kernel-measurement-registers) |
 | `az-tdx`, `az-snp` additionally | `pcrs`: map of index 0–23 to 32-byte SHA-256 value; duplicate indices refused |
 | `nvidia_gpu` (Rust field `gpu`) | `user_nonce`, `required`, `expected_archs`, `allowed_bindings`, `device_policy` |
 | `floors` | [Collateral version floors](../../docs/collateral.md#freshness-and-version-floors) |
@@ -94,14 +94,14 @@ component by component (not an aggregate version).
 See generated rustdocs for exact field types. API adds
 [server-side policy restrictions](../attestation-api/README.md#verification-and-tokens).
 
-### SNP kernel runtime registers
+### SNP kernel measurement registers
 
-A bare-metal SNP guest kernel with the runtime-register provider keeps 16
+A bare-metal SNP guest kernel with the measurement-register provider keeps 16
 SHA-384 registers and an event log, and writes a commitment to them and the
 requester's 64 bytes into `REPORT_DATA`. SNP evidence carries the log as
 `event_log`.
 
-- `runtime_registers` (expected final values in index order, at most 16;
+- `measurement_registers` (expected final values in index order, at most 16;
   later registers must be zero, `[]` = all zero) selects this mode. It needs
   the requester's exact 64 bytes as `report_data`, `launch_digest` and VMPL 0.
   Take the expected values from your own reference (image manifest, workload
@@ -110,7 +110,7 @@ requester's 64 bytes into `REPORT_DATA`. SNP evidence carries the log as
   provider, guest root chooses `REPORT_DATA` and can forge any registers.
 - Gate on `passed()`, never on `report_data_match` alone: that field is the
   commitment and the launch digest pin, not the registers. The result carries
-  `runtime_registers` only when it passed. A malformed `event_log` is an error.
+  `measurement_registers` only when it passed. A malformed `event_log` is an error.
 - `report_data` must be a fresh challenge: the registers are a snapshot at
   report time, and a reused value replays an older snapshot.
 - On a provider image only this mode binds a nonce (API tokens, GPU binding).
