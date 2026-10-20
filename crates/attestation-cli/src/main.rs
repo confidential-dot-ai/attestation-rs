@@ -309,6 +309,19 @@ async fn cmd_attest(args: AttestArgs) {
             process::exit(1);
         }
     };
+    // The verifier then needs nothing but its roots. Without collateral the
+    // evidence still verifies where the verifier may fetch.
+    let verifier = attestation::Verifier::new(context(attestation::Context::new()));
+    let evidence_json = match verifier
+        .attach_collateral(&evidence_json, &report_data)
+        .await
+    {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("Collateral not attached: {e}");
+            evidence_json
+        }
+    };
     let elapsed = t0.elapsed();
 
     eprintln!(
@@ -573,10 +586,7 @@ async fn cmd_verify(args: VerifyArgs) {
         Ok(base) => ctx.with_vendor_base(&base),
         Err(_) => ctx,
     };
-    let verifier = attestation::Verifier::new(match cache_dir() {
-        Some(dir) => ctx.with_cache_dir(dir),
-        None => ctx,
-    });
+    let verifier = attestation::Verifier::new(context(ctx));
 
     eprintln!("Verifying evidence...");
 
@@ -633,6 +643,14 @@ async fn cmd_verify(args: VerifyArgs) {
     // a pinned reference drifts.
     if !passed {
         process::exit(1);
+    }
+}
+
+/// `ctx` keeping collateral between runs in the user's cache directory.
+fn context(ctx: attestation::Context) -> attestation::Context {
+    match cache_dir() {
+        Some(dir) => ctx.with_cache_dir(dir),
+        None => ctx,
     }
 }
 

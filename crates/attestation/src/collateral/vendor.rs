@@ -197,7 +197,7 @@ impl Vendor {
     pub(crate) async fn nras_attest(
         &self,
         request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
-    ) -> crate::error::Result<serde_json::Value> {
+    ) -> crate::error::Result<Vec<u8>> {
         use crate::error::AttestationError;
         let url = match request.arch {
             crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
@@ -232,9 +232,7 @@ impl Vendor {
                 )));
             }
         }
-        let body = read_body(response).await.map_err(unavailable)?;
-        serde_json::from_slice(&body)
-            .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))
+        read_body(response).await.map_err(unavailable)
     }
 }
 

@@ -60,6 +60,87 @@ pub struct AttestationEvidence {
     #[cfg(not(feature = "nvidia-gpu"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nvidia_gpu: Option<serde_json::Value>,
+    /// The collateral the evidence needs, as the vendors served it. The
+    /// verifier checks each piece against its compiled-in roots and uses the
+    /// newest copy among these and its own. One attached piece that does not
+    /// verify makes the evidence not genuine, even when the verifier has a
+    /// good copy: do not strip or reorder pieces. A piece past its
+    /// nextUpdate but within grace is used as is, not refetched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collateral: Vec<AttachedCollateral>,
+}
+
+/// A vendor response: the vendor URL, the body (base64 in JSON), and the
+/// issuer chain Intel PCS sends in a header (PEM, without the root). In an
+/// envelope, a piece without an issuer chain takes the one of the nearest
+/// piece before it that has one, so a chain shared by several pieces appears
+/// once. Order therefore matters: a piece moved under another chain is
+/// refused for its signer, as any wrong chain is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachedCollateral {
+    pub url: String,
+    #[serde(with = "base64_bytes")]
+    pub body: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_chain: Option<String>,
+}
+
+impl AttestationEvidence {
+    /// The attached collateral as held responses, each with its issuer chain.
+    pub fn held_collateral(&self) -> Vec<crate::context::HeldResponse> {
+        let mut chain = None;
+        self.collateral
+            .iter()
+            .map(|c| {
+                if c.issuer_chain.is_some() {
+                    chain.clone_from(&c.issuer_chain);
+                }
+                (c.url.clone(), c.body.clone(), chain.clone())
+            })
+            .collect()
+    }
+
+    /// Attach `responses`: roots removed from issuer chains, and pieces with
+    /// the same chain next to each other so it is written once.
+    pub fn attach(&mut self, mut responses: Vec<crate::context::HeldResponse>) {
+        for (_, _, chain) in &mut responses {
+            *chain = chain.as_deref().map(crate::collateral::without_roots);
+        }
+        responses.sort_by(|a, b| (&a.2, &a.0).cmp(&(&b.2, &b.0)));
+        let mut previous: Option<String> = None;
+        self.collateral = responses
+            .into_iter()
+            .map(|(url, body, chain)| {
+                let issuer_chain = if chain.is_some() && chain != previous {
+                    previous.clone_from(&chain);
+                    chain
+                } else {
+                    None
+                };
+                AttachedCollateral {
+                    url,
+                    body,
+                    issuer_chain,
+                }
+            })
+            .collect();
+    }
+}
+
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        STANDARD
+            .decode(String::deserialize(d)?)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl std::fmt::Display for PlatformType {
