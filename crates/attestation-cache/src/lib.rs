@@ -168,7 +168,18 @@ async fn handle(State(cache): State<Cache>, request: Request) -> Response {
     let ready = cache.ready.load(std::sync::atomic::Ordering::Relaxed);
     let path = request.uri().path();
     let mut from = None;
-    let mut response = if request.method() != Method::GET {
+    let mut response = if request.method() == Method::OPTIONS {
+        let mut response = status(StatusCode::NO_CONTENT, String::new());
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET"),
+        );
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Authorization"),
+        );
+        response
+    } else if request.method() != Method::GET {
         status(StatusCode::METHOD_NOT_ALLOWED, "GET only".into())
     } else if path == "/health" {
         status(StatusCode::OK, "ok".into())
