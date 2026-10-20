@@ -98,26 +98,30 @@ See generated rustdocs for exact field types. API adds
 
 A bare-metal SNP guest kernel with the runtime-register provider keeps 16
 SHA-384 registers and an event log, and writes a commitment to them and the
-requester's 64 bytes into every report's `REPORT_DATA`. SNP evidence carries
-that log as `event_log`. Setting `runtime_registers` (the expected final values
-in index order, at most 16; registers past the list must be zero, `[]` means
-all zero) selects this mode. It needs `report_data` set to exactly the 64 bytes
-the requester passed, `launch_digest` and VMPL 0. **Every pinned
-`launch_digest` must be an image whose kernel has the provider**: on an image
-without it, guest root chooses `REPORT_DATA` and can forge any registers.
-The verifier replays the log prefix the report names and sets
-`report_data_match` from the commitment; `runtime_registers` in the result
-holds the replayed registers only when the whole result passes. A malformed `event_log` is an error. With debug allowed
-(`allow_debug`), the host can read and change guest memory, so register values
-are not protected against the host. Likewise with `min_tcb` unset: a host on
-firmware with known bugs can forge registers, so production verifiers should
-set `min_tcb`. Azure and GCP refuse `runtime_registers`
-with an invalid-params error; they never pass it. On a provider image
-`REPORT_DATA` is always the kernel's commitment, so plain `report_data` cannot
-bind a nonce there: nonce-binding consumers (API tokens, the GPU binding) must
-use this mode. Upgrade verifiers (library, API, WASM, CLI) before deploying
-provider images: older verifiers reject evidence that carries `event_log`.
-Every SNP result refuses a guest policy that allows a migration agent.
+requester's 64 bytes into `REPORT_DATA`. SNP evidence carries the log as
+`event_log`.
+
+- `runtime_registers` (expected final values in index order, at most 16;
+  later registers must be zero, `[]` = all zero) selects this mode. It needs
+  the requester's exact 64 bytes as `report_data`, `launch_digest` and VMPL 0.
+  Take the expected values from your own reference (image manifest, workload
+  policy), never from the presented log.
+- **Every pinned `launch_digest` must be a provider image**: without the
+  provider, guest root chooses `REPORT_DATA` and can forge any registers.
+- Gate on `passed()`, never on `report_data_match` alone: that field is the
+  commitment and the launch digest pin, not the registers. The result carries
+  `runtime_registers` only when it passed. A malformed `event_log` is an error.
+- `report_data` must be a fresh challenge: the registers are a snapshot at
+  report time, and a reused value replays an older snapshot.
+- On a provider image only this mode binds a nonce (API tokens, GPU binding).
+  Azure and GCP refuse it (`InvalidParams`). Upgrade verifiers (library, API,
+  WASM, CLI) before deploying provider images: older verifiers reject evidence
+  that carries `event_log`.
+
+With `allow_debug`, the host can read and change guest memory; with `min_tcb`
+unset, a host on firmware with known bugs can forge registers. Production
+verifiers set `min_tcb` and leave debug off. Every SNP result refuses a guest
+policy that allows a migration agent.
 
 ## Results, errors and retry
 
