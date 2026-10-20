@@ -96,18 +96,27 @@ async fn nras_attest(store: &Store, request: &NrasRequest, now: i64) -> Result<s
     Ok(answer)
 }
 
-/// Whether the overall token of an NRAS answer has an `exp` before `now`.
-/// Any other answer is left to verification.
+/// Invalid time claims on any token require a fresh NRAS answer.
+/// Malformed payloads are left to verification.
 fn expired(answer: &[u8], now: i64) -> bool {
-    let exp = || -> Option<f64> {
-        let (overall, _) = split_eat_response(&serde_json::from_slice(answer).ok()?).ok()?;
-        let payload = URL_SAFE_NO_PAD.decode(overall.split('.').nth(1)?).ok()?;
-        serde_json::from_slice::<serde_json::Value>(&payload)
-            .ok()?
-            .get("exp")?
-            .as_f64()
+    let tokens = || -> Option<Vec<String>> {
+        let (overall, subs) = split_eat_response(&serde_json::from_slice(answer).ok()?).ok()?;
+        Some(
+            std::iter::once(overall)
+                .chain(subs.into_iter().map(|(_, t)| t))
+                .collect(),
+        )
     };
-    exp().is_some_and(|exp| now > exp.floor() as i64)
+    tokens().is_some_and(|tokens| {
+        tokens.iter().any(|token| {
+            token
+                .split('.')
+                .nth(1)
+                .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+                .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
+                .is_some_and(|claims| enforce_time_claims(&claims, now).is_err())
+        })
+    })
 }
 
 /// Where an NRAS answer is held: NVIDIA's NRAS endpoint for the request's
@@ -227,7 +236,7 @@ pub fn verify_bundle(
     let archs_allowed = params
         .expected_archs
         .as_ref()
-        .map(|allowed| bundle.devices.iter().all(|d| allowed.contains(&d.arch)));
+        .map(|allowed| archs_match(&claims, allowed));
 
     Ok(NvidiaGpuResult {
         claims,
@@ -235,6 +244,13 @@ pub fn verify_bundle(
         device_count_match,
         device_policy_met,
     })
+}
+
+fn archs_match(claims: &NvidiaGpuClaims, allowed: &[NvidiaGpuArch]) -> bool {
+    claims
+        .devices
+        .iter()
+        .all(|d| d.arch.is_some_and(|arch| allowed.contains(&arch)))
 }
 
 const MAX_GPU_DEVICES: usize = 32;
@@ -977,6 +993,22 @@ mod tests {
         NvidiaGpuArch, NvidiaGpuBinding, NvidiaGpuDeviceClaims, NvidiaGpuDeviceEvidence,
         NvidiaGpuEvidenceBundle, NvidiaGpuParams,
     };
+
+    #[test]
+    fn architecture_policy_uses_signed_device_claims() {
+        let mut claims = NvidiaGpuClaims {
+            overall_ok: true,
+            eat_nonce: None,
+            overall_raw: serde_json::Value::Null,
+            devices: vec![device_claims_from_submodule(
+                &serde_json::json!({"hwmodel": "Blackwell"}),
+            )],
+        };
+        assert!(archs_match(&claims, &[NvidiaGpuArch::Blackwell]));
+        assert!(!archs_match(&claims, &[NvidiaGpuArch::Hopper]));
+        claims.devices[0].arch = None;
+        assert!(!archs_match(&claims, &[NvidiaGpuArch::Hopper]));
+    }
 
     fn one_device_bundle() -> NvidiaGpuEvidenceBundle {
         NvidiaGpuEvidenceBundle {

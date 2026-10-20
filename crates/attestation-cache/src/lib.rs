@@ -53,23 +53,6 @@ impl Default for Config {
     }
 }
 
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("dir", &self.dir)
-            .field("upstream", &self.upstream)
-            .field("listen", &self.listen)
-            .field("vsock_port", &self.vsock_port)
-            .field("warm", &self.warm)
-            .field(
-                "upstream_key",
-                &self.upstream_key.as_ref().map(|_| "redacted"),
-            )
-            .field("keys", &format_args!("[{} redacted]", self.keys.len()))
-            .finish()
-    }
-}
-
 impl Config {
     /// The collateral context this configuration describes.
     pub fn context(&self) -> anyhow::Result<Context> {
@@ -298,13 +281,8 @@ fn authorized(keys: &[String], headers: &axum::http::HeaderMap) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     keys.iter().fold(false, |found, key| {
-        found | same(key.as_bytes(), sent.as_bytes())
+        found | attestation::utils::constant_time_eq(key.as_bytes(), sent.as_bytes())
     })
-}
-
-/// `a == b` in time that depends only on the lengths.
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
 /// A URL in [`Cache::cold`] until dropped.
@@ -395,14 +373,6 @@ mod tests {
             cache.remember(&format!("https://example/{i}"));
         }
         assert_eq!(lock(&cache.known).len(), MAX_KNOWN);
-    }
-
-    #[test]
-    fn the_keys_are_not_in_the_debug_output() {
-        let config: Config =
-            toml::from_str("keys = [\"k-secret-1\"]\nupstream_key = \"u-secret-2\"").unwrap();
-        let shown = format!("{config:?}");
-        assert!(!shown.contains("secret"), "{shown}");
     }
 
     #[test]

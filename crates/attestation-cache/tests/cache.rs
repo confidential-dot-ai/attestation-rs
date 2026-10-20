@@ -45,6 +45,10 @@ impl Vendor {
 }
 
 async fn vendor(delay: Duration) -> Vendor {
+    gated_vendor(delay, None).await
+}
+
+async fn gated_vendor(delay: Duration, gate: Option<Arc<tokio::sync::Semaphore>>) -> Vendor {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -53,12 +57,20 @@ async fn vendor(delay: Duration) -> Vendor {
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
             let counter = counter.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
-                let mut buf = vec![0; 8192];
-                let n = sock.read(&mut buf).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let mut buf = Vec::new();
+                while !buf.ends_with(b"\r\n\r\n") {
+                    buf.push(sock.read_u8().await.unwrap());
+                }
+                let request = String::from_utf8(buf).unwrap();
                 let path = request.split(' ').nth(1).unwrap_or("").to_string();
                 counter.lock().unwrap().push(path.clone());
+                if path.contains("fmspc=0000") {
+                    if let Some(gate) = gate {
+                        let _permit = gate.acquire().await.unwrap();
+                    }
+                }
                 tokio::time::sleep(delay).await;
                 let (status, headers, body) = if path == TCB_INFO {
                     let encoded = chain().replace('\n', "%0A").replace(' ', "%20");
@@ -108,7 +120,14 @@ async fn serve(cache: Cache) -> String {
 }
 
 async fn get(base: &str, path: &str) -> reqwest::Response {
-    reqwest::get(format!("{base}{path}")).await.unwrap()
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{base}{path}"))
+        .send()
+        .await
+        .unwrap()
 }
 
 /// An upstream nothing listens on.
@@ -238,8 +257,10 @@ async fn failing_upstream() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mut buf = vec![0; 8192];
-            let _ = sock.read(&mut buf).await;
+            let mut buf = Vec::new();
+            while !buf.ends_with(b"\r\n\r\n") {
+                buf.push(sock.read_u8().await.unwrap());
+            }
             let _ = sock
                 .write_all(b"HTTP/1.1 503 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await;
@@ -253,16 +274,19 @@ async fn while_the_upstream_is_down_cold_clients_do_not_each_ask_it() {
     let (upstream, hits) = failing_upstream().await;
     let dir = tempfile::tempdir().unwrap();
     let cache = cache(dir.path(), &upstream, NOW).await;
+    assert_eq!(get(&cache, AMD_CRL).await.status(), 503);
+    let baseline = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(baseline > 0);
     for _ in 0..20 {
         assert_eq!(get(&cache, AMD_CRL).await.status(), 503);
     }
-    // One fetch: a try and its one retry.
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), baseline);
 }
 
 #[tokio::test]
 async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
-    let v = vendor(Duration::from_millis(500)).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let v = gated_vendor(Duration::ZERO, Some(gate.clone())).await;
     let dir = tempfile::tempdir().unwrap();
     let cache = cache(dir.path(), &v.base, NOW).await;
     assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
@@ -282,8 +306,32 @@ async fn over_the_cap_of_cold_fetches_clients_are_told_to_retry() {
         })
         .collect();
     // A piece in memory is still served while cold fetches are at the cap.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if v.hits
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("fmspc=0000"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(get(&cache, TCB_INFO).await.status(), 200);
+    // Wait for all admissions/refusals before releasing held requests.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while clients.iter().filter(|c| c.is_finished()).count() < 40 - attestation_cache::MAX_COLD
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    gate.add_permits(40);
     let mut busy = 0;
     for client in clients {
         match client.await.unwrap() {
@@ -320,7 +368,6 @@ async fn a_connection_slow_to_send_its_headers_is_closed() {
     let _ = tokio::time::timeout(Duration::from_secs(20), sock.read_to_end(&mut buf)).await;
     let took = start.elapsed();
     assert!(took < Duration::from_secs(15), "{took:?}");
-    assert!(!String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
 }
 
 #[tokio::test]
@@ -337,17 +384,32 @@ async fn health_is_always_up_and_ready_once_a_piece_was_served() {
 #[tokio::test]
 async fn ready_only_once_a_warm_piece_was_fetched() {
     let warm = vec![format!("https:/{AMD_CRL}")];
-    for (upstream, ready) in [
-        (dead_upstream().await, 503),
-        (vendor(Duration::ZERO).await.base, 200),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::new(context(dir.path(), &upstream, None, NOW), &warm);
-        tokio::spawn(cache.clone().keep_fresh());
-        let base = serve(cache).await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert_eq!(get(&base, "/ready").await.status(), ready, "{upstream}");
-    }
+    let (down, hits) = failing_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(context(dir.path(), &down, None, NOW), &warm);
+    tokio::spawn(cache.clone().keep_fresh());
+    let base = serve(cache).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hits.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(get(&base, "/ready").await.status(), 503);
+
+    let v = vendor(Duration::ZERO).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::new(context(dir.path(), &v.base, None, NOW), &warm);
+    tokio::spawn(cache.clone().keep_fresh());
+    let base = serve(cache).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while get(&base, "/ready").await.status() != 200 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

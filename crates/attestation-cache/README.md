@@ -29,7 +29,7 @@ vendors  <-  site cache (upstream: the vendors; the only egress to vendors)
   in memory, not on disk) are fetched from one vendor host per second; more
   get `503` with `Retry-After: 1`. After an upstream outage, a piece is not
   asked for again for 10 seconds (or the upstream's Retry-After); its
-  clients get `503` meanwhile. A `429` or `503` from the upstream pauses
+  clients get `503` meanwhile. A `429` or `503` from a vendor directly pauses
   every fetch to that vendor host for its Retry-After (10 seconds without
   one).
 - A connection must send its request headers within 10 seconds, and is
@@ -46,14 +46,7 @@ vendors  <-  site cache (upstream: the vendors; the only egress to vendors)
 
 ## Guests
 
-Inside a confidential VM the attestation library finds the host's cache by
-itself: it asks `GET /health` at vsock port 8455 of the host (CID 2). Once
-that answers 200, all collateral comes from there and the vendors are never contacted
-from the guest; while nothing listens, the guest uses the vendors and tries
-the host again every minute. A `404` from a cache is not taken as the
-vendor's word: to the guest it is `CollateralUnavailable`, not a refusal.
-The evidence it makes carries the collateral, so its verifiers need no
-network.
+Guests discover the host cache automatically; see [Collateral](../../README.md#collateral).
 
 ## Running
 
@@ -65,8 +58,7 @@ install -m 0644 crates/attestation-cache/attestation-cache.service /etc/systemd/
 systemctl enable --now attestation-cache
 ```
 
-Configuration: see `config.example.toml` (`dir`, `upstream`, `listen`,
-`vsock_port`, `warm`). The listener speaks plain HTTP.
+Configuration: see `config.example.toml`. The listener speaks plain HTTP.
 
 `GET /health` answers 200 while the process runs; `GET /ready` answers 200
 once a piece was fetched (a `warm` one or any served), or at once when
@@ -81,7 +73,7 @@ logged at warn, and a piece refused for not verifying at warn. Keys,
 
 With `keys` set, every other request needs `Authorization: Bearer KEY` with
 one of them (else 401); a host cache sends its site's key with
-`upstream_key`. Keys are compared in constant time and never logged. Use
+`upstream_key`. Keys are compared in constant time. Use
 keys only over HTTPS (behind the TLS terminator). Keys apply to every
 listener, vsock included, and guests never send a key: so set `keys` on site
 caches, not on a host cache that serves guests (keep its TCP listener on
@@ -107,9 +99,7 @@ month, most of them for the NRAS key set. A host cache whose upstream is the loa
 different replica each time; that is fine, as every replica serves verified
 vendor bytes.
 
-Without `keys`, it is an unauthenticated mirror of public vendor collateral: anyone who can
-reach it can make it fetch from the vendors, within the limits above (see keys). Make it
-reachable only by its intended clients (loopback and the host's guests over
+Make the cache reachable only by its intended clients (loopback and the host's guests over
 vsock for a host cache; the host caches, for a site cache). A site cache that host
 caches reach over the network must be served over HTTPS, for example behind
 a TLS terminator; hosts accept plain HTTP only from a loopback address.
