@@ -1,7 +1,12 @@
 # attestation: Rust library and shared policy contract
 
-See the [workspace capability matrix](../../README.md#capabilities) and
-[evidence/collateral guide](../../docs/collateral.md) first.
+Generate and verify TEE evidence with one policy-driven Rust interface across
+AMD SEV-SNP, Intel TDX, Azure, GCP and dstack. Verification runs natively or in
+WebAssembly, with pure-Rust cryptography and shared vendor collateral handling.
+
+See the [supported platform matrix](../../README.md#capabilities) and
+[generate/verify walkthrough](../../README.md#verify-evidence-in-rust) to get
+started; this guide covers policy fields, results and integration choices.
 
 ## Rust verification
 
@@ -36,9 +41,10 @@ cache; `.at(unix_seconds)?` fixes evaluation time. See the
 
 ## Policies
 
-`Policies` is the single Rust/serde contract used by API `/verify` and WASM
-`evaluate`. Available keys still depend on the surface: API excludes `dstack`;
-the WASM harness excludes `nvidia_gpu`.
+`Policies` is the shared Rust/serde contract used by API `/verify` and WASM
+`evaluate`. Enabled platform features determine the library policy keys; see
+the [API](../attestation-api/README.md) and [WASM](../attestation-wasm/README.md)
+guides for their interface-specific choices.
 
 - `Policies::default()` / `{}` accepts **no CPU platform**.
 - `Policies::all()` accepts every compiled-in CPU platform with default checks,

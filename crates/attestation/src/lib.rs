@@ -16,6 +16,8 @@
 //! **Verifier** (any machine, including WASM): say which platforms you accept
 //! and what each must satisfy.
 //! ```no_run
+//! # #[cfg(feature = "tdx")]
+//! # mod example {
 //! use attestation::{Policies, TdxParams};
 //!
 //! async fn check(evidence: &[u8], nonce: &[u8], mrtd: [u8; 48])
@@ -31,6 +33,7 @@
 //!     };
 //!     Ok(attestation::verify(evidence, &policies).await?.passed())
 //! }
+//! # }
 //! ```
 //!
 //! An `Err` means the evidence could not be verified (malformed, not

@@ -52,7 +52,10 @@ async function verifyEnvelope(envelope, policies, cacheBase, bearerKey) {
     if (!response.ok) throw new Error(`collateral HTTP ${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     let binary = '';
-    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
     const chain = chainHeaders.map(h => response.headers.get(h)).find(Boolean);
     collateral.push({ url, body: btoa(binary),
       issuer_chain: chain ? decodeURIComponent(chain) : undefined });
