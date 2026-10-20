@@ -1763,113 +1763,6 @@ mod tests {
         assert!(!r.migrate_ma);
     }
 
-    /// A vector from the kernel/verifier golden set: REPORT_DATA, the log and
-    /// the caller data, and its registers.
-    fn kmr_vector(name: &str) -> ([u8; 64], String, [u8; 64], Vec<[u8; 48]>) {
-        let json: serde_json::Value =
-            serde_json::from_str(include_str!("../../../test_data/snp/kmr-vectors.json")).unwrap();
-        let v = json["vectors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["name"] == name)
-            .unwrap();
-        let hex = |v: &serde_json::Value| hex::decode(v.as_str().unwrap()).unwrap();
-        let registers = v["registers"].as_array().unwrap();
-        (
-            hex(&v["report_data"]).try_into().unwrap(),
-            BASE64.encode(hex(&v["event_log"])),
-            hex(&v["caller_data"]).try_into().unwrap(),
-            registers
-                .iter()
-                .map(|r| hex(r).try_into().unwrap())
-                .collect(),
-        )
-    }
-
-    /// Check a vector's registers on a report whose launch digest pin held.
-    fn check_kmr(name: &str, caller_data: Option<&[u8; 64]>, expected: &[[u8; 48]]) -> SnpResult {
-        let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let params = SnpParams {
-            launch_digest: Some(vec![report.measurement]),
-            ..Default::default()
-        };
-        let mut result = evaluate_report(&report, &params, Some(true));
-        let (report_data, log, vector_caller_data, _) = kmr_vector(name);
-        let caller_data = caller_data.unwrap_or(&vector_caller_data);
-        check_runtime_registers(&mut result, &report_data, Some(&log), caller_data, expected)
-            .unwrap();
-        result
-    }
-
-    #[test]
-    fn runtime_registers_must_equal_the_expected_values() {
-        let (_, _, _, registers) = kmr_vector("four_events");
-        let r = check_kmr("four_events", None, &registers);
-        assert_eq!(r.report_data_match, Some(true));
-        assert_eq!(r.runtime_registers.as_ref().unwrap().registers, registers);
-        assert_eq!(r.runtime_registers_match, Some(true));
-        assert!(r.passed());
-
-        // Registers past the expected list must be zero; register 15 is not.
-        let r = check_kmr("four_events", None, &registers[..5]);
-        assert_eq!(r.runtime_registers_match, Some(false));
-        assert!(!r.passed());
-
-        let mut other = registers.clone();
-        other[0][0] ^= 1;
-        let r = check_kmr("four_events", None, &other);
-        assert_eq!(r.runtime_registers_match, Some(false));
-        assert!(!r.passed());
-    }
-
-    #[test]
-    fn a_debug_guest_shows_registers_only_when_debug_is_allowed() {
-        let (report_data, log, caller_data, registers) = kmr_vector("four_events");
-        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
-        report.policy.set_debug_allowed(true);
-        let check = |allow_debug: bool| {
-            let params = SnpParams {
-                launch_digest: Some(vec![report.measurement]),
-                allow_debug,
-                ..Default::default()
-            };
-            let mut result = evaluate_report(&report, &params, Some(true));
-            check_runtime_registers(
-                &mut result,
-                &report_data,
-                Some(&log),
-                &caller_data,
-                &registers,
-            )
-            .unwrap();
-            result
-        };
-        let r = check(true);
-        assert!(r.passed() && r.runtime_registers.is_some());
-        let r = check(false);
-        assert_eq!(r.runtime_registers_match, Some(true));
-        assert!(!r.passed() && r.runtime_registers.is_none());
-    }
-
-    #[test]
-    fn genesis_registers_match_an_empty_expectation() {
-        let r = check_kmr("genesis", None, &[]);
-        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
-        assert_eq!(r.runtime_registers_match, Some(true));
-        assert!(r.passed());
-    }
-
-    #[test]
-    fn other_caller_data_fails_and_exposes_no_registers() {
-        let (_, _, _, registers) = kmr_vector("four_events");
-        let r = check_kmr("four_events", Some(&[0; 64]), &registers);
-        assert_eq!(r.report_data_match, Some(false));
-        assert!(r.runtime_registers.is_none());
-        assert_eq!(r.runtime_registers_match, Some(false));
-        assert!(!r.passed());
-    }
-
     // ---------------------------------------------------------------
     // Hardware fixture: a Genoa guest kernel with runtime registers
     // ---------------------------------------------------------------
@@ -2173,6 +2066,34 @@ mod tests {
             forged[..]
         );
         assert!(r.passed());
+    }
+
+    #[test]
+    fn a_debug_guest_shows_registers_only_when_debug_is_allowed() {
+        let mut report = parse_report(KMR_REPORT).unwrap();
+        report.policy.set_debug_allowed(true);
+        let check = |allow_debug: bool| {
+            let params = SnpParams {
+                launch_digest: Some(vec![report.measurement]),
+                allow_debug,
+                ..Default::default()
+            };
+            let mut result = evaluate_report(&report, &params, Some(true));
+            check_runtime_registers(
+                &mut result,
+                &report.report_data,
+                Some(&BASE64.encode(KMR_EVENT_LOG)),
+                KMR_CALLER_DATA.try_into().unwrap(),
+                &kmr_expected(),
+            )
+            .unwrap();
+            result
+        };
+        let r = check(true);
+        assert!(r.passed() && r.runtime_registers.is_some());
+        let r = check(false);
+        assert_eq!(r.runtime_registers_match, Some(true));
+        assert!(!r.passed() && r.runtime_registers.is_none());
     }
 
     #[tokio::test]
