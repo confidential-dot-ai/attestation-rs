@@ -414,6 +414,67 @@ async fn ready_only_once_a_warm_piece_was_fetched() {
 }
 
 #[tokio::test]
+async fn authenticated_browser_preflight_is_open_but_get_requires_a_key() {
+    let v = vendor(Duration::ZERO).await;
+    let dir = tempfile::tempdir().unwrap();
+    let base = serve(
+        Cache::new(context(dir.path(), &v.base, None, NOW), &[]).with_keys(vec!["secret".into()]),
+    )
+    .await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{base}{TCB_INFO}");
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Origin", "https://verifier.example")
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "authorization")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 204);
+    assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+    assert_eq!(preflight.headers()["access-control-allow-methods"], "GET");
+    assert_eq!(
+        preflight.headers()["access-control-allow-headers"],
+        "Authorization"
+    );
+    assert!(preflight.bytes().await.unwrap().is_empty());
+    assert_eq!(v.hits(TCB_INFO), 0);
+
+    for key in [None, Some("wrong"), Some("secret")] {
+        let mut request = client
+            .get(&url)
+            .header("Origin", "https://verifier.example");
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        if key == Some("secret") {
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.bytes().await.unwrap().as_ref(),
+                read("tcb_info_70a06d070000.json")
+            );
+        } else {
+            assert_eq!(response.status(), 401);
+            assert_eq!(v.hits(TCB_INFO), 0);
+        }
+    }
+    assert_eq!(v.hits(TCB_INFO), 1);
+    assert_eq!(
+        client
+            .post(url)
+            .bearer_auth("secret")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        405
+    );
+}
+
+#[tokio::test]
 async fn with_keys_only_clients_with_a_key_are_answered() {
     let v = vendor(Duration::ZERO).await;
     let (site_dir, host_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
