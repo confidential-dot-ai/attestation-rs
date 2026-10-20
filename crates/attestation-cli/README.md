@@ -30,6 +30,12 @@ encoding, chosen independently of the evidence:
 attestation-cli verify --evidence evidence.json --platform snp   --expected-report-data "$NONCE_HEX"
 ```
 
+The CLI has no SNP runtime-register mode; verify that evidence through the
+library or the attestation-api `/verify` policies
+([runtime registers](../attestation/README.md#snp-kernel-runtime-registers)).
+On a report from a runtime-register kernel, `REPORT_DATA` is the kernel's
+commitment, so `--expected-report-data` with the requester's bytes fails.
+
 Use measurement pins to identify an approved workload. For TDX, where `MRTD`
 and `RTMR1` are trusted 96-character hex values:
 

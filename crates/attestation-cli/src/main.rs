@@ -108,6 +108,8 @@ struct VerifyArgs {
     at: Option<i64>,
 
     /// Expected report data (hex-encoded) for nonce binding verification.
+    /// SNP runtime registers are not supported here: on a runtime-register
+    /// kernel this fails, as `REPORT_DATA` holds the kernel's commitment.
     #[arg(long)]
     expected_report_data: Option<String>,
 

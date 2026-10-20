@@ -22,6 +22,10 @@ fn genoa_crl() -> attestation::HeldResponse {
 }
 
 fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
+    run_at(evidence, AT, args)
+}
+
+fn run_at(evidence: serde_json::Value, at: &str, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
@@ -31,7 +35,7 @@ fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     std::fs::write(&path, evidence.to_string()).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
         .env("XDG_CACHE_HOME", &dir)
-        .args(["verify", "--offline", "--at", AT, "--evidence"])
+        .args(["verify", "--offline", "--at", at, "--evidence"])
         .arg(&path)
         .args(args)
         .output()
@@ -95,6 +99,46 @@ fn launch_digest_mismatch_prints_result_and_exits_one() {
     assert_eq!(out.status.code(), Some(1));
     let json = stdout_json(&out);
     assert_eq!(json["launch_digest_match"], false);
+    assert_eq!(json["passed"], false);
+}
+
+/// The CLI has no runtime-register mode. On evidence from a kernel with the
+/// provider, `REPORT_DATA` is the kernel's commitment, so pinning the
+/// requester's bytes fails.
+#[test]
+fn a_runtime_register_report_fails_the_requesters_report_data() {
+    const DIR: &str = "../attestation/test_data/snp";
+    let read = |file: &str| std::fs::read(format!("{DIR}/{file}")).unwrap();
+    let report = read("kmr-report.bin");
+    let evidence = serde_json::json!({
+        "platform": "snp",
+        "evidence": {
+            "attestation_report": BASE64.encode(&report),
+            "cert_chain": { "vcek": BASE64.encode(read("kmr-vcek.der")) },
+            "event_log": BASE64.encode(read("kmr-event-log.bin")),
+        },
+    });
+    // 2026-10-20, inside the kernel guest VCEK's window.
+    let verify = |report_data: &[u8]| {
+        run_at(
+            evidence.clone(),
+            "1792454400",
+            &[
+                "--platform",
+                "snp",
+                "--expected-report-data",
+                &hex::encode(report_data),
+            ],
+        )
+    };
+    let out = verify(&report[0x50..0x90]);
+    assert_eq!(out.status.code(), Some(0), "the raw REPORT_DATA matches");
+
+    let out = verify(&read("kmr-caller-data.bin"));
+    assert_eq!(out.status.code(), Some(1));
+    let json = stdout_json(&out);
+    assert_eq!(json["report_data_match"], false);
+    assert!(json["runtime_registers"].is_null());
     assert_eq!(json["passed"], false);
 }
 
