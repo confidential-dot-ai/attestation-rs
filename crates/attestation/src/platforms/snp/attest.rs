@@ -41,6 +41,19 @@ fn certs_to_chain(certs: Vec<CertTableEntry>) -> Option<SnpCertChain> {
     vcek.map(|v| SnpCertChain { vcek: v, ask, ark })
 }
 
+/// The event log, base64 encoded; `None` only when the file does not exist
+/// (a kernel without the provider). Any other read error is returned.
+fn read_event_log(path: &Path) -> Result<Option<String>> {
+    match std::fs::read(path) {
+        Ok(log) => Ok(Some(BASE64.encode(log))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AttestationError::HardwareAccessFailed(format!(
+            "read {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
 /// Generate SNP attestation evidence.
 pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
     let padded = pad_report_data(report_data, 64)?;
@@ -63,13 +76,30 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
 
     let cert_chain = certs.and_then(certs_to_chain);
     // Read after the report: the log then holds the prefix the report commits to.
-    let event_log = std::fs::read(EVENT_LOG_PATH)
-        .ok()
-        .map(|log| BASE64.encode(log));
+    let event_log = read_event_log(Path::new(EVENT_LOG_PATH))?;
 
     Ok(SnpEvidence {
         attestation_report: BASE64.encode(&report_bytes),
         cert_chain,
         event_log,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_missing_event_log_means_no_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("event_log");
+        assert_eq!(read_event_log(&log).unwrap(), None);
+        std::fs::write(&log, [1, 2, 3]).unwrap();
+        assert_eq!(
+            read_event_log(&log).unwrap(),
+            Some(BASE64.encode([1, 2, 3]))
+        );
+        // A read that fails for another reason (here ENOTDIR) is an error.
+        assert!(read_event_log(&log.join("child")).is_err());
+    }
 }
