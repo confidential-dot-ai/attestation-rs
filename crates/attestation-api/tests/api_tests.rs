@@ -1105,15 +1105,50 @@ async fn jwks_returns_error_when_token_not_configured() {
     assert_eq!(json["error"], "token_not_configured");
 }
 
+// Captured evidence and a local vendor isolate API logic from AMD availability.
+#[tokio::test]
+async fn snp_fixture_verify_accepts_valid_evidence_and_rejects_bad_signature() {
+    let base = vendor(vec![
+        ("/crl", 200, GENOA_CRL.to_vec()),
+        ("/Genoa/", 200, SNP_VCEK.to_vec()),
+    ])
+    .await;
+    for corrupt in [false, true] {
+        let mut body = snp_body(false);
+        if corrupt {
+            let mut report = SNP_REPORT.to_vec();
+            report[672] ^= 1; // First byte of the SNP report signature.
+            body["evidence"]["attestation_report"] = BASE64.encode(report).into();
+        }
+        let (status, json) = post_verify(online_state(&base), body).await;
+        if corrupt {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+            assert_eq!(json["error"], "verification_failed");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["passed"], true);
+        }
+    }
+}
+
+#[tokio::test]
+async fn snp_vendor_rate_limit_is_unavailable_not_verification_success() {
+    let base = vendor(vec![
+        ("/crl", 200, GENOA_CRL.to_vec()),
+        ("/Genoa/", 429, Vec::new()),
+    ])
+    .await;
+    let (status, json) = post_verify(online_state(&base), snp_body(false)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["error"], "collateral_unavailable");
+}
+
 // --- End-to-end test: attest then verify ---
 
 #[tokio::test]
-#[ignore = "requires an accessible TEE attestation device"]
-async fn attest_then_verify_roundtrip() {
-    if !has_tee() {
-        // Skip on non-TEE machines
-        return;
-    }
+#[ignore = "live vendor check: requires a TEE and available vendor collateral"]
+async fn live_vendor_attest_then_verify_roundtrip() {
+    assert!(has_tee(), "live vendor gate requires an accessible TEE");
 
     let state = test_state();
 
