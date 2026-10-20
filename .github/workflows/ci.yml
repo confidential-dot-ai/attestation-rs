@@ -107,7 +107,7 @@ jobs:
   # only the release job below publishes on pushes to main.
   release-build:
     name: Release Build ${{ matrix.target }}
-    needs: [check, test]
+    needs: [check, test, vsock]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -195,7 +195,7 @@ jobs:
   # Dockerfile keeps warm builds to the changed crates.
   docker-build:
     name: Docker Build
-    needs: [check, test]
+    needs: [check, test, vsock]
     runs-on: ubuntu-latest
     permissions:
       contents: read
