@@ -211,7 +211,6 @@ pub fn verify_bundle(
             AttestationError::NrasResponseParse(format!("no NRAS answer for {arch:?}"))
         })?;
         let group = verify_arch_group(
-            arch,
             response,
             &arch_nonce(arch, user_nonce, bundle),
             params,
@@ -321,7 +320,6 @@ struct ArchGroupResult {
 /// JWS-verify NRAS's overall and per-submodule tokens for one architecture
 /// group, and check the eat_nonce binding against the derived SPDM nonce.
 fn verify_arch_group(
-    arch: NvidiaGpuArch,
     response: &serde_json::Value,
     nonce_bytes: &[u8; 32],
     params: &NvidiaGpuParams,
@@ -367,11 +365,8 @@ fn verify_arch_group(
         // a submodule spliced from another session carries a different nonce and
         // is rejected here.
         check_submodule_nonce(&name, &sub_claims, nonce_bytes)?;
-        let mut dc = device_claims_from_submodule(&sub_claims);
+        let dc = device_claims_from_submodule(&sub_claims);
         check_device_report_nonce(&name, &dc)?;
-        if dc.arch.is_none() {
-            dc.arch = Some(arch);
-        }
         device_policy_met &= device_policy_holds(&name, &dc, &params.device_policy);
         device_claims.push(dc);
     }
@@ -996,18 +991,23 @@ mod tests {
 
     #[test]
     fn architecture_policy_uses_signed_device_claims() {
-        let mut claims = NvidiaGpuClaims {
-            overall_ok: true,
-            eat_nonce: None,
-            overall_raw: serde_json::Value::Null,
-            devices: vec![device_claims_from_submodule(
-                &serde_json::json!({"hwmodel": "Blackwell"}),
-            )],
-        };
-        assert!(archs_match(&claims, &[NvidiaGpuArch::Blackwell]));
-        assert!(!archs_match(&claims, &[NvidiaGpuArch::Hopper]));
-        claims.devices[0].arch = None;
-        assert!(!archs_match(&claims, &[NvidiaGpuArch::Hopper]));
+        // Synthetic post-signature payloads through production extraction.
+        // No bundle architecture enters this claims-construction path.
+        for (payload, blackwell, hopper) in [
+            (serde_json::json!({"hwmodel": "Blackwell"}), true, false),
+            (serde_json::json!({"hwmodel": "Hopper"}), false, true),
+            (serde_json::json!({"hwmodel": "unknown"}), false, false),
+            (serde_json::json!({}), false, false),
+        ] {
+            let claims = NvidiaGpuClaims {
+                overall_ok: true,
+                eat_nonce: None,
+                overall_raw: serde_json::Value::Null,
+                devices: vec![device_claims_from_submodule(&payload)],
+            };
+            assert_eq!(archs_match(&claims, &[NvidiaGpuArch::Blackwell]), blackwell);
+            assert_eq!(archs_match(&claims, &[NvidiaGpuArch::Hopper]), hopper);
+        }
     }
 
     fn one_device_bundle() -> NvidiaGpuEvidenceBundle {
