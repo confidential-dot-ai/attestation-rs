@@ -576,6 +576,7 @@ mod native {
             &self,
             url: &str,
             id: &C::Id,
+            cold: bool,
         ) -> std::result::Result<Entry, Failure> {
             let vendor = self
                 .vendor
@@ -583,9 +584,10 @@ mod native {
                 .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
             if let Some((at, failure)) = self.failed.get(url).await {
                 let stands = match &failure {
-                    Failure::Unavailable(e) => self
-                        .recheck
-                        .min(e.retry_after.map_or(OUTAGE, Duration::from_secs)),
+                    Failure::Unavailable(e) => self.recheck.min(
+                        e.retry_after
+                            .map_or(OUTAGE, |s| Duration::from_secs(s.max(1))),
+                    ),
                     _ => self.recheck,
                 };
                 if at.elapsed() < stands {
@@ -601,16 +603,21 @@ mod native {
                     return Err(wait(left.as_secs(), "the vendor asked to wait"));
                 }
             }
-            let (direct, fetched) = Box::pin(vendor.fetch(url)).await;
-            if let Err(e) = &fetched {
-                if matches!(e.status, Some(429 | 503)) {
-                    let pause = self
-                        .recheck
-                        .min(e.retry_after.map_or(HOST_PAUSE, Duration::from_secs));
+            if cold {
+                self.admit_cold(url)?;
+            }
+            let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
+            if let Err(e) = &mut fetched {
+                if direct && matches!(e.status, Some(429 | 503)) {
+                    let pause = self.recheck.min(
+                        e.retry_after
+                            .map_or(HOST_PAUSE, |s| Duration::from_secs(s.max(1))),
+                    );
                     self.lock_hosts()
                         .entry(host(url).to_string())
                         .or_default()
                         .paused_until = Some(Instant::now() + pause);
+                    e.retry_after.get_or_insert(pause.as_secs().max(1));
                 }
             }
             let (body, chain) = match fetched {
@@ -710,13 +717,7 @@ mod native {
                     return Ok(e.clone());
                 }
             }
-            let fetched = match &on_disk {
-                Some(_) => self.fetch::<C>(url, id).await,
-                None => match self.admit_cold(url) {
-                    Ok(()) => self.fetch::<C>(url, id).await,
-                    Err(e) => Err(e),
-                },
-            };
+            let fetched = self.fetch::<C>(url, id, on_disk.is_none()).await;
             match (fetched, on_disk) {
                 (Ok(new), Some(old)) if !new.dates.not_older_than(&old.dates) => Ok(old),
                 (Ok(new), _) => {
@@ -749,7 +750,7 @@ mod native {
                     if current.as_ref().is_some_and(|c| !self.due(c, now, force)) {
                         return Op::Nop;
                     }
-                    match self.fetch::<C>(url, id).await {
+                    match self.fetch::<C>(url, id, false).await {
                         Ok(new)
                             if current
                                 .as_ref()
@@ -920,6 +921,70 @@ mod tests {
         }
         // The first piece: one try and its retry.
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_refusals_keep_their_classification_and_do_not_spend_cold_budget() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = Context::new().with_test_vendor(&v.base);
+        for _ in 0..30 {
+            let err = ctx
+                .store()
+                .get::<TcbInfo>(&[0; 6], NOW)
+                .await
+                .err()
+                .unwrap();
+            assert!(!err.is_retryable());
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+        let err = ctx
+            .store()
+            .get::<TcbInfo>(&[1; 6], NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(!err.is_retryable());
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn zero_retry_after_still_holds_an_outage() {
+        let v = vendor(
+            vec![status(503, vec![("Retry-After", "0".into())])],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = Context::new().with_upstream(&v.base).unwrap();
+        assert!(tcb_info(&ctx, NOW).await.is_err());
+        let hits = v.hits.load(Ordering::SeqCst);
+        assert!(hits > 0);
+        for _ in 0..20 {
+            assert!(tcb_info(&ctx, NOW).await.is_err());
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), hits);
+    }
+
+    #[tokio::test]
+    async fn an_upstream_cache_outage_does_not_pause_other_pieces() {
+        let v = vendor(
+            vec![
+                status(503, vec![]),
+                status(503, vec![]),
+                pcs("2026-10-14/tcb_info_70a06d070000.json"),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = Context::new().with_upstream(&v.base).unwrap();
+        assert!(ctx
+            .store()
+            .get::<TcbInfo>(&[0; 6], NOW)
+            .await
+            .err()
+            .unwrap()
+            .is_retryable());
+        assert!(tcb_info(&ctx, NOW).await.is_ok());
+        assert_eq!(v.hits.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

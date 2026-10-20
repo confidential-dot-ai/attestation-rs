@@ -109,7 +109,7 @@ impl Context {
     }
 
     /// Fetch collateral from the vendors themselves, without looking for a
-    /// host cache (an attestation-cache never asks another one).
+    /// host cache (for an attestation-cache without an upstream).
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn with_vendors(mut self) -> Self {
