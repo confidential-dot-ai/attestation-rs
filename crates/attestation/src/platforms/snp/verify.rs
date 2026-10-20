@@ -2058,6 +2058,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_kernel_report_above_vmpl_0_fails() {
+        macro_rules! kmr_vmpl {
+            ($file:literal) => {
+                include_bytes!(concat!("../../../test_data/snp/kmr-vmpl/", $file)).as_slice()
+            };
+        }
+        // The expectation is the log's own replay, so only the VMPL can fail.
+        let params = |report: &[u8], log: &[u8], caller_data: &[u8]| {
+            let count = u32::from_le_bytes(
+                parse_report(report).unwrap().report_data[..4]
+                    .try_into()
+                    .unwrap(),
+            );
+            SnpParams {
+                report_data: Some(caller_data.to_vec()),
+                launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
+                runtime_registers: Some(mr::replay(log, count).unwrap().unwrap().to_vec()),
+                ..Default::default()
+            }
+        };
+        let (report, log, caller) = (
+            kmr_vmpl!("vmpl0.report.bin"),
+            kmr_vmpl!("vmpl0.event-log.bin"),
+            kmr_vmpl!("vmpl0.caller-data.bin"),
+        );
+        let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
+        assert_eq!(r.vmpl, 0);
+        assert!(r.passed());
+
+        let (log, caller) = (kmr_vmpl!("event-log.bin"), kmr_vmpl!("caller-data.bin"));
+        for (report, vmpl) in [
+            (kmr_vmpl!("vmpl1.report.bin"), 1),
+            (kmr_vmpl!("vmpl2.report.bin"), 2),
+            (kmr_vmpl!("vmpl3.report.bin"), 3),
+            (kmr_vmpl!("vmpl4.report.bin"), 4),
+            (kmr_vmpl!("privlevel1.report.bin"), 1),
+            (kmr_vmpl!("privlevel2.report.bin"), 2),
+            (kmr_vmpl!("privlevel3.report.bin"), 3),
+        ] {
+            let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
+            assert_eq!(r.vmpl, vmpl);
+            assert_eq!(r.report_data_match, Some(true), "VMPL {vmpl}");
+            assert_eq!(r.runtime_registers_match, Some(true), "VMPL {vmpl}");
+            assert!(!r.passed(), "VMPL {vmpl}");
+        }
+    }
+
+    #[tokio::test]
     async fn registers_are_not_exposed_when_the_launch_digest_pin_fails() {
         let mut params = SnpParams {
             report_data: Some(KMR_CALLER_DATA.to_vec()),
