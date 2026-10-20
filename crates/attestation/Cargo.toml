@@ -102,8 +102,6 @@ tokio-vsock = "0.7"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
-http = "1"
-bytes = "1"
 az-cvm-vtpm = { version = "0.8.1", default-features = false, features = ["attester"], optional = true }
 nv-attestation-sdk = { git = "https://github.com/NVIDIA/attestation-sdk", rev = "0c1be386a8fbb8f2766a6a556d10df86f5fed9d3", optional = true }
 
