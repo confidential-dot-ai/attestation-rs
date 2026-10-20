@@ -19,12 +19,11 @@ pub struct CacheStats {
 }
 
 pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
-    // attestation::detect() memoizes the hardware probe, so calling it per
-    // request here does not re-open the vTPM context.
+    // Service discovery is memoized, so health checks do not re-open devices.
     let platform = {
         #[cfg(target_os = "linux")]
         {
-            attestation::detect().ok().map(|p| format!("{p}"))
+            super::detect_platform().ok().map(|p| format!("{p}"))
         }
         #[cfg(not(target_os = "linux"))]
         {

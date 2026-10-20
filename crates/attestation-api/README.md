@@ -8,7 +8,12 @@ A REST API service for generating and verifying Trusted Execution Environment (T
 
 - AMD SEV-SNP
 - Intel TDX
-- Azure SNP / TDX variants
+- Azure and Google Cloud SNP / TDX variants
+
+The API does not accept dstack evidence or policy keys (including null keys),
+regardless of workspace features. On a dstack host, automatic detection uses
+bare TDX only when that interface is available. The library and WASM retain
+dstack support.
 
 ## API Endpoints
 
@@ -91,6 +96,10 @@ nowhere and not fetchable is `502 collateral_unavailable` (with `Retry-After`
 when the vendor sent one); a piece that is not the vendor's is `422
 verification_failed`.
 
+All callers, including unauthenticated `/verify` callers, share a limit of
+10 new pieces per second per vendor host. Put the API behind per-client rate
+limiting so forged requests cannot exhaust this shared fetch budget.
+
 ## Usage Examples
 
 **Generate attestation evidence:**
@@ -128,12 +137,18 @@ allowed values);
 `allow_debug`, `min_tcb`, `max_vmpl`; `az-tdx` and `az-snp` also take `pcrs`
 (`{ "<index>": "<32 bytes>" }`, index 0-23, each index once);
 `nvidia_gpu` takes `user_nonce`,
-`required`, `expected_archs`. A field the platform does not have is a `400`.
+`required`, `expected_archs`, `allowed_bindings`, `device_policy`; `floors`
+raises the lowest accepted collateral versions (`amd_crl_milan`,
+`amd_crl_genoa`, `amd_crl_turin`, `intel_tcb_info`, `intel_qe_identity`).
+A field the platform does not have is a `400`. This is `attestation::Policies`
+as JSON, the same shape the WASM `evaluate` takes.
 
 The server sets floors: `allow_debug: true`, `max_vmpl` above 0, and a TCB
 status Intel does not consider valid (`"Revoked"`, `"NoMatchingLevel"`) in
 `accepted_tcb_statuses` are a `400` unless the matching `attestation.allow_*`
-option is enabled. `issue_token` requires `report_data` in the policy for the
+option is enabled (`allow_debug` covers `nvidia_gpu.device_policy.allow_debug`
+too); `floors` below the shipped versions and a `device_policy` that drops
+`require_secboot` or `require_measres_success` are always a `400`. `issue_token` requires a non-empty `report_data` in the policy for the
 evidence's platform.
 
 A token alone is not fresh: anyone who can call `/verify` can replay old

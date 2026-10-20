@@ -65,7 +65,9 @@ fn normalize_quote_to_base64(quote: &str) -> String {
 }
 
 /// What a caller can ask of dstack evidence.
-#[derive(Debug, Clone, Default)]
+/// In JSON, the `tdx` params.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct DstackParams {
     pub tdx: TdxParams,
 }

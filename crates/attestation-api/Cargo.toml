@@ -17,7 +17,9 @@ nvidia-gpu = ["attestation/nvidia-gpu"]
 nvidia-gpu-attest = ["nvidia-gpu", "attestation/nvidia-gpu-attest"]
 
 [dependencies]
-attestation = { workspace = true, features = ["attest", "nvidia-gpu"] }
+# Supported platforms are explicit; the HTTP boundary also rejects unsupported
+# policy keys when other workspace crates enable additional library features.
+attestation = { workspace = true, features = ["attest", "snp", "tdx", "az-snp", "az-tdx", "gcp-snp", "gcp-tdx", "nvidia-gpu"] }
 # Web framework
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

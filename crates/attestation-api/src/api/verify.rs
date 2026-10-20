@@ -1,11 +1,8 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::Json;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
@@ -23,103 +20,60 @@ pub struct VerifyRequest {
     #[serde(default)]
     pub nvidia_gpu: Option<Value>,
     /// The collateral /attest attached, `[{url, body, issuer_chain}]`.
-    #[serde(default)]
     pub collateral: Option<Value>,
     /// Accepted platforms and their params. Evidence for a platform without an
-    /// entry is refused.
-    #[serde(default)]
-    pub policies: PoliciesInput,
+    /// entry is refused. Issued tokens carry it as their `policy` claim.
+    #[serde(default, deserialize_with = "api_policies")]
+    pub policies: attestation::Policies,
     #[serde(default)]
     pub issue_token: bool,
 }
 
-/// Accepted platforms, keyed by platform name, each with its params. Byte
-/// values are base64. A field that does not exist for a platform is refused.
-/// Issued tokens carry it as their `policy` claim.
-#[derive(Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PoliciesInput {
-    pub tdx: Option<TdxParamsInput>,
-    pub snp: Option<SnpParamsInput>,
-    #[serde(rename = "az-tdx")]
-    pub az_tdx: Option<TdxParamsInput>,
-    #[serde(rename = "az-snp")]
-    pub az_snp: Option<SnpParamsInput>,
-    #[serde(rename = "gcp-tdx")]
-    pub gcp_tdx: Option<TdxParamsInput>,
-    #[serde(rename = "gcp-snp")]
-    pub gcp_snp: Option<SnpParamsInput>,
-    pub nvidia_gpu: Option<GpuParamsInput>,
-}
-
-/// TDX params (also az-tdx, gcp-tdx). See `attestation::TdxParams`.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TdxParamsInput {
-    pub report_data: Option<String>,
-    pub init_data: Option<String>,
-    /// 48 bytes, or an array of allowed values.
-    pub mrtd: Option<OneOrMany>,
-    /// 48 bytes each, or arrays of allowed values.
-    pub rtmr0: Option<OneOrMany>,
-    pub rtmr1: Option<OneOrMany>,
-    pub rtmr2: Option<OneOrMany>,
-    pub rtmr3: Option<OneOrMany>,
-    #[serde(default)]
-    pub allow_debug: bool,
-    /// A status outside the default (`Revoked`, `NoMatchingLevel`) is refused
-    /// unless `attestation.allow_revoked_or_unlisted_tcb` is set.
-    #[serde(default = "default_tcb_statuses")]
-    pub accepted_tcb_statuses: Vec<attestation::TdxTcbStatus>,
-    /// az-tdx only: expected vTPM PCRs by index, 32 bytes each.
-    #[serde(default, deserialize_with = "unique_pcrs")]
-    pub pcrs: Option<BTreeMap<u8, String>>,
-}
-
-fn default_tcb_statuses() -> Vec<attestation::TdxTcbStatus> {
-    attestation::TdxParams::default().accepted_tcb_statuses
-}
-
-/// SEV-SNP params (also az-snp, gcp-snp). See `attestation::SnpParams`.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnpParamsInput {
-    pub report_data: Option<String>,
-    pub host_data: Option<String>,
-    /// 48 bytes, or an array of allowed values.
-    pub launch_digest: Option<OneOrMany>,
-    #[serde(default)]
-    pub allow_debug: bool,
-    pub min_tcb: Option<attestation::SnpTcb>,
-    /// Above 0 is refused unless `attestation.allow_nonzero_vmpl` is set.
-    #[serde(default)]
-    pub max_vmpl: u32,
-    /// az-snp only: expected vTPM PCRs by index, 32 bytes each.
-    #[serde(default, deserialize_with = "unique_pcrs")]
-    pub pcrs: Option<BTreeMap<u8, String>>,
-}
-
-/// A single base64 value, or an array of allowed values.
-#[derive(Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// NVIDIA GPU params. See `attestation::NvidiaGpuParams`.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GpuParamsInput {
-    /// The user nonce that seeded the GPU SPDM nonce; must equal the platform
-    /// `report_data`.
-    pub user_nonce: Option<String>,
-    /// Refuse evidence without a GPU bundle.
-    #[serde(default)]
-    pub required: bool,
-    /// Acceptable GPU/switch architectures (`"HOPPER"`, `"BLACKWELL"`,
-    /// `"LS10"`). If absent, all known archs are accepted.
-    pub expected_archs: Option<Vec<attestation::NvidiaGpuArch>>,
+// Filter keys while streaming, so library serde still rejects duplicate keys.
+// Feature unification must not expand the service's accepted policy surface.
+fn api_policies<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<attestation::Policies, D::Error> {
+    struct ApiPolicies;
+    impl<'de> serde::de::Visitor<'de> for ApiPolicies {
+        type Value = attestation::Policies;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("supported API policies")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+            struct Supported<M>(M);
+            impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for Supported<M> {
+                type Error = M::Error;
+                fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+                    &mut self,
+                    seed: K,
+                ) -> Result<Option<K::Value>, Self::Error> {
+                    use serde::de::IntoDeserializer;
+                    let Some(key) = self.0.next_key::<String>()? else {
+                        return Ok(None);
+                    };
+                    if !crate::config::SUPPORTED_ATTESTATION_PLATFORMS.contains(&key.as_str())
+                        && !matches!(key.as_str(), "floors" | "nvidia_gpu")
+                    {
+                        return Err(serde::de::Error::custom(format!(
+                            "unsupported policy: {key}"
+                        )));
+                    }
+                    seed.deserialize(key.into_deserializer()).map(Some)
+                }
+                fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+                    &mut self,
+                    seed: V,
+                ) -> Result<V::Value, Self::Error> {
+                    self.0.next_value_seed(seed)
+                }
+            }
+            attestation::Policies::deserialize(serde::de::value::MapAccessDeserializer::new(
+                Supported(map),
+            ))
+        }
+    }
+    deserializer.deserialize_map(ApiPolicies)
 }
 
 #[derive(Serialize)]
@@ -138,16 +92,25 @@ pub async fn handler(
 ) -> Result<Json<VerifyResponse>, ApiError> {
     let Json(req) = payload?;
     let platform = canonical_platform(req.platform.as_deref())?;
-    let policies = build_policies(&req.policies, &state.config.attestation)?;
-    if req.issue_token && !req.policies.pins_report_data(platform) {
+    check_server_floors(&req.policies, &state.config.attestation)?;
+    if req.issue_token
+        && req
+            .policies
+            .report_data(platform)
+            .is_none_or(<[u8]>::is_empty)
+    {
         return Err(ApiError::BadRequest(format!(
-            "issue_token requires policies.{platform}.report_data"
+            "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
-    let evidence_json =
-        build_evidence_envelope(platform, req.evidence, req.nvidia_gpu, req.collateral)?;
+    let evidence_json = build_evidence_envelope(
+        &platform.to_string(),
+        req.evidence,
+        req.nvidia_gpu,
+        req.collateral,
+    )?;
 
-    let result = state.verifier.verify(&evidence_json, &policies).await?;
+    let result = state.verifier.verify(&evidence_json, &req.policies).await?;
     let passed = PassedVerification::new(&result);
 
     let token = match &passed {
@@ -169,237 +132,58 @@ pub async fn handler(
     }))
 }
 
-impl PoliciesInput {
-    fn pins_report_data(&self, platform: &str) -> bool {
-        let tdx = |p: &Option<TdxParamsInput>| p.as_ref().is_some_and(|p| p.report_data.is_some());
-        let snp = |p: &Option<SnpParamsInput>| p.as_ref().is_some_and(|p| p.report_data.is_some());
-        match platform {
-            "tdx" => tdx(&self.tdx),
-            "az-tdx" => tdx(&self.az_tdx),
-            "gcp-tdx" => tdx(&self.gcp_tdx),
-            "snp" => snp(&self.snp),
-            "az-snp" => snp(&self.az_snp),
-            "gcp-snp" => snp(&self.gcp_snp),
-            _ => false,
-        }
-    }
-}
-
-fn build_policies(
-    input: &PoliciesInput,
+/// Params below the server's floors are refused unless its config allows
+/// them: `allow_debug`, a TCB status outside the default set, and `max_vmpl`
+/// above 0. Collateral floors below the shipped ones and a GPU device policy
+/// weaker than the default are always refused.
+fn check_server_floors(
+    policies: &attestation::Policies,
     config: &AttestationConfig,
-) -> Result<attestation::Policies, ApiError> {
-    let tdx = |p: &Option<TdxParamsInput>| p.as_ref().map(|p| p.to_params(config)).transpose();
-    let snp = |p: &Option<SnpParamsInput>| p.as_ref().map(|p| p.to_params(config)).transpose();
-    // Which `Policies` fields exist depends on attestation's features.
-    #[allow(clippy::needless_update)]
-    let policies = attestation::Policies {
-        tdx: plain(tdx(&input.tdx)?, "tdx")?,
-        snp: plain(snp(&input.snp)?, "snp")?,
-        az_tdx: tdx(&input.az_tdx)?.map(|(tdx, pcrs)| attestation::AzTdxParams { tdx, pcrs }),
-        az_snp: snp(&input.az_snp)?.map(|(snp, pcrs)| attestation::AzSnpParams { snp, pcrs }),
-        gcp_tdx: plain(tdx(&input.gcp_tdx)?, "gcp-tdx")?
-            .map(|tdx| attestation::GcpTdxParams { tdx }),
-        gcp_snp: plain(snp(&input.gcp_snp)?, "gcp-snp")?
-            .map(|snp| attestation::GcpSnpParams { snp }),
-        gpu: input
-            .nvidia_gpu
-            .as_ref()
-            .map(GpuParamsInput::to_params)
-            .transpose()?,
-        ..Default::default()
+) -> Result<(), ApiError> {
+    let refuse = |what: &str| {
+        Err(ApiError::BadRequest(format!(
+            "{what} is disabled by server configuration"
+        )))
     };
-    Ok(policies)
-}
-
-type Pcrs = BTreeMap<u8, [u8; 32]>;
-
-fn refuse(name: &str, platform: &str) -> ApiError {
-    ApiError::BadRequest(format!("{name} does not apply to {platform}"))
-}
-
-/// Params of a platform without vTPM PCR pins.
-fn plain<T>(params: Option<(T, Pcrs)>, platform: &str) -> Result<Option<T>, ApiError> {
-    params
-        .map(|(params, pcrs)| {
-            if pcrs.is_empty() {
-                Ok(params)
-            } else {
-                Err(refuse("pcrs", platform))
-            }
-        })
-        .transpose()
-}
-
-fn decode_pcrs(pcrs: &Option<BTreeMap<u8, String>>) -> Result<Pcrs, ApiError> {
-    pcrs.iter()
-        .flatten()
-        .map(|(&index, value)| {
-            let name = format!("pcrs.{index}");
-            let bytes = decode(&Some(value.clone()), &name)?.unwrap_or_default();
-            let value: [u8; 32] = bytes.try_into().map_err(|b: Vec<u8>| {
-                ApiError::BadRequest(format!("{name} must be 32 bytes, got {}", b.len()))
-            })?;
-            Ok((index, value))
-        })
-        .collect()
-}
-
-/// A JSON object of PCR pins. A repeated index is refused rather than
-/// silently keeping the last value.
-fn unique_pcrs<'de, D>(deserializer: D) -> Result<Option<BTreeMap<u8, String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct Pins;
-    impl<'de> serde::de::Visitor<'de> for Pins {
-        type Value = BTreeMap<u8, String>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("an object of PCR index to base64 value")
-        }
-        fn visit_map<A: serde::de::MapAccess<'de>>(
-            self,
-            mut map: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut pins = BTreeMap::new();
-            while let Some((index, value)) = map.next_entry::<u8, String>()? {
-                if pins.insert(index, value).is_some() {
-                    return Err(serde::de::Error::custom(format!(
-                        "PCR {index} is pinned more than once"
-                    )));
-                }
-            }
-            Ok(pins)
+    let gpu = policies.gpu.as_ref().map(|p| &p.device_policy);
+    let debug = policies.tdx_params().any(|p| p.allow_debug)
+        || policies.snp_params().any(|p| p.allow_debug)
+        || gpu.is_some_and(|p| p.allow_debug);
+    if debug && !config.allow_debug {
+        return refuse("allow_debug");
+    }
+    if !config.allow_revoked_or_unlisted_tcb {
+        let valid = attestation::TdxParams::default().accepted_tcb_statuses;
+        let mut statuses = policies.tdx_params().flat_map(|p| &p.accepted_tcb_statuses);
+        if let Some(status) = statuses.find(|s| !valid.contains(s)) {
+            return refuse(&format!("accepting TCB status {status}"));
         }
     }
-    deserializer.deserialize_map(Pins).map(Some)
-}
-
-fn check_allow_debug(requested: bool, config: &AttestationConfig) -> Result<(), ApiError> {
-    if requested && !config.allow_debug {
+    if !config.allow_nonzero_vmpl && policies.snp_params().any(|p| p.max_vmpl > 0) {
+        return refuse("max_vmpl above 0");
+    }
+    if policies
+        .floors
+        .lowers(&attestation::collateral::VersionFloors::default())
+    {
         return Err(ApiError::BadRequest(
-            "allow_debug is disabled by server configuration".to_string(),
+            "floors may raise, not lower, the collateral versions accepted".to_string(),
+        ));
+    }
+    if gpu.is_some_and(|p| !p.require_secboot || !p.require_measres_success) {
+        return Err(ApiError::BadRequest(
+            "nvidia_gpu.device_policy must require secboot and measres success".to_string(),
         ));
     }
     Ok(())
 }
 
-impl TdxParamsInput {
-    fn to_params(
-        &self,
-        config: &AttestationConfig,
-    ) -> Result<(attestation::TdxParams, Pcrs), ApiError> {
-        check_allow_debug(self.allow_debug, config)?;
-        if !config.allow_revoked_or_unlisted_tcb {
-            let valid = default_tcb_statuses();
-            if let Some(status) = self
-                .accepted_tcb_statuses
-                .iter()
-                .find(|s| !valid.contains(s))
-            {
-                return Err(ApiError::BadRequest(format!(
-                    "accepting TCB status {status} is disabled by server configuration"
-                )));
-            }
-        }
-        let params = attestation::TdxParams {
-            report_data: decode(&self.report_data, "report_data")?,
-            init_data: decode(&self.init_data, "init_data")?,
-            mrtd: decode_digests(&self.mrtd, "mrtd")?,
-            rtmr: [
-                decode_digests(&self.rtmr0, "rtmr0")?,
-                decode_digests(&self.rtmr1, "rtmr1")?,
-                decode_digests(&self.rtmr2, "rtmr2")?,
-                decode_digests(&self.rtmr3, "rtmr3")?,
-            ],
-            allow_debug: self.allow_debug,
-            accepted_tcb_statuses: self.accepted_tcb_statuses.clone(),
-        };
-        Ok((params, decode_pcrs(&self.pcrs)?))
-    }
-}
-
-impl SnpParamsInput {
-    fn to_params(
-        &self,
-        config: &AttestationConfig,
-    ) -> Result<(attestation::SnpParams, Pcrs), ApiError> {
-        check_allow_debug(self.allow_debug, config)?;
-        if self.max_vmpl > 0 && !config.allow_nonzero_vmpl {
-            return Err(ApiError::BadRequest(
-                "max_vmpl above 0 is disabled by server configuration".to_string(),
-            ));
-        }
-        let params = attestation::SnpParams {
-            report_data: decode(&self.report_data, "report_data")?,
-            host_data: decode(&self.host_data, "host_data")?,
-            launch_digest: decode_digests(&self.launch_digest, "launch_digest")?,
-            allow_debug: self.allow_debug,
-            min_tcb: self.min_tcb,
-            max_vmpl: self.max_vmpl,
-        };
-        Ok((params, decode_pcrs(&self.pcrs)?))
-    }
-}
-
-impl GpuParamsInput {
-    fn to_params(&self) -> Result<attestation::NvidiaGpuParams, ApiError> {
-        Ok(attestation::NvidiaGpuParams {
-            user_nonce: decode(&self.user_nonce, "nvidia_gpu.user_nonce")?,
-            required: self.required,
-            expected_archs: self.expected_archs.clone(),
-            ..Default::default()
-        })
-    }
-}
-
-fn decode(value: &Option<String>, name: &str) -> Result<Option<Vec<u8>>, ApiError> {
-    value
-        .as_ref()
-        .map(|v| BASE64.decode(v))
-        .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid base64 {name}: {e}")))
-}
-
-/// Decodes a base64 measurement parameter, which must be exactly 48 bytes.
-fn decode_digest(value: &Option<String>, name: &str) -> Result<Option<[u8; 48]>, ApiError> {
-    let Some(bytes) = decode(value, name)? else {
-        return Ok(None);
-    };
-    let digest: [u8; 48] = bytes.try_into().map_err(|b: Vec<u8>| {
-        ApiError::BadRequest(format!("{name} must be 48 bytes, got {}", b.len()))
-    })?;
-    Ok(Some(digest))
-}
-
-/// Decodes a measurement parameter that takes one value or a set of allowed
-/// values. An empty set is refused (it could never match).
-fn decode_digests(
-    value: &Option<OneOrMany>,
-    name: &str,
-) -> Result<Option<Vec<[u8; 48]>>, ApiError> {
-    let values = match value {
-        None => return Ok(None),
-        Some(OneOrMany::One(v)) => std::slice::from_ref(v),
-        Some(OneOrMany::Many(vs)) => vs.as_slice(),
-    };
-    if values.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "{name}: the allowed set is empty"
-        )));
-    }
-    let mut digests = Vec::with_capacity(values.len());
-    for v in values {
-        digests.extend(decode_digest(&Some(v.clone()), name)?);
-    }
-    Ok(Some(digests))
-}
-
-fn canonical_platform(platform: Option<&str>) -> Result<&'static str, ApiError> {
+fn canonical_platform(platform: Option<&str>) -> Result<attestation::PlatformType, ApiError> {
     let platform = platform.ok_or_else(|| {
         ApiError::BadRequest("platform is required for evidence verification".to_string())
     })?;
     normalize_platform(platform)
+        .and_then(|p| serde_json::from_value(p.into()).ok())
         .ok_or_else(|| ApiError::BadRequest(format!("unknown platform: {platform}")))
 }
 
@@ -439,19 +223,14 @@ fn is_attestation_envelope(evidence: &Value) -> bool {
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{
-        build_evidence_envelope, build_policies, canonical_platform, decode_digest, PoliciesInput,
-    };
-    use crate::config::AttestationConfig;
+    use super::{build_evidence_envelope, canonical_platform};
     use crate::error::ApiError;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine;
 
     #[test]
     fn build_evidence_envelope_wraps_split_form_with_canonical_platform() {
         let normalized: Value = serde_json::from_slice(
             &build_evidence_envelope(
-                canonical_platform(Some("SNP")).unwrap(),
+                &canonical_platform(Some("SNP")).unwrap().to_string(),
                 json!({ "report": "abc" }),
                 None,
                 None,
@@ -495,6 +274,20 @@ mod tests {
     }
 
     #[test]
+    fn policy_boundary_preserves_duplicate_key_rejection() {
+        let valid = r#"{"evidence":{},"policies":{"tdx":{}}}"#;
+        assert!(serde_json::from_str::<super::VerifyRequest>(valid).is_ok());
+        for policies in [
+            r#"{"tdx":{},"tdx":{}}"#,
+            r#"{"dstack":null}"#,
+            r#"{"future":{}}"#,
+        ] {
+            let request = format!(r#"{{"evidence":{{}},"policies":{policies}}}"#);
+            assert!(serde_json::from_str::<super::VerifyRequest>(&request).is_err());
+        }
+    }
+
+    #[test]
     fn platform_is_required_and_must_be_known() {
         assert!(matches!(
             canonical_platform(None),
@@ -504,56 +297,6 @@ mod tests {
             canonical_platform(Some("not-a-platform")),
             Err(ApiError::BadRequest(_))
         ));
-    }
-
-    #[test]
-    fn decode_digest_accepts_48_bytes_and_absent() {
-        assert_eq!(decode_digest(&None, "mrtd").unwrap(), None);
-        let digest = [0xabu8; 48];
-        let got = decode_digest(&Some(BASE64.encode(digest)), "mrtd").unwrap();
-        assert_eq!(got, Some(digest));
-    }
-
-    #[test]
-    fn decode_digest_rejects_wrong_length_and_bad_base64() {
-        let short = decode_digest(&Some(BASE64.encode([0u8; 47])), "rtmr1").unwrap_err();
-        assert!(matches!(short, ApiError::BadRequest(_)));
-        let junk = decode_digest(&Some("!!not-base64".to_string()), "rtmr1").unwrap_err();
-        assert!(matches!(junk, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn an_empty_allowed_set_is_refused() {
-        let input: PoliciesInput =
-            serde_json::from_value(json!({ "tdx": { "mrtd": [] } })).unwrap();
-        let err = build_policies(&input, &AttestationConfig::default()).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn a_pcr_pinned_twice_is_refused() {
-        let pin = BASE64.encode([0u8; 32]);
-        let body = format!(r#"{{"az-snp":{{"pcrs":{{"4":"{pin}","4":"{pin}"}}}}}}"#);
-        assert!(serde_json::from_str::<PoliciesInput>(&body).is_err());
-    }
-
-    #[test]
-    fn a_pin_the_platform_does_not_have_is_refused() {
-        let mrtd = BASE64.encode([0u8; 48]);
-        assert!(
-            serde_json::from_value::<PoliciesInput>(json!({ "tdx": { "mrtd": mrtd } })).is_ok()
-        );
-        assert!(
-            serde_json::from_value::<PoliciesInput>(json!({ "snp": { "mrtd": mrtd } })).is_err()
-        );
-
-        let policies = |v: Value| serde_json::from_value::<PoliciesInput>(v).unwrap();
-        let config = AttestationConfig::default();
-        let pcrs = json!({ "4": BASE64.encode([0u8; 32]) });
-        assert!(build_policies(&policies(json!({ "az-tdx": { "pcrs": pcrs } })), &config).is_ok());
-        let err =
-            build_policies(&policies(json!({ "tdx": { "pcrs": pcrs } })), &config).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[test]

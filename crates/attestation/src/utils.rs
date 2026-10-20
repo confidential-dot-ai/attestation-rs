@@ -129,6 +129,145 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// The JSON encodings of params values (`#[serde(with = ...)]`): bytes are
+/// standard base64.
+pub(crate) mod b64 {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::de::Error;
+    #[cfg(any(feature = "tdx", feature = "snp", feature = "nvidia-gpu"))]
+    use serde::Serialize;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    fn decode<E: Error>(value: &str) -> Result<Vec<u8>, E> {
+        STANDARD
+            .decode(value)
+            .map_err(|e| E::custom(format!("invalid base64: {e}")))
+    }
+
+    #[cfg(any(feature = "tdx", feature = "snp"))]
+    fn decode_fixed<const N: usize, E: Error>(value: &str) -> Result<[u8; N], E> {
+        decode(value)?
+            .try_into()
+            .map_err(|b: Vec<u8>| E::custom(format!("must be {N} bytes, got {}", b.len())))
+    }
+
+    /// Required bytes, including attached collateral bodies.
+    pub mod vec {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_str(&STANDARD.encode(value))
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+            decode(&String::deserialize(d)?)
+        }
+    }
+
+    /// Optional bytes.
+    #[cfg(any(feature = "tdx", feature = "snp", feature = "nvidia-gpu"))]
+    pub mod bytes {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+            value.as_ref().map(|b| STANDARD.encode(b)).serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+            Option::<String>::deserialize(d)?
+                .map(|v| decode(&v))
+                .transpose()
+        }
+    }
+
+    /// Optional allowed 48-byte values: one value or a non-empty array.
+    #[cfg(any(feature = "tdx", feature = "snp"))]
+    pub mod digests {
+        use super::*;
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<Vec<[u8; 48]>>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            value
+                .as_ref()
+                .map(|v| v.iter().map(|d| STANDARD.encode(d)).collect::<Vec<_>>())
+                .serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<Vec<[u8; 48]>>, D::Error> {
+            let values = match Option::<OneOrMany>::deserialize(d)? {
+                None => return Ok(None),
+                Some(OneOrMany::One(v)) => vec![v],
+                Some(OneOrMany::Many(vs)) => vs,
+            };
+            if values.is_empty() {
+                return Err(D::Error::custom("the allowed set is empty"));
+            }
+            values
+                .iter()
+                .map(|v| decode_fixed(v))
+                .collect::<Result<_, _>>()
+                .map(Some)
+        }
+    }
+
+    /// vTPM PCR pins: an object of index to 32 bytes. An index given twice
+    /// is refused rather than keeping the last value; `null` is no pins.
+    #[cfg(any(feature = "az-tdx", feature = "az-snp"))]
+    pub mod pcrs {
+        use std::collections::BTreeMap;
+
+        use serde::de::{MapAccess, Visitor};
+
+        use super::*;
+
+        type Pins = BTreeMap<u8, [u8; 32]>;
+
+        pub fn serialize<S: Serializer>(pins: &Pins, s: S) -> Result<S::Ok, S::Error> {
+            s.collect_map(pins.iter().map(|(i, v)| (i, STANDARD.encode(v))))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Pins, D::Error> {
+            struct PinsVisitor;
+            impl<'de> Visitor<'de> for PinsVisitor {
+                type Value = Pins;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("an object of PCR index to base64 value")
+                }
+                fn visit_none<E: Error>(self) -> Result<Pins, E> {
+                    Ok(Pins::new())
+                }
+                fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Pins, D::Error> {
+                    d.deserialize_map(self)
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Pins, A::Error> {
+                    let mut pins = Pins::new();
+                    while let Some((index, value)) = map.next_entry::<u8, String>()? {
+                        let value = decode_fixed(&value)
+                            .map_err(|e: A::Error| A::Error::custom(format!("PCR {index}: {e}")))?;
+                        if pins.insert(index, value).is_some() {
+                            return Err(A::Error::custom(format!(
+                                "PCR {index} is pinned more than once"
+                            )));
+                        }
+                    }
+                    Ok(pins)
+                }
+            }
+            d.deserialize_option(PinsVisitor)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

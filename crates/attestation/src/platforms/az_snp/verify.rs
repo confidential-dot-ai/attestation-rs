@@ -15,10 +15,15 @@ use super::evidence::AzSnpEvidence;
 /// What a caller can ask of Azure SEV-SNP (vTPM) evidence. `snp.report_data`
 /// is checked against the vTPM quote nonce and `snp.host_data` (a 32-byte
 /// init-data hash) against PCR[8].
-#[derive(Debug, Clone, Default)]
+/// In JSON, the `snp` params and `pcrs` (`{ "<index>": "<base64>" }`)
+/// are one object.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AzSnpParams {
+    #[serde(flatten)]
     pub snp: SnpParams,
     /// Expected vTPM PCR values (SHA-256 bank) by index. Empty means no check.
+    #[serde(default, with = "crate::utils::b64::pcrs")]
     pub pcrs: BTreeMap<u8, [u8; 32]>,
 }
 

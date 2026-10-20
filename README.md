@@ -87,19 +87,22 @@ compiled into the verifier, exactly as on native:
       issuer_chain: header ? decodeURIComponent(header) : undefined,
     });
   }
+  const nonce = btoa('my-nonce');
+  const policies = { snp: { report_data: nonce }, tdx: { report_data: nonce } };
   const result = JSON.parse(await evaluate(
-    envelope, ['snp', 'tdx'], new TextEncoder().encode('my-nonce'),
-    undefined, undefined, undefined, JSON.stringify(collateral),
+    envelope, JSON.stringify(policies), JSON.stringify(collateral),
   ));
   if (!result.passed) throw new Error('attestation did not pass');
 </script>
 ```
 
-`evaluate(envelope, platforms, report_data, init_data, rtmr3, min_tcb,
-collateral)` throws only when the evidence cannot be evaluated (malformed, not
-genuine, platform not accepted, needed collateral missing or not the
-vendor's); mismatches, policy flags and expired collateral are fields, so the
-caller must read `passed`.
+`evaluate(envelope, policies, collateral)` takes `policies` in the same JSON
+shape as the attestation-api `/verify` request (see
+[its README](crates/attestation-api/README.md)); `dstack` is accepted too.
+It throws only when the evidence cannot be evaluated (malformed, not genuine,
+platform not accepted, invalid params, needed collateral missing or not the
+vendor's), with the error's `kind` saying which; mismatches, policy flags and
+expired collateral are fields, so the caller must read `passed`.
 
 For a Node.js end-to-end example (generate live evidence, fetch its collateral,
 verify in WASM), build with `--target nodejs` and run
@@ -117,7 +120,7 @@ let policies = Policies {
     tdx: Some(TdxParams {
         report_data: Some(nonce.to_vec()),
         mrtd: Some(vec![mrtd_a, mrtd_b]),        // any of; [u8; 48] each
-        rtmr: [None, Some(vec![rtmr1]), None, None],
+        rtmr1: Some(vec![rtmr1]),
         ..Default::default()
     }),
     ..Default::default()
@@ -140,10 +143,14 @@ is a value: mismatches are `*_match: Some(false)`, and debug, VMPL, minimum TCB
 and TCB status are fields. `passed()` is true only when every rule held. Pins,
 `report_data` and init data are compared in constant time.
 
-`mrtd`, each `rtmr` and `launch_digest` take a set of allowed values, because
+`mrtd`, each `rtmrN` and `launch_digest` take a set of allowed values, because
 firmware the cloud provider owns varies (the Azure paravisor build, the GCP
 firmware per memory size or machine type). The measurement must equal one of
 them; an empty set is invalid params (`Err`).
+
+`Policies` is also JSON (serde), in the shape the attestation-api `/verify`
+request and the WASM `evaluate` take: `{ "tdx": { "report_data": "<base64>",
+"mrtd": ["<base64>"] } }`. Unknown keys are refused.
 
 ## Collateral
 

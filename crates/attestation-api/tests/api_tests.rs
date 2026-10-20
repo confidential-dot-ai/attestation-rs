@@ -252,18 +252,24 @@ async fn verify_rejects_expected_measurement_of_wrong_length() {
 
 #[tokio::test]
 async fn verify_refuses_evidence_for_a_platform_without_policy() {
-    let (status, json) = post_verify(
-        offline_state_with(|_| {}),
-        serde_json::json!({
-            "platform": "tdx",
-            "evidence": tdx_v4_evidence(),
-            "policies": { "snp": {} }
-        }),
-    )
-    .await;
+    for policies in [
+        serde_json::json!({"snp": {}}),
+        serde_json::json!({"tdx": null}),
+        serde_json::json!({}),
+    ] {
+        let (status, json) = post_verify(
+            offline_state_with(|_| {}),
+            serde_json::json!({
+                "platform": "tdx",
+                "evidence": tdx_v4_evidence(),
+                "policies": policies
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(json["error"], "platform_not_allowed");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json["error"], "platform_not_allowed");
+    }
 }
 
 #[tokio::test]
@@ -353,23 +359,61 @@ async fn verify_refuses_policies_below_the_server_floors_unless_enabled() {
         serde_json::json!({ "tdx": {}, "snp": { "max_vmpl": 1 } }),
     )
     .await;
+    assert_floor(
+        |c| c.attestation.allow_debug = false,
+        serde_json::json!({ "tdx": { "allow_debug": true }, "nvidia_gpu": { "device_policy": { "allow_debug": true } } }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn verify_refuses_collateral_floors_or_gpu_checks_below_the_defaults() {
+    let shipped = attestation::collateral::VersionFloors::default().intel_tcb_info;
+    for (policies, status) in [
+        (
+            serde_json::json!({ "floors": { "intel_tcb_info": shipped - 1 } }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "nvidia_gpu": { "device_policy": { "require_secboot": false } } }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "floors": { "intel_tcb_info": shipped + 1 } }),
+            StatusCode::OK,
+        ),
+    ] {
+        let mut policies = policies;
+        policies["tdx"] = serde_json::json!({ "allow_debug": true });
+        let (got, json) = post_verify(
+            offline_state_with(enable_all_floors),
+            serde_json::json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": policies }),
+        )
+        .await;
+        assert_eq!(got, status, "{policies}: {json}");
+    }
 }
 
 #[tokio::test]
 async fn verify_refuses_a_token_request_without_report_data() {
-    let (status, json) = post_verify(
-        offline_state_with(|c| c.attestation.allow_debug = true),
-        serde_json::json!({
-            "platform": "tdx",
-            "evidence": tdx_v4_evidence(),
-            "policies": { "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==" } },
-            "issue_token": true
-        }),
-    )
-    .await;
+    for policies in [
+        serde_json::json!({ "tdx": { "allow_debug": true }, "snp": { "report_data": "AA==" } }),
+        serde_json::json!({ "tdx": { "allow_debug": true, "report_data": "" } }),
+    ] {
+        let (status, json) = post_verify(
+            offline_state_with(|c| c.attestation.allow_debug = true),
+            serde_json::json!({
+                "platform": "tdx",
+                "evidence": tdx_v4_evidence(),
+                "policies": policies,
+                "issue_token": true
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"], "bad_request");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{policies}");
+        assert_eq!(json["error"], "bad_request");
+    }
 }
 
 #[tokio::test]
@@ -1130,4 +1174,30 @@ async fn attest_then_verify_roundtrip() {
     }
     let verify_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(verify_json["passed"], true);
+}
+
+#[tokio::test]
+async fn verify_refuses_unsupported_policy_keys_even_with_open_server_rules() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::Value::Null,
+        serde_json::json!({"allow_debug": true}),
+    ] {
+        let (status, json) = post_verify(
+            offline_state_with(enable_all_floors),
+            serde_json::json!({"platform": "tdx", "evidence": tdx_v4_evidence(), "policies": {"tdx": {}, "dstack": value}}),
+        ).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"], "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
+    let (status, json) = post_verify(
+        offline_state_with(enable_all_floors),
+        serde_json::json!({"platform": "tdx", "evidence": tdx_v4_evidence(), "policies": {"tdx": {}, "nvidia_gpu": {"required": true}}}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"], "verification_failed");
 }

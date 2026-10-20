@@ -80,7 +80,7 @@ pub struct AttestationEvidence {
 #[serde(deny_unknown_fields)]
 pub struct AttachedCollateral {
     pub url: String,
-    #[serde(with = "base64_bytes")]
+    #[serde(with = "crate::utils::b64::vec")]
     pub body: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_chain: Option<String>,
@@ -128,21 +128,6 @@ impl AttestationEvidence {
     }
 }
 
-mod base64_bytes {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        STANDARD
-            .decode(String::deserialize(d)?)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl std::fmt::Display for PlatformType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -159,12 +144,15 @@ impl std::fmt::Display for PlatformType {
 
 /// NVIDIA GPU verification parameters, applied when an envelope carries a GPU
 /// bundle.
+/// In JSON, `user_nonce` is base64.
 #[cfg(feature = "nvidia-gpu")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct NvidiaGpuParams {
     /// User nonce used to derive the GPU SPDM nonce. Required when verifying
     /// an envelope that carries a `gpu` bundle, and must equal the platform
     /// params' `report_data`.
+    #[serde(with = "crate::utils::b64::bytes")]
     pub user_nonce: Option<Vec<u8>>,
     /// If true, reject envelopes that do not include an NVIDIA GPU bundle.
     pub required: bool,
@@ -195,6 +183,7 @@ pub struct NvidiaGpuParams {
 /// Defaults mirror `allow_debug`'s security posture: fail closed.
 #[cfg(feature = "nvidia-gpu")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct NvidiaGpuDevicePolicy {
     /// If true, accept devices reporting `dbgstat != "disabled"`. Default false
     /// (debug-enabled GPUs fail the policy).
