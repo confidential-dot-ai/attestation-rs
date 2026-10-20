@@ -1915,7 +1915,7 @@ mod tests {
             let err = try_verify_kmr(KMR_FULL_REPORT, &bad, &params).await;
             assert!(
                 matches!(err, Err(AttestationError::EvidenceDeserialize(_))),
-                "{junk} trailing bytes: {err:?}"
+                "{junk} trailing bytes"
             );
         }
         // A whole entry past the count is not attested and changes nothing.
@@ -1965,7 +1965,7 @@ mod tests {
             let r = try_verify_kmr(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &params).await;
             assert!(
                 matches!(r, Err(AttestationError::InvalidParams(_))),
-                "{params:?}: {r:?}"
+                "{params:?}"
             );
         }
     }
@@ -1978,8 +1978,7 @@ mod tests {
         assert!(BASE64.encode(&log).len() > crate::utils::MAX_EVIDENCE_FIELD_SIZE);
         let r = try_verify_kmr(KMR_FULL_REPORT, &log, &kmr_full_params()).await;
         assert!(
-            matches!(&r, Err(AttestationError::EvidenceDeserialize(m)) if m.contains("too large")),
-            "{r:?}"
+            matches!(&r, Err(AttestationError::EvidenceDeserialize(m)) if m.contains("too large"))
         );
     }
 
