@@ -39,6 +39,7 @@ jobs:
     with:
       runner: snp-metal-cvm
       platform: snp
+      producer_ref: ${{ github.sha }}
       expected_launch_digest: '15bc995383ddcf1fee2107753e6c26bc65358602519a342b8ff8fbfdfa4b40865d90b11cef11b7d34934e6c5eed19115'
 
   attest-tdx-metal:
@@ -46,6 +47,7 @@ jobs:
     with:
       runner: tdx-metal-cvm
       platform: tdx
+      producer_ref: ${{ github.sha }}
       expected_mrtd: '9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1'
 
   tee:
@@ -56,7 +58,7 @@ jobs:
           - platform: snp-metal
             runs_on: snp-metal-cvm
             features: attest
-            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture))"  # az_* are the azure cell; capture_fixture is TDX
+            filter: "not (binary(az_snp_live) | binary(az_tdx_live) | binary(capture_fixture) | test(the_vsock_client_reads_status_chain_and_caps_the_body) | test(live_vendor_attest_then_verify_roundtrip))"  # az_* are the azure cell; capture_fixture is TDX
             test_threads: "2"
             tee_dev: /dev/sev-guest
           - platform: azure-snp
@@ -135,3 +137,14 @@ jobs:
           cargo nextest run --workspace --features ${{ matrix.features }} \
             --run-ignored all -E '${{ matrix.filter }}' \
             --no-fail-fast --test-threads ${{ matrix.test_threads }}
+
+      - name: Live vendor API attest/verify (SNP; failure blocks this gate)
+        if: matrix.platform == 'snp-metal'
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          cargo nextest run --locked -p attestation-api --test api_tests \
+            --run-ignored only -E 'test(=live_vendor_attest_then_verify_roundtrip)' \
+            --test-threads 1

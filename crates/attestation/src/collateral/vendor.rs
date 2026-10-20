@@ -580,10 +580,10 @@ mod tests {
     }
 
     /// vsock loopback (CID 1) needs the vsock_loopback module, which the
-    /// Linux Docker gate loads. Run explicitly with --ignored.
+    /// dedicated ephemeral Linux CI gate loads. Run explicitly with --ignored.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[ignore = "requires Linux vsock_loopback; run explicitly in the Docker gate"]
+    #[ignore = "requires Linux vsock_loopback; run explicitly in the dedicated CI gate"]
     async fn the_vsock_client_reads_status_chain_and_caps_the_body() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio_vsock::{VsockAddr, VsockListener};

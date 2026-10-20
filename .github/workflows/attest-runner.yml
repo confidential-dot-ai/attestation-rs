@@ -8,9 +8,9 @@
 # the original. Edit the original, then copy the whole file across.
 #
 # NOTE FOR THIS REPO SPECIFICALLY: the gate builds attestation-cli from
-# attestation-rs main, not from the commit under test. That is deliberate. A
+# a pinned attestation-rs commit, not the commit under test. That is deliberate. A
 # verifier built from the code being tested would be checking that code with
-# itself.
+# itself. The producer is pinned separately to the caller's exact source SHA.
 #
 # ═══════════════════════════════════════════════════════════════════════════
 # ATTEST A SELF-HOSTED CONFIDENTIAL RUNNER, PER JOB, TO SOMETHING THAT IS NOT
@@ -70,10 +70,15 @@ on:
         type: string
         default: ''
       cli_ref:
-        description: 'attestation-rs ref to build the verifier from'
+        description: 'Full attestation-rs commit SHA for the independent verifier'
         required: false
         type: string
-        default: 'main'
+        default: 'd4dfb1308177daff0ecebf41cc82b37497325558'
+      producer_ref:
+        description: 'Full attestation-rs commit SHA for the producer; empty uses cli_ref'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -101,7 +106,8 @@ jobs:
     needs: nonce
     runs-on: ${{ inputs.runner }}
     outputs:
-      evidence: ${{ steps.att.outputs.evidence }}
+      sha256: ${{ steps.att.outputs.sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: build deps
         run: |
@@ -120,23 +126,28 @@ jobs:
         id: att
         env:
           NONCE: ${{ needs.nonce.outputs.nonce }}
+          CLI_SHA: ${{ inputs.producer_ref || inputs.cli_ref }}
         run: |
           set -euo pipefail
-          cargo install --quiet \
+          [[ "$CLI_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::producer_ref must be a full commit SHA"; exit 1; }
+          cargo install --quiet --locked \
             --git https://github.com/confidential-dot-ai/attestation-rs \
-            --rev "${{ inputs.cli_ref }}" \
-            --features attest attestation-cli 2>/dev/null \
-            || cargo install --quiet \
-                 --git https://github.com/confidential-dot-ai/attestation-rs \
-                 --branch "${{ inputs.cli_ref }}" \
-                 --features attest attestation-cli
+            --rev "$CLI_SHA" --features attest attestation-cli
           attestation-cli attest \
             --platform '${{ inputs.platform }}' \
-            --report-data-hex "$NONCE" > /tmp/evidence.json
-          # Carried as a job output rather than an artifact so the verify job
-          # cannot be handed a different file than the one this job produced.
-          echo "evidence=$(base64 -w0 < /tmp/evidence.json)" >> "$GITHUB_OUTPUT"
-          echo "evidence produced, $(wc -c < /tmp/evidence.json) bytes"
+            --report-data-hex "$NONCE" > "$RUNNER_TEMP/evidence.json"
+          # Bind the downloaded bytes to this producer job, independently of
+          # the artifact service's archive digest (which is not a file digest).
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/evidence.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "evidence produced, $(wc -c < "$RUNNER_TEMP/evidence.json") bytes at $CLI_SHA"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: evidence-${{ inputs.runner }}-${{ inputs.platform }}-${{ github.run_attempt }}-${{ needs.nonce.outputs.nonce }}
+          path: ${{ runner.temp }}/evidence.json
+          if-no-files-found: error
+          retention-days: 1
 
   verify:
     # Deliberately ubuntu-latest, and deliberately a separate job. A guest that
@@ -154,10 +165,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.evidence.outputs.artifact_id }}
+          path: ${{ runner.temp }}/attestation-evidence
+          merge-multiple: true
+
       - name: verify the report against the nonce and the pinned measurement
         env:
           NONCE: ${{ needs.nonce.outputs.nonce }}
-          EVIDENCE: ${{ needs.evidence.outputs.evidence }}
+          EVIDENCE_SHA256: ${{ needs.evidence.outputs.sha256 }}
+          CLI_SHA: ${{ inputs.cli_ref }}
           LAUNCH: ${{ inputs.expected_launch_digest }}
           MRTD: ${{ inputs.expected_mrtd }}
           PLATFORM: ${{ inputs.platform }}
@@ -166,16 +184,16 @@ jobs:
           # No --features attest here on purpose. This host has no TEE and the
           # verify path does not need one, so the verifier cannot accidentally
           # depend on hardware it is checking claims about.
-          cargo install --quiet \
+          [[ "$CLI_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cli_ref must be a full commit SHA"; exit 1; }
+          [[ "$EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::missing evidence digest"; exit 1; }
+          EVIDENCE_FILE="$RUNNER_TEMP/attestation-evidence/evidence.json"
+          printf '%s  %s\n' "$EVIDENCE_SHA256" "$EVIDENCE_FILE" | sha256sum --check --strict
+          cargo install --quiet --locked \
             --git https://github.com/confidential-dot-ai/attestation-rs \
-            --branch "${{ inputs.cli_ref }}" attestation-cli
-          printf '%s' "$EVIDENCE" | base64 -d > /tmp/evidence.json
+            --rev "$CLI_SHA" attestation-cli
 
-          ARGS=(verify --evidence /tmp/evidence.json --expected-report-data "$NONCE")
-          # Drop this guard once every pinned cli_ref has `verify --platform`.
-          if attestation-cli verify --help | grep -q -- '--platform'; then
-            ARGS+=(--platform "$PLATFORM")
-          fi
+          ARGS=(verify --evidence "$EVIDENCE_FILE" --expected-report-data "$NONCE")
+          ARGS+=(--platform "$PLATFORM")
           if [ -n "$LAUNCH" ]; then
             ARGS+=(--expected-launch-digest "$LAUNCH")
           elif [ -n "$MRTD" ]; then

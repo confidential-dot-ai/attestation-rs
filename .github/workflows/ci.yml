@@ -40,6 +40,30 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace
 
+  vsock:
+    name: VSOCK loopback transport (not TEE validation)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Require and enable loopback on this ephemeral hosted runner
+        run: |
+          set -euo pipefail
+          # Never run this setup on the shared confidential runner rail.
+          modinfo vsock_loopback
+          sudo modprobe vsock_loopback
+          test -d /sys/module/vsock_loopback
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Exercise real AF_VSOCK status, chain, Retry-After and body limits
+        run: |
+          cargo test --locked -p attestation --lib --no-default-features --features snp \
+            collateral::vendor::tests::the_vsock_client_reads_status_chain_and_caps_the_body \
+            -- --ignored --exact --list > vsock-tests.txt
+          grep -Fx 'collateral::vendor::tests::the_vsock_client_reads_status_chain_and_caps_the_body: test' vsock-tests.txt
+          cargo test --locked -p attestation --lib --no-default-features --features snp \
+            collateral::vendor::tests::the_vsock_client_reads_status_chain_and_caps_the_body \
+            -- --ignored --exact
+
   nvidia-gpu:
     name: NVIDIA GPU verifier (feature legs)
     runs-on: ubuntu-latest
@@ -83,7 +107,7 @@ jobs:
   # only the release job below publishes on pushes to main.
   release-build:
     name: Release Build ${{ matrix.target }}
-    needs: [check, test]
+    needs: [check, test, vsock]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -171,7 +195,7 @@ jobs:
   # Dockerfile keeps warm builds to the changed crates.
   docker-build:
     name: Docker Build
-    needs: [check, test]
+    needs: [check, test, vsock]
     runs-on: ubuntu-latest
     permissions:
       contents: read
