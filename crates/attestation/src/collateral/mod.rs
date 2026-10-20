@@ -27,6 +27,8 @@ mod gce;
 mod intel;
 #[cfg(feature = "nvidia-gpu")]
 mod nvidia;
+#[cfg(not(target_arch = "wasm32"))]
+mod serve;
 mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod vendor;
@@ -39,6 +41,8 @@ pub use gce::GceEndorsement;
 pub use intel::{PckCrl, QeIdentity, RootCrl, TcbInfo};
 #[cfg(feature = "nvidia-gpu")]
 pub use nvidia::NrasJwks;
+#[cfg(not(target_arch = "wasm32"))]
+pub use serve::Served;
 pub use store::{CollateralUsed, Source, Store};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vendor::VSOCK_PORT;

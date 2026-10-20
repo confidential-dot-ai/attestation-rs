@@ -97,6 +97,28 @@ impl Context {
         Ok(self)
     }
 
+    /// Send `key` as a bearer token to an `https://` (or loopback) upstream
+    /// cache that requires one.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_upstream_key(mut self, key: Option<String>) -> Self {
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.upstream_key = key;
+        }
+        self
+    }
+
+    /// Fetch collateral from the vendors themselves, without looking for a
+    /// host cache (for an attestation-cache without an upstream).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_vendors(mut self) -> Self {
+        if let Some(vendor) = self.store.native_mut().and_then(|n| n.vendor.as_mut()) {
+            vendor.upstream = crate::collateral::vendor::Upstream::Vendors;
+        }
+        self
+    }
+
     /// Fetch collateral from a fake vendor at `base` (`{base}/{host}/{path}`),
     /// whose answers count as the vendor's own. Only for tests.
     #[cfg(all(any(test, feature = "test-vendor"), not(target_arch = "wasm32")))]
