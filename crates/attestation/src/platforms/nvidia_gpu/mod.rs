@@ -25,6 +25,11 @@
 //! native verification needs NRAS. The shipped JS/WASM harness does not enable
 //! this library feature.
 //!
+//! When an attached NRAS answer is used, the verifier authenticates its signed
+//! claims and nonce, but does not bind that answer to the supplied bundle's
+//! device-evidence bytes. This is separate from physical CPU/GPU co-location,
+//! which nonce binding does not prove.
+//!
 //! ## Submodule binding (RFC 9711 `submods`)
 //!
 //! The overall token's `submods` claim carries a detached digest per device of

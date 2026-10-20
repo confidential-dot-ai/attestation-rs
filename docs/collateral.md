@@ -142,6 +142,9 @@ attached NRAS answer can be reused only while all its tokens are valid; once
 expired it needs a fresh NRAS answer. This is a live external dependency when
 no usable answer is attached. The shipped WASM harness does not enable NVIDIA
 verification, even though the library's portable feature can compile for WASM.
+When an attached NRAS answer is used, the verifier authenticates its signed
+claims and nonce, but does not bind that answer to the supplied bundle's
+device-evidence bytes.
 Nonce binding proves participation under the same challenge, not physical
 CPU/GPU co-location: an attester can relay another GPU's evidence. The verifier
 checks each NRAS submodule's signed nonce rather than re-deriving NVIDIA's
