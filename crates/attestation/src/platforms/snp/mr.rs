@@ -277,4 +277,125 @@ mod tests {
         v.report_data[15] = 1;
         assert!(verify_vector(&v).unwrap().is_none());
     }
+
+    /// A seeded xorshift64* generator, so property cases are reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn bytes<const N: usize>(&mut self) -> [u8; N] {
+            std::array::from_fn(|_| self.next() as u8)
+        }
+        fn log(&mut self, entries: usize) -> Vec<u8> {
+            (0..entries)
+                .flat_map(|_| {
+                    let mut entry = vec![self.below(REGISTER_COUNT) as u8];
+                    entry.extend(self.bytes::<48>());
+                    entry
+                })
+                .collect()
+        }
+    }
+
+    fn flip_bit(bytes: &mut [u8], rng: &mut Rng) {
+        let bit = rng.below(bytes.len() * 8);
+        bytes[bit / 8] ^= 1 << (bit % 8);
+    }
+
+    const CASES: usize = 10_000;
+
+    #[test]
+    fn any_commitment_round_trips_and_any_flip_in_it_is_rejected() {
+        let mut rng = Rng(0x5eed_6b6d_7231);
+        for case in 0..CASES {
+            let entries = rng.below(41);
+            let log = rng.log(entries);
+            let event_count = rng.below(entries + 1) as u32;
+            let caller_data = rng.bytes::<64>();
+            let registers = replay(&log, event_count).unwrap().unwrap();
+            for (i, register) in registers.iter().enumerate() {
+                let named = log
+                    .chunks_exact(ENTRY_LEN)
+                    .take(event_count as usize)
+                    .any(|e| e[0] as usize == i);
+                assert_eq!(*register != [0; 48], named, "case {case}");
+            }
+            let reported = report_data(event_count, &registers, &caller_data);
+            let verified = verify(&reported, &log, &caller_data).unwrap().unwrap();
+            assert_eq!(verified.event_count, event_count, "case {case}");
+            assert_eq!(verified.registers, registers.to_vec(), "case {case}");
+
+            let committed = event_count as usize * ENTRY_LEN;
+            let (mut log2, mut caller2, mut reported2) = (log.clone(), caller_data, reported);
+            let target = match rng.below(4) {
+                0 if committed > 0 => {
+                    flip_bit(&mut log2[..committed], &mut rng);
+                    "committed log"
+                }
+                1 => {
+                    flip_bit(&mut caller2, &mut rng);
+                    "caller data"
+                }
+                2 if committed < log.len() => {
+                    flip_bit(&mut log2[committed..], &mut rng);
+                    "log past the count"
+                }
+                _ => {
+                    flip_bit(&mut reported2, &mut rng);
+                    "report data"
+                }
+            };
+            let result = verify(&reported2, &log2, &caller2);
+            if target == "log past the count" {
+                match result {
+                    Ok(Some(r)) => assert_eq!(r, verified, "case {case}"),
+                    Ok(None) => panic!("case {case}: a flip past the count changed the answer"),
+                    Err(_) => assert!(log2.chunks_exact(ENTRY_LEN).any(|e| e[0] > 15)),
+                }
+            } else {
+                assert!(
+                    !matches!(result, Ok(Some(_))),
+                    "case {case}: a flip in the {target} still verified"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arbitrary_bytes_give_an_answer_by_the_error_contract() {
+        let mut rng = Rng(0x0dd_b17e5);
+        for case in 0..CASES {
+            let mut reported = rng.bytes::<64>();
+            if rng.below(2) == 0 {
+                reported[..4].copy_from_slice(&(rng.below(8) as u32).to_le_bytes());
+            }
+            let entries = rng.below(8);
+            let mut log = rng.log(entries);
+            match rng.below(3) {
+                0 => {
+                    let junk = rng.below(ENTRY_LEN);
+                    log.extend((0..junk).map(|_| rng.next() as u8));
+                }
+                1 if !log.is_empty() => {
+                    let i = rng.below(log.len() / ENTRY_LEN) * ENTRY_LEN;
+                    log[i] = rng.next() as u8;
+                }
+                _ => {}
+            }
+            let malformed = !log.len().is_multiple_of(ENTRY_LEN)
+                || log.chunks_exact(ENTRY_LEN).any(|e| e[0] > 15);
+            match verify(&reported, &log, &rng.bytes::<64>()) {
+                Err(_) => assert!(malformed, "case {case}"),
+                Ok(answer) => assert!(!malformed && answer.is_none(), "case {case}"),
+            }
+        }
+    }
 }
