@@ -1,6 +1,7 @@
 pub mod certs;
 pub mod claims;
 pub mod evidence;
+pub mod mr;
 pub mod verify;
 
 pub use verify::{Snp, SnpParams, SnpResult};

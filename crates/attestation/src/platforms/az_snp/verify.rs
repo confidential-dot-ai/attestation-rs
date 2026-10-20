@@ -31,6 +31,11 @@ impl AzSnpParams {
     /// Reject params that cannot be applied, before any I/O.
     pub fn validate(&self) -> Result<()> {
         self.snp.validate()?;
+        if self.snp.caller_data.is_some() {
+            return Err(AttestationError::InvalidParams(
+                "runtime registers are bare-metal SNP only".into(),
+            ));
+        }
         tpm_common::check_init_data_len(self.snp.host_data.as_deref())?;
         tpm_common::check_pcr_pin_indexes(&self.pcrs)
     }
@@ -275,6 +280,21 @@ mod tests {
             message: "ff544347".to_string() + &"00".repeat(100),
             pcrs: (0..24).map(|_| "00".repeat(32)).collect(),
         }
+    }
+
+    #[test]
+    fn runtime_registers_are_bare_metal_only() {
+        let snp = SnpParams {
+            launch_digest: Some(vec![[1; 48]]),
+            caller_data: Some(vec![7; 64]),
+            ..Default::default()
+        };
+        snp.validate().unwrap();
+        let params = AzSnpParams {
+            snp,
+            ..Default::default()
+        };
+        assert!(params.validate().is_err());
     }
 
     #[test]

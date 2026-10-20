@@ -68,6 +68,7 @@ Minimal JSON (illustrative challenge only; use a fresh random challenge):
 | --- | --- |
 | `tdx`, `gcp-tdx`, `az-tdx`, `dstack` | `report_data`, `init_data`, `mrtd`, `rtmr0`–`rtmr3`, `allow_debug`, `accepted_tcb_statuses` |
 | `snp`, `gcp-snp`, `az-snp` | `report_data`, `host_data`, `launch_digest`, `allow_debug`, `min_tcb`, `max_vmpl` |
+| `snp` additionally | `caller_data`, `runtime_registers`: [guest kernel runtime registers](#snp-kernel-runtime-registers) |
 | `az-tdx`, `az-snp` additionally | `pcrs`: map of index 0–23 to 32-byte SHA-256 value; duplicate indices refused |
 | `nvidia_gpu` (Rust field `gpu`) | `user_nonce`, `required`, `expected_archs`, `allowed_bindings`, `device_policy` |
 | `floors` | [Collateral version floors](../../docs/collateral.md#freshness-and-version-floors) |
@@ -91,6 +92,21 @@ SNP `min_tcb` is an object with `bootloader`, `tee`, `snp`, `microcode` and
 optional `fmc`; minimum checks compare components, not an aggregate version.
 See generated rustdocs for exact field types. API adds
 [server-side policy restrictions](../attestation-api/README.md#verification-and-tokens).
+
+### SNP kernel runtime registers
+
+A bare-metal SNP guest kernel with the runtime-register provider keeps 16
+SHA-384 registers and an event log, and writes a commitment to them into every
+report's `REPORT_DATA`. SNP evidence carries that log as `event_log`. Setting
+`caller_data` (the exact 64 bytes the requester passed as report data) selects
+this mode: it needs `launch_digest` pinned to an image with the provider, no
+`report_data`, no debug and VMPL 0. The verifier replays the log prefix the
+report names and sets `report_data_match` from the commitment;
+`runtime_registers` in the result holds the replayed registers. Set
+`runtime_registers` in the policy to the expected final values in index order;
+registers past the list must be zero. Without `caller_data`, and always on
+Azure and GCP, there are no runtime registers. Every SNP result refuses a guest
+policy that allows a migration agent.
 
 ## Results, errors and retry
 

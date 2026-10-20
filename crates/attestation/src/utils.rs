@@ -220,6 +220,23 @@ pub(crate) mod b64 {
         }
     }
 
+    /// Required 48-byte values.
+    #[cfg(feature = "snp")]
+    pub mod digest_list {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(value: &[[u8; 48]], s: S) -> Result<S::Ok, S::Error> {
+            s.collect_seq(value.iter().map(|d| STANDARD.encode(d)))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[u8; 48]>, D::Error> {
+            Vec::<String>::deserialize(d)?
+                .iter()
+                .map(|v| decode_fixed(v))
+                .collect()
+        }
+    }
+
     /// vTPM PCR pins: an object of index to 32 bytes. An index given twice
     /// is refused rather than keeping the last value; `null` is no pins.
     #[cfg(any(feature = "az-tdx", feature = "az-snp"))]

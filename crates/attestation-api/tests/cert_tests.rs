@@ -71,6 +71,7 @@ fn token_issuer_produces_valid_jwt() {
         "launch_digest_match": null,
         "debug": false,
         "allow_debug": false,
+        "migrate_ma": false,
         "vmpl": 0,
         "max_vmpl": 0,
         "reported_tcb": { "bootloader": 0, "tee": 0, "snp": 0, "microcode": 0 },

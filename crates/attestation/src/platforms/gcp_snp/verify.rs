@@ -24,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::collateral::{CollateralUsed, GceEndorsement, Store};
-use crate::error::Result;
+use crate::error::{AttestationError, Result};
 use crate::platform::Platform;
 use crate::platforms::gcp_endorsement;
 use crate::platforms::snp::evidence::SnpEvidence;
@@ -82,6 +82,11 @@ impl Platform for GcpSnp {
     type CollateralSet = GcpSnpCollateralSet;
 
     fn validate(params: &GcpSnpParams) -> Result<()> {
+        if params.snp.caller_data.is_some() {
+            return Err(AttestationError::InvalidParams(
+                "runtime registers are bare-metal SNP only".into(),
+            ));
+        }
         Snp::validate(&params.snp)
     }
 
@@ -169,7 +174,19 @@ mod tests {
                 ask: None,
                 ark: None,
             }),
+            event_log: None,
         }
+    }
+
+    #[test]
+    fn runtime_registers_are_bare_metal_only() {
+        let snp = SnpParams {
+            launch_digest: Some(vec![[1; 48]]),
+            caller_data: Some(vec![7; 64]),
+            ..Default::default()
+        };
+        Snp::validate(&snp).unwrap();
+        assert!(GcpSnp::validate(&GcpSnpParams { snp }).is_err());
     }
 
     #[tokio::test]

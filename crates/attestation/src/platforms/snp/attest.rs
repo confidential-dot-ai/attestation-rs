@@ -13,6 +13,10 @@ use super::evidence::{SnpCertChain, SnpEvidence};
 /// SNP guest attestation character device.
 const SEV_GUEST_DEVICE_PATH: &str = "/dev/sev-guest";
 
+/// The guest kernel's runtime-register event log (absent on kernels without
+/// the provider).
+const EVENT_LOG_PATH: &str = "/sys/class/misc/sev-guest/event_log";
+
 /// Check if SNP hardware is available on this machine.
 pub fn is_available() -> bool {
     Path::new(SEV_GUEST_DEVICE_PATH).exists()
@@ -58,9 +62,14 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
             })?;
 
     let cert_chain = certs.and_then(certs_to_chain);
+    // Read after the report: the log then holds the prefix the report commits to.
+    let event_log = std::fs::read(EVENT_LOG_PATH)
+        .ok()
+        .map(|log| BASE64.encode(log));
 
     Ok(SnpEvidence {
         attestation_report: BASE64.encode(&report_bytes),
         cert_chain,
+        event_log,
     })
 }
