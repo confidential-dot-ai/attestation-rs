@@ -139,9 +139,8 @@ pub struct SnpResult {
     /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` only on
     /// results not from [`Snp::verify`]).
     pub crl_ok: Option<bool>,
-    /// The guest kernel's runtime registers that `REPORT_DATA` commits to
-    /// (`None`: no runtime registers, or the commitment or the launch digest
-    /// pin failed).
+    /// The guest kernel's runtime registers that `REPORT_DATA` commits to;
+    /// `None` unless the result [passed](Self::passed).
     pub runtime_registers: Option<RuntimeRegisters>,
     /// `runtime_registers` equal the expected ones (`None` outside runtime
     /// mode).
@@ -323,9 +322,9 @@ impl Platform for Snp {
 
 /// Replay the event log prefix that `report_data` names and replace
 /// `report_data_match` with whether `report_data` commits to it and
-/// `caller_data`. Registers are exposed and compared with `expected` only
-/// when the launch digest pin also held: without the provider the commitment
-/// means nothing.
+/// `caller_data`. Registers are compared with `expected` only when the
+/// launch digest pin also held (without the provider the commitment means
+/// nothing), and exposed only when the whole result passed.
 fn check_runtime_registers(
     result: &mut SnpResult,
     report_data: &[u8; 64],
@@ -347,7 +346,7 @@ fn check_runtime_registers(
             .enumerate()
             .all(|(i, value)| *value == expected.get(i).copied().unwrap_or([0; 48]))
     }));
-    result.runtime_registers = registers;
+    result.runtime_registers = registers.filter(|_| result.passed());
     Ok(())
 }
 
@@ -1823,6 +1822,35 @@ mod tests {
     }
 
     #[test]
+    fn a_debug_guest_shows_registers_only_when_debug_is_allowed() {
+        let (report_data, log, caller_data, registers) = kmr_vector("four_events");
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        report.policy.set_debug_allowed(true);
+        let check = |allow_debug: bool| {
+            let params = SnpParams {
+                launch_digest: Some(vec![report.measurement]),
+                allow_debug,
+                ..Default::default()
+            };
+            let mut result = evaluate_report(&report, &params, Some(true));
+            check_runtime_registers(
+                &mut result,
+                &report_data,
+                Some(&log),
+                &caller_data,
+                &registers,
+            )
+            .unwrap();
+            result
+        };
+        let r = check(true);
+        assert!(r.passed() && r.runtime_registers.is_some());
+        let r = check(false);
+        assert_eq!(r.runtime_registers_match, Some(true));
+        assert!(!r.passed() && r.runtime_registers.is_none());
+    }
+
+    #[test]
     fn genesis_registers_match_an_empty_expectation() {
         let r = check_kmr("genesis", None, &[]);
         assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
@@ -2085,7 +2113,7 @@ mod tests {
         );
         let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
         assert_eq!(r.vmpl, 0);
-        assert!(r.passed());
+        assert!(r.passed() && r.runtime_registers.is_some());
 
         let (log, caller) = (kmr_vmpl!("event-log.bin"), kmr_vmpl!("caller-data.bin"));
         for (report, vmpl) in [
@@ -2102,6 +2130,7 @@ mod tests {
             assert_eq!(r.report_data_match, Some(true), "VMPL {vmpl}");
             assert_eq!(r.runtime_registers_match, Some(true), "VMPL {vmpl}");
             assert!(!r.passed(), "VMPL {vmpl}");
+            assert!(r.runtime_registers.is_none(), "VMPL {vmpl}");
         }
     }
 

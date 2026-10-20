@@ -107,8 +107,7 @@ the requester passed, `launch_digest` and VMPL 0. **Every pinned
 without it, guest root chooses `REPORT_DATA` and can forge any registers.
 The verifier replays the log prefix the report names and sets
 `report_data_match` from the commitment; `runtime_registers` in the result
-holds the replayed registers only when the commitment and the launch digest pin
-both hold. A malformed `event_log` is an error. With debug allowed
+holds the replayed registers only when the whole result passes. A malformed `event_log` is an error. With debug allowed
 (`allow_debug`), the host can read and change guest memory, so register values
 are not protected against the host. Azure and GCP refuse `runtime_registers`
 with an invalid-params error; they never pass it. On a provider image
