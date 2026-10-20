@@ -302,11 +302,8 @@ impl Platform for Snp {
             let caller_data = params
                 .report_data
                 .as_deref()
-                .unwrap_or_default()
-                .try_into()
-                .map_err(|_| {
-                    AttestationError::InvalidParams("report_data must be 64 bytes".into())
-                })?;
+                .and_then(|d| d.try_into().ok())
+                .expect("validate: runtime_registers needs a 64-byte report_data");
             check_runtime_registers(
                 &mut result,
                 &report.report_data,
