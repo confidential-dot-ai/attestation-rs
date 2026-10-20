@@ -1,0 +1,5 @@
+A forged runtime-register commitment from an image WITHOUT the provider (confos 461cf86, no patch 0002),
+lunal-host-1 (Genoa), 2026-10-20, round-2 hardware run b4-forge (proto/artifacts/r2/b4-forge). Launch digest d294414b...03abec,
+policy 0x30000, VMPL 0, same chip and TCB as kmr-vcek.der.
+Guest root passed user_data = H||C, computed off-guest over event-log.bin (mr1 <- sha384("forged: approved kernel cmdline"),
+mr4 <- sha384("forged: approved workload image")) and caller-data.bin (sha512("r2 B4 relying-party nonce")).

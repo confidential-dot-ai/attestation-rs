@@ -1742,27 +1742,6 @@ mod tests {
         assert!(!r.migrate_ma);
     }
 
-    #[tokio::test]
-    async fn a_report_data_without_a_commitment_fails() {
-        // The fixture's REPORT_DATA is caller bytes, as an unpatched kernel
-        // passes through.
-        let report = parse_report(LIVE_REPORT_V5).unwrap();
-        let plain = SnpParams {
-            report_data: Some(report.report_data.to_vec()),
-            launch_digest: Some(vec![report.measurement]),
-            ..Default::default()
-        };
-        assert!(verify(&plain).await.unwrap().passed());
-        let r = verify(&SnpParams {
-            runtime_registers: Some(vec![]),
-            ..plain
-        })
-        .await
-        .unwrap();
-        assert_eq!(r.report_data_match, Some(false));
-        assert!(r.runtime_registers.is_none() && !r.passed());
-    }
-
     /// A vector from the kernel/verifier golden set: REPORT_DATA, the log and
     /// the caller data, and its registers.
     fn kmr_vector(name: &str) -> ([u8; 64], String, [u8; 64], Vec<[u8; 48]>) {
@@ -2134,6 +2113,45 @@ mod tests {
             assert!(!r.passed(), "VMPL {vmpl}");
             assert!(r.runtime_registers.is_none(), "VMPL {vmpl}");
         }
+    }
+
+    /// Guest root on an image without the provider passes a forged `H || C`
+    /// as its report data. Only the launch digest pin tells it apart.
+    #[tokio::test]
+    async fn a_forged_commitment_passes_only_where_its_image_is_pinned() {
+        let report = include_bytes!("../../../test_data/snp/kmr-forge/report.bin");
+        let log = include_bytes!("../../../test_data/snp/kmr-forge/event-log.bin");
+        let caller = include_bytes!("../../../test_data/snp/kmr-forge/caller-data.bin");
+        let hex48 = |s: &str| -> [u8; 48] { hex::decode(s).unwrap().try_into().unwrap() };
+        let forged = vec![
+            [0; 48],
+            hex48("faef475db093da0bf48d02e58db273cf2efd9cc33fea6f75c86b094c9f2352b73c7021e4629e7f784f97893febebfc0d"),
+            [0; 48],
+            [0; 48],
+            hex48("9447d432169ab5914449fe9c0cc297b1ed8fca7b9a934151a81d174ab72df392fdd6e0305ff7c1587254f511381d9efa"),
+        ];
+        let image = parse_report(report).unwrap().measurement;
+        let provider = hex48("3dc918aabbb74ba2b8e16f5796bbf7c49b56057ed828f0197658b70cb6a02d2f7e933097d21f7cfab17db4232d449523");
+        let params = |launch_digest: Vec<[u8; 48]>| SnpParams {
+            report_data: Some(caller.to_vec()),
+            launch_digest: Some(launch_digest),
+            runtime_registers: Some(forged.clone()),
+            ..Default::default()
+        };
+
+        let r = verify_kmr_with(report, log, &params(vec![provider])).await;
+        assert_eq!(r.launch_digest_match, Some(false));
+        assert_eq!(r.report_data_match, Some(false));
+        assert!(r.runtime_registers.is_none() && !r.passed());
+
+        // Pinning the image without the provider, even next to a provider
+        // image, accepts the forged registers.
+        let r = verify_kmr_with(report, log, &params(vec![provider, image])).await;
+        assert_eq!(
+            r.runtime_registers.as_ref().unwrap().registers[..5],
+            forged[..]
+        );
+        assert!(r.passed());
     }
 
     #[tokio::test]
