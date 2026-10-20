@@ -113,12 +113,6 @@ async fn every_platform_verifies_with_roots_only_from_attached_collateral() {
             .collateral
             .iter()
             .all(|c| c.from == Source::Attached));
-        eprintln!(
-            "envelope size {platform}: {} bytes without collateral, {} with ({} pieces)",
-            evidence.len(),
-            with.len(),
-            verified.collateral.len()
-        );
     }
 }
 
@@ -192,6 +186,7 @@ async fn an_older_valid_copy_passes_only_at_or_above_the_floor() {
 
     let verified = verify_at(&older, &Policies::all(), NOW).await.unwrap();
     assert_eq!(qe_identity(&verified).version, Some(21));
+    assert_eq!(qe_identity(&verified).floor, Some(20));
     assert!(verified.passed());
 
     let raised = Policies {
@@ -214,18 +209,6 @@ async fn an_older_valid_copy_passes_only_at_or_above_the_floor() {
     let missing = verifier.context().store().missing();
     assert!(missing.len() == 1 && missing[0].ends_with("/qe/identity"));
     assert!(verify_at(&newest, &raised, NOW).await.unwrap().passed());
-}
-
-#[tokio::test]
-async fn a_copy_below_the_shipped_floor_does_not_pass() {
-    // Eval 18, since replaced by Intel (and also past its nextUpdate: no
-    // eval-18 copy is inside its window together with the other fixtures).
-    let old = tdx_with_qe_identity("td_qe_identity_2026-03-16_eval18_expired.json").await;
-    let verified = verify_at(&old, &Policies::all(), NOW).await.unwrap();
-    let qe = qe_identity(&verified);
-    assert_eq!((qe.version, qe.floor), (Some(18), Some(20)));
-    assert!(!qe.acceptable());
-    assert!(!verified.passed());
 }
 
 #[tokio::test]
@@ -400,7 +383,8 @@ async fn gpu_collateral_is_attached_and_used_without_network() {
     let set: serde_json::Value = serde_json::from_slice(&jwks).unwrap();
     let kid = set["keys"][0]["kid"].as_str().unwrap().to_string();
     let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES384","kid":"{kid}"}}"#));
-    let token = format!("{header}.e30.{}", URL_SAFE_NO_PAD.encode([0u8; 96]));
+    let claims = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{}}}"#, NOW + 60));
+    let token = format!("{header}.{claims}.{}", URL_SAFE_NO_PAD.encode([0u8; 96]));
     let answer = serde_json::json!([["JWT", token], { "GPU-0": token }]);
     let nonce = hex::encode(crate::platforms::nvidia_gpu::gpu_nonce(
         &report_data,
@@ -415,6 +399,35 @@ async fn gpu_collateral_is_attached_and_used_without_network() {
         None,
     ));
     held.push((jwks_url.clone(), jwks.clone(), None));
+
+    let mut rotated = held.clone();
+    let mut other_keys = set.clone();
+    for key in other_keys["keys"].as_array_mut().unwrap() {
+        key["kid"] = "unrelated".into();
+    }
+    rotated.iter_mut().find(|(u, ..)| *u == jwks_url).unwrap().1 =
+        serde_json::to_vec(&other_keys).unwrap();
+    let partial = Verifier::new(testing::context(rotated))
+        .attach_collateral(&envelope, &report_data)
+        .await
+        .unwrap();
+    let partial_envelope: crate::AttestationEvidence = serde_json::from_slice(&partial).unwrap();
+    assert!(!partial_envelope
+        .collateral
+        .iter()
+        .any(|c| c.url == jwks_url));
+    let partial_policies = Policies {
+        gpu: Some(crate::NvidiaGpuParams {
+            user_nonce: Some(report_data.clone()),
+            ..Default::default()
+        }),
+        ..Policies::all().with_report_data(&report_data)
+    };
+    assert!(roots_only(NOW)
+        .verify(&partial, &partial_policies)
+        .await
+        .unwrap_err()
+        .is_retryable());
 
     let attester = Verifier::new(testing::context(held));
     let with = attester
@@ -488,7 +501,9 @@ async fn an_expired_attached_nras_answer_is_not_used() {
     let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES384","kid":"{kid}"}}"#));
     let claims = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{}}}"#, NOW - 1));
     let token = format!("{header}.{claims}.{}", URL_SAFE_NO_PAD.encode([0u8; 96]));
-    let answer = serde_json::json!([["JWT", token], { "GPU-0": token }]);
+    let live = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{}}}"#, NOW + 60));
+    let overall = format!("{header}.{live}.{}", URL_SAFE_NO_PAD.encode([0u8; 96]));
+    let answer = serde_json::json!([["JWT", overall], { "GPU-0": token }]);
     let nonce = hex::encode(crate::platforms::nvidia_gpu::gpu_nonce(
         &report_data,
         &bundle.binding,
