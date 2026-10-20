@@ -174,6 +174,29 @@ Fetching what the evidence lacks is a fallback: on in the CLI and servers,
 off with `Context::offline()` (`--offline`); in the browser the JS wrapper
 fetches what `collateral_needed` lists.
 
+Where evidence is made, collateral comes from an `attestation-cache` rather
+than the vendors (see `crates/attestation-cache`). Inside a confidential VM
+(a `/dev/tdx_guest`, `/dev/sev-guest` or configfs-tsm guest) the library finds
+the host's cache by itself: a `Context` asks `GET /health` at vsock port 8455
+of the host (CID 2); once that answers, every fetch of that `Context` goes
+there and the vendors are never asked directly; while nothing answers, the
+vendors are used and the host is tried again every minute. Each `Context`
+looks on its own. Outside a confidential VM, and in Azure vTPM guests and
+dstack containers (which show none of those devices), the vendors are used.
+`Context::with_upstream` sets a cache
+explicitly (`https://` base URL without query, `http://` on loopback only, or
+`vsock://CID:PORT`). The choice is logged at info level (the CLI logs per
+`RUST_LOG`), and a `CollateralUnavailable` detail names the upstream asked.
+Answers from a cache are verified like the vendors' and
+reported `from: cache`; a cache's "not found" is `CollateralUnavailable`, as
+only the vendor itself can say a piece is not published. A cache can still
+hand a fresh process an older copy that is valid: that copy is bounded by the
+version floors and its own nextUpdate (plus the grace), and is never taken
+over a newer copy the process already has. Each
+piece is refreshed at a random time in the last quarter of its validity, and
+at least a day before its nextUpdate. NRAS attestation requests (GPU) go to
+NRAS directly.
+
 - No copy anywhere is `CollateralUnavailable { collateral, retry_after,
   detail }`, the only retryable error: it names the piece, the vendor's
   Retry-After when it sent one, and why in `detail`.

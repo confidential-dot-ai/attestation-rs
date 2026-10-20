@@ -40,6 +40,8 @@ pub use intel::{PckCrl, QeIdentity, RootCrl, TcbInfo};
 #[cfg(feature = "nvidia-gpu")]
 pub use nvidia::NrasJwks;
 pub use store::{CollateralUsed, Source, Store};
+#[cfg(not(target_arch = "wasm32"))]
+pub use vendor::VSOCK_PORT;
 
 use crate::error::Result;
 
