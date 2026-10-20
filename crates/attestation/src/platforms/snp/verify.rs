@@ -62,8 +62,9 @@ pub struct SnpParams {
     /// requester passed as `REPORT_DATA`. Setting it selects the mode:
     /// `REPORT_DATA` must then commit to the evidence's event log and this
     /// value, and it needs `launch_digest` pinned to an image with the
-    /// provider, no `report_data`, no debug and VMPL 0. Unset: no runtime
-    /// registers.
+    /// provider, no `report_data` and VMPL 0. Unset: no runtime registers.
+    /// With debug allowed, the host can read and change guest memory, so
+    /// register values are not protected against the host.
     #[serde(with = "b64::bytes")]
     pub caller_data: Option<Vec<u8>>,
     /// Expected final runtime registers in index order; registers past the
@@ -90,13 +91,9 @@ impl SnpParams {
                     "caller_data must be 64 bytes".into(),
                 ));
             }
-            if self.launch_digest.is_none()
-                || self.report_data.is_some()
-                || self.allow_debug
-                || self.max_vmpl != 0
-            {
+            if self.launch_digest.is_none() || self.report_data.is_some() || self.max_vmpl != 0 {
                 return Err(AttestationError::InvalidParams(
-                    "caller_data needs launch_digest, no report_data, no debug and VMPL 0".into(),
+                    "caller_data needs launch_digest, no report_data and VMPL 0".into(),
                 ));
             }
         }
@@ -1543,6 +1540,13 @@ mod tests {
         let report = parse_report(LIVE_REPORT_V5).unwrap();
         let ok = runtime_params(&report);
         ok.validate().unwrap();
+        // Debug is the caller's choice, as for any SNP report.
+        SnpParams {
+            allow_debug: true,
+            ..ok.clone()
+        }
+        .validate()
+        .unwrap();
         let bad = [
             SnpParams {
                 caller_data: Some(vec![7; 63]),
