@@ -57,8 +57,12 @@ impl Upstream {
             let (cid, port) = address.split_once(':')?;
             return Some(Upstream::Vsock(cid.parse().ok()?, port.parse().ok()?));
         }
-        let bare =
-            reqwest::Url::parse(url).is_ok_and(|u| u.query().is_none() && u.fragment().is_none());
+        let bare = reqwest::Url::parse(url).is_ok_and(|u| {
+            u.query().is_none()
+                && u.fragment().is_none()
+                && u.username().is_empty()
+                && u.password().is_none()
+        });
         (bare && allowed(url)).then(|| Upstream::Cache(url.trim_end_matches('/').to_string()))
     }
 
@@ -496,9 +500,9 @@ mod vsock {
                 .await
                 .map_err(|e| unreachable(&e))?;
         tokio::spawn(connection);
-        let request = http::Request::get(format!("/{path}"))
-            .header(http::header::HOST, "attestation-cache")
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
+        let request = hyper::Request::get(format!("/{path}"))
+            .header(hyper::header::HOST, "attestation-cache")
+            .body(http_body_util::Empty::<hyper::body::Bytes>::new())
             .map_err(|e| unreachable(&e))?;
         let response = sender
             .send_request(request)
@@ -576,23 +580,24 @@ mod tests {
     }
 
     /// vsock loopback (CID 1) needs the vsock_loopback module, which the
-    /// Linux docker gate loads; where it is missing the test has nothing to
-    /// talk to and returns.
+    /// Linux Docker gate loads. Run explicitly with --ignored.
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[ignore = "requires Linux vsock_loopback; run explicitly in the Docker gate"]
     async fn the_vsock_client_reads_status_chain_and_caps_the_body() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio_vsock::{VsockAddr, VsockListener};
-        let Ok(listener) = VsockListener::bind(VsockAddr::new(1, u32::MAX)) else {
-            return;
-        };
+        let listener = VsockListener::bind(VsockAddr::new(1, u32::MAX))
+            .expect("vsock_loopback must be loaded for this gate");
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
                 tokio::spawn(async move {
-                    let mut buf = vec![0; 4096];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let mut buf = Vec::new();
+                    while !buf.ends_with(b"\r\n\r\n") {
+                        buf.push(sock.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8(buf).unwrap();
                     let (status, header, body) = match request.split(' ').nth(1) {
                         Some("/health") => (200, "", b"ok".to_vec()),
                         Some("/chain") => {
@@ -672,6 +677,8 @@ mod tests {
             "vsock://8455",
             "https://cache.example/?x=1",
             "https://cache.example/#x",
+            "https://user:secret@cache.example",
+            "https://user@cache.example",
         ] {
             assert_eq!(Upstream::parse(bad), None, "{bad}");
         }
