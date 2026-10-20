@@ -1665,6 +1665,86 @@ mod tests {
         assert!(!r.passed());
     }
 
+    // ---------------------------------------------------------------
+    // Hardware fixture: a Genoa guest kernel with runtime registers
+    // ---------------------------------------------------------------
+
+    const KMR_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-report.bin");
+    const KMR_EVENT_LOG: &[u8] = include_bytes!("../../../test_data/snp/kmr-event-log.bin");
+    const KMR_CALLER_DATA: &[u8] = include_bytes!("../../../test_data/snp/kmr-caller-data.bin");
+    const KMR_BOOT_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-boot-report.bin");
+    const KMR_BOOT_CALLER_DATA: &[u8] =
+        include_bytes!("../../../test_data/snp/kmr-boot-caller-data.bin");
+    const KMR_VCEK: &[u8] = include_bytes!("../../../test_data/snp/kmr-vcek.der");
+
+    /// Verify a fixture report from the kernel guest at 2026-10-20 (its VCEK
+    /// was issued 2026-10-19), with the same launch digest pin.
+    async fn verify_kmr(
+        report: &[u8],
+        event_log: &[u8],
+        caller_data: &[u8],
+        expected: Vec<[u8; 48]>,
+    ) -> SnpResult {
+        const AT: i64 = 1_792_454_400;
+        let mut evidence = make_snp_evidence_with_vcek(report, KMR_VCEK);
+        evidence.event_log = Some(BASE64.encode(event_log));
+        let params = SnpParams {
+            launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
+            caller_data: Some(caller_data.to_vec()),
+            runtime_registers: Some(expected),
+            ..Default::default()
+        };
+        let ctx = crate::context::Context::held(vec![testing::amd_crl(ProcessorGeneration::Genoa)])
+            .at(AT)
+            .unwrap();
+        let (collateral, _) = Snp::gather(&evidence, ctx.store(), AT).await.unwrap();
+        Snp::verify(&evidence, &params, &collateral, AT).unwrap()
+    }
+
+    fn kmr_expected() -> Vec<[u8; 48]> {
+        let hex48 = |s: &str| -> [u8; 48] { hex::decode(s).unwrap().try_into().unwrap() };
+        vec![
+            hex48("f3be9859164ede7b01be3c5856639f170754b0b68bdc74b18901ce22a4da7426a9f5baa70616338fd8a296ba92aefa90"),
+            [0; 48],
+            hex48("fd3bae3f6e3d7b4298af44f7e909cd8c542042f23f9ed693d2515db38aff41dc1eceadfd381fc1b727b9230370cc9edd"),
+            [0; 48],
+            hex48("7b8ce46e415acf0241046b21b4624e06fad196c737f287a42cf2d842c867b61aa5bee9a83171f033d1873ebd3e37865e"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_kernel_report_verifies_with_its_registers() {
+        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, kmr_expected()).await;
+        assert_eq!(r.report_data_match, Some(true));
+        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 3);
+        assert_eq!(r.runtime_registers_match, Some(true));
+        assert!(r.passed());
+
+        let mut other_caller = KMR_CALLER_DATA.to_vec();
+        other_caller[0] ^= 1;
+        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &other_caller, kmr_expected()).await;
+        assert!(r.runtime_registers.is_none() && !r.passed());
+
+        let mut other_log = KMR_EVENT_LOG.to_vec();
+        other_log[60] ^= 1;
+        let r = verify_kmr(KMR_REPORT, &other_log, KMR_CALLER_DATA, kmr_expected()).await;
+        assert!(r.runtime_registers.is_none() && !r.passed());
+
+        let mut other_expected = kmr_expected();
+        other_expected.truncate(3);
+        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, other_expected).await;
+        assert_eq!(r.runtime_registers_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[tokio::test]
+    async fn the_earliest_kernel_report_commits_to_zero_registers() {
+        let r = verify_kmr(KMR_BOOT_REPORT, &[], KMR_BOOT_CALLER_DATA, vec![[0; 48]]).await;
+        assert_eq!(r.runtime_registers.as_ref().unwrap().event_count, 0);
+        assert_eq!(r.runtime_registers_match, Some(true));
+        assert!(r.passed());
+    }
+
     #[tokio::test]
     async fn test_verify_evidence_wrong_launch_digest_is_some_false() {
         // Wrong digest must record Some(false) without failing verification.
