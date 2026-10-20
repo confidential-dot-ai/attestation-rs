@@ -112,7 +112,7 @@ struct VerifyArgs {
     expected_report_data: Option<String>,
 
     /// Expected init data hash (hex-encoded): TDX MRCONFIGID, SNP HOST_DATA,
-    /// or the vTPM PCR[8] init-data hash on Azure.
+    /// or the vTPM `PCR[8]` init-data hash on Azure.
     #[arg(long)]
     expected_init_data: Option<String>,
 
@@ -121,20 +121,20 @@ struct VerifyArgs {
     #[arg(long)]
     expected_mrtd: Vec<String>,
 
-    /// Allowed RTMR[0] (hex-encoded, 48 bytes). TDX-only. Repeatable, as for
+    /// Allowed `RTMR[0]` (hex-encoded, 48 bytes). TDX-only. Repeatable, as for
     /// --expected-mrtd.
     #[arg(long)]
     expected_rtmr0: Vec<String>,
 
-    /// Allowed RTMR[1], as for --expected-rtmr0.
+    /// Allowed `RTMR[1]`, as for --expected-rtmr0.
     #[arg(long)]
     expected_rtmr1: Vec<String>,
 
-    /// Allowed RTMR[2], as for --expected-rtmr0.
+    /// Allowed `RTMR[2]`, as for --expected-rtmr0.
     #[arg(long)]
     expected_rtmr2: Vec<String>,
 
-    /// Allowed RTMR[3], as for --expected-rtmr0.
+    /// Allowed `RTMR[3]`, as for --expected-rtmr0.
     #[arg(long)]
     expected_rtmr3: Vec<String>,
 

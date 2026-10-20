@@ -548,7 +548,7 @@ impl NvidiaGpuResult {
     }
 }
 
-/// Helper module for serializing Vec<u8> as hex strings.
+/// Helper module for serializing `Vec<u8>` as hex strings.
 mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 

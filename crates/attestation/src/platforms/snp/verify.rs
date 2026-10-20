@@ -44,7 +44,7 @@ pub struct SnpParams {
     #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
-    /// 32-byte init-data hash checked against PCR[8].
+    /// 32-byte init-data hash checked against `PCR[8]`.
     #[serde(with = "b64::bytes")]
     pub host_data: Option<Vec<u8>>,
     /// Allowed launch digests (`report.measurement`): the measurement must
@@ -441,8 +441,8 @@ pub fn verify_vek_validity_period(vek_der: &[u8], now: i64) -> Result<()> {
 /// the certificate CN), the VEK validity period, and the VEK's chip-id/TCB OID
 /// cross-validation against the report. This is step 6 of
 /// [`Snp::verify`] as one unit, for callers that resolve the VEK
-/// themselves (notably the WASM `verify_snp` entry point). Revocation is out
-/// of scope — pair with [`check_vek_against_crl`] when CRL data is available.
+/// themselves. Revocation is out of scope; use [`Snp`] for verification with
+/// AMD revocation checks.
 pub fn verify_vek_endorsement(
     report: &AttestationReport,
     vek_der: &[u8],

@@ -2,17 +2,16 @@
 //!
 //! The CCEL is a TCG2-format event log stored in the ACPI CCEL table
 //! at `/sys/firmware/acpi/tables/data/CCEL`. Each event targets an MR index
-//! (1-4 mapping to RTMR[0-3]) and carries a SHA-384 digest. Replaying the
+//! (1-4 mapping to `RTMR[0-3]`) and carries a SHA-384 digest. Replaying the
 //! events from a zero-initialized state must reproduce the RTMR values in
 //! the TDX quote, proving event log integrity.
 //!
-//! Only RTMR[0-2] (boot-time registers) are subject to this check. RTMR[3]
+//! Only `RTMR[0-2]` (boot-time registers) are subject to this check. `RTMR[3]`
 //! is the runtime-extendable register: the guest kernel's tdx_guest sysfs
 //! extend interface appends no CCEL entry (the log area is firmware-owned),
-//! so any legitimate runtime extend — e.g. the confidential-os operator-key
-//! binding, or a per-workload measurer — makes RTMR[3] unreplayable by
-//! construction. Relying parties verify `quote.rtmr_3` directly against
-//! their own expected value (`expected_rtmr3` / claims).
+//! so legitimate runtime extensions, such as application measurements, make
+//! `RTMR[3]` unreplayable from the firmware log. Relying parties pin the signed
+//! value directly with `TdxParams::rtmr3`.
 
 use sha2::{Digest, Sha384};
 
@@ -47,7 +46,7 @@ fn read_le_u16(data: &[u8], offset: usize, field: &str) -> Result<u16> {
 /// A parsed CCEL event.
 #[derive(Debug, Clone)]
 pub struct CcelEvent {
-    /// MR index: 1=RTMR[0], 2=RTMR[1], 3=RTMR[2], 4=RTMR[3].
+    /// MR index: 1=`RTMR[0]`, 2=`RTMR[1]`, 3=`RTMR[2]`, 4=`RTMR[3]`.
     pub mr_index: u32,
     /// TCG2 event type (e.g. 0x80000001 = EV_EFI_VARIABLE_DRIVER_CONFIG).
     pub event_type: u32,
@@ -212,12 +211,12 @@ pub fn replay_rtmrs(events: &[CcelEvent]) -> [[u8; 48]; 4] {
 
 /// Verify that replayed RTMR values from a CCEL match those in a TDX quote body.
 ///
-/// Enforces RTMR[0-2] only. RTMR[3] is runtime-extendable and such extends
+/// Enforces `RTMR[0-2]` only. `RTMR[3]` is runtime-extendable and such extends
 /// never appear in the CCEL (see module docs), so a mismatch there is
 /// expected on any guest that runtime-extends and only logs a warning;
 /// relying parties verify `quote.rtmr_3` directly.
 ///
-/// Returns `Ok(())` if RTMR[0-2] match, or an error describing the first mismatch.
+/// Returns `Ok(())` if `RTMR[0-2]` match, or an error describing the first mismatch.
 pub fn verify_ccel_against_rtmrs(
     ccel_data: &[u8],
     rtmr_0: &[u8; 48],

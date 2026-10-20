@@ -14,7 +14,7 @@ use super::evidence::AzSnpEvidence;
 
 /// What a caller can ask of Azure SEV-SNP (vTPM) evidence. `snp.report_data`
 /// is checked against the vTPM quote nonce and `snp.host_data` (a 32-byte
-/// init-data hash) against PCR[8].
+/// init-data hash) against `PCR[8]`.
 /// In JSON, the `snp` params and `pcrs` (`{ "<index>": "<base64>" }`)
 /// are one object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -277,8 +277,8 @@ pub fn parse_tdx_quote(data: &[u8]) -> Result<TdxQuote> {
 ///
 /// The TDX quote auth data follows the report body and contains:
 /// - sig_data_len (4 bytes LE)
-/// - ECDSA P-256 signature (64 bytes: R[32] || S[32])
-/// - ECDSA attestation public key (64 bytes: X[32] || Y[32])
+/// - ECDSA P-256 signature (64 bytes: `R[32]` || `S[32]`)
+/// - ECDSA attestation public key (64 bytes: `X[32]` || `Y[32]`)
 /// - QE certification data (variable)
 ///
 /// The signature covers SHA-256(header + body).
@@ -362,7 +362,7 @@ pub struct TdxParams {
     #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected init data: MRCONFIGID (at most 48 bytes, zero-padded). On
-    /// Azure (vTPM) a 32-byte hash checked against PCR[8].
+    /// Azure (vTPM) a 32-byte hash checked against `PCR[8]`.
     #[serde(with = "b64::bytes")]
     pub init_data: Option<Vec<u8>>,
     /// Allowed MRTD values: the MRTD must equal one of them. Cloud firmware

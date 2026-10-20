@@ -58,7 +58,7 @@ impl From<Failure> for JsValue {
 /// evidence }` envelope), as a JSON array of strings. Fetch each and pass the
 /// responses to [`evaluate`] as `{ url, body (base64), issuer_chain }`.
 ///
-/// Evidence that is malformed or not genuine throws (see [`Failure`]): it
+/// Evidence that is malformed or not genuine throws a JS Error with `kind`: it
 /// never names collateral to fetch. The exception is SNP evidence without a
 /// VEK: its VCEK is named from the unverified report and checked once held.
 #[wasm_bindgen]
@@ -89,8 +89,8 @@ async fn collateral_needed_impl(envelope_json: &str) -> Result<String, Failure> 
 /// - `collateral_json`: the responses for the URLs [`collateral_needed`]
 ///   listed
 ///
-/// Returns the `Verified` result as JSON with `passed`. Throws (see
-/// [`Failure`]) when the evidence cannot be evaluated: malformed, not
+/// Returns the `Verified` result as JSON with `passed`. Throws a JS Error
+/// with `kind` when the evidence cannot be evaluated: malformed, not
 /// genuine, platform not accepted, invalid params, needed collateral
 /// missing, or collateral that is not the vendor's. Mismatches, policy
 /// flags and expired collateral are values: read `passed`.

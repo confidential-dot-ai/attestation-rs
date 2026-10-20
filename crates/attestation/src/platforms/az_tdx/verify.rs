@@ -15,7 +15,7 @@ use super::evidence::AzTdxEvidence;
 
 /// What a caller can ask of Azure TDX (vTPM) evidence. `tdx.report_data` is
 /// checked against the vTPM quote nonce and `tdx.init_data` (a 32-byte
-/// init-data hash) against PCR[8].
+/// init-data hash) against `PCR[8]`.
 /// In JSON, the `tdx` params and `pcrs` (`{ "<index>": "<base64>" }`)
 /// are one object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

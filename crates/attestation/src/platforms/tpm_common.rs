@@ -15,7 +15,7 @@ use crate::utils::{constant_time_eq, sha256, sha256_two, strip_trailing_nulls};
 /// Decoded TPM quote components: (signature, message, pcr_values).
 pub type DecodedTpmQuote = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
 
-/// The PCR index that init-data is measured into (PCR[8] = SHA256(0^32 || init_data_hash)).
+/// The PCR index that init-data is measured into (`PCR[8]` = SHA256(0^32 || init_data_hash)).
 const INIT_DATA_PCR: usize = 8;
 
 /// The vTPM device path `az_cvm_vtpm` opens (`TctiNameConf::Device` default).
@@ -641,7 +641,7 @@ struct QuoteInfo {
 
 impl QuoteInfo {
     /// The quote is a `TPM2_Quote` over exactly one selection, in the SHA-256
-    /// bank: the only shape the PCR checks (digest, PCR[8], pins) accept.
+    /// bank: the only shape the PCR checks (digest, `PCR[8]`, pins) accept.
     fn is_sha256_quote(&self) -> bool {
         self.attest_type == TPM_ST_ATTEST_QUOTE && self.hash_algs == [TPM_ALG_SHA256]
     }
@@ -678,10 +678,10 @@ pub fn check_report_data(tpm_msg: &[u8], expected: Option<&[u8]>) -> Result<Opti
     tpm_nonce_matches(tpm_msg, expected).map(Some)
 }
 
-/// Check TPM PCR[8] against expected init_data_hash, returning `None` if no expectation was provided.
+/// Check TPM `PCR[8]` against expected init_data_hash, returning `None` if no expectation was provided.
 ///
 /// TPM PCR extend semantics: `PCR[8] = SHA256(zeros_32 || init_data_hash)`.
-/// The guest extends PCR[8] from its initial zero state with the init_data hash,
+/// The guest extends `PCR[8]` from its initial zero state with the init_data hash,
 /// so we must replicate that extend operation before comparing.
 ///
 /// `tpm_pcrs` is attacker-supplied data carried alongside the quote: a
@@ -721,7 +721,7 @@ pub fn check_init_data(
     Ok(Some(constant_time_eq(&tpm_pcrs[INIT_DATA_PCR], &extended)))
 }
 
-/// The init-data hash checked against PCR[8] must be exactly 32 bytes.
+/// The init-data hash checked against `PCR[8]` must be exactly 32 bytes.
 pub fn check_init_data_len(expected: Option<&[u8]>) -> Result<()> {
     match expected {
         Some(e) if e.len() != 32 => Err(AttestationError::InvalidParams(format!(
@@ -1544,7 +1544,7 @@ mod tests {
         assert!(result.is_err(), "should fail with too few PCRs");
     }
 
-    /// Regression PoC: an unselected PCR[8] must never be trusted.
+    /// Regression PoC: an unselected `PCR[8]` must never be trusted.
     ///
     /// An attacker on a genuine Azure CVM issues a real AK-signed TPM2_Quote
     /// whose selection excludes PCR 8, then appends a forged
