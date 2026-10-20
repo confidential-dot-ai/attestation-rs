@@ -75,7 +75,10 @@ pub struct SnpParams {
     ///
     /// With debug allowed, the host can read and change guest memory, so
     /// register values are not protected against the host.
-    #[serde(with = "b64::digest_list::option")]
+    #[serde(
+        with = "b64::digest_list::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub runtime_registers: Option<Vec<[u8; 48]>>,
 }
 
@@ -1723,6 +1726,9 @@ mod tests {
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains(r#""runtime_registers":[]"#), "{json}");
+        // Unset, the field is left out, so parsers that predate it accept the JSON.
+        let json = serde_json::to_string(&SnpParams::default()).unwrap();
+        assert!(!json.contains("runtime_registers"), "{json}");
     }
 
     #[test]
