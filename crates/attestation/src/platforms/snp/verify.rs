@@ -64,7 +64,9 @@ pub struct SnpParams {
     /// in index order, at most 16; registers past the list must be zero (`[]`:
     /// all zero). Setting it selects the mode: `REPORT_DATA` must commit to
     /// the evidence's event log and `report_data`. It needs a 64-byte
-    /// `report_data`, `launch_digest` and VMPL 0.
+    /// `report_data`, `launch_digest` and VMPL 0. Azure and GCP refuse it
+    /// (`InvalidParams`). On a provider image `REPORT_DATA` is always the
+    /// commitment, so only this mode binds the requester's bytes there.
     ///
     /// **Every `launch_digest` value must be an image whose kernel has the
     /// runtime-register provider.** On an image without it, guest root

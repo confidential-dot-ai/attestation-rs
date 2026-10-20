@@ -110,7 +110,11 @@ The verifier replays the log prefix the report names and sets
 holds the replayed registers only when the commitment and the launch digest pin
 both hold. A malformed `event_log` is an error. With debug allowed
 (`allow_debug`), the host can read and change guest memory, so register values
-are not protected against the host. Azure and GCP have no runtime registers.
+are not protected against the host. Azure and GCP refuse `runtime_registers`
+with an invalid-params error; they never pass it. On a provider image
+`REPORT_DATA` is always the kernel's commitment, so plain `report_data` cannot
+bind a nonce there: nonce-binding consumers (API tokens, the GPU binding) must
+use this mode. Deploy the verifier before the images.
 Every SNP result refuses a guest policy that allows a migration agent.
 
 ## Results, errors and retry
