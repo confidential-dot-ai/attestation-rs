@@ -217,10 +217,12 @@ fn measurement_registers_must_all_match() {
     }
 }
 
-/// Guest root on an image without the provider forged `H || C` over
-/// registers 1 and 4: it passes only where that image is pinned.
+/// Pins for registers 1 and 4 only: the CLI fills registers 0, 2 and 3 with
+/// zero. The forge fixture (guest root on an image without the provider,
+/// `H || C` over registers 1 and 4) passes with its own image pinned and
+/// fails a provider-only pin.
 #[test]
-fn a_forged_commitment_fails_a_provider_only_pin() {
+fn unpinned_registers_below_the_highest_pin_are_zero() {
     let (forged, k) = kernel_evidence(
         "kmr-forge/report.bin",
         "kmr-forge/event-log.bin",
@@ -249,6 +251,47 @@ fn evidence_for_a_platform_not_accepted_exits_one() {
     assert!(out.stdout.is_empty(), "nothing was verified");
 }
 
+/// A bad `--expected-mr` exits 2 with every other measurement-register
+/// argument given. The same arguments with well-formed pins exit 1 (the
+/// Genoa report is not from a kernel with registers), so each 2 is the pin's.
+#[test]
+fn a_bad_expected_mr_exits_two() {
+    let (a, b, nonce) = ("aa".repeat(48), "bb".repeat(48), "aa".repeat(64));
+    let verify_mode = |extra: &[&str], pins: &[String]| {
+        let mut args = vec![
+            "--expected-launch-digest",
+            &a,
+            "--expected-report-data",
+            &nonce,
+        ];
+        args.extend(extra);
+        for pin in pins {
+            args.extend(["--expected-mr", pin]);
+        }
+        verify(&args)
+    };
+    let out = verify_mode(&[], &[format!("0={a}"), format!("1={b}")]);
+    assert_eq!(out.status.code(), Some(1), "well-formed pins");
+    for (case, out) in [
+        ("index 16", verify_mode(&[], &[format!("16={a}")])),
+        (
+            "32-byte value",
+            verify_mode(&[], &[format!("0={}", "aa".repeat(32))]),
+        ),
+        (
+            "index twice",
+            verify_mode(&[], &[format!("0={a}"), format!("0={b}")]),
+        ),
+        (
+            "Azure",
+            verify_mode(&["--platform", "az-snp"], &[format!("0={a}")]),
+        ),
+    ] {
+        assert_eq!(out.status.code(), Some(2), "{case}");
+        assert!(out.stdout.is_empty(), "nothing was verified: {case}");
+    }
+}
+
 #[test]
 fn usage_errors_exit_two() {
     for args in [
@@ -267,20 +310,6 @@ fn usage_errors_exit_two() {
             &format!("4={}", "bb".repeat(32)),
         ],
         &["--platform", "snp", "--expected-report-data", "zz"],
-        &["--expected-mr", &format!("16={}", "aa".repeat(48))],
-        &["--expected-mr", &format!("0={}", "aa".repeat(32))],
-        &[
-            "--expected-mr",
-            &format!("0={}", "aa".repeat(48)),
-            "--expected-mr",
-            &format!("0={}", "bb".repeat(48)),
-        ],
-        &[
-            "--platform",
-            "az-snp",
-            "--expected-mr",
-            &format!("0={}", "aa".repeat(48)),
-        ],
         // Measurement-register mode needs the requester's 64 bytes and a pin.
         &[
             "--expected-launch-digest",

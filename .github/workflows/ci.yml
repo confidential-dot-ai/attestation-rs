@@ -39,6 +39,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace
+      # The SNP attester's event-log read is Linux + `attest` only, so the
+      # workspace run above does not compile it. It needs no TEE.
+      - name: SNP attester event-log read
+        run: |
+          cargo test -p attestation --lib --features attest platforms::snp::attest -- --list > snp-attest-tests.txt
+          grep -Fx 'platforms::snp::attest::tests::only_a_missing_event_log_means_no_log: test' snp-attest-tests.txt
+          cargo test -p attestation --lib --features attest platforms::snp::attest
 
   vsock:
     name: VSOCK loopback transport (not TEE validation)

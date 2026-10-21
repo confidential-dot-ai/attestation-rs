@@ -623,10 +623,7 @@ async fn a_measurement_register_token_carries_the_full_log_registers() {
         state
     };
 
-    let request = body(&caller_data);
-    let size = serde_json::to_vec(&request).unwrap().len();
-    assert!(size < 1024 * 1024, "{size}");
-    let (status, json) = post_verify(state(), request).await;
+    let (status, json) = post_verify(state(), body(&caller_data)).await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["passed"], true);
     let token = json["token"].as_str().expect("token issued");

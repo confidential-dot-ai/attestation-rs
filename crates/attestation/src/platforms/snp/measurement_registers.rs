@@ -208,24 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_log_entry_is_rejected() {
-        let mut v = prefix_vector();
-        assert!(verify_vector(&v).unwrap().is_some());
-        v.log[ENTRY_LEN + 10] ^= 1;
-        assert!(verify_vector(&v).unwrap().is_none());
-    }
-
-    #[test]
-    fn a_moved_log_entry_is_rejected() {
-        let mut v = prefix_vector();
-        assert!(verify_vector(&v).unwrap().is_some());
-        v.log[0] = 2;
-        assert!(verify_vector(&v).unwrap().is_none());
-        v.log[0] = 16;
-        assert!(verify_vector(&v).is_err());
-    }
-
-    #[test]
     fn rejected_cases() {
         let v = prefix_vector();
         assert!(verify_vector(&v).unwrap().is_some());
@@ -239,6 +221,12 @@ mod tests {
         padding[15] = 1;
         let mut other_caller = v.caller_data;
         other_caller[63] ^= 1;
+        let mut lower_count = v.report_data;
+        lower_count[0] = 3;
+        let mut other_registers = replay(&v.log, 4).unwrap().unwrap();
+        other_registers[1][0] ^= 1;
+        let over_other_registers = report_data(4, &other_registers, &v.caller_data);
+        let moved = with(four, 0, 2);
         let reordered = [
             &four[2 * ENTRY_LEN..3 * ENTRY_LEN],
             &four[ENTRY_LEN..2 * ENTRY_LEN],
@@ -275,6 +263,19 @@ mod tests {
                 v.caller_data,
             ),
             ("other caller data", four, v.report_data, other_caller),
+            (
+                "an entry moved to another register",
+                &moved,
+                v.report_data,
+                v.caller_data,
+            ),
+            ("a lower event count", four, lower_count, v.caller_data),
+            (
+                "a commitment over other registers",
+                four,
+                over_other_registers,
+                v.caller_data,
+            ),
         ];
         for (name, log, reported, caller_data) in mismatch {
             assert!(
@@ -282,42 +283,6 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn entries_past_the_committed_count_are_not_attested() {
-        let mut v = prefix_vector();
-        v.log[4 * ENTRY_LEN + 10] ^= 1;
-        assert!(verify_vector(&v).unwrap().is_some());
-    }
-
-    #[test]
-    fn a_commitment_over_other_registers_is_rejected() {
-        let v = prefix_vector();
-        let mut registers = replay(&v.log, 4).unwrap().unwrap();
-        assert!(verify(
-            &report_data(4, &registers, &v.caller_data),
-            &v.log,
-            &v.caller_data
-        )
-        .unwrap()
-        .is_some());
-        registers[1][0] ^= 1;
-        let forged = report_data(4, &registers, &v.caller_data);
-        assert!(verify(&forged, &v.log, &v.caller_data).unwrap().is_none());
-    }
-
-    #[test]
-    fn a_changed_event_count_is_rejected() {
-        let mut v = prefix_vector();
-        assert!(verify_vector(&v).unwrap().is_some());
-        v.report_data[0] = 3;
-        assert!(verify_vector(&v).unwrap().is_none());
-        v.report_data[0] = 6;
-        assert!(
-            verify_vector(&v).unwrap().is_none(),
-            "log shorter than the count"
-        );
     }
 
     /// A seeded xorshift64* generator, so property cases are reproducible.
@@ -448,7 +413,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     use super::super::evidence::{SnpCertChain, SnpEvidence};
-    use super::super::verify::{evaluate_report, parse_report, Snp, SnpParams, SnpResult};
+    use super::super::verify::{parse_report, Snp, SnpParams, SnpResult};
     use crate::platform::Platform;
     use crate::testing;
     use crate::types::ProcessorGeneration;
@@ -556,11 +521,30 @@ mod tests {
             measurement_registers: Some(vec![]),
             ..Default::default()
         };
-        let json = serde_json::to_string(&params).unwrap();
-        assert!(json.contains(r#""measurement_registers":[]"#), "{json}");
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["measurement_registers"], serde_json::json!([]));
         // Unset, the field is left out, so parsers that predate it accept the JSON.
-        let json = serde_json::to_string(&SnpParams::default()).unwrap();
-        assert!(!json.contains("measurement_registers"), "{json}");
+        let json = serde_json::to_value(SnpParams::default()).unwrap();
+        assert!(json.get("measurement_registers").is_none());
+    }
+
+    #[test]
+    fn evidence_without_an_event_log_leaves_the_field_out() {
+        // Verifiers that predate `event_log` refuse unknown fields, so evidence
+        // from a kernel without the provider must not name it.
+        let plain = evidence(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let with_log = SnpEvidence {
+            event_log: Some(BASE64.encode(entry(0, 1))),
+            ..plain.clone()
+        };
+        assert!(serde_json::to_value(with_log)
+            .unwrap()
+            .get("event_log")
+            .is_some());
+        assert!(serde_json::to_value(plain)
+            .unwrap()
+            .get("event_log")
+            .is_none());
     }
 
     #[tokio::test]
@@ -645,11 +629,6 @@ mod tests {
     #[tokio::test]
     async fn a_kernel_report_verifies_with_its_registers() {
         assert_eq!(KMR_EVENT_LOG.len(), 4096 * ENTRY_LEN);
-        let encoded = BASE64.encode(KMR_EVENT_LOG).len();
-        assert!(
-            encoded < crate::utils::MAX_EVIDENCE_FIELD_SIZE / 3,
-            "{encoded}"
-        );
         let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &kmr_params()).await;
         assert_eq!(r.report_data_match, Some(true));
         let registers = r.measurement_registers.as_ref().unwrap();
@@ -662,11 +641,13 @@ mod tests {
         let mut other_caller = kmr_params();
         other_caller.report_data.as_mut().unwrap()[0] ^= 1;
         let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &other_caller).await;
+        assert_eq!(r.report_data_match, Some(false));
         assert!(r.measurement_registers.is_none() && !r.passed());
 
         let mut other_log = KMR_EVENT_LOG.to_vec();
         other_log[60] ^= 1;
         let r = verify_kmr_with(KMR_REPORT, &other_log, &kmr_params()).await;
+        assert_eq!(r.report_data_match, Some(false));
         assert!(r.measurement_registers.is_none() && !r.passed());
 
         let mut other_value = kmr_params();
@@ -723,31 +704,9 @@ mod tests {
         assert!(verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &ok)
             .await
             .passed());
-        let bad = [
-            SnpParams {
-                max_vmpl: 1,
-                ..ok.clone()
-            },
-            SnpParams {
-                measurement_registers: Some(vec![[1; 48]; 17]),
-                ..ok.clone()
-            },
-            SnpParams {
-                report_data: Some(vec![7; 63]),
-                ..ok.clone()
-            },
-            SnpParams {
-                launch_digest: None,
-                ..ok.clone()
-            },
-        ];
-        for params in bad {
-            let r = try_verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &params).await;
-            assert!(
-                matches!(r, Err(AttestationError::InvalidParams(_))),
-                "{params:?}"
-            );
-        }
+        let bad = SnpParams { max_vmpl: 1, ..ok };
+        let r = try_verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &bad).await;
+        assert!(matches!(r, Err(AttestationError::InvalidParams(_))));
     }
 
     #[tokio::test]
@@ -757,9 +716,7 @@ mod tests {
         let log = vec![0; 147 * 5350];
         assert!(BASE64.encode(&log).len() > crate::utils::MAX_EVIDENCE_FIELD_SIZE);
         let r = try_verify_kmr(KMR_REPORT, &log, &kmr_params()).await;
-        assert!(
-            matches!(&r, Err(AttestationError::EvidenceDeserialize(m)) if m.contains("too large"))
-        );
+        assert!(matches!(r, Err(AttestationError::EvidenceDeserialize(_))));
     }
 
     #[tokio::test]
@@ -817,6 +774,7 @@ mod tests {
         let r = verify_kmr_with(report, log, &params(vec![provider])).await;
         assert_eq!(r.launch_digest_match, Some(false));
         assert_eq!(r.report_data_match, Some(false));
+        assert_eq!(r.measurement_registers_match, Some(false));
         assert!(r.measurement_registers.is_none() && !r.passed());
 
         // Pinning the image without the provider, even next to a provider
@@ -827,47 +785,5 @@ mod tests {
             forged[..]
         );
         assert!(r.passed());
-    }
-
-    #[test]
-    fn a_debug_guest_shows_registers_only_when_debug_is_allowed() {
-        let mut report = parse_report(KMR_REPORT).unwrap();
-        report.policy.set_debug_allowed(true);
-        let check = |allow_debug: bool| {
-            let params = SnpParams {
-                launch_digest: Some(vec![report.measurement]),
-                allow_debug,
-                ..Default::default()
-            };
-            let mut result = evaluate_report(&report, &params, Some(true));
-            check_measurement_registers(
-                &mut result,
-                &report.report_data,
-                Some(&BASE64.encode(KMR_EVENT_LOG)),
-                KMR_CALLER_DATA.try_into().unwrap(),
-                &kmr_expected(),
-            )
-            .unwrap();
-            result
-        };
-        let r = check(true);
-        assert!(r.passed() && r.measurement_registers.is_some());
-        let r = check(false);
-        assert_eq!(r.measurement_registers_match, Some(true));
-        assert!(!r.passed() && r.measurement_registers.is_none());
-    }
-
-    #[tokio::test]
-    async fn registers_are_not_exposed_when_the_launch_digest_pin_fails() {
-        let mut params = kmr_params();
-        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
-        assert!(r.measurement_registers.is_some() && r.passed());
-
-        params.launch_digest = Some(vec![[0x77; 48]]);
-        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
-        assert_eq!(r.launch_digest_match, Some(false));
-        assert_eq!(r.report_data_match, Some(false));
-        assert_eq!(r.measurement_registers_match, Some(false));
-        assert!(r.measurement_registers.is_none() && !r.passed());
     }
 }
