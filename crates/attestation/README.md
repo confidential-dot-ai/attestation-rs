@@ -89,8 +89,8 @@ it to the vTPM quote nonce instead. `host_data` is at most 32 bytes; TDX
 against PCR[8]. Empty report data is an all-zero pin, not a fresh challenge.
 
 SNP `min_tcb` is an object with `bootloader`, `tee`, `snp`, `microcode` and
-optional `fmc`; the reported, committed and launch TCB must each meet it,
-component by component (not an aggregate version).
+optional `fmc`; on every SNP platform the reported, committed and launch TCB
+must each meet it, component by component (not an aggregate version).
 See generated rustdocs for exact field types. API adds
 [server-side policy restrictions](../attestation-api/README.md#verification-and-tokens).
 
@@ -117,6 +117,9 @@ requester's 64 bytes into `REPORT_DATA`. SNP evidence carries the log as
   Azure and GCP refuse it (`InvalidParams`). Upgrade verifiers (library, API,
   WASM, CLI) before deploying provider images: older verifiers reject evidence
   that carries `event_log`.
+- The API and WASM take this policy as JSON (registers base64); the CLI takes
+  `--expected-mr INDEX=HEX` ([CLI guide](../attestation-cli/README.md)). A full
+  4096-entry log fits the API's 1 MiB body.
 
 With `allow_debug`, the host can read and change guest memory; with `min_tcb`
 unset, a host on firmware with known bugs can forge registers. Production
