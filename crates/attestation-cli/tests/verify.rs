@@ -102,44 +102,148 @@ fn launch_digest_mismatch_prints_result_and_exits_one() {
     assert_eq!(json["passed"], false);
 }
 
-/// The CLI has no measurement-register mode. On evidence from a kernel with the
-/// provider, `REPORT_DATA` is the kernel's commitment, so pinning the
-/// requester's bytes fails.
-#[test]
-fn a_measurement_register_report_fails_the_requesters_report_data() {
+/// SNP kernel evidence from the attestation test data, and the values that
+/// verify it: its launch digest, the requester's 64 bytes and the registers
+/// replayed from its log.
+fn kernel_evidence(report: &str, log: &str, caller_data: &str) -> (serde_json::Value, Kernel) {
     const DIR: &str = "../attestation/test_data/snp";
     let read = |file: &str| std::fs::read(format!("{DIR}/{file}")).unwrap();
-    let report = read("kmr-full-report.bin");
+    let (report, log) = (read(report), read(log));
     let evidence = serde_json::json!({
         "platform": "snp",
         "evidence": {
             "attestation_report": BASE64.encode(&report),
             "cert_chain": { "vcek": BASE64.encode(read("kmr-vcek.der")) },
-            "event_log": BASE64.encode(read("kmr-full-event-log.bin")),
+            "event_log": BASE64.encode(&log),
         },
     });
-    // 2026-10-20, inside the kernel guest VCEK's window.
-    let verify = |report_data: &[u8]| {
-        run_at(
-            evidence.clone(),
-            "1792454400",
-            &[
-                "--platform",
-                "snp",
-                "--expected-report-data",
-                &hex::encode(report_data),
-            ],
-        )
+    let kernel = Kernel {
+        launch_digest: hex::encode(&report[0x90..0xC0]),
+        caller_data: hex::encode(read(caller_data)),
+        registers: replay(&log).iter().map(hex::encode).collect(),
     };
-    let out = verify(&report[0x50..0x90]);
-    assert_eq!(out.status.code(), Some(0), "the raw REPORT_DATA matches");
+    (evidence, kernel)
+}
 
-    let out = verify(&read("kmr-full-caller-data.bin"));
-    assert_eq!(out.status.code(), Some(1));
+struct Kernel {
+    launch_digest: String,
+    caller_data: String,
+    registers: Vec<String>,
+}
+
+/// The registers after the whole log, replayed with sha2 directly.
+fn replay(log: &[u8]) -> Vec<[u8; 48]> {
+    use sha2::{Digest, Sha384};
+    let mut registers = vec![[0u8; 48]; 16];
+    for entry in log.chunks(49) {
+        let r = &mut registers[entry[0] as usize];
+        *r = Sha384::new()
+            .chain_update(*r)
+            .chain_update(&entry[1..])
+            .finalize()
+            .into();
+    }
+    registers
+}
+
+/// `verify` in measurement-register mode at 2026-10-20, inside the kernel
+/// guest VCEK's window, with each nonzero `registers[i]` as
+/// `--expected-mr i=…` (the others must be zero).
+fn verify_kernel(
+    evidence: &serde_json::Value,
+    launch_digest: &str,
+    caller_data: &str,
+    registers: &[String],
+) -> Output {
+    let pins: Vec<String> = registers
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| *r != &"00".repeat(48))
+        .map(|(i, r)| format!("{i}={r}"))
+        .collect();
+    let mut args = vec![
+        "--expected-launch-digest",
+        launch_digest,
+        "--expected-report-data",
+        caller_data,
+    ];
+    for pin in &pins {
+        args.extend(["--expected-mr", pin]);
+    }
+    run_at(evidence.clone(), "1792454400", &args)
+}
+
+/// The guest kernel's full log: 4096 events in all 16 registers.
+#[test]
+fn measurement_registers_must_all_match() {
+    let (evidence, k) = kernel_evidence(
+        "kmr-full-report.bin",
+        "kmr-full-event-log.bin",
+        "kmr-full-caller-data.bin",
+    );
+    let out = verify_kernel(&evidence, &k.launch_digest, &k.caller_data, &k.registers);
+    assert_eq!(out.status.code(), Some(0));
     let json = stdout_json(&out);
-    assert_eq!(json["report_data_match"], false);
-    assert!(json["measurement_registers"].is_null());
-    assert_eq!(json["passed"], false);
+    assert_eq!(json["measurement_registers"]["event_count"], 4096);
+
+    let mut wrong_register = k.registers.clone();
+    wrong_register[7] = "aa".repeat(48);
+    let first = if k.caller_data.starts_with('0') {
+        '1'
+    } else {
+        '0'
+    };
+    let wrong_nonce = format!("{first}{}", &k.caller_data[1..]);
+    for (case, out) in [
+        (
+            "one wrong register",
+            verify_kernel(&evidence, &k.launch_digest, &k.caller_data, &wrong_register),
+        ),
+        (
+            "a nonzero register left out",
+            verify_kernel(
+                &evidence,
+                &k.launch_digest,
+                &k.caller_data,
+                &k.registers[..15],
+            ),
+        ),
+        (
+            "wrong nonce",
+            verify_kernel(&evidence, &k.launch_digest, &wrong_nonce, &k.registers),
+        ),
+        (
+            "wrong launch digest pin",
+            verify_kernel(&evidence, &"aa".repeat(48), &k.caller_data, &k.registers),
+        ),
+    ] {
+        assert_eq!(out.status.code(), Some(1), "{case}");
+    }
+}
+
+/// Guest root on an image without the provider forged `H || C` over
+/// registers 1 and 4: it passes only where that image is pinned.
+#[test]
+fn a_forged_commitment_fails_a_provider_only_pin() {
+    let (forged, k) = kernel_evidence(
+        "kmr-forge/report.bin",
+        "kmr-forge/event-log.bin",
+        "kmr-forge/caller-data.bin",
+    );
+    let (_, provider) = kernel_evidence(
+        "kmr-full-report.bin",
+        "kmr-full-event-log.bin",
+        "kmr-full-caller-data.bin",
+    );
+    let out = verify_kernel(&forged, &k.launch_digest, &k.caller_data, &k.registers);
+    assert_eq!(out.status.code(), Some(0), "its own image pinned");
+    let out = verify_kernel(
+        &forged,
+        &provider.launch_digest,
+        &k.caller_data,
+        &k.registers,
+    );
+    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]
@@ -167,6 +271,33 @@ fn usage_errors_exit_two() {
             &format!("4={}", "bb".repeat(32)),
         ],
         &["--platform", "snp", "--expected-report-data", "zz"],
+        &["--expected-mr", &format!("16={}", "aa".repeat(48))],
+        &["--expected-mr", &format!("0={}", "aa".repeat(32))],
+        &[
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+            "--expected-mr",
+            &format!("0={}", "bb".repeat(48)),
+        ],
+        &[
+            "--platform",
+            "az-snp",
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+        ],
+        // Measurement-register mode needs the requester's 64 bytes and a pin.
+        &[
+            "--expected-launch-digest",
+            &"aa".repeat(48),
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+        ],
+        &[
+            "--expected-report-data",
+            &"aa".repeat(64),
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+        ],
         &[
             "--platform",
             "snp",
