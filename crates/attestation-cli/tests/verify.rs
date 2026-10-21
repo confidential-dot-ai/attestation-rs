@@ -21,11 +21,7 @@ fn genoa_crl() -> attestation::HeldResponse {
     (url, GENOA_CRL.to_vec(), None)
 }
 
-fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
-    run_at(evidence, AT, args)
-}
-
-fn run_at(evidence: serde_json::Value, at: &str, args: &[&str]) -> Output {
+fn run(evidence: serde_json::Value, at: &str, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
@@ -56,7 +52,7 @@ fn evidence() -> serde_json::Value {
 }
 
 fn verify(args: &[&str]) -> Output {
-    run(evidence(), args)
+    run(evidence(), AT, args)
 }
 
 fn stdout_json(out: &Output) -> serde_json::Value {
@@ -170,7 +166,7 @@ fn verify_kernel(
     for pin in &pins {
         args.extend(["--expected-mr", pin]);
     }
-    run_at(evidence.clone(), "1792454400", &args)
+    run(evidence.clone(), "1792454400", &args)
 }
 
 /// The guest kernel's full log: 4096 events in all 16 registers.
@@ -319,6 +315,7 @@ fn collateral_unavailable_exits_three() {
             "platform": "snp",
             "evidence": { "attestation_report": BASE64.encode(REPORT) },
         }),
+        AT,
         &["--platform", "snp"],
     );
     assert_eq!(out.status.code(), Some(3));
