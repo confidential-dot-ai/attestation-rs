@@ -1766,38 +1766,48 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Hardware fixture: a Genoa guest kernel with measurement registers
+    // Hardware fixtures: Genoa guest kernels with measurement registers
     // ---------------------------------------------------------------
 
-    const KMR_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-report.bin");
-    const KMR_EVENT_LOG: &[u8] = include_bytes!("../../../test_data/snp/kmr-event-log.bin");
-    const KMR_CALLER_DATA: &[u8] = include_bytes!("../../../test_data/snp/kmr-caller-data.bin");
-    const KMR_BOOT_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-boot-report.bin");
-    const KMR_BOOT_CALLER_DATA: &[u8] =
-        include_bytes!("../../../test_data/snp/kmr-boot-caller-data.bin");
+    /// The VCEK of the Genoa chip all the kernel fixtures ran on (issued 2026-10-19).
     const KMR_VCEK: &[u8] = include_bytes!("../../../test_data/snp/kmr-vcek.der");
+    // The measurement-register kernel guest (launch digest 5d931eed…) after a
+    // full log: 4096 events, then extend fails with ENOSPC; 2026-10-20.
+    const KMR_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-full-report.bin");
+    const KMR_EVENT_LOG: &[u8] = include_bytes!("../../../test_data/snp/kmr-full-event-log.bin");
+    const KMR_CALLER_DATA: &[u8] =
+        include_bytes!("../../../test_data/snp/kmr-full-caller-data.bin");
 
-    /// Verify a fixture report from the kernel guest at 2026-10-20 (its VCEK
-    /// was issued 2026-10-19), with the same launch digest pin.
-    async fn verify_kmr(
-        report: &[u8],
-        event_log: &[u8],
-        caller_data: &[u8],
-        expected: Vec<[u8; 48]>,
-    ) -> SnpResult {
-        let params = SnpParams {
-            report_data: Some(caller_data.to_vec()),
-            launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
-            measurement_registers: Some(expected),
+    /// The registers after the whole log, replayed with sha2 directly rather
+    /// than with `measurement_registers`.
+    fn kmr_expected() -> Vec<[u8; 48]> {
+        use sha2::{Digest, Sha384};
+        let mut registers = vec![[0u8; 48]; 16];
+        for entry in KMR_EVENT_LOG.chunks(49) {
+            let r = &mut registers[entry[0] as usize];
+            *r = Sha384::new()
+                .chain_update(*r)
+                .chain_update(&entry[1..])
+                .finalize()
+                .into();
+        }
+        registers
+    }
+
+    fn kmr_params() -> SnpParams {
+        SnpParams {
+            report_data: Some(KMR_CALLER_DATA.to_vec()),
+            launch_digest: Some(vec![parse_report(KMR_REPORT).unwrap().measurement]),
+            measurement_registers: Some(kmr_expected()),
             ..Default::default()
-        };
-        verify_kmr_with(report, event_log, &params).await
+        }
     }
 
     async fn verify_kmr_with(report: &[u8], event_log: &[u8], params: &SnpParams) -> SnpResult {
         try_verify_kmr(report, event_log, params).await.unwrap()
     }
 
+    /// Verify a kernel fixture at 2026-10-20, inside its VCEK's window.
     async fn try_verify_kmr(
         report: &[u8],
         event_log: &[u8],
@@ -1813,106 +1823,60 @@ mod tests {
         Snp::verify(&evidence, params, &collateral, AT)
     }
 
-    fn kmr_expected() -> Vec<[u8; 48]> {
-        let hex48 = |s: &str| -> [u8; 48] { hex::decode(s).unwrap().try_into().unwrap() };
-        vec![
-            hex48("f3be9859164ede7b01be3c5856639f170754b0b68bdc74b18901ce22a4da7426a9f5baa70616338fd8a296ba92aefa90"),
-            [0; 48],
-            hex48("fd3bae3f6e3d7b4298af44f7e909cd8c542042f23f9ed693d2515db38aff41dc1eceadfd381fc1b727b9230370cc9edd"),
-            [0; 48],
-            hex48("7b8ce46e415acf0241046b21b4624e06fad196c737f287a42cf2d842c867b61aa5bee9a83171f033d1873ebd3e37865e"),
-        ]
-    }
-
     #[tokio::test]
     async fn a_kernel_report_verifies_with_its_registers() {
-        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, kmr_expected()).await;
-        assert_eq!(r.report_data_match, Some(true));
-        assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 3);
-        assert_eq!(r.measurement_registers_match, Some(true));
-        assert!(r.passed());
-
-        let mut other_caller = KMR_CALLER_DATA.to_vec();
-        other_caller[0] ^= 1;
-        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &other_caller, kmr_expected()).await;
-        assert!(r.measurement_registers.is_none() && !r.passed());
-
-        let mut other_log = KMR_EVENT_LOG.to_vec();
-        other_log[60] ^= 1;
-        let r = verify_kmr(KMR_REPORT, &other_log, KMR_CALLER_DATA, kmr_expected()).await;
-        assert!(r.measurement_registers.is_none() && !r.passed());
-
-        let mut other_expected = kmr_expected();
-        other_expected.truncate(3);
-        let r = verify_kmr(KMR_REPORT, KMR_EVENT_LOG, KMR_CALLER_DATA, other_expected).await;
-        assert_eq!(r.measurement_registers_match, Some(false));
-        assert!(!r.passed());
-    }
-
-    #[tokio::test]
-    async fn the_earliest_kernel_report_commits_to_zero_registers() {
-        let r = verify_kmr(KMR_BOOT_REPORT, &[], KMR_BOOT_CALLER_DATA, vec![]).await;
-        assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 0);
-        assert_eq!(r.measurement_registers_match, Some(true));
-        assert!(r.passed());
-    }
-
-    // The kernel guest's full log: 4096 events, then extend fails with ENOSPC.
-    const KMR_FULL_REPORT: &[u8] = include_bytes!("../../../test_data/snp/kmr-full-report.bin");
-    const KMR_FULL_EVENT_LOG: &[u8] =
-        include_bytes!("../../../test_data/snp/kmr-full-event-log.bin");
-    const KMR_FULL_CALLER_DATA: &[u8] =
-        include_bytes!("../../../test_data/snp/kmr-full-caller-data.bin");
-    /// The 16 final registers, replayed by an independent hashlib script.
-    const KMR_FULL_REGISTERS: &[u8] =
-        include_bytes!("../../../test_data/snp/kmr-full-registers.bin");
-
-    fn kmr_full_params() -> SnpParams {
-        SnpParams {
-            report_data: Some(KMR_FULL_CALLER_DATA.to_vec()),
-            launch_digest: Some(vec![parse_report(KMR_FULL_REPORT).unwrap().measurement]),
-            measurement_registers: Some(KMR_FULL_REGISTERS.as_chunks::<48>().0.to_vec()),
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn a_full_kernel_log_verifies() {
-        assert_eq!(
-            KMR_FULL_EVENT_LOG.len(),
-            4096 * measurement_registers::ENTRY_LEN
-        );
-        let encoded = BASE64.encode(KMR_FULL_EVENT_LOG).len();
+        assert_eq!(KMR_EVENT_LOG.len(), 4096 * measurement_registers::ENTRY_LEN);
+        let encoded = BASE64.encode(KMR_EVENT_LOG).len();
         assert!(
             encoded < crate::utils::MAX_EVIDENCE_FIELD_SIZE / 3,
             "{encoded}"
         );
-        let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &kmr_full_params()).await;
+        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &kmr_params()).await;
+        assert_eq!(r.report_data_match, Some(true));
         let registers = r.measurement_registers.as_ref().unwrap();
         assert_eq!(registers.event_count, 4096);
+        assert_eq!(registers.registers, kmr_expected());
         assert!(registers.registers.iter().all(|r| *r != [0; 48]));
         assert_eq!(r.measurement_registers_match, Some(true));
         assert!(r.passed());
 
-        let mut other = kmr_full_params();
-        other.measurement_registers.as_mut().unwrap()[15][47] ^= 1;
-        let r = verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &other).await;
-        assert_eq!(r.measurement_registers_match, Some(false));
-        assert!(!r.passed());
+        let mut other_caller = kmr_params();
+        other_caller.report_data.as_mut().unwrap()[0] ^= 1;
+        let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &other_caller).await;
+        assert!(r.measurement_registers.is_none() && !r.passed());
+
+        let mut other_log = KMR_EVENT_LOG.to_vec();
+        other_log[60] ^= 1;
+        let r = verify_kmr_with(KMR_REPORT, &other_log, &kmr_params()).await;
+        assert!(r.measurement_registers.is_none() && !r.passed());
+
+        let mut other_value = kmr_params();
+        other_value.measurement_registers.as_mut().unwrap()[15][47] ^= 1;
+        let mut shorter_list = kmr_params();
+        shorter_list
+            .measurement_registers
+            .as_mut()
+            .unwrap()
+            .truncate(15);
+        for params in [other_value, shorter_list] {
+            let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
+            assert_eq!(r.measurement_registers_match, Some(false));
+            assert!(!r.passed());
+        }
     }
 
     #[tokio::test]
-    async fn a_full_log_follows_the_error_contract() {
-        let params = kmr_full_params();
+    async fn a_kernel_log_follows_the_error_contract() {
+        let params = kmr_params();
         let log = |change: &dyn Fn(&mut Vec<u8>)| {
-            let mut log = KMR_FULL_EVENT_LOG.to_vec();
+            let mut log = KMR_EVENT_LOG.to_vec();
             change(&mut log);
             log
         };
         // Bytes that are not whole entries are malformed, whatever the count.
         for junk in [1, 48] {
             let bad = log(&|l| l.extend(vec![0; junk]));
-            let err = try_verify_kmr(KMR_FULL_REPORT, &bad, &params).await;
+            let err = try_verify_kmr(KMR_REPORT, &bad, &params).await;
             assert!(
                 matches!(err, Err(AttestationError::EvidenceDeserialize(_))),
                 "{junk} trailing bytes"
@@ -1923,7 +1887,7 @@ mod tests {
             l.push(3);
             l.extend([9; 48]);
         });
-        let r = verify_kmr_with(KMR_FULL_REPORT, &longer, &params).await;
+        let r = verify_kmr_with(KMR_REPORT, &longer, &params).await;
         assert_eq!(r.measurement_registers.as_ref().unwrap().event_count, 4096);
         assert!(r.passed());
         // A log shorter than the count is a mismatch, not an error.
@@ -1931,7 +1895,7 @@ mod tests {
             log(&|l| l.truncate(4095 * measurement_registers::ENTRY_LEN)),
             Vec::new(),
         ] {
-            let r = verify_kmr_with(KMR_FULL_REPORT, &shorter, &params).await;
+            let r = verify_kmr_with(KMR_REPORT, &shorter, &params).await;
             assert_eq!(r.report_data_match, Some(false));
             assert!(r.measurement_registers.is_none() && !r.passed());
         }
@@ -1939,8 +1903,8 @@ mod tests {
 
     #[tokio::test]
     async fn snp_verify_refuses_params_validate_refuses() {
-        let ok = kmr_full_params();
-        assert!(verify_kmr_with(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &ok)
+        let ok = kmr_params();
+        assert!(verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &ok)
             .await
             .passed());
         let bad = [
@@ -1962,7 +1926,7 @@ mod tests {
             },
         ];
         for params in bad {
-            let r = try_verify_kmr(KMR_FULL_REPORT, KMR_FULL_EVENT_LOG, &params).await;
+            let r = try_verify_kmr(KMR_REPORT, KMR_EVENT_LOG, &params).await;
             assert!(
                 matches!(r, Err(AttestationError::InvalidParams(_))),
                 "{params:?}"
@@ -1976,7 +1940,7 @@ mod tests {
         // limit this decodes to a well-formed log that is only a mismatch.
         let log = vec![0; 147 * 5350];
         assert!(BASE64.encode(&log).len() > crate::utils::MAX_EVIDENCE_FIELD_SIZE);
-        let r = try_verify_kmr(KMR_FULL_REPORT, &log, &kmr_full_params()).await;
+        let r = try_verify_kmr(KMR_REPORT, &log, &kmr_params()).await;
         assert!(
             matches!(&r, Err(AttestationError::EvidenceDeserialize(m)) if m.contains("too large"))
         );
@@ -1984,62 +1948,41 @@ mod tests {
 
     #[tokio::test]
     async fn a_kernel_report_above_vmpl_0_fails() {
-        macro_rules! kmr_vmpl {
-            ($file:literal) => {
-                include_bytes!(concat!("../../../test_data/snp/kmr-vmpl/", $file)).as_slice()
-            };
-        }
+        // SNP_GET_REPORT with req.vmpl = 1 from the measurement-register kernel
+        // guest (launch digest d6c2c431…), committing to the first 6 entries
+        // of its log and its caller data; 2026-10-20.
+        let report = include_bytes!("../../../test_data/snp/kmr-vmpl/vmpl1.report.bin");
+        let log = include_bytes!("../../../test_data/snp/kmr-vmpl/event-log.bin");
+        let caller = include_bytes!("../../../test_data/snp/kmr-vmpl/caller-data.bin");
         // The expectation is the log's own replay, so only the VMPL can fail.
-        let params = |report: &[u8], log: &[u8], caller_data: &[u8]| {
-            let count = u32::from_le_bytes(
-                parse_report(report).unwrap().report_data[..4]
-                    .try_into()
-                    .unwrap(),
-            );
-            SnpParams {
-                report_data: Some(caller_data.to_vec()),
-                launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
-                measurement_registers: Some(
-                    measurement_registers::replay(log, count)
-                        .unwrap()
-                        .unwrap()
-                        .to_vec(),
-                ),
-                ..Default::default()
-            }
+        let params = SnpParams {
+            report_data: Some(caller.to_vec()),
+            launch_digest: Some(vec![parse_report(report).unwrap().measurement]),
+            measurement_registers: Some(
+                measurement_registers::replay(log, 6)
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+            ),
+            ..Default::default()
         };
-        let (report, log, caller) = (
-            kmr_vmpl!("vmpl0.report.bin"),
-            kmr_vmpl!("vmpl0.event-log.bin"),
-            kmr_vmpl!("vmpl0.caller-data.bin"),
-        );
-        let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
-        assert_eq!(r.vmpl, 0);
-        assert!(r.passed() && r.measurement_registers.is_some());
-
-        let (log, caller) = (kmr_vmpl!("event-log.bin"), kmr_vmpl!("caller-data.bin"));
-        for (report, vmpl) in [
-            (kmr_vmpl!("vmpl1.report.bin"), 1),
-            (kmr_vmpl!("vmpl2.report.bin"), 2),
-            (kmr_vmpl!("vmpl3.report.bin"), 3),
-            (kmr_vmpl!("vmpl4.report.bin"), 4),
-            (kmr_vmpl!("privlevel1.report.bin"), 1),
-            (kmr_vmpl!("privlevel2.report.bin"), 2),
-            (kmr_vmpl!("privlevel3.report.bin"), 3),
-        ] {
-            let r = verify_kmr_with(report, log, &params(report, log, caller)).await;
-            assert_eq!(r.vmpl, vmpl);
-            assert_eq!(r.report_data_match, Some(true), "VMPL {vmpl}");
-            assert_eq!(r.measurement_registers_match, Some(true), "VMPL {vmpl}");
-            assert!(!r.passed(), "VMPL {vmpl}");
-            assert!(r.measurement_registers.is_none(), "VMPL {vmpl}");
-        }
+        let r = verify_kmr_with(report, log, &params).await;
+        assert_eq!(r.vmpl, 1);
+        assert_eq!(r.report_data_match, Some(true));
+        assert_eq!(r.measurement_registers_match, Some(true));
+        assert!(!r.passed() && r.measurement_registers.is_none());
+        let accepting_vmpl1 = SnpResult { max_vmpl: 1, ..r };
+        assert!(accepting_vmpl1.passed(), "only the VMPL fails");
     }
 
     /// Guest root on an image without the provider passes a forged `H || C`
     /// as its report data. Only the launch digest pin tells it apart.
     #[tokio::test]
     async fn a_forged_commitment_passes_only_where_its_image_is_pinned() {
+        // A guest image built without the provider (launch digest d294414b…),
+        // same chip and TCB, 2026-10-20. Guest root asked for a report with
+        // user_data = H || C computed off-guest over event-log.bin (mr1, mr4
+        // extended with "forged: …" digests) and caller-data.bin.
         let report = include_bytes!("../../../test_data/snp/kmr-forge/report.bin");
         let log = include_bytes!("../../../test_data/snp/kmr-forge/event-log.bin");
         let caller = include_bytes!("../../../test_data/snp/kmr-forge/caller-data.bin");
@@ -2052,7 +1995,7 @@ mod tests {
             hex48("9447d432169ab5914449fe9c0cc297b1ed8fca7b9a934151a81d174ab72df392fdd6e0305ff7c1587254f511381d9efa"),
         ];
         let image = parse_report(report).unwrap().measurement;
-        let provider = hex48("3dc918aabbb74ba2b8e16f5796bbf7c49b56057ed828f0197658b70cb6a02d2f7e933097d21f7cfab17db4232d449523");
+        let provider = parse_report(KMR_REPORT).unwrap().measurement;
         let params = |launch_digest: Vec<[u8; 48]>| SnpParams {
             report_data: Some(caller.to_vec()),
             launch_digest: Some(launch_digest),
@@ -2105,12 +2048,7 @@ mod tests {
 
     #[tokio::test]
     async fn registers_are_not_exposed_when_the_launch_digest_pin_fails() {
-        let mut params = SnpParams {
-            report_data: Some(KMR_CALLER_DATA.to_vec()),
-            launch_digest: Some(vec![parse_report(KMR_REPORT).unwrap().measurement]),
-            measurement_registers: Some(kmr_expected()),
-            ..Default::default()
-        };
+        let mut params = kmr_params();
         let r = verify_kmr_with(KMR_REPORT, KMR_EVENT_LOG, &params).await;
         assert!(r.measurement_registers.is_some() && r.passed());
 

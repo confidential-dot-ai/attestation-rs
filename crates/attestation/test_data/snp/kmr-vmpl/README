@@ -1,7 +1,0 @@
-Reports from the measurement-register kernel guest on an AMD Genoa host, 2026-10-20.
-Launch digest d6c2c431...121d, policy 0x30000,
-same chip and TCB as kmr-vcek.der.
-- vmpl{1,2,3,4}.report.bin: SNP_GET_REPORT with req.vmpl 1-4 (the firmware also signs VMPL 4).
-- privlevel{1,2,3}.report.bin: configfs-tsm report with privlevel 1-3.
-  All seven commit (H||C) to the first 6 entries of event-log.bin and caller-data.bin.
-- vmpl0.*: the VMPL 0 ioctl report of the same boot, its log and caller data (positive control).

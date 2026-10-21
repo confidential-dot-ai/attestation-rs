@@ -124,43 +124,32 @@ fn bad_log(msg: String) -> AttestationError {
 mod tests {
     use super::*;
 
-    const VECTORS: &str = include_str!("../../../test_data/snp/kmr-vectors.json");
+    fn entry(index: u8, byte: u8) -> Vec<u8> {
+        let mut entry = vec![index];
+        entry.extend([byte; 48]);
+        entry
+    }
+
+    fn hex<const N: usize>(s: &str) -> [u8; N] {
+        hex::decode(s).unwrap().try_into().unwrap()
+    }
 
     struct Vector {
         caller_data: [u8; 64],
         log: Vec<u8>,
-        event_count: u32,
-        registers: Vec<Register>,
         report_data: [u8; 64],
     }
 
-    fn vectors() -> Vec<Vector> {
-        let json: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
-        let hex = |v: &serde_json::Value| hex::decode(v.as_str().unwrap()).unwrap();
-        json["vectors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| Vector {
-                caller_data: hex(&v["caller_data"]).try_into().unwrap(),
-                log: hex(&v["event_log"]),
-                event_count: v["event_count"].as_u64().unwrap() as u32,
-                registers: v["registers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| hex(r).try_into().unwrap())
-                    .collect(),
-                report_data: hex(&v["report_data"]).try_into().unwrap(),
-            })
-            .collect()
-    }
-
-    /// A vector with events in several registers and a longer log than it commits to.
+    /// Four events in registers 0, 1, 0 and 15, and a fifth entry past the
+    /// count. The expected values are from Python hashlib.
     fn prefix_vector() -> Vector {
-        let v = vectors().swap_remove(3);
-        assert!(v.event_count == 4 && v.log.len() == 5 * ENTRY_LEN);
-        v
+        let mut log = [entry(0, 1), entry(1, 2), entry(0, 3), entry(15, 4)].concat();
+        log.extend(entry(4, 5));
+        Vector {
+            caller_data: [7; 64],
+            log,
+            report_data: hex("0400000000000000000000000000000099bc02ea57ae232704f512bcc942c10c023dd6bc7efedde64bb6fc4f0b8ed443b6e6183e3db85da964f4768e0129b6f1"),
+        }
     }
 
     fn verify_vector(v: &Vector) -> Result<Option<MeasurementRegisters>> {
@@ -168,18 +157,21 @@ mod tests {
     }
 
     #[test]
-    fn golden_vectors() {
-        for v in vectors() {
-            let registers = replay(&v.log, v.event_count).unwrap().unwrap();
-            assert_eq!(registers.to_vec(), v.registers);
-            assert_eq!(
-                report_data(v.event_count, &registers, &v.caller_data),
-                v.report_data
-            );
-            let verified = verify_vector(&v).unwrap().expect("commitment matches");
-            assert_eq!(verified.event_count, v.event_count);
-            assert_eq!(verified.registers, v.registers);
-        }
+    fn known_answers() {
+        let caller_data: [u8; 64] = std::array::from_fn(|i| i as u8);
+        let genesis = hex("00000000000000000000000000000000d48e8448c5430f57994fb15caa1855aa3fa0f03b6e4c91511aa3f83b363ad4474bb701d740aac53b0cfabba7c2ffa6a7");
+        let verified = verify(&genesis, &[], &caller_data).unwrap().unwrap();
+        assert_eq!(verified.event_count, 0);
+        assert_eq!(verified.registers, vec![[0; 48]; REGISTER_COUNT]);
+
+        let v = prefix_vector();
+        let mut expected = vec![[0; 48]; REGISTER_COUNT];
+        expected[0] = hex("6198ab2caaa45d0bcc5d1f27e7c4a763f5518d272c0d74c2166aec2c5d280418d9d341caf10434d4f87a4921778d2d6a");
+        expected[1] = hex("66f60db53f35b91eb7f71aad347e076712169849778651cebd1b6f3c3b5eb756820617468d20330a8ea9913f60c1cc55");
+        expected[15] = hex("273130d1fd0a53dad497ed8fc5c79d3c9f3c16963ff6cfac62b5890eeea1fc9bef91b9fefb568e5cdf375bcdbdcc817b");
+        let verified = verify_vector(&v).unwrap().unwrap();
+        assert_eq!(verified.event_count, 4);
+        assert_eq!(verified.registers, expected);
     }
 
     #[test]
@@ -201,35 +193,61 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_log_is_an_error_whatever_the_count() {
+    fn rejected_cases() {
         let v = prefix_vector();
         assert!(verify_vector(&v).unwrap().is_some());
-        let mut past_the_count = v.log.clone();
-        past_the_count[4 * ENTRY_LEN] = 16;
-        let mut trailing = v.log.clone();
-        trailing.push(0);
-        for log in [past_the_count, trailing] {
-            assert!(verify(&v.report_data, &log, &v.caller_data).is_err());
-        }
-    }
-
-    #[test]
-    fn rejected_golden_vectors() {
-        let json: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
-        let hex = |v: &serde_json::Value| hex::decode(v.as_str().unwrap()).unwrap();
-        let rejected = json["rejected"].as_array().unwrap();
-        assert!(!rejected.is_empty());
-        for v in rejected {
-            let result = verify(
-                &hex(&v["report_data"]).try_into().unwrap(),
-                &hex(&v["event_log"]),
-                &hex(&v["caller_data"]).try_into().unwrap(),
+        let four = &v.log[..4 * ENTRY_LEN];
+        let with = |log: &[u8], at: usize, value: u8| {
+            let mut log = log.to_vec();
+            log[at] = value;
+            log
+        };
+        let mut padding = v.report_data;
+        padding[15] = 1;
+        let mut other_caller = v.caller_data;
+        other_caller[63] ^= 1;
+        let reordered = [
+            &four[2 * ENTRY_LEN..3 * ENTRY_LEN],
+            &four[ENTRY_LEN..2 * ENTRY_LEN],
+            &four[..ENTRY_LEN],
+            &four[3 * ENTRY_LEN..],
+        ]
+        .concat();
+        let malformed = [
+            ("index above 15", with(four, 3 * ENTRY_LEN, 16)),
+            (
+                "index above 15 past the count",
+                with(&v.log, 4 * ENTRY_LEN, 16),
+            ),
+            ("trailing partial entry", [four, &[0]].concat()),
+        ];
+        for (name, log) in malformed {
+            assert!(
+                verify(&v.report_data, &log, &v.caller_data).is_err(),
+                "{name}"
             );
-            match v["expect"].as_str().unwrap() {
-                "malformed" => assert!(result.is_err(), "{}", v["name"]),
-                "mismatch" => assert!(result.unwrap().is_none(), "{}", v["name"]),
-                other => panic!("unknown expectation {other}"),
-            }
+        }
+        let mismatch = [
+            (
+                "log shorter than the count",
+                &four[..3 * ENTRY_LEN],
+                v.report_data,
+                v.caller_data,
+            ),
+            ("nonzero header padding", four, padding, v.caller_data),
+            (
+                "reordered within a register",
+                &reordered,
+                v.report_data,
+                v.caller_data,
+            ),
+            ("other caller data", four, v.report_data, other_caller),
+        ];
+        for (name, log, reported, caller_data) in mismatch {
+            assert!(
+                verify(&reported, log, &caller_data).unwrap().is_none(),
+                "{name}"
+            );
         }
     }
 
@@ -243,7 +261,7 @@ mod tests {
     #[test]
     fn a_commitment_over_other_registers_is_rejected() {
         let v = prefix_vector();
-        let mut registers: [Register; REGISTER_COUNT] = v.registers.clone().try_into().unwrap();
+        let mut registers = replay(&v.log, 4).unwrap().unwrap();
         assert!(verify(
             &report_data(4, &registers, &v.caller_data),
             &v.log,
@@ -267,22 +285,6 @@ mod tests {
             verify_vector(&v).unwrap().is_none(),
             "log shorter than the count"
         );
-    }
-
-    #[test]
-    fn other_caller_data_is_rejected() {
-        let mut v = prefix_vector();
-        assert!(verify_vector(&v).unwrap().is_some());
-        v.caller_data[63] ^= 1;
-        assert!(verify_vector(&v).unwrap().is_none());
-    }
-
-    #[test]
-    fn nonzero_header_padding_is_rejected() {
-        let mut v = prefix_vector();
-        assert!(verify_vector(&v).unwrap().is_some());
-        v.report_data[15] = 1;
-        assert!(verify_vector(&v).unwrap().is_none());
     }
 
     /// A seeded xorshift64* generator, so property cases are reproducible.

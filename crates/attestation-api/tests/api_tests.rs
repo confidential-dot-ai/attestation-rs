@@ -579,16 +579,22 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
 #[tokio::test]
 async fn a_measurement_register_token_carries_the_full_log_registers() {
     use attestation::collateral::{AmdCrl, AmdKey, Collateral};
+    use sha2::{Digest, Sha384};
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../attestation/test_data/snp/");
     let read = |file: &str| std::fs::read(format!("{DIR}{file}")).unwrap();
     let report = read("kmr-full-report.bin");
     let caller_data = read("kmr-full-caller-data.bin");
-    let registers: Vec<String> = read("kmr-full-registers.bin")
-        .as_chunks::<48>()
-        .0
-        .iter()
-        .map(|r| BASE64.encode(r))
-        .collect();
+    // The registers after the whole log, replayed with sha2 directly.
+    let mut replayed = [[0u8; 48]; 16];
+    for entry in read("kmr-full-event-log.bin").chunks(49) {
+        let r = &mut replayed[entry[0] as usize];
+        *r = Sha384::new()
+            .chain_update(*r)
+            .chain_update(&entry[1..])
+            .finalize()
+            .into();
+    }
+    let registers: Vec<String> = replayed.iter().map(|r| BASE64.encode(r)).collect();
     let body = |report_data: &[u8]| {
         serde_json::json!({
             "platform": "snp",

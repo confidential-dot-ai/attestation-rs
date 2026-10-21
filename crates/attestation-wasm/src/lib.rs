@@ -236,6 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn snp_measurement_registers_are_checked() {
+        use sha2::{Digest, Sha384};
         let report = read("snp/kmr-full-report.bin");
         let envelope = serde_json::json!({
             "platform": "snp",
@@ -247,12 +248,17 @@ mod tests {
         })
         .to_string();
         let held = fetch(&envelope).await;
-        let registers: Vec<String> = read("snp/kmr-full-registers.bin")
-            .as_chunks::<48>()
-            .0
-            .iter()
-            .map(|r| BASE64.encode(r))
-            .collect();
+        // The registers after the whole log, replayed with sha2 directly.
+        let mut replayed = [[0u8; 48]; 16];
+        for entry in read("snp/kmr-full-event-log.bin").chunks(49) {
+            let r = &mut replayed[entry[0] as usize];
+            *r = Sha384::new()
+                .chain_update(*r)
+                .chain_update(&entry[1..])
+                .finalize()
+                .into();
+        }
+        let registers: Vec<String> = replayed.iter().map(|r| BASE64.encode(r)).collect();
         let evaluate = |registers: &[String]| {
             let policies = serde_json::json!({ "snp": {
                 "report_data": BASE64.encode(read("snp/kmr-full-caller-data.bin")),

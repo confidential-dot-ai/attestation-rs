@@ -248,6 +248,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",

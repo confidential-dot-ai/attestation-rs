@@ -109,13 +109,13 @@ fn launch_digest_mismatch_prints_result_and_exits_one() {
 fn a_measurement_register_report_fails_the_requesters_report_data() {
     const DIR: &str = "../attestation/test_data/snp";
     let read = |file: &str| std::fs::read(format!("{DIR}/{file}")).unwrap();
-    let report = read("kmr-report.bin");
+    let report = read("kmr-full-report.bin");
     let evidence = serde_json::json!({
         "platform": "snp",
         "evidence": {
             "attestation_report": BASE64.encode(&report),
             "cert_chain": { "vcek": BASE64.encode(read("kmr-vcek.der")) },
-            "event_log": BASE64.encode(read("kmr-event-log.bin")),
+            "event_log": BASE64.encode(read("kmr-full-event-log.bin")),
         },
     });
     // 2026-10-20, inside the kernel guest VCEK's window.
@@ -134,7 +134,7 @@ fn a_measurement_register_report_fails_the_requesters_report_data() {
     let out = verify(&report[0x50..0x90]);
     assert_eq!(out.status.code(), Some(0), "the raw REPORT_DATA matches");
 
-    let out = verify(&read("kmr-caller-data.bin"));
+    let out = verify(&read("kmr-full-caller-data.bin"));
     assert_eq!(out.status.code(), Some(1));
     let json = stdout_json(&out);
     assert_eq!(json["report_data_match"], false);
