@@ -315,6 +315,12 @@ A `gpu/<ueid>` or `nvswitch/<ueid>` submodule carries the device evidence exactl
 
 The two base64 members keep NVIDIA's encoding because NRAS consumes them as text; they are the only byte-carrying members of the profile that do not follow Section 4.7. The attester obtains them from the device with the SPDM nonce of Section 5.4 (`nras-nonce`). A device submodule's binding names the challenge pattern because the device protocol takes a nonce on every exchange (Section 5.1); the nonce is the envelope's, so under a `cpu` submodule in the certificate pattern the device evidence is as old as the certificate. Other members of a device submodule are ignored.
 
+### 4.6. Nested Arm CCA token
+
+For Arm CCA the `cpu` submodule is a nested token (RFC 9711 section 4.2.18.3): the CCA attestation token bytes exactly as the RMM returned them. In JSON it is the array `["CBOR", <token as base64url>]`; in CBOR it is the byte string. No `cvm_report` wrapper is used because the token is already an EAT, and the realm token's challenge carries the binding (Section 9.6).
+
+A CCA `cpu` submodule has no `cvm_binding`: it is in the challenge pattern, in `cca-challenge` mode, and binds no key in version 1. A policy that names `freshness.key` refuses it with `binding-mismatch`.
+
 ### 4.7. Encoding rules
 
 JSON (the primary encoding):
@@ -940,6 +946,89 @@ The `cpu` submodule's claims are those of Section 9.1.5 or 9.2.5 with hosting `a
 ### 9.5. Google Cloud confidential VMs
 
 Google Cloud SEV-SNP and TDX guests obtain the raw hardware report through the guest kernel, exactly as on bare metal, with hosting `gcp`. Evidence, authentication, binding and claims are those of Sections 9.1 and 9.2, and `gcp` admits the same report types and modes as `bare`.
+
+### 9.6. Arm CCA
+
+An Arm CCA realm is attested by a token the Realm Management Monitor (RMM) returns: a realm token signed by the Realm Attestation Key (RAK), and a platform token signed by the CCA Platform Attestation Key (CPAK) that binds the RAK. The `cpu` submodule carries the token as a nested token (Section 4.6), with hosting `bare`.
+
+#### 9.6.1. Evidence
+
+The realm calls `RSI_ATTESTATION_TOKEN_INIT` with the 64-byte challenge `pad64(anchor)` and reads the token with `RSI_ATTESTATION_TOKEN_CONTINUE` (RMM specification, section B5). Two top-level forms exist, and a verifier accepts exactly these two by allowlist. The collection MUST contain exactly the labels 44234 and 44241: draft-ffm-rats-cca-token-04 lets a tag-907 collection carry further entries (a firmware activity list, device tokens, a certificate chain), and version 1 refuses any other entry with `unsupported`.
+
+| Form | Encoding | Emitted by |
+| --- | --- | --- |
+| collection under tag 907 | `#6.907({44234: [263, bytes .cbor COSE_Sign1<platform>], 44241: [263, bytes .cbor COSE_Sign1<realm>]})`, each value a CMW record whose type is CoAP content-format 263 (`application/eat+cwt`) | RMM specification 2.0 (in beta as 2.0-bet3) and draft-ffm-rats-cca-token-02 and later; the reference RMM firmware by default from its 0.9.0 release |
+| collection under tag 399 | `#6.399({44234: bytes .cbor COSE_Sign1<platform>, 44241: bytes .cbor COSE_Sign1<realm>})` | RMM specification 1.0-rel0 and draft-ffm-rats-cca-token-00 and -01 |
+
+Neither tag is assigned in the IANA CBOR Tags registry (Section 17.3). Both tokens are tagged COSE_Sign1 (RFC 9052).
+
+#### 9.6.2. Profiles and binding
+
+The platform token binds the realm token through the hash of the RAK: the hash, with the algorithm the realm token names in its public-key hash algorithm claim (44240), of the content bytes of the realm public key claim (44237), which is an encoded COSE_Key. The claim that carries the hash depends on the platform profile:
+
+| Platform profile (claim 265) | Realm profile | Binding claim in the platform token |
+| --- | --- | --- |
+| `tag:arm.com,2023:cca_platform#1.0.0` | `tag:arm.com,2023:realm#1.0.0` | challenge (10) |
+| `tag:arm.com,2024:cca_platform#2.0.0` | `tag:arm.com,2024:realm#2.0.0` | challenge (10) |
+| `tag:arm.com,2026:cca_platform#2.0.0`, and its delegated variant (spelled `;delegated` in draft-ffm-rats-cca-token-04 and `#delegated` in the RMM specification 2.0-bet3) | `tag:arm.com,2026:realm#2.0.0` | workload binding (2408) |
+
+Either top-level form may carry any of these profile pairs. The realm token's profile claim (265) is OPTIONAL in the CCA token drafts and in the RMM 1.0 CDDL; when it is absent, the realm profile is the one the platform profile's row names. A token whose pair of profiles is not one row of this table (a pair taken from two rows included), a token under another platform profile (such as `tag:arm.com,2024:cca_platform#1.1.0` and `tag:arm.com,2026:cca_platform#2.1.0`, which draft-ffm-rats-cca-token-04 also defines), a 2026 platform token that also carries a challenge claim (10), and a token using the direct or HESRAK binding variants are refused with `unsupported` in version 1.
+
+#### 9.6.3. Claims used
+
+Realm token:
+
+| Key | Claim | Use |
+| --- | --- | --- |
+| 10 | challenge, 64 bytes | MUST equal `pad64(anchor)` (`cca-challenge`) |
+| 44235 | Realm Personalization Value, 64 bytes | `cvm_host_data`, semantics `cca-rpv` |
+| 44236 | hash algorithm identifier, text | `alg` of the RIM and REMs: `sha-256`, `sha-384` or `sha-512` map to `sha256`, `sha384`, `sha512` |
+| 44237 | RAK, an encoded COSE_Key | verifies the realm token; its hash binds the platform token |
+| 44238 | Realm Initial Measurement | `cvm_launch_measurement` |
+| 44239 | Realm Extensible Measurements, 4 values | `cca-rem` registers 0 to 3 |
+| 44240 | RAK hash algorithm identifier, text | the binding hash |
+
+Platform token:
+
+| Key | Claim | Use |
+| --- | --- | --- |
+| 2396 | implementation ID, 32 bytes | `cvm_platform.generation`, in lowercase hexadecimal; selects the vendor's endorsements |
+| 256 | instance ID, a 33-byte UEID whose first byte is 0x01 | `cvm_identity.instance_id`; selects the CPAK |
+| 2395 | security lifecycle | guest policy (Section 9.6.5); `cvm_tcb.lifecycle` |
+| 2399 | software components | `cvm_tcb.sw_components`: component type (1), measurement value (2), version (4), signer ID (5), hash algorithm (6) |
+| 2400 | verification service, text | a hint for where the vendor's endorsements are served |
+| 2402 | platform hash algorithm identifier | the algorithm of the software component measurements |
+
+#### 9.6.4. Authentication
+
+1. Endorsement. The verifier pins, per platform vendor, the key that signs the vendor's CoRIM (draft-ietf-rats-corim-11). The CoRIM for the implementation ID carries attestation-key triples that bind each instance ID to its CPAK, and reference-value triples for the platform software components. There is no single root for CCA platforms; the CoRIM is the endorsement, and it is REQUIRED: without it the platform token cannot be authenticated, and the verifier refuses with `collateral-unavailable` whatever the policy says.
+2. Platform token. The CPAK the CoRIM binds to the token's instance ID verifies the platform token's COSE_Sign1 signature (ES256 or ES384, RFC 9053, as its protected header names).
+3. Realm token. The RAK of claim 44237 verifies the realm token's COSE_Sign1 signature (ES384).
+4. Binding. The platform token's binding claim (Section 9.6.2) equals the hash of the RAK.
+5. Platform software. Every software component's measurement and signer ID equals a reference value the CoRIM endorses for the implementation ID. This one check is waived when the policy sets `tcb.require_signed_collateral` to false; the waiver is reported as `cca_corim` `skipped` with a reason, and `hardware` then makes no claim.
+6. Allowlist. With a machine allowlist, the instance ID MUST be on it.
+
+#### 9.6.5. Guest policy and normalized claims
+
+The security lifecycle's bits 15:8 name its state: 0x30 is secured; 0x40 (non-platform-RoT debug) and 0x50 (recoverable platform-RoT debug) are debug states; every other state (unknown, assembly and test, provisioning, decommissioned) is refused. A debug state is refused unless `allow_debug`, and is then reported with `configuration` 96. A realm cannot migrate under the RMM specification, so `migratable` is false.
+
+| Claim | Source |
+| --- | --- |
+| `cvm_platform` | vendor `arm`, TEE `cca`, generation the implementation ID, hosting `bare` |
+| `cvm_launch_measurement` | `{alg, value}`: the RIM under the realm hash algorithm |
+| `cvm_registers` | REM 0 to 3 as `cca-rem`, backing `hardware`, `replayed` false |
+| `cvm_host_data` | `{semantics: "cca-rpv", value: RPV}` |
+| `cvm_policy` | `{debug, migratable}`: `debug` true in a debug lifecycle state |
+| `dbgstat` | `enabled` in a debug lifecycle state, `disabled-since-boot` otherwise |
+| `cvm_tcb` | `{lifecycle, sw_components}` |
+| `cvm_identity` | `{instance_id}` |
+
+Version 1 does not replay REMs. The RMM specification and its reference implementation define the REM extend input differently for extensions shorter than 64 bytes and for hash algorithms other than SHA-512, so a replay rule cannot yet be fixed; REMs are pinned by value (`reference.registers`) and reported with `replayed` false. A later revision defines REM replay from a CEL log once the extend function is settled.
+
+#### 9.6.6. Collateral
+
+The vendor's signed CoRIM, identified by the collateral key `cca_corim/<implementation id hex>` (Section 10.3). The platform token's verification service claim is unauthenticated when the verifier reads it, so a verifier fetches only from origins its configuration names; the claim MAY select among them and never adds one.
+
 
 ### 9.7. NVIDIA GPUs and NVSwitch
 
