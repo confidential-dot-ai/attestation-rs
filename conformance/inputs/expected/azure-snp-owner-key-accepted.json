@@ -1,0 +1,330 @@
+{
+  "ear_all_submods_bound": "true",
+  "eat_nonce": "YXR0ZXN0YXRpb24tdGVzdC1maXh0dXJl",
+  "eat_profile": "tag:ietf.org,2026:rats/ear#04",
+  "submods": {
+    "cpu": {
+      "ear_appraisal_policy_ids": [
+        "tag:confidential.ai,2026:cvm#1",
+        "ni:///sha-384;nSiqMFSg0SA6JzNw1yr78yVYBOv0bkIkdwwRt7zyP7dfyyjPhBREYftePKEQA_Q4"
+      ],
+      "ear_attester_claims": {
+        "cvm_freshness": {
+          "mode": "vtpm-extradata",
+          "pattern": "challenge"
+        },
+        "cvm_host_data": {
+          "semantics": "snp-host-data",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_identity": {
+          "chip_id": "Blr6c-XM861sViPifP5u8xPiDgiJQwoLjDsU9ia3Fi5AS1fY4YM7EOQdSCw1GFND4IBpAaaMUVfCCNx6juqr6Q"
+        },
+        "cvm_launch_measurement": {
+          "alg": "sha384",
+          "value": "agY76d159jcchC5ID43DtccllhNE5XEw6Ixa30no9_bHm3Wl63f8dplZ9K6y-UAe"
+        },
+        "cvm_owner": {
+          "author_key_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "family_id": "AiEgAAAAAAAAAAAAAAAAAA",
+          "id_key_digest": "lC_ZPr3m6nqW763q_GDxxrPRDnA7Ha_XVVuS9_PTLQ4AZ2dkjLpbECrz1ldWr0F3",
+          "image_id": "AgAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_platform": {
+          "generation": "Milan",
+          "hosting": "azure",
+          "tee": "sev-snp",
+          "vendor": "amd"
+        },
+        "cvm_policy": {
+          "debug": false,
+          "migratable": false,
+          "single_socket": false,
+          "smt": true,
+          "vmpl": 0
+        },
+        "cvm_tcb": {
+          "committed": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          },
+          "current": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          },
+          "launch": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          },
+          "reported": {
+            "bootloader": 4,
+            "microcode": 219,
+            "snp": 24,
+            "tee": 0
+          }
+        },
+        "dbgstat": "disabled-since-boot",
+        "snp": {
+          "chip_id": "065afa73e5ccf3ad6c5623e27cfe6ef313e20e0889430a0b8c3b14f626b7162e404b57d8e1833b10e41d482c35185343e0806901a68c5157c208dc7a8eeaabe9",
+          "init_data": "0000000000000000000000000000000000000000000000000000000000000000",
+          "measurement": "6a063be9dd79f6371c842e480f8dc3b5c725961344e57130e88c5adf49e8f7f6c79b75a5eb77fc769959f4aeb2f9401e",
+          "platform_smt_enabled": true,
+          "platform_tsme_enabled": false,
+          "policy_abi_major": 0,
+          "policy_abi_minor": 31,
+          "policy_debug_allowed": false,
+          "policy_migrate_ma": false,
+          "policy_single_socket": false,
+          "policy_smt_allowed": true,
+          "report_data": "094f612be41d84ea09ac048e067568272608943c9937f6c714049b7c26baca0f0000000000000000000000000000000000000000000000000000000000000000",
+          "reported_tcb_bootloader": 4,
+          "reported_tcb_microcode": 219,
+          "reported_tcb_snp": 24,
+          "reported_tcb_tee": 0
+        }
+      },
+      "ear_status": "affirming",
+      "ear_trustworthiness_vector": {
+        "configuration": 2,
+        "executables": 3,
+        "runtime-opaque": 2
+      },
+      "ear_verifier_claims": {
+        "cvm_collateral": {
+          "snp_crl": {
+            "status": "skipped"
+          }
+        },
+        "cvm_reference": {
+          "launch_measurement": true
+        }
+      }
+    },
+    "vtpm": {
+      "ear_appraisal_policy_ids": [
+        "tag:confidential.ai,2026:cvm#1",
+        "ni:///sha-384;nSiqMFSg0SA6JzNw1yr78yVYBOv0bkIkdwwRt7zyP7dfyyjPhBREYftePKEQA_Q4"
+      ],
+      "ear_attester_claims": {
+        "cvm_freshness": {
+          "mode": "vtpm-extradata",
+          "pattern": "challenge"
+        },
+        "cvm_registers": [
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 0,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "4VxEeWvqv0arzsfFflkJQgQeR0l-TsJ1cci3Zk9I3O0"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 1,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "fYHxRbTgYSKgIEijnE61gyw-TdHROr7x2AL1rY1PJuU"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 2,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "PUWM_lXMA-ofRD8VYr7sjfUcdeFKn8-acjShPxmOeWk"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 3,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "PUWM_lXMA-ofRD8VYr7sjfUcdeFKn8-acjShPxmOeWk"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 4,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "7ucMhuqFaidxmiEn1gkPAuEA4pR8FqDWo1X3KUOCmS8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 5,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "j0V0m_du0pKTd7p8DEnfkaUevvpMJh5uoYZ2ZQFxy4w"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 6,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "vzr_-3wv_ApQBXzk8mNx9FOdBcrCX8kCb7XFnRoG4b8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 7,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "OyDgIkFv32HXLk2jK0NUeBvj3gYIEWl20o_9rYw0HSo"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 8,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 9,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "U5lTyrhtKz0v7kHdfi5phzCl_PLOX-O5vZpO_OXg5NE"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 10,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "xPleAV-0fq974s3Q_6K0iZCbL4z5PykLK7C06oa98qg"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 11,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 12,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "8aFCxTWG5-IiPsdOX00aSUKVax_ZrHj6_N-FEXqjRdo"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 13,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 14,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "MG-di5TxfZPcbnz49cedZS60xsTRPeLd3CSvQW4T7K8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 15,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 16,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 17,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 18,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 19,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 20,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 21,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 22,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "__________________________________________8"
+          },
+          {
+            "alg": "sha256",
+            "backing": "privileged-service",
+            "index": 23,
+            "replayed": false,
+            "source": "vtpm-pcr",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        ],
+        "cvm_tpm_ak": {
+          "data": "SENMQQEAAAAqCQAAAgAAAAAAAAAAAAAAAAAAAAAAAAADAAAACgAAAB8AAwAAAAAAAiEgAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAQAAAAAABjbJQAAAAAAAAAAAAAAAAAAAAlPYSvkHYTqCawEjgZ1aCcmCJQ8mTf2xxQEm3wmusoPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABqBjvp3Xn2NxyELkgPjcO1xyWWE0TlcTDojFrfSej39sebdaXrd_x2mVn0rrL5QB4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJQv2T695up6lu-t6vxg8caz0Q5wOx2v11Vbkvfz0y0OAGdnZIy6WxAq89ZXVq9BdwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH7-Lxf2C5yIzFHA4nHP0Ab6DUVWgZty-Uip7MGm4AvO__________________________________________8EAAAAAAAY2xkBAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAZa-nPlzPOtbFYj4nz-bvMT4g4IiUMKC4w7FPYmtxYuQEtX2OGDOxDkHUgsNRhTQ-CAaQGmjFFXwgjceo7qq-kEAAAAAAAY2x03AQAdNwEABAAAAAAAGNsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC61A5X73cU1KfLy9byLUUnRRB_iksmLhuk2sEqU2m8cy1dzvFkatajmKCMubIkingAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAevj1Dh9S6ZnCMjh9Wq-pRI9rAUfc5WSrsuX6NhsfbjyKjE5w17CEnem4SctMNWMUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGoEAAABAAAAAgAAAAEAAABWBAAAeyJrZXlzIjpbeyJraWQiOiJIQ0xBa1B1YiIsImtleV9vcHMiOlsic2lnbiJdLCJrdHkiOiJSU0EiLCJlIjoiQVFBQiIsIm4iOiJwNERLbHdBQkRqcXd3SGdiaHA1WGU4ckZQX2JsN3EzWHBmVVZGQjdlY243YXFxVlA5c253RmNjd1c0Q1haemp2dnc5UjhBdnl5VXktYkg1UGstN2VvRXFQdmV2VVkwTXp4aHBYZjVUeS1abWlINUVUXzhqWUZsSXpJWXdjQUlCSEZWOEN5THFZSWFBQVlGUkt3OFJjOVRGV2k2TjhGZ1NDclEyMUFBVF8xUHVpYXo3TjJKRXZOeEJ5cGxrbF80cmdVN29TM0RlUnJtb2pfQlFBQi1vSWM4SUxPSDEtX3JxbnhSeTBqNmZMZFBBdDFUSnhiMFZkYWs4WmRRMUkwVlNIaTJRMTgyanJWNFZxYkN4RnhNQ2lWMzdYRk9GR1I3WkZ5UEJtRlhtY1JESW1pcTRpMEZIOEs5QXNUWXpZX0Izc1EtbElDcDRIQnV4UWtfRGFsdXlVcncifSx7ImtpZCI6IkhDTEVrUHViIiwia2V5X29wcyI6WyJlbmNyeXB0Il0sImt0eSI6IlJTQSIsImUiOiJBUUFCIiwibiI6IndJSnNiZ0FBdkV1WkotVGtObDl2ZUdqOThYbU55cVBqdGJQWGtJRnl2aGgydTIteTU3WWd1cWwtczZrOHRwaC1XQkh4cXh5b3AtLWticnVrQjN2aFJodkF1akFvYWJybnBZNEx5a3pRTWdCSUFsSkNkd1h6YUgzUjQ2aElXUVFSN3gyNWJlNGowTzdhN3FRUEdMcW9OY2N3RTJCdWQ2Y0ExTW9ETmZnTW5haHFaWXN5VVdIbXBNdlZ4UmdIbVg5dzNkOUNLSGE5U0JNRUNlWVdvOTNYdUpWOFVfYktmbEZXMEQyTDRnRVFtWTNaUnBaQjBIZC1Xbks1OUhpNi03R1dxbGszdzUzaU9ZNlpydEpTd3BsZzRtcnJvc0hocEJyR2Q1Mk9NSHgyNDlzZXNHLUxRRHJtODFTcTJmT1FvXzFNUXRUamhtS09TTmNRcVEtelBtUFhUdyJ9XSwidm0tY29uZmlndXJhdGlvbiI6eyJjb25zb2xlLWVuYWJsZWQiOnRydWUsInNlY3VyZS1ib290Ijp0cnVlLCJ0cG0tZW5hYmxlZCI6dHJ1ZSwidm1VbmlxdWVJZCI6IjAyRkUxMkVDLTVCNzQtNEExQi1CMjYxLThFQTQ2RkU5QUYzNiJ9LCJ1c2VyLWRhdGEiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCJ9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "method": "hcl-report"
+        }
+      },
+      "ear_status": "none",
+      "ear_trustworthiness_vector": {
+        "executables": 0
+      },
+      "ear_verifier_claims": {
+        "cvm_backing_min": {
+          "required": "privileged-service",
+          "weakest_seen": "privileged-service"
+        }
+      }
+    }
+  }
+}
