@@ -640,6 +640,135 @@ https://kdsintf.amd.com/vcek/v1/{Milan|Genoa|Turin}/crl
 
 `{hwid}` is `CHIP_ID` in lowercase hexadecimal (its first 8 bytes on Turin), the SPLs are the components of `REPORTED_TCB` in decimal, and `fmcSPL` is present exactly on Turin. A VLEK is issued to the cloud provider and carried inline; KDS serves its chain and CRL at `/vlek/v1/{product}/cert_chain` and `/vlek/v1/{product}/crl`, and the CRL is the same ARK-signed list as the VCEK path's.
 
+### 9.2. Intel TDX
+
+This binding covers TDX guests with hosting `bare`, `gcp` and `dstack`, and supplies the hardware quote for Azure TDX (Section 9.4).
+
+#### 9.2.1. Evidence
+
+The attester obtains a TD quote through the guest kernel (the configfs-tsm report interface or the TDX guest device and the host's quoting service) with `REPORTDATA` set to `pad64(anchor)`. It carries the quote in `cvm_report` with type `application/vnd.confidential-ai.tdx-quote`, MAY carry the RTMRs as `tdx-rtmr` registers and the ACPI CCEL as a `tdx-ccel` log (or a `tcg-cel-*` log), and MAY carry Intel collateral in `cvm_endorsements`.
+
+#### 9.2.2. Quote layout
+
+The quote header is 48 bytes, little-endian:
+
+| Offset | Length | Field | Requirement |
+| --- | --- | --- | --- |
+| 0 | 2 | version | 4 or 5 |
+| 2 | 2 | attestation key type | 2 (ECDSA-256 with P-256) |
+| 4 | 4 | TEE type | 0x00000081 (TDX) |
+| 12 | 16 | QE vendor ID | Intel's `939a7233f79c4ca9940a0db3957f0607` |
+| 28 | 20 | user data | not used |
+
+A version 4 quote carries the TD report body at offset 48. A version 5 quote carries a body type (2 bytes) at 48, a body size (4 bytes) at 50 and the body at 54; type 2 is a TDX 1.0 body of 584 bytes and type 3 a TDX 1.5 body of 648 bytes, and the body size MUST equal its type's length. Type 1 (an SGX enclave report) and type 4 (the 885-byte body Intel's quote verification library calls TD Report 1.5 Ex) are refused with `report-invalid` in version 1, as is any violation of the header table. Offsets within the body:
+
+| Body offset | Length | Field | Use |
+| --- | --- | --- | --- |
+| 0 | 16 | `TEE_TCB_SVN` | `cvm_tcb.tee_tcb_svn`; TCB level matching. Byte 0 is the TDX module's minor SVN, byte 1 its major SVN, byte 2 the microcode SE_SVN when the module was loaded |
+| 16 | 48 | `MRSEAM` | `tdx_mrseam`; TDX module identity |
+| 64 | 48 | `MRSIGNERSEAM` | `tdx_mrsignerseam`; TDX module identity |
+| 112 | 8 | `SEAMATTRIBUTES` | TDX module identity |
+| 120 | 8 | `TDATTRIBUTES` | guest policy (Section 9.2.5) |
+| 128 | 8 | `XFAM` | `tdx_xfam` |
+| 136 | 48 | `MRTD` | `cvm_launch_measurement`, `alg` `sha384` |
+| 184 | 48 | `MRCONFIGID` | `cvm_host_data`, semantics `tdx-mrconfigid` |
+| 232 | 48 | `MROWNER` | `cvm_owner.mr_owner` |
+| 280 | 48 | `MROWNERCONFIG` | `cvm_owner.mr_owner_config` |
+| 328, 376, 424, 472 | 48 each | `RTMR0` to `RTMR3` | `tdx-rtmr` registers 0 to 3 |
+| 520 | 64 | `REPORTDATA` | the binding |
+| 584 | 16 | `TEE_TCB_SVN2` | TDX 1.5 bodies |
+| 600 | 48 | `MRSERVICETD` | TDX 1.5 bodies; `cvm_policy.service_td` is true when non-zero |
+
+After the body: a 4-byte signature data length, then the quote signature (64 bytes, `r || s`), the attestation key (64 bytes, `x || y` of a P-256 point), and certification data of type 6 (QE report certification data): the QE report body (384 bytes), its signature (64 bytes), the QE authentication data (a 2-byte length and the data), and nested certification data of type 5 (the PEM PCK certificate chain). Each certification data is a 2-byte type and a 4-byte size followed by that many bytes.
+
+#### 9.2.3. Authentication
+
+1. Quote signature. The attestation key verifies the ECDSA P-256 SHA-256 signature over the header and the body (for version 5, including the body type and size).
+2. Quoting enclave. The PCK leaf's key verifies the QE report signature over the 384-byte QE report body. The QE report's `REPORTDATA` (offset 320) equals `SHA-256(attestation key || QE authentication data) || zeros32`.
+3. PCK chain. The chain is leaf, PCK Platform or Processor CA, and Intel SGX Root CA, whose key the verifier pins (Appendix E). Every certificate is inside its window at the evaluation time. The leaf is not on the PCK CRL of its issuing CA, and the intermediate is not on the Root CA CRL; each CRL is signed by its issuer and inside its window.
+4. QE Identity. The TCB signing certificate is the one certificate of the collateral's issuer chain below the pinned root: its subject names it an Intel SGX TCB Signing certificate, the root signs it, it is inside its window at the evaluation time, and it is not on the Root CA CRL; a failure is refused with `collateral-invalid`. The TD QE Identity has version 2 and `id` `TD_QE`, is signed by the TCB signing certificate, and is inside its `nextUpdate`. The QE report's `MRSIGNER` and `ISVPRODID` equal its values, and `MISCSELECT` and `ATTRIBUTES` equal them under their masks. Its TCB levels are ordered descending by `isvsvn`, then by `tcbDate`, and two levels equal under that order make it invalid; the QE's `ISVSVN` selects the first level whose `isvsvn` it meets. A QE matching no level, or a `Revoked` level, is refused with `tcb-not-allowed`.
+5. TCB Info. The TCB Info is signed by the TCB signing certificate, has `id` `TDX` and version 3, carries the FMSPC and PCE identifier of the PCK leaf's SGX extensions, and has a `nextUpdate` after the evaluation time. The verifier then evaluates the TCB following Intel's quote verification library at the revision of Section 19.1, with the deviations step 4 states:
+   1. TDX module identity. When `TEE_TCB_SVN[1]` is 0, `MRSIGNERSEAM` MUST equal the TCB Info's `tdxModule.mrsigner`, and `SEAMATTRIBUTES` MUST be zero and equal its `attributes`. When `TEE_TCB_SVN[1]` is greater than 0, the same checks use the `tdxModuleIdentities` entry whose `id` is `TDX_` followed by `TEE_TCB_SVN[1]` as two hexadecimal digits, compared without regard to case, and the module's status is that of the first of the entry's TCB levels, in descending `isvsvn` order, whose `isvsvn` is at most `TEE_TCB_SVN[0]`. A missing entry or level is refused with `tcb-not-allowed`.
+   2. Platform level. The TCB levels are ordered descending by their SGX components, then PCESVN, then TDX components, compared lexicographically, and two levels equal under that order make the TCB Info invalid. The selected level is the first whose SGX components are each at most the PCK certificate's corresponding component, whose PCESVN is at most the certificate's PCESVN, and whose TDX components are each at most the corresponding byte of `TEE_TCB_SVN`, comparing from byte 2 when `TEE_TCB_SVN[1]` is greater than 0. No matching level is refused with `tcb-not-allowed`.
+   3. Effective status. Start from the selected level's status. If the module status or the QE Identity level's status is `OutOfDate`, `UpToDate` and `SWHardeningNeeded` become `OutOfDate`, and `ConfigurationNeeded` and `ConfigurationAndSWHardeningNeeded` become `OutOfDateConfigurationNeeded`. If either is `Revoked`, the effective status is `Revoked`. The advisories are the selected level's, then the QE Identity level's, then the module's.
+   4. The effective status MUST be in `tcb.tdx_allowed_status`; `Revoked` is always refused. Version 1 departs from the library in three ways: for a TDX 1.5 body it evaluates `TEE_TCB_SVN` only, where the library also evaluates `TEE_TCB_SVN2` and can return `TdRelaunchAdvised`, so a module updated in place since launch is judged at its launch level; and it does not restrict QE levels to the five statuses, or module levels to the three, that the library accepts, which Intel's collateral does not exceed.
+6. Allowlist. With a machine allowlist, the PPID of the PCK leaf MUST be on it.
+
+The PCK leaf's SGX extensions (PCK specification) supply: PPID (`1.2.840.113741.1.13.1.1`, 16 bytes), the TCB components and PCESVN (`.2.1` to `.2.17`), and FMSPC (`.4`, 6 bytes).
+
+#### 9.2.4. Generation
+
+The generation of a TDX platform is its FMSPC, from the PCK leaf, as twelve lowercase hexadecimal digits.
+
+#### 9.2.5. Guest policy and normalized claims
+
+`TDATTRIBUTES` is read as a 64-bit little-endian integer, with the bit assignments of the TDX Module ABI specification (348551-008, Table 3.23):
+
+| Bits | Name | Rule |
+| --- | --- | --- |
+| 3:0 | TUD group (TD under debug); bit 0 is `DEBUG`, bits 3:1 reserved | any bit set puts the TD under debug; refused unless `allow_debug` |
+| 6:4 | TD-under-profiling group (bits 15:4 in the ABI, of which 15:7 are reserved): `HGS_PLUS_PROF`, `PERF_PROF`, `PMT_PROF` | any bit set lets the host profile the TD, which this profile treats as debug; refused unless `allow_debug` |
+| 16 | `ICSSD` | permitted |
+| 17 | `SERVTD_EXT` | permitted |
+| 22:18 | `RESERVED_P` | ignored, as the ABI specification allows |
+| 27 | `LASS` | permitted |
+| 28 | `SEPT_VE_DISABLE` | MUST be set under `require_sept_ve_disable` |
+| 29 | `MIGRATABLE` | refused unless `allow_migration` |
+| 30 | `PKS` | permitted |
+| 31 | `KL` (reserved in later ABI revisions) | permitted |
+| 62 | `TPA` | permitted |
+| 63 | `PERFMON` | permitted |
+| 3:1, 15:7, 26:23, 61:32 | reserved, mask `0x3FFFFFFF0780FF8E` | MUST be zero under `require_zero_reserved_attributes` |
+
+The TDX DCAP quote format document still shows an older attribute layout; the ABI specification governs.
+
+A non-zero `MRSERVICETD` in a TDX 1.5 quote is refused unless `allow_service_td`.
+
+| Claim | Source |
+| --- | --- |
+| `cvm_platform` | vendor `intel`, TEE `tdx`, generation the FMSPC, hosting as reported |
+| `cvm_policy` | `{debug, migratable, sept_ve_disable, service_td?, reserved_bits_zero}`: `debug` when any of bits 6:0 is set, `migratable` bit 29, `sept_ve_disable` bit 28, `reserved_bits_zero` when the reserved mask is clear, and `service_td` (TDX 1.5 bodies only) when `MRSERVICETD` is not zero |
+| `dbgstat` | `enabled` when any of bits 6:0 is set, `disabled-since-boot` otherwise |
+| `cvm_tcb` | `{tee_tcb_svn, pck_tcb, pcesvn, fmspc, status?, advisories?}`: `TEE_TCB_SVN`; the PCK certificate's 16 TCB components and PCESVN; the FMSPC; and, when collateral was checked, the effective status and the advisories of Section 9.2.3 step 5 |
+| `cvm_identity` | `{ppid}` |
+| `cvm_owner` | `{mr_owner, mr_owner_config}` |
+| `cvm_host_data` | `{semantics: "tdx-mrconfigid", value: MRCONFIGID}` |
+| `tdx_*` | the compatibility claims of Section 12.6, in lowercase hexadecimal |
+
+#### 9.2.6. Binding, registers and logs
+
+The binding is `report-data`: `REPORTDATA == pad64(anchor)`; on Azure, `vtpm-extradata` (Section 9.4). The RTMRs are `tdx-rtmr` registers 0 to 3 with backing `hardware`. A `tdx-ccel` log maps `MrIndex` 1 to 4 to RTMR 0 to 3, skips records at `MrIndex` 0 (which describe `MRTD`), refuses any higher index with `replay-mismatch`, and replays in the SHA-384 bank from zero; a CEL log replays the same way.
+
+#### 9.2.7. Collateral
+
+`tdx.tcb_info`, `tdx.qe_identity`, `tdx.pck_crl` and `tdx.root_crl` (Section 10.1). Intel PCS serves them at:
+
+```
+https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc={fmspc}
+https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity
+https://api.trustedservices.intel.com/sgx/certification/v4/pckcrl?ca={platform|processor}[&encoding=der]
+https://certificates.trustedservices.intel.com/IntelSGXRootCA.der
+```
+
+The TCB Info's issuer chain is in the `TCB-Info-Issuer-Chain` response header and the QE Identity's in `SGX-Enclave-Identity-Issuer-Chain`, percent-encoded PEM. The signature in each response covers the exact bytes of its `tcbInfo` or `enclaveIdentity` member. The `pckcrl` endpoint returns PEM unless `encoding=der` is given; a verifier accepts either and holds the DER (Section 10.1).
+
+### 9.3. dstack
+
+dstack runs TDX and SEV-SNP guests whose guest agent returns the hardware report and, on TDX, an event log. Evidence and authentication are those of Section 9.1 or 9.2 with hosting `dstack`; the report is always the raw hardware report (the configfs-tsm JSON type is not accepted), and the binding is `report-data`, or `commitment` for an SEV-SNP guest with a register provider. The attester obtains the report from the guest agent with its report data set as the mode requires. The `dstack-json` log format applies to TDX guests only.
+
+dstack's log is carried as `dstack-json` (Section 7.1): a JSON array of events `{imr, event_type, digest, event, event_payload, version?, preimage?}`, strictly parsed (a duplicate or unknown member is refused), with `imr` the RTMR ordinal 0 to 3 (no offset), `digest` 48 bytes in hexadecimal, and `event_payload` in hexadecimal.
+
+- A boot event keeps the TCG digest it carries, carries no `preimage`, and carries `version` only as 1.
+- A runtime event has `event_type` 0x08000001, and its digest is recomputed from its content under its `version`, absent meaning 1:
+  - version 1: `SHA-384(u32le(0x08000001) || ":" || event || ":" || event_payload)`, where `event` is the UTF-8 name and `event_payload` the payload bytes; a name containing `:` is refused, so the hash input splits back into one name; `preimage` MUST be absent;
+  - version 2: `SHA-384(p)`, where `p` is the JCS serialization (RFC 8785) of `{"name": event, "payload": <lowercase hexadecimal of event_payload>, "type": 134217729}`; the event's `preimage` member is REQUIRED, is the hexadecimal encoding of `p`, and MUST decode to `p` byte for byte.
+- A log that breaks these shape rules (a name containing `:`, a missing, extra or non-matching `preimage`, another `version`) is refused with `log-invalid`; a runtime event whose recomputed digest differs from its `digest` is refused with `replay-mismatch`.
+- Replay is `R = SHA-384(R || digest)` from zero for each RTMR the log extends, and each MUST reproduce the signed RTMR.
+
+### 9.5. Google Cloud confidential VMs
+
+Google Cloud SEV-SNP and TDX guests obtain the raw hardware report through the guest kernel, exactly as on bare metal, with hosting `gcp`. Evidence, authentication, binding and claims are those of Sections 9.1 and 9.2, and `gcp` admits the same report types and modes as `bare`.
+
 ## 10. Endorsements
 
 ### 10.1. Inline endorsements
@@ -1031,3 +1160,18 @@ JCS          {"commitment":{"header16":"QVRTLU1SLTEBARAAAAAAAA","seed":"YM3K6sPx
 SHA-384      a678b73c551d1a00857d906715789f89c0f89683086fe8a28a1dfb537a9271520c121a3da5ca0838fb9e0cc8b3d0dc10
 id           ni:///sha-384;pni3PFUdGgCFfZBnFXificD4loMIb-iiih37U3qScVIMEho9pcoIOPueDMiz0NwQ
 ```
+
+### B.5. dstack runtime events (Section 9.3)
+
+A runtime event (type 0x08000001) with name `app-id` and payload `deadbeef`:
+
+```
+name          6170702d6964
+payload       deadbeef
+v1 digest     67b4be4efed0893cfa2bb1d35dca209ad8348b4c97f980807bcde8b9a0f26398dd0923d6eccb5aa2096d98046da8740f
+v2 preimage   7b226e616d65223a226170702d6964222c227061796c6f6164223a226465616462656566222c2274797065223a3133343231373732397d
+              {"name":"app-id","payload":"deadbeef","type":134217729}
+v2 digest     baf3bcd15a9ffbd5d96a054080db0d029d44a88cdb7ea9f9ca5953bf7a1d8d91f9a16c6de05de1034f41295e8cec53dc
+```
+
+The version 1 digest is `SHA-384(01000008 || 3a || name || 3a || payload)`; the version 2 digest is the SHA-384 of the preimage, which the event carries in hexadecimal.
