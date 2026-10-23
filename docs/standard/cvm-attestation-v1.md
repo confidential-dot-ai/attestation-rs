@@ -462,6 +462,116 @@ For device submodules: the verifier sends one NRAS request per architecture with
 
 A verifier MUST appraise every submodule the envelope carries. It MUST refuse the whole envelope when any submodule fails.
 
+## 12. Appraisal results
+
+### 12.1. Result envelope
+
+The appraisal is an EAR claims set (draft-ietf-rats-ear-04) with `eat_profile` `tag:ietf.org,2026:rats/ear#04`:
+
+| Claim | CBOR key | Value |
+| --- | --- | --- |
+| `eat_profile` | 265 | `tag:ietf.org,2026:rats/ear#04` |
+| `iat` | 6 | the appraisal time, the evaluation time when one was given |
+| `ear_verifier_id` | 1004 | `{developer, build}` naming the verifier implementation |
+| `eat_nonce` | 10 | the nonce that was bound |
+| `ear_all_submods_bound` | text | `"true"` or `"false"` (Section 12.6) |
+| `ear_raw_evidence` | 1002 | OPTIONAL: a CMW record of type `application/cmw+json` whose value is a CMW collection carrying the envelope as appraised (indicator 4) and the endorsements the verifier used (indicator 2), so the decision can be re-verified after a vendor withdraws collateral |
+| `submods` | 266 | one entry per evidence submodule, with the same names |
+
+Each submodule entry:
+
+| Claim | CBOR key | Value |
+| --- | --- | --- |
+| `ear_status` | 1000 | the AR4SI tier of the submodule (Section 12.4) |
+| `ear_trustworthiness_vector` | 1001 | Section 12.4 |
+| `ear_appraisal_policy_ids` | 1003 | exactly two identifiers: the profile URI `tag:confidential.ai,2026:cvm#1`, which names the verification procedure, and the policy's own identifier (Section 12.5) |
+| `ear_attester_claims` | 1005 | the normalized claims of Section 12.2 |
+| `ear_verifier_claims` | 1006 | the verifier claims of Section 12.3 |
+
+The appraisal carries no signature. A verifier that hands an appraisal across a trust boundary signs it as an EAR token, a JWT (RFC 7519) or CWT (RFC 8392) as draft-ietf-rats-ear-04 section 3 defines, or delivers it over an authenticated channel; the field names alone make nothing verifiable. A failed appraisal produces no appraisal: the verifier returns the refusal code. A relying party that records failures MAY express them with the AR4SI contraindicated values; this profile does not.
+
+### 12.2. Normalized attester claims
+
+`ear_attester_claims` of a `cpu` submodule:
+
+| Claim | CBOR key | Value |
+| --- | --- | --- |
+| `cvm_platform` | -70001 | `{vendor, tee, generation, hosting}`: vendor, TEE and generation derived from signed data (Section 9); `hosting` as the attester reported it, a label |
+| `cvm_launch_measurement` | -70020 | `{alg, value}`: the launch measurement and its algorithm |
+| `cvm_registers` | -70005 | the verified registers of Section 6 with `backing` as established and `replayed`; workload slots add `owner` and `purpose` from their claim records |
+| `cvm_freshness` | -70021 | `{pattern, mode, key?, not_before?, not_after?}` as bound; present only because the binding passed |
+| `cvm_host_data` | -70022 | `{semantics, value}` with semantics `snp-host-data` (32 bytes), `tdx-mrconfigid` (48) or `cca-rpv` (64); a label (Section 3.5) |
+| `cvm_owner` | -70023 | SEV-SNP `{family_id, image_id, id_key_digest, author_key_digest}`; TDX `{mr_owner, mr_owner_config}`; absent on Arm CCA |
+| `cvm_policy` | -70024 | normalized security settings: `debug` and `migratable` on every TEE; `smt`, `single_socket` and `vmpl` on SEV-SNP; `sept_ve_disable`, `service_td` (TDX 1.5 quotes only) and `reserved_bits_zero` on TDX |
+| `dbgstat` | 263 | `enabled` when the TEE's guest-debug facility is enabled, `disabled-since-boot` otherwise (CBOR 0 and 2) |
+| `cvm_tcb` | -70025 | vendor-specific TCB values and, on TDX, the vendor's status and advisories (Section 9) |
+| `cvm_identity` | -70026 | the hardware identifier: SEV-SNP `chip_id`, TDX `ppid`, Arm CCA `instance_id`, authenticated by the hardware chain; an SEV-SNP `chip_id` under a VLEK or a masked `CHIP_ID` is reported as the report carries it and identifies no machine (Section 13.3) |
+| `cvm_chain` | -70007 | in `commitment` mode, `{chain_len}` |
+| `bootseed` | 268 | in `commitment` mode, the chain's boot seed |
+
+`dbgstat` covers the TEE's guest-debug facility, through which the host can read and write guest state: the SEV-SNP policy DEBUG bit, the TDX debug attributes, the Arm CCA platform lifecycle. It makes no statement about the chip's hardware debug interfaces. The policy is fixed at launch, so a disabled facility is reported as `disabled-since-boot`.
+
+`cvm_workload_id` (CBOR key -70027) is reserved for a derived workload identifier and is never emitted by a version 1 verifier.
+
+`ear_attester_claims` of a `vtpm` submodule: `cvm_registers` (the verified PCRs), `cvm_freshness` and `cvm_tpm_ak`.
+
+`ear_attester_claims` of a device submodule: NRAS's signed device claims verbatim, with `cvm_identity` `{ueid}` and, for a GPU whose token carries both versions, `cvm_tcb` `{driver, vbios}` beside them (Section 9.7).
+
+### 12.3. Verifier claims
+
+`ear_verifier_claims` records what the verifier checked:
+
+| Claim | CBOR key | Value |
+| --- | --- | --- |
+| `cvm_collateral` | -70030 | per check (`snp_crl`, `tdx_pck_crl`, `tdx_root_crl`, `tdx_tcb_info`, `tdx_qe_identity`, `nras_jwks`, `cca_corim`): `{status, reason?, this_update?, next_update?, signed?}` with `status` `checked`, `skipped` (the policy waived it; Section 13.1) or `not-applicable` (the evidence gives it nothing to check) |
+| `cvm_reference` | -70031 | which reference values were applied: `launch_measurement` true when a launch measurement pin matched and false when none was configured, and `registers` listing each pinned slot, which matched; absent when the policy pins nothing that applies to the submodule |
+| `cvm_backing_min` | -70032 | `{required, weakest_seen}`; absent when the submodule has no registers |
+| `ear_nvidia_evidence` | text | device submodules: `{signature_verified, parsed, nonce_match}` from NRAS's signed claims (Section 9.7), each present when the device token carries the claim it comes from |
+
+In a `cvm_collateral` entry, `reason` is present on a `skipped` entry; `signed` is true on every `checked` entry and absent otherwise; `next_update` is the `nextUpdate` of a TCB Info or QE Identity and appears only on `tdx_tcb_info` and `tdx_qe_identity`; `this_update` is not emitted in version 1.
+
+A check the policy waived is reported as `skipped` with its reason. A configured expectation that fails is a refusal; a `false` in `cvm_reference` means only that nothing was pinned.
+
+### 12.4. Trustworthiness vector and status
+
+The vector uses the AR4SI categories and values (draft-ietf-rats-ar4si-10 section 2.3). A category the verifier makes no assertion about is absent.
+
+| Category | Value and condition |
+| --- | --- |
+| `instance-identity` | 2 when the policy carries a machine allowlist and the authenticated identity is on it; absent without an allowlist. An identity absent from the allowlist is a refusal |
+| `configuration` | 2 when the security settings of Section 13.1 hold; 96 when debug is enabled (which the policy allowed), or on SEV-SNP a VMPL other than 0. Other settings a policy admits (migration, a waived `SEPT_VE_DISABLE`, non-zero reserved attributes, a service TD) leave it at 2; the policy identifier records the waiver |
+| `executables` | 2 when the launch measurement is pinned and matched and every register the policy pins matched; 3 when the launch measurement is pinned and matched and no register is pinned; absent when the launch measurement is not pinned, since nothing then vouches for the code the registers were measured by |
+| `hardware` | 2 when the chain anchors, every signature verifies, revocation was checked, and the TCB was assessed and is acceptable: on TDX the vendor status from TCB Info, on SEV-SNP a TCB floor that applied (AMD runs no status service), on Arm CCA the endorsed platform software; 32 when the vendor reports a status with known vulnerabilities that the policy accepts (on TDX any accepted status other than `UpToDate`); absent when the TCB was not assessed or a revocation check was waived. Revocation is a refusal |
+| `runtime-opaque` | 2 for every `cpu` submodule that appraises with debug disabled: the runtime executes inside the TEE, encrypted and opaque to the host; 96 when debug is enabled, since the host can then read guest memory. Nothing is claimed about isolation between processes inside the guest |
+| `file-system`, `storage-opaque` | absent in version 1 |
+| `sourced-data` | device submodules: 2 when NRAS affirmed the device and every device gate held |
+
+The `vtpm` submodule's vector carries `executables` alone: 2 when the policy pins at least one PCR and every pinned PCR matched (the launch measurement pin that `vtpm-extradata` requires vouches for the paravisor that measured them); 0 (no assertion) when the policy pins none, because AR4SI requires a vector to carry at least one category. The vTPM's hardware, configuration and runtime claims belong to the `cpu` submodule that binds its key. A device submodule's vector carries `sourced-data` and, with an allowlist, `instance-identity`.
+
+`executables` 2 asserts that every register the policy pins holds an approved value. A policy that pins a subset of the registers obtains that assertion over the subset only; a relying party that needs the full AR4SI meaning (only approved code during and after boot) pins every register the platform exposes.
+
+`ear_status` is the worst tier the vector reaches, where each value's tier is: -1 to 1 none; 2 to 31 and -32 to -2 affirming; 32 to 95 and -96 to -33 warning; 96 to 127 and -128 to -97 contraindicated; with none < affirming < warning < contraindicated.
+
+### 12.5. Policy identifier
+
+The second entry of `ear_appraisal_policy_ids` names the effective policy: `ni:///sha-384;<base64url>` (RFC 6920), the SHA-384 of the JCS serialization (RFC 8785) of the policy in which every member that has a default is present with its value or its default, and no member is null. The members without a default (`freshness.key`, `reference.host_data`, `tcb.default_floor`, a machine's `tcb_floor`, the members of a floor, `identity`, `owner`, `gpu.expected_archs`) appear only when set; every other object appears, empty or not, as in Appendix B.4, which shows the effective default policy in full. Two appraisals carry the same identifier exactly when their effective policies serialize to the same bytes; reordering an array changes the identifier without changing the requirements. The identifier of the default policy is in Appendix B.4.
+
+### 12.6. Composition with the TDX confidential-GPU EAR profile
+
+draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines EAR claims for TDX guests with confidential GPUs. This profile composes with it:
+
+- a TDX `cpu` submodule carries, beside the `cvm_*` claims, the Intel Trust Authority names that draft reuses, as lowercase hexadecimal text: `tdx_mrtd`, `tdx_rtmr0` to `tdx_rtmr3`, `tdx_mrconfigid`, `tdx_mrowner`, `tdx_mrownerconfig`, `tdx_td_attributes`, `tdx_tee_tcb_svn`, `tdx_xfam`, `tdx_mrseam`, `tdx_mrsignerseam`;
+- device submodules carry NRAS's claim names unchanged, and `ear_nvidia_evidence` in `ear_verifier_claims`;
+- `ear_all_submods_bound` is the draft's text claim. The verifier emits `"true"` or `"false"` and never `"unknown"`, since it checks every binding. A binding that fails is a refusal, so the claim is `"false"` only when a device's signed nonce match is false and the policy (`gpu.device_policy.require_nonce_match`) tolerates it.
+
+The claim names and value encodings match that draft; its container and its submodule labels differ. The draft places the `tdx_*` claims in `ear_evidence_claims` of a submodule labeled `tdx` and names GPU submodules `gpu_0`, `gpu_1` and so on, where this profile uses `ear_attester_claims` of `cpu` and `gpu/<ueid>`. A relying party written against the draft maps `tdx` to `cpu`, `ear_evidence_claims` to `ear_attester_claims`, and `gpu_<i>` to the `i`-th `gpu/<ueid>` submodule in ascending byte order of the names. The draft makes every member of `ear_nvidia_evidence` required, and this profile omits a member whose source claim NRAS did not sign.
+
+EAR-04 section 3 requires an EAR extension to be a map, and `ear_all_submods_bound` is a text value because draft-kykdxy defines it so; a relying party that applies EAR-04's extension rule alone refuses it. The conflict lies between the two drafts, and this profile follows draft-kykdxy until they reconcile.
+
+### 12.7. Composition with Confidential Containers Trustee
+
+For an SEV-SNP `cpu` submodule the verifier emits an `snp` object in `ear_attester_claims`, beside the `cvm_*` claims, carrying the names the Confidential Containers Trustee verifier emits, with Trustee's types: `policy_abi_major`, `policy_abi_minor` (integers), `policy_smt_allowed`, `policy_migrate_ma`, `policy_debug_allowed`, `policy_single_socket` (booleans), `reported_tcb_bootloader`, `reported_tcb_tee`, `reported_tcb_snp`, `reported_tcb_microcode` (integers), `platform_tsme_enabled`, `platform_smt_enabled` (booleans), and `measurement`, `report_data`, `init_data` (Trustee's name for `HOST_DATA`) and `chip_id` (lowercase hexadecimal text). A policy written against Trustee's annotated evidence reads this object unchanged. The object is compatibility output: the `cvm_*` claims are normative, the `snp` object carries Trustee's view of the same report (part of it repeats `cvm_*` content, and members such as `report_data` and the policy ABI version appear only there), and its keys stay text in both encodings.
+
 ## 13. Verifier policy
 
 ### 13.1. Shape and defaults
@@ -661,4 +771,14 @@ NRAS nonces derived from `nonce`:
 ```
 gpu     a5db775022742960966c4ad77b3d903d6645eee00575a557cd18963d31251325
 switch  84982aa6b0e69839ac5b84d62d2c16f30239baa2a99add9975d09aa439c47051
+```
+
+### B.4. Policy identifier (Section 12.5)
+
+The identifier of the default policy. The canonical form is the JCS serialization of the effective default policy; an implementation that fills the defaults of Section 13.1 and serializes with RFC 8785 reproduces it:
+
+```
+JCS          {"commitment":{"header16":"QVRTLU1SLTEBARAAAAAAAA","seed":"YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"},"freshness":{},"gpu":{"device_policy":{"allow_debug":false,"require_measres_success":true,"require_nonce_match":true,"require_secboot":true},"required":false},"min_backing":"hardware","policy_bits":{"allow_debug":false,"allow_migration":false,"allow_service_td":false,"require_sept_ve_disable":true,"require_vmpl0":true,"require_zero_reserved_attributes":true},"reference":{"launch_measurement":[],"pcrs":{},"registers":{},"slot_owners":{}},"tcb":{"floors":{},"require_revocation":true,"require_signed_collateral":true,"tdx_allowed_status":["UpToDate"]}}
+SHA-384      a678b73c551d1a00857d906715789f89c0f89683086fe8a28a1dfb537a9271520c121a3da5ca0838fb9e0cc8b3d0dc10
+id           ni:///sha-384;pni3PFUdGgCFfZBnFXificD4loMIb-iiih37U3qScVIMEho9pcoIOPueDMiz0NwQ
 ```
