@@ -235,6 +235,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snp_measurement_registers_are_checked() {
+        use sha2::{Digest, Sha384};
+        let report = read("snp/kmr-full-report.bin");
+        let envelope = serde_json::json!({
+            "platform": "snp",
+            "evidence": {
+                "attestation_report": BASE64.encode(&report),
+                "cert_chain": { "vcek": BASE64.encode(read("snp/kmr-vcek.der")) },
+                "event_log": BASE64.encode(read("snp/kmr-full-event-log.bin")),
+            },
+        })
+        .to_string();
+        let held = fetch(&envelope).await;
+        // The registers after the whole log, replayed with sha2 directly.
+        let mut replayed = [[0u8; 48]; 16];
+        for entry in read("snp/kmr-full-event-log.bin").chunks(49) {
+            let r = &mut replayed[entry[0] as usize];
+            *r = Sha384::new()
+                .chain_update(*r)
+                .chain_update(&entry[1..])
+                .finalize()
+                .into();
+        }
+        let registers: Vec<String> = replayed.iter().map(|r| BASE64.encode(r)).collect();
+        let evaluate = |registers: &[String]| {
+            let policies = serde_json::json!({ "snp": {
+                "report_data": BASE64.encode(read("snp/kmr-full-caller-data.bin")),
+                "launch_digest": BASE64.encode(&report[0x90..0xC0]),
+                "measurement_registers": registers,
+            } })
+            .to_string();
+            let (envelope, held) = (envelope.clone(), held.clone());
+            // 2026-10-20, inside the kernel guest VCEK's window.
+            async move {
+                let r = evaluate_impl(&envelope, &policies, &held, Some(1_792_454_400));
+                serde_json::from_str::<serde_json::Value>(&r.await.unwrap()).unwrap()
+            }
+        };
+        let r = evaluate(&registers).await;
+        assert_eq!(r["measurement_registers"]["event_count"], 4096);
+        assert_eq!(r["measurement_registers_match"], true);
+        assert_eq!(r["passed"], true);
+
+        let r = evaluate(&registers[..15]).await;
+        assert_eq!(r["measurement_registers_match"], false);
+        assert_eq!(r["passed"], false);
+    }
+
+    #[tokio::test]
     async fn missing_or_forged_collateral_throws() {
         let err = evaluate_impl(&tdx_envelope(), &request("tdx"), "[]", Some(NOW))
             .await

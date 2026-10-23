@@ -30,6 +30,18 @@ encoding, chosen independently of the evidence:
 attestation-cli verify --evidence evidence.json --platform snp   --expected-report-data "$NONCE_HEX"
 ```
 
+For a bare-metal SNP guest kernel with
+[measurement registers](../attestation/README.md#snp-kernel-measurement-registers),
+pin the registers with `--expected-mr INDEX=HEX` (index 0–15, 48 bytes; repeat
+an index only once). Any `--expected-mr` selects that mode: `--expected-report-data`
+is then the 64 bytes the requester gave the kernel, `--expected-launch-digest`
+(provider images only) is required, and registers not given must be zero:
+
+```sh
+attestation-cli verify --evidence evidence.json --expected-launch-digest "$DIGEST" \
+  --expected-report-data "$NONCE_HEX" --expected-mr "0=$MR0" --expected-mr "4=$MR4"
+```
+
 Use measurement pins to identify an approved workload. For TDX, where `MRTD`
 and `RTMR1` are trusted 96-character hex values:
 
@@ -39,7 +51,8 @@ attestation-cli verify --platform tdx --expected-report-data "$NONCE_HEX"   --ex
 
 `--platform` is repeatable. Without it, platform-specific pins determine the
 accepted intersection: MRTD/RTMR pins accept TDX variants, launch-digest pins
-accept SNP variants, and PCR pins accept Azure variants. No platform and no
+accept SNP variants, PCR pins accept Azure variants, and `--expected-mr`
+accepts bare-metal SNP. No platform and no
 platform-specific pins is exit 2; the evidence tag never chooses your policy.
 A pin irrelevant to an explicitly accepted platform is also exit 2.
 

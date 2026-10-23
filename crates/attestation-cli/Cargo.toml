@@ -29,3 +29,4 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 [dev-dependencies]
 attestation = { workspace = true, features = ["test-vendor"] }
 base64 = { workspace = true }
+sha2 = { workspace = true }

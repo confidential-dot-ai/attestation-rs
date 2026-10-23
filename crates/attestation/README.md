@@ -68,6 +68,7 @@ Minimal JSON (illustrative challenge only; use a fresh random challenge):
 | --- | --- |
 | `tdx`, `gcp-tdx`, `az-tdx`, `dstack` | `report_data`, `init_data`, `mrtd`, `rtmr0`–`rtmr3`, `allow_debug`, `accepted_tcb_statuses` |
 | `snp`, `gcp-snp`, `az-snp` | `report_data`, `host_data`, `launch_digest`, `allow_debug`, `min_tcb`, `max_vmpl` |
+| `snp` additionally | `measurement_registers`: [guest kernel measurement registers](#snp-kernel-measurement-registers) |
 | `az-tdx`, `az-snp` additionally | `pcrs`: map of index 0–23 to 32-byte SHA-256 value; duplicate indices refused |
 | `nvidia_gpu` (Rust field `gpu`) | `user_nonce`, `required`, `expected_archs`, `allowed_bindings`, `device_policy` |
 | `floors` | [Collateral version floors](../../docs/collateral.md#freshness-and-version-floors) |
@@ -88,9 +89,42 @@ it to the vTPM quote nonce instead. `host_data` is at most 32 bytes; TDX
 against PCR[8]. Empty report data is an all-zero pin, not a fresh challenge.
 
 SNP `min_tcb` is an object with `bootloader`, `tee`, `snp`, `microcode` and
-optional `fmc`; minimum checks compare components, not an aggregate version.
+optional `fmc`; on every SNP platform the reported, committed and launch TCB
+must each meet it, component by component (not an aggregate version).
 See generated rustdocs for exact field types. API adds
 [server-side policy restrictions](../attestation-api/README.md#verification-and-tokens).
+
+### SNP kernel measurement registers
+
+A bare-metal SNP guest kernel with the measurement-register provider keeps 16
+SHA-384 registers and an event log, and writes a commitment to them and the
+requester's 64 bytes into `REPORT_DATA`. SNP evidence carries the log as
+`event_log`.
+
+- `measurement_registers` (expected final values in index order, at most 16;
+  later registers must be zero, `[]` = all zero) selects this mode. It needs
+  the requester's exact 64 bytes as `report_data`, `launch_digest` and VMPL 0.
+  Take the expected values from your own reference (image manifest, workload
+  policy), never from the presented log.
+- **Every pinned `launch_digest` must be a provider image**: without the
+  provider, guest root chooses `REPORT_DATA` and can forge any registers.
+- Gate on `passed()`, never on `report_data_match` alone: that field is the
+  commitment and the launch digest pin, not the registers. The result carries
+  `measurement_registers` only when it passed. A malformed `event_log` is an error.
+- `report_data` must be a fresh challenge: the registers are a snapshot at
+  report time, and a reused value replays an older snapshot.
+- On a provider image only this mode binds a nonce (API tokens, GPU binding).
+  Azure and GCP refuse it (`InvalidParams`). Upgrade verifiers (library, API,
+  WASM, CLI) before deploying provider images: older verifiers reject evidence
+  that carries `event_log`.
+- The API and WASM take this policy as JSON (registers base64); the CLI takes
+  `--expected-mr INDEX=HEX` ([CLI guide](../attestation-cli/README.md)). A full
+  4096-entry log fits the API's 1 MiB body.
+
+With `allow_debug`, the host can read and change guest memory; with `min_tcb`
+unset, a host on firmware with known bugs can forge registers. Production
+verifiers set `min_tcb` and leave debug off. Every SNP result refuses a guest
+policy that allows a migration agent.
 
 ## Results, errors and retry
 

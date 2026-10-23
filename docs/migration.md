@@ -84,6 +84,20 @@ JSON strings, not JS typed arrays. Catch errors by `kind` and read returned
 their issuer-chain headers. See the [browser example](../crates/attestation-wasm/README.md).
 Dstack is enabled in this harness, NVIDIA is not.
 
+## SNP behavior changes
+
+- A guest policy that allows a migration agent (`MIGRATE_MA`) is now rejected
+  on every SNP platform.
+- With `min_tcb` set, the reported, committed and launch TCB must each meet it,
+  on every SNP platform (Azure and GCP included), not the reported TCB alone.
+- New, optional: `SnpEvidence.event_log` and `SnpParams.measurement_registers`
+  for [guest kernel measurement registers](../crates/attestation/README.md#snp-kernel-measurement-registers)
+  (CLI `--expected-mr`). Bare-metal SNP only; Azure and GCP refuse the policy.
+  Every pinned `launch_digest` must be an image with the kernel provider, and
+  consumers must gate on `passed()`, never on `report_data_match` alone.
+- Upgrade verifiers (library, API, WASM, CLI) before deploying provider images:
+  older verifiers reject evidence that carries `event_log`.
+
 ## Evidence transport and cache rollout
 
 Evidence now may carry substantial collateral. Transport it as an HTTP body

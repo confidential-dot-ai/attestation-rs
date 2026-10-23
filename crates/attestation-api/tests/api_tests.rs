@@ -573,6 +573,84 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
     })
 }
 
+/// The kernel guest's full measurement-register log (4096 events) through
+/// `/verify` with a token: the body fits the 1 MiB limit, the token carries
+/// the registers and the policy, and another nonce gets no token.
+#[tokio::test]
+async fn a_measurement_register_token_carries_the_full_log_registers() {
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral};
+    use sha2::{Digest, Sha384};
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../attestation/test_data/snp/");
+    let read = |file: &str| std::fs::read(format!("{DIR}{file}")).unwrap();
+    let report = read("kmr-full-report.bin");
+    let caller_data = read("kmr-full-caller-data.bin");
+    // The registers after the whole log, replayed with sha2 directly.
+    let mut replayed = [[0u8; 48]; 16];
+    for entry in read("kmr-full-event-log.bin").chunks(49) {
+        let r = &mut replayed[entry[0] as usize];
+        *r = Sha384::new()
+            .chain_update(*r)
+            .chain_update(&entry[1..])
+            .finalize()
+            .into();
+    }
+    let registers: Vec<String> = replayed.iter().map(|r| BASE64.encode(r)).collect();
+    let body = |report_data: &[u8]| {
+        serde_json::json!({
+            "platform": "snp",
+            "evidence": {
+                "attestation_report": BASE64.encode(&report),
+                "cert_chain": { "vcek": BASE64.encode(read("kmr-vcek.der")) },
+                "event_log": BASE64.encode(read("kmr-full-event-log.bin")),
+            },
+            "policies": { "snp": {
+                "report_data": BASE64.encode(report_data),
+                "launch_digest": BASE64.encode(&report[0x90..0xC0]),
+                "measurement_registers": registers,
+            } },
+            "issue_token": true,
+        })
+    };
+    let state = || {
+        let mut state = offline_state_with(|_| {});
+        let crl = AmdCrl::url(&(attestation::ProcessorGeneration::Genoa, AmdKey::Vcek));
+        // 2026-10-20, inside the kernel guest VCEK's window.
+        let ctx = attestation::Context::offline()
+            .with_held(vec![(crl, GENOA_CRL.to_vec(), None)])
+            .at(1_792_454_400)
+            .unwrap();
+        state.verifier = Arc::new(attestation::Verifier::new(ctx));
+        state
+    };
+
+    let (status, json) = post_verify(state(), body(&caller_data)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["passed"], true);
+    let token = json["token"].as_str().expect("token issued");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(token.split('.').nth(1).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claims["result"], json["result"]);
+    let attested = &claims["result"]["measurement_registers"];
+    assert_eq!(attested["event_count"], 4096);
+    assert_eq!(attested["registers"], serde_json::json!(registers));
+    assert_eq!(
+        claims["policy"]["snp"]["measurement_registers"],
+        serde_json::json!(registers)
+    );
+
+    let mut other = caller_data.clone();
+    other[0] ^= 1;
+    let (status, json) = post_verify(state(), body(&other)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["passed"], false);
+    assert!(json["result"]["measurement_registers"].is_null());
+    assert!(json.get("token").is_none());
+}
+
 #[tokio::test]
 async fn collateral_that_is_not_the_vendors_is_a_422() {
     let mut crl = GENOA_CRL.to_vec();

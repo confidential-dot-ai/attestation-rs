@@ -21,7 +21,7 @@ fn genoa_crl() -> attestation::HeldResponse {
     (url, GENOA_CRL.to_vec(), None)
 }
 
-fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
+fn run(evidence: serde_json::Value, at: &str, args: &[&str]) -> Output {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("cli-verify-{}-{n}", std::process::id()));
@@ -31,7 +31,7 @@ fn run(evidence: serde_json::Value, args: &[&str]) -> Output {
     std::fs::write(&path, evidence.to_string()).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_attestation-cli"))
         .env("XDG_CACHE_HOME", &dir)
-        .args(["verify", "--offline", "--at", AT, "--evidence"])
+        .args(["verify", "--offline", "--at", at, "--evidence"])
         .arg(&path)
         .args(args)
         .output()
@@ -52,7 +52,7 @@ fn evidence() -> serde_json::Value {
 }
 
 fn verify(args: &[&str]) -> Output {
-    run(evidence(), args)
+    run(evidence(), AT, args)
 }
 
 fn stdout_json(out: &Output) -> serde_json::Value {
@@ -98,11 +98,198 @@ fn launch_digest_mismatch_prints_result_and_exits_one() {
     assert_eq!(json["passed"], false);
 }
 
+/// SNP kernel evidence from the attestation test data, and the values that
+/// verify it: its launch digest, the requester's 64 bytes and the registers
+/// replayed from its log.
+fn kernel_evidence(report: &str, log: &str, caller_data: &str) -> (serde_json::Value, Kernel) {
+    const DIR: &str = "../attestation/test_data/snp";
+    let read = |file: &str| std::fs::read(format!("{DIR}/{file}")).unwrap();
+    let (report, log) = (read(report), read(log));
+    let evidence = serde_json::json!({
+        "platform": "snp",
+        "evidence": {
+            "attestation_report": BASE64.encode(&report),
+            "cert_chain": { "vcek": BASE64.encode(read("kmr-vcek.der")) },
+            "event_log": BASE64.encode(&log),
+        },
+    });
+    let kernel = Kernel {
+        launch_digest: hex::encode(&report[0x90..0xC0]),
+        caller_data: hex::encode(read(caller_data)),
+        registers: replay(&log).iter().map(hex::encode).collect(),
+    };
+    (evidence, kernel)
+}
+
+struct Kernel {
+    launch_digest: String,
+    caller_data: String,
+    registers: Vec<String>,
+}
+
+/// The registers after the whole log, replayed with sha2 directly.
+fn replay(log: &[u8]) -> Vec<[u8; 48]> {
+    use sha2::{Digest, Sha384};
+    let mut registers = vec![[0u8; 48]; 16];
+    for entry in log.chunks(49) {
+        let r = &mut registers[entry[0] as usize];
+        *r = Sha384::new()
+            .chain_update(*r)
+            .chain_update(&entry[1..])
+            .finalize()
+            .into();
+    }
+    registers
+}
+
+/// `verify` in measurement-register mode at 2026-10-20, inside the kernel
+/// guest VCEK's window, with each nonzero `registers[i]` as
+/// `--expected-mr i=…` (the others must be zero).
+fn verify_kernel(
+    evidence: &serde_json::Value,
+    launch_digest: &str,
+    caller_data: &str,
+    registers: &[String],
+) -> Output {
+    let pins: Vec<String> = registers
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| *r != &"00".repeat(48))
+        .map(|(i, r)| format!("{i}={r}"))
+        .collect();
+    let mut args = vec![
+        "--expected-launch-digest",
+        launch_digest,
+        "--expected-report-data",
+        caller_data,
+    ];
+    for pin in &pins {
+        args.extend(["--expected-mr", pin]);
+    }
+    run(evidence.clone(), "1792454400", &args)
+}
+
+/// The guest kernel's full log: 4096 events in all 16 registers.
+#[test]
+fn measurement_registers_must_all_match() {
+    let (evidence, k) = kernel_evidence(
+        "kmr-full-report.bin",
+        "kmr-full-event-log.bin",
+        "kmr-full-caller-data.bin",
+    );
+    let out = verify_kernel(&evidence, &k.launch_digest, &k.caller_data, &k.registers);
+    assert_eq!(out.status.code(), Some(0));
+    let json = stdout_json(&out);
+    assert_eq!(json["measurement_registers"]["event_count"], 4096);
+
+    let mut wrong_register = k.registers.clone();
+    wrong_register[7] = "aa".repeat(48);
+    let first = if k.caller_data.starts_with('0') {
+        '1'
+    } else {
+        '0'
+    };
+    let wrong_nonce = format!("{first}{}", &k.caller_data[1..]);
+    for (case, out) in [
+        (
+            "one wrong register",
+            verify_kernel(&evidence, &k.launch_digest, &k.caller_data, &wrong_register),
+        ),
+        (
+            "a nonzero register left out",
+            verify_kernel(
+                &evidence,
+                &k.launch_digest,
+                &k.caller_data,
+                &k.registers[..15],
+            ),
+        ),
+        (
+            "wrong nonce",
+            verify_kernel(&evidence, &k.launch_digest, &wrong_nonce, &k.registers),
+        ),
+        (
+            "wrong launch digest pin",
+            verify_kernel(&evidence, &"aa".repeat(48), &k.caller_data, &k.registers),
+        ),
+    ] {
+        assert_eq!(out.status.code(), Some(1), "{case}");
+    }
+}
+
+/// Pins for registers 1 and 4 only: the CLI fills registers 0, 2 and 3 with
+/// zero. The forge fixture (guest root on an image without the provider,
+/// `H || C` over registers 1 and 4) passes with its own image pinned and
+/// fails a provider-only pin.
+#[test]
+fn unpinned_registers_below_the_highest_pin_are_zero() {
+    let (forged, k) = kernel_evidence(
+        "kmr-forge/report.bin",
+        "kmr-forge/event-log.bin",
+        "kmr-forge/caller-data.bin",
+    );
+    let (_, provider) = kernel_evidence(
+        "kmr-full-report.bin",
+        "kmr-full-event-log.bin",
+        "kmr-full-caller-data.bin",
+    );
+    let out = verify_kernel(&forged, &k.launch_digest, &k.caller_data, &k.registers);
+    assert_eq!(out.status.code(), Some(0), "its own image pinned");
+    let out = verify_kernel(
+        &forged,
+        &provider.launch_digest,
+        &k.caller_data,
+        &k.registers,
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
 #[test]
 fn evidence_for_a_platform_not_accepted_exits_one() {
     let out = verify(&["--platform", "tdx"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty(), "nothing was verified");
+}
+
+/// A bad `--expected-mr` exits 2 with every other measurement-register
+/// argument given. The same arguments with well-formed pins exit 1 (the
+/// Genoa report is not from a kernel with registers), so each 2 is the pin's.
+#[test]
+fn a_bad_expected_mr_exits_two() {
+    let (a, b, nonce) = ("aa".repeat(48), "bb".repeat(48), "aa".repeat(64));
+    let verify_mode = |extra: &[&str], pins: &[String]| {
+        let mut args = vec![
+            "--expected-launch-digest",
+            &a,
+            "--expected-report-data",
+            &nonce,
+        ];
+        args.extend(extra);
+        for pin in pins {
+            args.extend(["--expected-mr", pin]);
+        }
+        verify(&args)
+    };
+    let out = verify_mode(&[], &[format!("0={a}"), format!("1={b}")]);
+    assert_eq!(out.status.code(), Some(1), "well-formed pins");
+    for (case, out) in [
+        ("index 16", verify_mode(&[], &[format!("16={a}")])),
+        (
+            "32-byte value",
+            verify_mode(&[], &[format!("0={}", "aa".repeat(32))]),
+        ),
+        (
+            "index twice",
+            verify_mode(&[], &[format!("0={a}"), format!("0={b}")]),
+        ),
+        (
+            "Azure",
+            verify_mode(&["--platform", "az-snp"], &[format!("0={a}")]),
+        ),
+    ] {
+        assert_eq!(out.status.code(), Some(2), "{case}");
+        assert!(out.stdout.is_empty(), "nothing was verified: {case}");
+    }
 }
 
 #[test]
@@ -123,6 +310,19 @@ fn usage_errors_exit_two() {
             &format!("4={}", "bb".repeat(32)),
         ],
         &["--platform", "snp", "--expected-report-data", "zz"],
+        // Measurement-register mode needs the requester's 64 bytes and a pin.
+        &[
+            "--expected-launch-digest",
+            &"aa".repeat(48),
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+        ],
+        &[
+            "--expected-report-data",
+            &"aa".repeat(64),
+            "--expected-mr",
+            &format!("0={}", "aa".repeat(48)),
+        ],
         &[
             "--platform",
             "snp",
@@ -144,6 +344,7 @@ fn collateral_unavailable_exits_three() {
             "platform": "snp",
             "evidence": { "attestation_report": BASE64.encode(REPORT) },
         }),
+        AT,
         &["--platform", "snp"],
     );
     assert_eq!(out.status.code(), Some(3));

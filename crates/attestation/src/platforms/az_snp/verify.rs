@@ -31,6 +31,11 @@ impl AzSnpParams {
     /// Reject params that cannot be applied, before any I/O.
     pub fn validate(&self) -> Result<()> {
         self.snp.validate()?;
+        if self.snp.measurement_registers.is_some() {
+            return Err(AttestationError::InvalidParams(
+                "measurement registers are bare-metal SNP only".into(),
+            ));
+        }
         tpm_common::check_init_data_len(self.snp.host_data.as_deref())?;
         tpm_common::check_pcr_pin_indexes(&self.pcrs)
     }
@@ -538,6 +543,30 @@ mod tests {
         .unwrap();
         assert_eq!(result.snp.crl_ok, Some(true));
         assert!(result.passed());
+    }
+
+    #[tokio::test]
+    async fn measurement_registers_are_bare_metal_only() {
+        let evidence = load_az_snp_evidence(GENOA_V5_FIXTURE);
+        let nonce = hex::decode(GENOA_V5_NONCE).unwrap();
+        let ctx =
+            crate::testing::context(vec![crate::testing::amd_crl(ProcessorGeneration::Genoa)]);
+        let (collateral, _) = AzSnp::gather(&evidence, ctx.store(), crate::testing::NOW)
+            .await
+            .unwrap();
+        let mut params = params_with_nonce(&nonce);
+        let r = AzSnp::verify(&evidence, &params, &collateral, crate::testing::NOW).unwrap();
+        assert!(r.passed());
+
+        params.snp.report_data = Some([nonce, vec![0; 16]].concat());
+        params.snp.launch_digest = Some(vec![[1; 48]]);
+        params.snp.measurement_registers = Some(vec![]);
+        params.snp.validate().unwrap();
+        assert!(params.validate().is_err());
+        let err = AzSnp::verify(&evidence, &params, &collateral, crate::testing::NOW)
+            .err()
+            .unwrap();
+        assert!(matches!(err, AttestationError::InvalidParams(_)), "{err}");
     }
 
     #[tokio::test]

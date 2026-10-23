@@ -59,6 +59,7 @@ fn bench_evidence_deserialize(c: &mut Criterion) {
     let evidence = attestation::platforms::snp::evidence::SnpEvidence {
         attestation_report: base64::engine::general_purpose::STANDARD.encode(SNP_REPORT_BYTES),
         cert_chain: None,
+        event_log: None,
     };
     let json = serde_json::to_string(&evidence).unwrap();
 

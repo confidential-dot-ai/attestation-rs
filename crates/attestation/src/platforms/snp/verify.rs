@@ -25,6 +25,7 @@ const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 
 use super::claims::extract_claims;
 use super::evidence::SnpEvidence;
+use super::measurement_registers::{self, MeasurementRegisters};
 
 /// SNP Attestation Report version (must be >= 3 for cpuid fields).
 const MIN_REPORT_VERSION: u32 = 3;
@@ -40,7 +41,8 @@ pub const MAX_REPORT_VERSION: u32 = 5;
 pub struct SnpParams {
     /// Expected `report_data` (at most 64 bytes, zero-padded). Result in
     /// [`SnpResult::report_data_match`]. On Azure (vTPM) this is checked
-    /// against the vTPM quote nonce instead.
+    /// against the vTPM quote nonce instead. With `measurement_registers`, the
+    /// exact 64 bytes the requester passed, which `REPORT_DATA` must commit to.
     #[serde(with = "b64::bytes")]
     pub report_data: Option<Vec<u8>>,
     /// Expected HOST_DATA (at most 32 bytes, zero-padded). On Azure (vTPM) a
@@ -53,10 +55,33 @@ pub struct SnpParams {
     pub launch_digest: Option<Vec<[u8; 48]>>,
     /// Accept a guest whose policy allows debug. Default: false.
     pub allow_debug: bool,
-    /// Minimum reported TCB; each component must be at least this.
+    /// Minimum TCB: each component of the reported, committed and launch
+    /// TCB must be at least this.
     pub min_tcb: Option<SnpTcb>,
     /// Highest VMPL accepted. Default: 0.
     pub max_vmpl: u32,
+    /// Bare-metal guest kernel measurement registers: the expected final values
+    /// in index order, at most 16; registers past the list must be zero (`[]`:
+    /// all zero). Setting it selects the mode: `REPORT_DATA` must commit to
+    /// the evidence's event log and `report_data`. It needs a 64-byte
+    /// `report_data`, `launch_digest` and VMPL 0. Azure and GCP refuse it
+    /// (`InvalidParams`). On a provider image `REPORT_DATA` is always the
+    /// commitment, so only this mode binds the requester's bytes there.
+    ///
+    /// **Every `launch_digest` value must be an image whose kernel has the
+    /// measurement-register provider.** On an image without it, guest root
+    /// chooses `REPORT_DATA` and can forge any registers; never pin such an
+    /// image here, not even next to provider images.
+    ///
+    /// With debug allowed, the host can read and change guest memory, so
+    /// register values are not protected against the host. Likewise with
+    /// `min_tcb` unset: a host on firmware with known bugs can forge
+    /// registers, so production verifiers should set `min_tcb`.
+    #[serde(
+        with = "b64::digest_list::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub measurement_registers: Option<Vec<[u8; 48]>>,
 }
 
 impl SnpParams {
@@ -70,6 +95,19 @@ impl SnpParams {
             return Err(AttestationError::InvalidParams(
                 "host_data exceeds 32 bytes".into(),
             ));
+        }
+        if let Some(registers) = &self.measurement_registers {
+            if registers.len() > measurement_registers::REGISTER_COUNT
+                || self.report_data.as_ref().is_none_or(|d| d.len() != 64)
+                || self.launch_digest.is_none()
+                || self.max_vmpl != 0
+            {
+                return Err(AttestationError::InvalidParams(
+                    "measurement_registers needs at most 16 values, a 64-byte report_data, \
+                     launch_digest and VMPL 0"
+                        .into(),
+                ));
+            }
         }
         crate::utils::check_allowed_set("launch_digest", self.launch_digest.as_deref())
     }
@@ -88,17 +126,27 @@ pub struct SnpResult {
     pub debug: bool,
     /// The params allowed a debug guest.
     pub allow_debug: bool,
+    /// The guest policy allows a migration agent (never accepted).
+    #[serde(default)]
+    pub migrate_ma: bool,
     /// VMPL the report was requested from.
     pub vmpl: u32,
     /// The highest VMPL the params accept.
     pub max_vmpl: u32,
     /// TCB the report was signed under.
     pub reported_tcb: SnpTcb,
-    /// `reported_tcb` is at or above `min_tcb` (`None` if no minimum given).
+    /// The reported, committed and launch TCB are each at or above `min_tcb`
+    /// (`None` if no minimum given).
     pub min_tcb_met: Option<bool>,
     /// The AMD CRL does not revoke the VEK's issuing ASK/ASVK (`None` only on
     /// results not from [`Snp::verify`]).
     pub crl_ok: Option<bool>,
+    /// The guest kernel's measurement registers that `REPORT_DATA` commits to;
+    /// `None` unless the result [passed](Self::passed).
+    pub measurement_registers: Option<MeasurementRegisters>,
+    /// `measurement_registers` equal the expected ones (`None` outside
+    /// measurement-register mode).
+    pub measurement_registers_match: Option<bool>,
 }
 
 impl SnpResult {
@@ -110,7 +158,9 @@ impl SnpResult {
             self.launch_digest_match,
             self.min_tcb_met,
             self.crl_ok,
+            self.measurement_registers_match,
         ]) && (!self.debug || self.allow_debug)
+            && !self.migrate_ma
             && self.vmpl <= self.max_vmpl
     }
 }
@@ -135,14 +185,22 @@ pub fn evaluate_report(
         ),
         debug: report.policy.debug_allowed(),
         allow_debug: params.allow_debug,
+        migrate_ma: report.policy.migrate_ma_allowed(),
         vmpl: report.vmpl,
         max_vmpl: params.max_vmpl,
-        min_tcb_met: params
-            .min_tcb
-            .as_ref()
-            .map(|min| min_tcb_met(&reported_tcb, min)),
+        min_tcb_met: params.min_tcb.as_ref().map(|min| {
+            [
+                &report.reported_tcb,
+                &report.committed_tcb,
+                &report.launch_tcb,
+            ]
+            .into_iter()
+            .all(|tcb| min_tcb_met(&snp_tcb(tcb), min))
+        }),
         reported_tcb,
         crl_ok,
+        measurement_registers: None,
+        measurement_registers_match: None,
     }
 }
 
@@ -246,6 +304,20 @@ impl Platform for Snp {
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
         check_report_bindings(&mut result, &report, params)?;
+        if let Some(expected) = &params.measurement_registers {
+            let caller_data = params
+                .report_data
+                .as_deref()
+                .and_then(|d| d.try_into().ok())
+                .expect("validate: measurement_registers needs a 64-byte report_data");
+            measurement_registers::check_measurement_registers(
+                &mut result,
+                &report.report_data,
+                evidence.event_log.as_deref(),
+                caller_data,
+                expected,
+            )?;
+        }
         Ok(result)
     }
 }
@@ -1113,6 +1185,7 @@ mod tests {
                 ask: None,
                 ark: None,
             }),
+            event_log: None,
         }
     }
 
@@ -1377,6 +1450,52 @@ mod tests {
         assert!(!vek_revoked(LIVE_VCEK_GENOA, &genoa_crl(amd), gen).unwrap());
     }
 
+    #[tokio::test]
+    async fn a_host_data_mismatch_alone_fails() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut params = SnpParams {
+            report_data: Some(report.report_data.to_vec()),
+            host_data: Some(report.host_data.to_vec()),
+            ..Default::default()
+        };
+        let r = verify(&params).await.unwrap();
+        assert_eq!(r.host_data_match, Some(true));
+        assert!(r.passed());
+        params.host_data.as_mut().unwrap()[0] ^= 1;
+        let r = verify(&params).await.unwrap();
+        assert_eq!(r.report_data_match, Some(true));
+        assert_eq!(r.host_data_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[test]
+    fn snp_verify_fails_a_report_whose_ask_is_revoked() {
+        let ask = super::super::certs::get_ask(ProcessorGeneration::Genoa);
+        let (_, ask_cert) = X509Certificate::from_der(ask).unwrap();
+        let (this_update, next_update) = valid_window();
+        let listing = mint_crl(
+            &mint_issuer("TEST-ARK"),
+            Some(ask_cert.raw_serial()),
+            this_update,
+            next_update,
+        );
+        let amd = testing::raw("2026-10-14/amd_crl_genoa.der", None).0;
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let verify = |crl: Vec<u8>| {
+            let collateral = SnpCollateralSet {
+                vek: LIVE_VCEK_GENOA.to_vec(),
+                crl: genoa_crl(crl),
+            };
+            Snp::verify(&evidence, &SnpParams::default(), &collateral, now_secs()).unwrap()
+        };
+        let r = verify(amd);
+        assert_eq!(r.crl_ok, Some(true));
+        assert!(r.passed());
+        let r = verify(listing);
+        assert_eq!(r.crl_ok, Some(false));
+        assert!(!r.passed());
+    }
+
     #[test]
     fn a_crl_for_another_generation_or_key_is_refused() {
         let mut crl = genoa_crl(Vec::new());
@@ -1424,6 +1543,91 @@ mod tests {
             !min_tcb_met(tcb, &floor),
             "a floor requiring FMC must reject a report without it"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Guest policy
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_migration_agent_fails() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        let params = SnpParams::default();
+        assert!(evaluate_report(&report, &params, Some(true)).passed());
+        report.policy.set_migrate_ma_allowed(true);
+        let r = evaluate_report(&report, &params, Some(true));
+        assert!(r.migrate_ma && !r.passed());
+    }
+
+    #[test]
+    fn a_report_above_the_accepted_vmpl_fails() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        assert_eq!(report.vmpl, 0);
+        let vmpl1 = SnpParams {
+            max_vmpl: 1,
+            ..Default::default()
+        };
+        assert!(evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+        for (vmpl, passes_at_vmpl1) in [(1, true), (2, false), (0xFFFF_FFFF, false)] {
+            report.vmpl = vmpl;
+            assert!(!evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+            assert_eq!(
+                evaluate_report(&report, &vmpl1, Some(true)).passed(),
+                passes_at_vmpl1,
+                "VMPL {vmpl:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_debug_guest_passes_only_when_allowed() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        let allow_debug = SnpParams {
+            allow_debug: true,
+            ..Default::default()
+        };
+        assert!(evaluate_report(&report, &SnpParams::default(), Some(true)).passed());
+        report.policy.set_debug_allowed(true);
+        let r = evaluate_report(&report, &SnpParams::default(), Some(true));
+        assert!(r.debug && !r.passed());
+        assert!(evaluate_report(&report, &allow_debug, Some(true)).passed());
+    }
+
+    #[test]
+    fn the_tcb_floor_applies_to_the_reported_committed_and_launch_tcb() {
+        let mut report = parse_report(LIVE_REPORT_V5).unwrap();
+        report.committed_tcb = report.reported_tcb;
+        report.launch_tcb = report.reported_tcb;
+        let params = SnpParams {
+            min_tcb: Some(snp_tcb(&report.reported_tcb)),
+            ..Default::default()
+        };
+        let met =
+            |report: &AttestationReport| evaluate_report(report, &params, Some(true)).min_tcb_met;
+        assert_eq!(met(&report), Some(true));
+        for field in 0..3 {
+            let mut below = report;
+            let tcb = [
+                &mut below.reported_tcb,
+                &mut below.committed_tcb,
+                &mut below.launch_tcb,
+            ]
+            .into_iter()
+            .nth(field)
+            .unwrap();
+            tcb.microcode -= 1;
+            assert_eq!(met(&below), Some(false), "TCB {field}");
+        }
+    }
+
+    #[test]
+    fn a_result_without_migrate_ma_deserializes() {
+        let report = parse_report(LIVE_REPORT_V5).unwrap();
+        let mut json =
+            serde_json::to_value(evaluate_report(&report, &SnpParams::default(), None)).unwrap();
+        json.as_object_mut().unwrap().remove("migrate_ma").unwrap();
+        let r: SnpResult = serde_json::from_value(json).unwrap();
+        assert!(!r.migrate_ma);
     }
 
     #[tokio::test]

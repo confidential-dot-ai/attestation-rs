@@ -91,7 +91,8 @@ struct VerifyArgs {
 
     /// Platform to accept; repeat to accept several. Without it, the
     /// platform-specific flags decide (--expected-mrtd/--expected-rtmrN: the
-    /// TDX platforms, --expected-launch-digest: the SNP platforms). Evidence
+    /// TDX platforms, --expected-launch-digest: the SNP platforms,
+    /// --expected-mr: bare-metal SNP). Evidence
     /// for any other platform is refused.
     #[arg(short, long)]
     platform: Vec<PlatformArg>,
@@ -108,6 +109,7 @@ struct VerifyArgs {
     at: Option<i64>,
 
     /// Expected report data (hex-encoded) for nonce binding verification.
+    /// With --expected-mr, the 64 bytes the requester gave the SNP kernel.
     #[arg(long)]
     expected_report_data: Option<String>,
 
@@ -147,6 +149,14 @@ struct VerifyArgs {
     /// Azure vTPM only (az-snp, az-tdx).
     #[arg(long, value_name = "INDEX=HEX")]
     expected_pcr: Vec<String>,
+
+    /// Expected SNP kernel measurement register as INDEX=HEX (index 0-15,
+    /// 48 bytes). Repeatable. Bare-metal SNP only. Any --expected-mr selects
+    /// measurement-register mode: --expected-report-data (the requester's 64
+    /// bytes) and --expected-launch-digest are required, and registers not
+    /// given must be zero.
+    #[arg(long, value_name = "INDEX=HEX")]
+    expected_mr: Vec<String>,
 
     /// NVIDIA GPU user nonce (hex) that seeded the GPU SPDM nonce. Enables GPU
     /// bundle verification via NRAS. If --expected-report-data is not given, it
@@ -414,6 +424,9 @@ fn accepted_platforms(args: &VerifyArgs) -> Vec<PlatformType> {
     if !args.expected_pcr.is_empty() {
         pins.push(("--expected-pcr", &AZURE_PLATFORMS));
     }
+    if !args.expected_mr.is_empty() {
+        pins.push(("--expected-mr", &[PlatformType::Snp]));
+    }
 
     let platforms: Vec<PlatformType> = if args.platform.is_empty() {
         if pins.is_empty() {
@@ -464,14 +477,16 @@ fn build_policies(args: &VerifyArgs) -> Policies {
     let rtmr2 = digests(&args.expected_rtmr2, "expected-rtmr2");
     let rtmr3 = digests(&args.expected_rtmr3, "expected-rtmr3");
     let launch_digest = digests(&args.expected_launch_digest, "expected-launch-digest");
-    let mut pcrs = std::collections::BTreeMap::<u8, [u8; 32]>::new();
-    for pin in &args.expected_pcr {
-        let (index, value) = parse_pcr_pin(pin)
-            .unwrap_or_else(|e| usage_error(&format!("invalid --expected-pcr {pin:?}: {e}")));
-        if pcrs.insert(index, value).is_some() {
-            usage_error(&format!("--expected-pcr pins PCR[{index}] more than once"));
-        }
-    }
+    let pcrs = parse_index_pins::<32>(&args.expected_pcr, "expected-pcr", 23);
+    // Unlisted registers below the highest pinned one are zero; the library
+    // requires every register past the list to be zero.
+    let measurement_registers = (!args.expected_mr.is_empty()).then(|| {
+        let pins = parse_index_pins::<48>(&args.expected_mr, "expected-mr", 15);
+        let len = pins.keys().last().map_or(0, |i| *i as usize + 1);
+        (0..len)
+            .map(|i| pins.get(&(i as u8)).copied().unwrap_or([0; 48]))
+            .collect()
+    });
 
     #[allow(unused_mut)]
     let mut policies = Policies::default();
@@ -530,6 +545,7 @@ fn build_policies(args: &VerifyArgs) -> Policies {
         report_data: report_data.clone(),
         host_data: init_data.clone(),
         launch_digest: launch_digest.clone(),
+        measurement_registers: measurement_registers.clone(),
         ..Default::default()
     };
     for platform in platforms {
@@ -669,16 +685,33 @@ fn cache_dir() -> Option<PathBuf> {
     Some(dir.join("attestation"))
 }
 
-/// Parse an `--expected-pcr` value of the form `INDEX=HEX`.
-fn parse_pcr_pin(pin: &str) -> Result<(u8, [u8; 32]), String> {
+/// Parse `--{flag}` values of the form `INDEX=HEX` (index 0 to `max`, `N`
+/// bytes), each index at most once; anything else is a usage error.
+fn parse_index_pins<const N: usize>(
+    pins: &[String],
+    flag: &str,
+    max: u8,
+) -> std::collections::BTreeMap<u8, [u8; N]> {
+    let mut values = std::collections::BTreeMap::new();
+    for pin in pins {
+        let (index, value) = parse_index_pin(pin, max)
+            .unwrap_or_else(|e| usage_error(&format!("invalid --{flag} {pin:?}: {e}")));
+        if values.insert(index, value).is_some() {
+            usage_error(&format!("--{flag} pins index {index} more than once"));
+        }
+    }
+    values
+}
+
+fn parse_index_pin<const N: usize>(pin: &str, max: u8) -> Result<(u8, [u8; N]), String> {
     let (index, value) = pin.split_once('=').ok_or("expected INDEX=HEX")?;
     let index: u8 = index
         .parse()
         .ok()
-        .filter(|i| *i <= 23)
-        .ok_or_else(|| format!("PCR index {index:?} is not 0-23"))?;
+        .filter(|i| *i <= max)
+        .ok_or_else(|| format!("index {index:?} is not 0-{max}"))?;
     let bytes = hex::decode(value).map_err(|e| format!("bad hex: {e}"))?;
-    let value = <[u8; 32]>::try_from(bytes.as_slice())
-        .map_err(|_| format!("PCR value must be 32 bytes, got {}", bytes.len()))?;
+    let value = <[u8; N]>::try_from(bytes.as_slice())
+        .map_err(|_| format!("value must be {N} bytes, got {}", bytes.len()))?;
     Ok((index, value))
 }

@@ -87,6 +87,11 @@ issued only on a passing result. Tokens use ES256 and include `result` and the
 serialized policy as `policy`. Default duration is 5 minutes; an empty key path
 uses an ephemeral key, so configure persistence if keys must survive restart.
 
+For SNP measurement registers, add `measurement_registers` to the `snp`
+policy ([semantics](../attestation/README.md#snp-kernel-measurement-registers));
+`report_data` is then the requester's 64 bytes. The token's
+`result.measurement_registers` carries the registers only on a passing result.
+
 A newly issued token is **not proof of fresh evidence**: callers could replay
 old evidence and ask for a new token. The relying party must validate the token
 and compare `policy.<platform>.report_data` with its own outstanding challenge,
