@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-hcl-hash-type-not-sha256",
+  "rule": {
+    "section": "9.4.1",
+    "statement": "the HCL report's report data hash type (offset 0x4CC) is 1, SHA-256; another value is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-hcl-hash-type-not-sha256.json",
+  "policy": "policy/azure-snp-hcl-hash-type-not-sha256.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
