@@ -1,0 +1,13 @@
+{
+  "id": "snp-tcb-reserved-byte-altered",
+  "rule": {
+    "section": "9.1.4",
+    "statement": "step 3: the signature covers bytes 0x000 to 0x29F as received, so a reserved byte of REPORTED_TCB changed after signing is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-tcb-reserved-byte-altered.json",
+  "policy": "policy/snp-tcb-reserved-byte-altered.json",
+  "expect": {
+    "refusal": "signature-invalid"
+  }
+}
