@@ -1,0 +1,13 @@
+{
+  "id": "envelope-submodules-at-bound",
+  "rule": {
+    "section": "4.7",
+    "statement": "an envelope carries at most 66 submodules: 66 parse, and the appraisal refuses more devices than it accepts (device-not-allowed)"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-submodules-at-bound.json",
+  "policy": "policy/envelope-submodules-at-bound.json",
+  "expect": {
+    "refusal": "device-not-allowed"
+  }
+}
