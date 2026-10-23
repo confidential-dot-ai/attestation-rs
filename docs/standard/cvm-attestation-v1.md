@@ -202,3 +202,122 @@ The envelope is unprotected (Section 4.1). Every field is one of:
 Each TEE lets the host place a value in the signed report at launch that the launch measurement does not cover: SNP `HOST_DATA` (32 bytes), TDX `MRCONFIGID` (48 bytes), CCA Realm Personalization Value (RPV, 64 bytes). The host can choose a different value on every launch, so on its own such a field is a label, and the profile reports it as `cvm_host_data` with explicit semantics. Other signed fields are host-set in the same way and are reported in `cvm_owner`: TDX `MROWNER` and `MROWNERCONFIG`, and the SEV-SNP ID block fields, which establish something only when the policy pins the ID key that signs them (Section 13.4).
 
 A host-set field becomes a guarantee when the measured image contains code that enforces a relationship with it: for example, a guest that refuses to start unless `HOST_DATA` equals the digest of the configuration it loads. Only then does pinning it (`reference.host_data`, Section 13.4) establish something about the workload, and the guarantee rests on the launch measurement pin that establishes the enforcing code.
+
+## 11. Verification procedure
+
+A verifier appraises evidence under a policy, with the relying party's nonce, the digest of the presented certificate in the certificate pattern (which a version 1 verifier receives as `freshness.key`, Section 5.5), collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
+
+For the `cpu` submodule:
+
+1. Parse. Parse the envelope within the bounds of Section 4.7, and validate the policy (Section 13.1; `policy-invalid`). Refuse an unknown profile or `cvm_version` and any submodule name or combination Section 4.2 does not admit (`envelope-invalid`), and an `eat_nonce` that differs from the nonce the relying party supplied (`binding-mismatch`).
+2. Identify. Select the parser from `cvm_report`'s media type, parse the hardware report, and re-derive the vendor, the TEE and the generation from it (Section 9). Refuse a report the parser does not accept (`report-invalid`), a TEE or media type the verifier does not implement (`platform-unsupported`), and a `cvm_platform` or `dbgstat` hint that contradicts the report (`envelope-invalid`).
+3. Authenticate. Verify the hardware chain to the pinned root and the report's signature, including every validity window at the evaluation time and the cross-checks Section 9 lists for the platform (`signature-invalid`, `chain-invalid`, and `collateral-unavailable` for a VEK that can be neither found inline nor fetched). When the policy carries a machine allowlist, the identity this step authenticated MUST be on it (`machine-not-allowed`).
+4. Guest policy. Enforce the normalized security settings (Section 13.1): debug disabled unless allowed; on SEV-SNP, a guest-requested report (VMPL at most 3), VMPL 0 and migration disallowed unless allowed; on TDX, `SEPT_VE_DISABLE` set, reserved attributes zero, and no migration-service TD unless allowed; on Arm CCA, the platform lifecycle in a secured state unless debug is allowed (`guest-policy`).
+5. Freshness. Verify the binding of `cvm_binding.mode` (Section 5.4). For `commitment` the check is the recompute of Section 8.1 over the registers step 8 establishes (`binding-mismatch`).
+6. Collateral. Check revocation, the TCB status, the TCB floor that applies to this machine (Section 13.2) and, on TDX, the QE Identity, each with its signing chain anchored and its window checked; record each outcome (`revoked`, `collateral-unavailable`, `collateral-invalid`, `tcb-not-allowed`). Advisories are reported and not checked.
+7. Registers. Establish the authoritative register values (Section 6.5) and refuse envelope values that differ (`register-mismatch`).
+8. Replay. Replay the log when present (Section 7.4), mark each register `replayed`, and apply the slot rules of Section 8 in `commitment` mode (`log-required`, `log-invalid`, `replay-mismatch`, `unsupported`).
+9. Reference values. Apply the reference values and the backing minimum (Sections 13.1 and 13.4; `reference-mismatch`, `backing-below-minimum`), then produce the claims and the trustworthiness vector (Section 12).
+
+Steps 4 to 9 read only values that step 3 has authenticated or that the envelope binds to them. A verifier MAY evaluate the steps in any order and MUST produce no appraisal unless every step passes; when evidence fails more than one check it MAY refuse with the code of any failing step. Each conformance case exercises one failing statement (Section 14.2).
+
+For the `vtpm` submodule, which is appraised before the `cpu` submodule that binds it: step 3 is the attestation key's signature over the quote and the checks of Section 9.4; step 5 is `extraData == anchor`; step 7 projects the quoted PCRs; step 8 replays the vTPM's log. The `cpu` submodule's step 5 is then the key binding of Section 9.4.
+
+For device submodules: the verifier sends one NRAS request per architecture with every device of that architecture, and appraises the answer as Section 9.7 states.
+
+A verifier MUST appraise every submodule the envelope carries. It MUST refuse the whole envelope when any submodule fails.
+
+## 14. Conformance
+
+This section defines verifier conformance. A verifier conforms to this profile when it reproduces the decision of every case of the conformance corpus at the corpus version it declares, and meets the requirements of Sections 4 to 13 and 15.9 that the corpus does not yet cover (`UNCOVERED.md`). The CDDL module constrains shapes, the vectors of Appendix B constrain formulas, and the corpus constrains decisions. An attester conforms when it produces evidence under Sections 4, 5 and 9 that a conforming verifier appraises; a register provider conforms to Sections 7.3 and 8.1 to 8.6. Version 1 publishes no corpus for attesters or register providers.
+
+### 14.1. Layout
+
+```
+conformance/
+  VERSION            the corpus version
+  README.md          how to run the corpus
+  UNCOVERED.md       the normative statements that have no case yet
+  cases/<id>.json    one case per file
+  inputs/            the evidence, policies, collateral, expected appraisals (inputs/expected/)
+                     and recorded NRAS exchanges the cases reference
+```
+
+The corpus is data. Each implementation runs it with its own runner and pins it by the revision it was taken from.
+
+### 14.2. Case format
+
+```
+case = {
+  "id": text,                         ; kebab-case, unique, never reused
+  "rule": { "section": text, "statement": text },
+  "now": text,                        ; RFC 3339 UTC: the evaluation time
+  "evidence": path,                   ; the evidence envelope, JSON
+  ? "policy": path,                   ; absent means the Section 13.1 defaults
+  ? "collateral": { * collateral-key => (path / { "body": path, "signing_chain": path }) },
+  ? "nras": [ * nras-exchange ],
+  "expect": { "appraisal": path } / { "refusal": refusal-code },
+}
+path = text                           ; relative to conformance/inputs, forward slashes
+collateral-key = text                 ; Section 10.3
+refusal-code = text                   ; Section 14.4
+nras-exchange = { "arch": "HOPPER" / "BLACKWELL" / "LS10", "nonce": text, "response": path, "jwks": path }
+                                      ; nonce: the request's nonce, lowercase hexadecimal (Section 9.7.1)
+```
+
+`signing_chain` is the PEM issuer chain that Section 10.1 calls `issuer_chain`.
+
+`rule.section` names the section of this document the case exercises and `rule.statement` states the rule, so a case traces to the text. An input whose path ends in `.gz` is stored gzip-compressed (RFC 1952) and is its decompressed content; only inputs over 1 MiB are compressed.
+
+A case fixes everything a decision depends on:
+
+- `now` is the evaluation time. Every validity window in the appraisal is judged against it. A conforming verifier takes the evaluation time as an input.
+- `collateral` is the whole collateral available to the appraisal, each file the artifact's bytes as the source serves them, with signed Intel artifacts carrying their signing chain beside the body. A request for a key the case does not carry fails as unavailable collateral. The envelope's inline endorsements are inputs like any other, and Section 10.2 applies.
+- `nras` holds the recorded exchange for each architecture batch: the nonce the verifier will send, NRAS's detached EAT, and the JWKS that verifies it. Nothing in the corpus reaches a network.
+- the policy is complete; a case without one runs under the defaults, and its identifier (Section 12.5) is the one the expected appraisal carries.
+- the relying party's nonce is the envelope's `eat_nonce`, and the digest of the presented certificate, in the certificate pattern, is the policy's `freshness.key`. The rule that refuses an `eat_nonce` other than the relying party's therefore has no case (`UNCOVERED.md`).
+
+A case exercises one statement. Where an input cannot avoid breaking several, `rule.statement` names the refusal expected.
+
+### 14.3. Comparison
+
+For `expect.appraisal`, the runner encodes the implementation's appraisal as the JSON of Section 12 and compares it with the expected file as parsed JSON values after removing, from both, the members that vary between implementations: `iat`; `ear_verifier_id`; `ear_raw_evidence`; `reason` inside every `cvm_collateral` entry. Everything else must be equal. An implementation that emits an extra claim fails the case.
+
+For `expect.refusal`, the runner maps the implementation's error to one code of Section 14.4 and compares codes. An error that maps to no code is no decision and fails the case, as does a refusal with another code, or an appraisal where a refusal was expected, or the reverse.
+
+### 14.4. Refusal codes
+
+A refusal names the rule family that failed:
+
+| Code | Sections | Meaning |
+| --- | --- | --- |
+| `envelope-invalid` | 3.4, 4, 5.3, 5.4, 6.1, 6.2, 6.4, 6.5, 8.1, 9.4.1, 10.1, 11 steps 1 and 2 | the envelope, a submodule or a `cvm_*` object breaks a shape, encoding, size, nesting, version or consistency rule, including a hint that contradicts the signed report, a backing the register's source does not admit, `snp-vmr` registers outside `commitment` mode, envelope values that disagree with each other (a vTPM register and its entry of `cvm_tpm_quote.pcrs`, an Azure SEV-SNP report and the HCL report's hardware area), an HCL report outside Section 9.4.1, and a reserved key kind |
+| `policy-invalid` | 11 step 1, 13 | the policy fails its own validation |
+| `platform-unsupported` | 9, 11 step 2 | the TEE, hosting or report media type is one this verifier does not implement |
+| `report-invalid` | 9.1.2, 9.1.3, 9.2.2, 9.4.3, 11 step 2 | the hardware report cannot be parsed, breaks a layout rule of Section 9 (a reserved byte, the signature algorithm, the key selection, a body type or size), or its version is outside the supported range; a TPM quote that is not a quote |
+| `signature-invalid` | 9.1.4, 9.2.3, 9.4.3, 11 step 3 | a hardware or vendor signature does not verify: the report, the quote, the TPM quote |
+| `chain-invalid` | 9.1.4, 9.2.3, 11 steps 3 and 6 | a certificate chain does not reach the pinned root, contradicts the report, or is outside its validity at the evaluation time; a quoting enclave that is not the one Intel's QE Identity names |
+| `machine-not-allowed` | 9.1.4, 9.7.3, 11 step 3, 13.3 | the authenticated machine identity is not on the allowlist, or the evidence identifies no machine while an allowlist is present |
+| `guest-policy` | 11 step 4 | a guest policy bit, TD attribute, VMPL, host-requested report, debug state or lifecycle violates policy |
+| `binding-mismatch` | 4.1, 4.6, 5, 8.7, 9.4, 9.7.2, 11 steps 1 and 5 | the binding of the submodule's mode does not hold (including the HCL report's key binding), the envelope's `eat_nonce` differs from the relying party's nonce, NRAS's overall or device nonce differs, a key binding the policy requires is absent or different (a CCA submodule under a policy key included), the certificate pattern without `freshness.key`, or `vtpm-extradata` or `commitment` without a pinned launch measurement |
+| `collateral-unavailable` | 9.1.4, 9.6.4, 9.7.2, 10, 11 steps 3 and 6 | an artifact the policy requires could not be obtained, including a VEK that a VLEK-signed or masked report does not carry, an NRAS or JWKS endpoint that cannot be reached and a missing CCA CoRIM |
+| `collateral-invalid` | 9.1.4, 9.2.3, 10, 11 step 6 | an artifact fails its signature, its signing chain, its binding or its window at the evaluation time, or cannot be parsed; an inline artifact that fails only its binding or window is ignored (Section 10.2) |
+| `revoked` | 11 step 6 | a certificate is revoked |
+| `tcb-not-allowed` | 9.2.3, 11 step 6, 13.2 | a TCB status outside the allowed set, a TCB value below its floor, a TDX module identity or TCB level that matches no entry, or a QE TCB level the QE Identity revokes or does not list |
+| `register-mismatch` | 6.5, 9.4.3, 11 step 7 | an envelope register differs from the authoritative value |
+| `log-required` | 4.3, 7.1, 7.4, 8, 11 step 8 | a log the mode requires is absent or in a format the mode does not admit, or `chain_len` and the log disagree |
+| `log-invalid` | 7.1, 9.3, 11 step 8 | the log cannot be parsed whole under its format's rules, or breaks a shape rule of its format |
+| `replay-mismatch` | 7.3, 7.4, 8, 9.2.6, 9.3, 11 step 8 | a replay does not reproduce a register that must reproduce, a record digest does not reproduce, a `cvm` event or claim is not deterministically encoded, a commitment log carries a record of another content type, a slot or `ats` record rule is broken, a CCEL record names an index above 4, or chain memory detects a restart or a fork |
+| `reference-mismatch` | 11 step 9, 13.1, 13.4 | a pinned launch measurement, register, PCR, host data, owner key or slot owner differs, or a pin nothing in the evidence can satisfy |
+| `backing-below-minimum` | 11 step 9, 13.1 | a register's backing is below the policy minimum |
+| `device-required` | 13.5 | the policy requires a device and the envelope carries none |
+| `device-not-allowed` | 4.2, 13.5 | a device's architecture is outside the allowed set, or the envelope carries more than 32 device submodules |
+| `device-token-invalid` | 9.7.2 | NRAS answered with a token the verifier refuses: signature, issuer, claims version, `submods` digest or entries, key identifier, or a token that maps to no device |
+| `device-policy` | 9.7.2, 9.7.3, 13.5 | NRAS's overall result is false, the device count differs, a device token is of another architecture, or a device gate failed |
+| `unsupported` | 7.1, 7.4, 9.4.3, 9.4.4, 9.6.1, 9.6.2, 9.7.1, 11 step 8 | a format or feature this version does not implement: the `aael` log, a log format the submodule does not admit, a TPM bank other than SHA-256 or a quote selection other than one SHA-256 selection, a CCA collection entry, profile or binding variant outside Sections 9.6.1 and 9.6.2, an NRAS request that relaxes NRAS's certificate checks |
+
+### 14.5. Versioning and change control
+
+The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.9") and pins that version in its continuous integration.
+
+The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
