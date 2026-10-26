@@ -58,11 +58,17 @@ pub struct ServerConfig {
     pub tls: TlsConfig,
 }
 
+/// Deprecated: the API does not terminate TLS. The section still parses so
+/// existing files with `enabled = false` load; `enabled = true` fails
+/// [`Config::validate`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
+    /// Deprecated: must be false.
     pub enabled: bool,
+    /// Deprecated: ignored.
     pub cert_path: String,
+    /// Deprecated: ignored.
     pub key_path: String,
 }
 
@@ -192,26 +198,12 @@ impl Config {
             .parse::<SocketAddr>()
             .map_err(|e| format!("invalid server.bind address '{}': {e}", self.server.bind))?;
 
-        // Validate TLS paths when TLS is enabled
+        // The listener is plaintext; accepting this flag would hide that.
         if self.server.tls.enabled {
-            if self.server.tls.cert_path.is_empty() {
-                return Err("tls.enabled requires a non-empty tls.cert_path".to_string());
-            }
-            if self.server.tls.key_path.is_empty() {
-                return Err("tls.enabled requires a non-empty tls.key_path".to_string());
-            }
-            if !Path::new(&self.server.tls.cert_path).exists() {
-                return Err(format!(
-                    "tls.cert_path '{}' does not exist",
-                    self.server.tls.cert_path
-                ));
-            }
-            if !Path::new(&self.server.tls.key_path).exists() {
-                return Err(format!(
-                    "tls.key_path '{}' does not exist",
-                    self.server.tls.key_path
-                ));
-            }
+            return Err("server.tls.enabled is not supported: attestation-api does not terminate TLS. \
+                 Evidence endpoints must not be routable: terminate TLS in front of the service and \
+                 bind to an address only the terminator reaches (loopback for a sidecar)"
+                .to_string());
         }
 
         // Validate token duration when token is enabled
@@ -282,5 +274,39 @@ mod tests {
         }
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         Config::load(&example).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn tls_enabled_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cases = [
+            ("absent", "", true),
+            ("disabled", "[server.tls]\nenabled = false\n", true),
+            (
+                "disabled with paths",
+                "[server.tls]\nenabled = false\ncert_path = \"c.pem\"\nkey_path = \"k.pem\"\n",
+                true,
+            ),
+            ("enabled", "[server.tls]\nenabled = true\n", false),
+            (
+                "enabled with paths",
+                "[server.tls]\nenabled = true\ncert_path = \"c.pem\"\nkey_path = \"k.pem\"\n",
+                false,
+            ),
+        ];
+        for (name, text, ok) in cases {
+            std::fs::write(&path, text).unwrap();
+            let got = Config::load(&path).unwrap().validate();
+            if ok {
+                assert!(got.is_ok(), "{name}: validate() = {got:?}, want Ok");
+            } else {
+                let err = got.expect_err(name);
+                assert!(
+                    err.contains("TLS"),
+                    "{name}: validate() = {err:?}, want TLS error"
+                );
+            }
+        }
     }
 }
