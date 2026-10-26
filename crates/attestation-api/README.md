@@ -20,9 +20,10 @@ Unknown keys are startup errors, including the removed `[certs]` settings.
 Default bind is `0.0.0.0:8400`, API keys are empty, `/attest` is enabled and
 token issuance is disabled. These are development defaults, not an
 access-control recommendation. The service speaks plain HTTP only and refuses
-`server.tls.enabled = true`. Do not make the evidence endpoints routable:
-bind to loopback, terminate TLS in front of it (sidecar or ingress) and set
-`auth.api_keys` before exposing the service.
+`server.tls.enabled = true`. Terminate TLS in front of it and bind to an
+address only the terminator reaches: loopback for a sidecar (the example
+config does this), a private address for an ingress. Set `auth.api_keys`
+before exposing the service.
 
 All endpoints except `/health` require `Authorization: Bearer TOKEN` when
 keys are configured. An empty list allows unauthenticated access and logs a

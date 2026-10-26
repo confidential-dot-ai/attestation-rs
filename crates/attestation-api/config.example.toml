@@ -1,7 +1,8 @@
 [server]
-bind = "0.0.0.0:8400"
-# Plain HTTP only. Terminate TLS in front of the service (sidecar or ingress)
-# and bind to loopback behind it. `[server.tls] enabled = true` is refused.
+# Plain HTTP only; `[server.tls] enabled = true` is refused. Terminate TLS in
+# front of the service: loopback for a sidecar, or an address only the
+# terminator can reach for an ingress. Never expose this listener directly.
+bind = "127.0.0.1:8400"
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.

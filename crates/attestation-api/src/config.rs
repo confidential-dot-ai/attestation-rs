@@ -201,8 +201,8 @@ impl Config {
         // The listener is plaintext; accepting this flag would hide that.
         if self.server.tls.enabled {
             return Err("server.tls.enabled is not supported: attestation-api does not terminate TLS. \
-                 Evidence endpoints must not be routable: bind to loopback and terminate TLS in the \
-                 deployment (sidecar or ingress) in front of it"
+                 Evidence endpoints must not be routable: terminate TLS in front of the service and \
+                 bind to an address only the terminator reaches (loopback for a sidecar)"
                 .to_string());
         }
 
