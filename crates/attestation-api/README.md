@@ -17,9 +17,11 @@ cargo test --locked -p attestation-api
 
 [config.example.toml](config.example.toml) is the configuration reference.
 Unknown keys are startup errors, including the removed `[certs]` settings.
-Default bind is `0.0.0.0:8400`, TLS is off, API keys are empty, `/attest` is
-enabled and token issuance is disabled. These are development defaults, not
-an access-control recommendation. Configure TLS or a TLS terminator and
+Default bind is `0.0.0.0:8400`, API keys are empty, `/attest` is enabled and
+token issuance is disabled. These are development defaults, not an
+access-control recommendation. The service speaks plain HTTP only and refuses
+`server.tls.enabled = true`. Do not make the evidence endpoints routable:
+bind to loopback, terminate TLS in front of it (sidecar or ingress) and set
 `auth.api_keys` before exposing the service.
 
 All endpoints except `/health` require `Authorization: Bearer TOKEN` when
