@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-hcl-version-not-1",
+  "rule": {
+    "section": "9.4.1",
+    "statement": "the HCL report's request data version (offset 0x4C4) is 1, since version 2 moves the variable data; another value is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-hcl-version-not-1.json",
+  "policy": "policy/azure-snp-hcl-version-not-1.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
