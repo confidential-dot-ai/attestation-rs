@@ -1,4 +1,7 @@
+mod common;
+
 use attestation_api::token::issuer::{PassedVerification, TokenIssuer};
+use p256::elliptic_curve::Generate;
 
 #[test]
 fn config_parse_explicit_values() {
@@ -47,7 +50,7 @@ fn config_rejects_unknown_attestation_platform() {
 
 #[test]
 fn token_issuer_produces_valid_jwt() {
-    let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+    let signing_key = p256::ecdsa::SigningKey::generate();
     let verifying_key = p256::ecdsa::VerifyingKey::from(&signing_key);
     let issuer = TokenIssuer::new(
         signing_key,
@@ -56,26 +59,7 @@ fn token_issuer_produces_valid_jwt() {
     )
     .unwrap();
 
-    let mut verified_json = serde_json::json!({
-        "platform": "snp",
-        "claims": {
-            "launch_digest": "",
-            "report_data": "",
-            "signed_data": "",
-            "init_data": "",
-            "tcb": { "type": "Snp", "bootloader": 0, "tee": 0, "snp": 0, "microcode": 0 },
-            "platform_data": {},
-        },
-        "report_data_match": true,
-        "host_data_match": null,
-        "launch_digest_match": null,
-        "debug": false,
-        "allow_debug": false,
-        "vmpl": 0,
-        "max_vmpl": 0,
-        "reported_tcb": { "bootloader": 0, "tee": 0, "snp": 0, "microcode": 0 },
-        "min_tcb_met": null,
-    });
+    let mut verified_json = common::passed_snp_json();
     let verified: attestation::Verified = serde_json::from_value(verified_json.clone()).unwrap();
     let passed = PassedVerification::new(&verified).expect("verification passed");
     let token = issuer

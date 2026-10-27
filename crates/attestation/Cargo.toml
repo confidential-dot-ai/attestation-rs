@@ -60,11 +60,9 @@ subtle = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await-macro"] }
 
 # Crypto
-p256 = { version = "0.13", features = ["ecdsa"] }
-p384 = { version = "0.13", features = ["ecdsa"] }
-# hazmat feature needed internally for PrehashVerifier in TDX DCAP signature verification;
-# no hazmat types are re-exported in the public API.
-ecdsa = { version = "0.16", features = ["verifying", "hazmat"] }
+# Verification only (see the workspace Cargo.toml on default features).
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
+p384 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 # RUSTSEC-2023-0071: rsa 0.9 has a timing side-channel in RSA PKCS#1 v1.5
 # *decryption* (Marvin Attack). This library uses rsa only for RSA-PSS signature
 # *verification* (no private key on the verifier side), so the direct attack
@@ -82,7 +80,7 @@ scroll = "0.12"
 # Attest-side dependencies (cross-platform parts)
 libc = { version = "0.2", optional = true }
 tempfile = { version = "3", optional = true }
-sev = { version = "7", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
+sev = { version = "7", default-features = false, features = ["snp"], optional = true }
 pem-rfc7468 = { version = "1", optional = true, features = ["alloc"] }
 zerocopy = { version = "0.8", optional = true, features = ["derive"] }
 pem = "3.0.6"

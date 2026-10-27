@@ -256,7 +256,7 @@ pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> 
     let intel_root_key = VerifyingKey::from_sec1_bytes(INTEL_SGX_ROOT_CA_PUB_DER)
         .map_err(|e| AttestationError::CertChainError(format!("Intel Root CA key parse: {e}")))?;
 
-    if root_pub_key.to_encoded_point(false) != intel_root_key.to_encoded_point(false) {
+    if root_pub_key.to_sec1_point(false) != intel_root_key.to_sec1_point(false) {
         return Err(AttestationError::CertChainError(
             "Root CA public key does not match Intel SGX Root CA".into(),
         ));
@@ -325,7 +325,7 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Res
     let intel_root_key = VerifyingKey::from_sec1_bytes(INTEL_SGX_ROOT_CA_PUB_DER)
         .map_err(|e| AttestationError::CertChainError(format!("Intel Root CA key parse: {e}")))?;
 
-    if root_pub_key.to_encoded_point(false) != intel_root_key.to_encoded_point(false) {
+    if root_pub_key.to_sec1_point(false) != intel_root_key.to_sec1_point(false) {
         return Err(AttestationError::CertChainError(
             "signing chain Root CA public key does not match Intel SGX Root CA".into(),
         ));

@@ -292,7 +292,6 @@ jobs:
           key: cargo-audit-0.22.2-${{ runner.os }}
       - if: steps.audit-bin.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked --version 0.22.2
-      # FIXME: Remove these ignores once upstream attestation-rs/sev updates deps.
-      # RUSTSEC-2023-0071: rsa (Marvin attack, no patched version available)
-      # RUSTSEC-2025-0141: bincode (unmaintained, used by sev crate)
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0141
+      # Ignores, with their reasons, live in .cargo/audit.toml.
+      - run: cargo audit
+      - run: cargo audit --file crates/attestation/fuzz/Cargo.lock

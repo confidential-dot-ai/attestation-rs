@@ -32,7 +32,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 
 # Crypto / tokens
-p256 = { workspace = true, features = ["jwk", "ecdsa"] }
+# The signing side: p256's default features (std, precomputed tables).
+p256 = { workspace = true, features = ["ecdsa", "pem", "precomputed-tables", "std"] }
 subtle = { workspace = true }
 
 # HTTP client (loadtest). Pinned directly (not `workspace = true`) so
@@ -54,7 +55,6 @@ base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-rand = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]

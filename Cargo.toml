@@ -25,15 +25,20 @@ cfg-if = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 der = "0.7"
-ecdsa = "0.16"
 getrandom = "0.2"
 hex = "0.4"
 log = "0.4"
-p256 = "0.13"
-p384 = "0.13"
+# No default features: `std` brings in getrandom, which does not build for
+# wasm32-unknown-unknown. Crates opt into what they use.
+#
+# p256/p384 0.14 sit on the newer RustCrypto stack (der 0.8, spki 0.8,
+# pkcs8 0.11, signature 3, sha2 0.11) while rsa 0.9 and x509-cert 0.2 stay
+# on the older one, so both are in Cargo.lock until rsa 0.10 is released.
+# Import traits through the crate that owns the key type (`p384::pkcs8::...`).
+p256 = { version = "0.14", default-features = false }
+p384 = { version = "0.14", default-features = false }
 pem = "3"
 pem-rfc7468 = "1"
-rand = "0.8"
 reqwest = "0.12"
 rsa = "0.9"
 scroll = "0.12"
