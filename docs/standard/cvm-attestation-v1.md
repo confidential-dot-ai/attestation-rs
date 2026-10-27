@@ -391,6 +391,145 @@ A `challenge` binding carries no key or an `spki-sha256` or `raw` key. A `certif
 
 The mode is constrained by the platform (Section 4.3): a verifier MUST refuse a mode that the TEE and hosting do not admit.
 
+## 6. Measurement registers
+
+### 6.1. Register entries
+
+`cvm_registers` is an array of entries:
+
+| Member | Value |
+| --- | --- |
+| `index` | the slot, an integer 0 to 65535, interpreted within `source` (Section 6.2) |
+| `alg` | the TPM 2.0 algorithm name: `sha256` (TPM_ALG_SHA256, 0x000B), `sha384` (TPM_ALG_SHA384, 0x000C) or `sha512` (TPM_ALG_SHA512, 0x000D) |
+| `value` | the register value, exactly the digest length of `alg` |
+| `source` | `tdx-rtmr`, `snp-vmr`, `vtpm-pcr` or `cca-rem` |
+| `backing` | `hardware`, `privileged-service`, `kernel-service` or `virtualized` (Section 6.4) |
+
+Each `(source, index)` appears at most once. `alg` is pinned per source: `sha384` for `tdx-rtmr` and `snp-vmr`; the quoted bank for `vtpm-pcr`; the realm hash algorithm for `cca-rem` (`sha256` or `sha512` under RMM 1.0, and also `sha384` under RMM 2.0). The array is REQUIRED whenever `cvm_log` is present, so that a verifier without support for a log format can still pin register values.
+
+### 6.2. Sources and index spaces
+
+| Source | Index | Width (bytes) | Held by |
+| --- | --- | --- | --- |
+| `tdx-rtmr` | RTMR ordinal 0 to 3 | 48 | the TDX module |
+| `cca-rem` | REM ordinal 0 to 3 | 32, 48 or 64 | the RMM |
+| `vtpm-pcr` | PCR number 0 to 23 | per bank | the paravisor's vTPM |
+| `snp-vmr` | slot 0 to 15 | 48 | the register provider (Section 8) |
+
+The launch measurement has its own claim, `cvm_launch_measurement`, and no register index denotes it.
+
+Two conventions in use are offset by one and are converted on ingest: the UEFI `CC_EVENT` `MrIndex` (0 is MRTD, 1 to 4 are RTMR 0 to 3), so CCEL records map `MrIndex - 1` to the RTMR ordinal; and measurement files that list MRTD at index 0 and RTMR 0 to 3 at indexes 1 to 4. The TCG CEL `pcr` field carries this profile's index.
+
+### 6.3. Slot semantics
+
+Slots 0 to 3 carry the same meaning on every platform that has them, following the TDX RTMR assignment and the TCG PC Client firmware profile:
+
+| Slot | Contents | PC Client analog |
+| --- | --- | --- |
+| 0 | firmware configuration | PCR 1 and 7 |
+| 1 | what the firmware loads: boot loader, partition table | PCR 2 to 6 |
+| 2 | kernel, command line, initial RAM disk and OS-loaded components | PCR 8 to 15 |
+| 3 | runtime | none |
+| 4 to 15 | workload slots, where the source has them; allocated at first use (Section 8.3) | none |
+
+`vtpm-pcr` entries keep their PCR numbers and are distinguished by `source`: RTMR 3, PCR 3 and SNP slot 3 are different registers.
+
+On `snp-vmr` the register provider starts with the guest kernel, so firmware cannot extend slots 0 to 2: they hold what the kernel records into them, and otherwise stay at genesis.
+
+### 6.4. Backing
+
+`backing` states what prevents code inside the CVM from rewriting a register. The levels, from strongest to weakest:
+
+| Backing | Definition | Examples |
+| --- | --- | --- |
+| `hardware` | the TEE hardware or its firmware holds the register and reports its value inside the signed report | TDX RTMRs, CCA REMs |
+| `privileged-service` | a component at a hardware-enforced privilege level above the guest operating system holds the register, and its code is covered by the launch measurement | a vTPM in the Azure paravisor; an SVSM at VMPL0 |
+| `kernel-service` | the measured guest kernel holds the register, and the kernel restriction set of Section 8.6 keeps every user, root included, from rewriting it; a kernel compromise defeats it | the SNP register provider of Section 8 |
+| `virtualized` | software without an enforced boundary against the most privileged user of the guest, or any register whose protection the verifier cannot establish | a userspace register service |
+
+In evidence, `backing` is a hint constrained by `source`: `hardware` for `tdx-rtmr` and `cca-rem`; `privileged-service` for `vtpm-pcr`; never `hardware` for `snp-vmr`. A verifier MUST refuse evidence that violates these constraints.
+
+In results, `backing` is what the verifier established. It MUST NOT be higher than the evidence claimed, and for `snp-vmr` it is the level Section 8.7 assigns. The policy sets a minimum (`min_backing`, Section 13.1) and the verifier reports the weakest backing it saw (`cvm_backing_min`, Section 12.3), so a downgrade from `hardware` to a software level fails visibly.
+
+### 6.5. Authoritative values
+
+The verifier never trusts `value` from the envelope:
+
+- `tdx-rtmr`: the authoritative values are the RTMRs in the signed TD quote, and every envelope entry MUST equal them.
+- `cca-rem`: the authoritative values are the REMs in the signed realm token, and every envelope entry MUST equal them.
+- `vtpm-pcr`: the quote's signed PCR digest MUST reproduce from the 24 values of `cvm_tpm_quote.pcrs` over the signed selection, and every register MUST equal the value of its PCR.
+- `snp-vmr`: the commitment in the signed report data MUST reproduce from the 16 register values (Section 8.1). `snp-vmr` registers therefore appear only with the `commitment` mode, and a verifier MUST refuse them in any other mode.
+
+When a log is present it MUST also replay to these values (Section 7.4).
+
+## 7. Event logs
+
+### 7.1. Formats
+
+`cvm_log` is `{format, data}`, `data` a byte string of at most 1 MiB. A log parses whole under its format's rules or the verifier refuses it with `log-invalid`; a verifier never uses the parsable prefix of a truncated log. The formats a submodule admits: on TDX, `tcg-cel-cbor`, `tcg-cel-json`, `tdx-ccel`, `dstack-json` and `aael` (refused, below); on SEV-SNP in `commitment` mode, `tcg-cel-cbor` and `tcg-cel-json`, where another format is refused with `log-required`; on the `vtpm` submodule, `tpm2-event-log`. A verifier refuses another format with `unsupported`. Hexadecimal in `tcg-cel-json` and `dstack-json` is lowercase when produced and case-insensitive when parsed.
+
+| Format | Content |
+| --- | --- |
+| `tcg-cel-cbor` | TCG Canonical Event Log v1.1 records in deterministic CBOR: `data` is the CEL CDDL's `tcg-canonical-event-log`, one array of records, each the map `{0: recnum, 1: pcr, 3: digests, 9: content_type, 10: content}`. `recnum` counts each index's records from 0 (CEL section 4.2.2) and `pcr` carries this profile's index. This is the format producers SHOULD emit. |
+| `tcg-cel-json` | the same records in CEL-JSON, a JSON array of `{recnum, pcr, digests: [{hashAlg, digest}], content_type, content}` with byte strings in hexadecimal; for inspection |
+| `tdx-ccel` | the ACPI CCEL table's log as the guest exposes it, in the TCG2 binary format; `MrIndex` 1 to 4 become RTMR 0 to 3. The Confidential Containers attestation agent appends its entries to it as `EV_EVENT_TAG` records whose tagged event ID is 0x4141454C around the text `domain operation content`, with the digest of the whole tagged event and `MrIndex` 4 (RTMR 3) by default |
+| `tpm2-event-log` | the vTPM's TCG2 binary log (PC Client PFP section 10) |
+| `dstack-json` | dstack's event log, a JSON array of `{imr, event_type, digest, event, event_payload, version?, preimage?}` with `imr` the RTMR ordinal (Section 9.3) |
+| `aael` | the Confidential Containers attestation agent's standalone log, used where the platform has no CCEL: a fixed 73-byte header followed by the records described for `tdx-ccel`. Version 1 verifiers MUST refuse it with `unsupported` |
+
+### 7.2. Normalization to CEL
+
+Every format becomes CEL records before replay. A TCG2 event becomes a `pcclient_std` record carrying all its digests; the TCG2 Spec ID header becomes an unmeasured record. A dstack runtime event becomes a `pcclient_std` record whose event data is the input of its digest, so the record verifies on its own. An attestation-agent entry keeps the tagged event as its event data.
+
+A record's event type and tagged-event ID lie outside its digest, so a relabeled record still replays. A verifier therefore lists the entries or runtime events of a register only when every measured record in that register is one whose digest reproduces from its content.
+
+### 7.3. The `cvm` content type
+
+Runtime events recorded by measured producers under this profile use the CEL content type `cvm`, value 200:
+
+```
+$TPMS_CEL_EVENT-extension /= TPMS_CEL_EVENT<CVM, CVM_CONTENT>
+CVM = JC<"cvm", 200>
+CVM_CONTENT = { seq => uint, event => BYTEBUFFER }
+seq = JC<"seq", 0>
+event = JC<"event", 1>
+```
+
+A `cvm` record is:
+
+- `recnum`: the record's number within its slot, from 0;
+- `pcr`: the slot index;
+- `digests`: exactly one entry, `hashAlg` 12 (TPM_ALG_SHA384) and `digest` `d`;
+- `content_type`: 200;
+- `content`: the map `{0: seq, 1: event}`, where `seq` is the record's position among the log's `cvm` records, from 0, and `event` is a byte string.
+
+`event` is the deterministic CBOR encoding (RFC 8949 section 4.2.1) of the map `{0: domain (tstr), 1: operation (tstr), 2: content_digest (bstr), 3: content (bstr, OPTIONAL)}`, with `domain` and `operation` each 1 to 255 bytes of UTF-8. `content_digest` is 48 bytes. A verifier refuses with `replay-mismatch` an `event` that is not deterministically encoded, carries a duplicate or unknown key, has trailing bytes, or has a `domain` or `operation` outside 1 to 255 bytes, because such bytes do not authenticate one reading. The meaning of `content_digest` belongs to the producer, except in the records of Section 8.2 and 8.3, where it is fixed. The digest extended into the register is:
+
+```
+d = SHA-384("ats-mr-v1/record" || u64le(seq) || u16le(pcr) || event)
+```
+
+In CEL-CBOR a record is `{0: recnum, 1: slot, 3: [{0: 12, 1: d}], 9: 200, 10: {0: seq, 1: event}}`, with `event` stored as the exact bytes that were hashed; in CEL-JSON it is `{"recnum", "pcr", "digests", "content_type": "cvm", "content": {"seq", "event": hex}}`. The order across registers lives in the content because CEL keeps `recnum` per index (CEL section 4.2.2) and requires a record to carry what its digest covers (CEL section 4.2.1.2), and leaves how a digest derives from content to the content type (CEL section 4.2.5).
+
+Domain `ats` is reserved for this profile's own records. In any log, a `cvm` record in domain `ats` is refused with `replay-mismatch` unless it is the boot record of Section 8.2 (record 0, in slot 3, without `content`) or, in a `commitment` log, a claim record of Section 8.3.
+
+CEL v1.1 Table 2 assigns content types 4, 5 and 7 to 9, reserves 6 and 10, and defines no private range. The value 200 is taken through the `$TPMS_CEL_EVENT-extension` socket that the CEL CDDL provides; Section 17.4 records the registration request. Vectors are in Appendix B.3.
+
+### 7.4. Replay
+
+The verifier replays every register a log covers, from that register's starting value, and marks each register `replayed: true` or `replayed: false` in the result. Without a log, every register is reported with `replayed` false.
+
+- A register the log extends is replayed when its records, extended in order from the starting value, reproduce the authoritative value of Section 6.5. For `tcg-cel-cbor`, `tcg-cel-json`, `dstack-json` and `tpm2-event-log`, every register the log extends MUST reproduce, and one that does not is refused with `replay-mismatch`. For `tdx-ccel`, RTMR 0 to 2 MUST reproduce, and RTMR 3 is reported with `replayed` false when it does not, because agents that extend RTMR 3 after boot do not all append to the CCEL.
+- A register the log never extends is replayed exactly when it still holds its starting value, since the log then accounts for every extend into it.
+- Starting values: zero for an RTMR and a REM; for a PCR the PC Client starting value (PCRs 17 to 22 all ones; PCR 0 at the locality of a `StartupLocality` event, otherwise zero; every other PCR zero); for an `snp-vmr` slot its genesis value (Section 8.1).
+- `EV_NO_ACTION` records are skipped. A `tpm2-event-log` is replayed in the quoted bank, which version 1 requires to be SHA-256 (Section 9.4.3).
+- A `cvm` record is replayed by requiring `seq` to count the log's `cvm` records from 0 without a gap and `recnum` to count its slot's records from 0 without a gap, recomputing `d` from `seq`, the record's index and the stored `event` bytes, requiring it to equal the recorded digest, and extending it. A record that breaks any of these is refused with `replay-mismatch`. The verifier never re-encodes content.
+- dstack runtime events are replayed with the digest rules of Section 9.3, from zero, as `R = SHA-384(R || digest)`.
+
+`replay_until_event`, under which the verified value would be the replay up to and including a named record, and a policy naming the slots that must replay, are not defined in version 1.
+
+On an SNP `cpu` submodule in `commitment` mode the log is REQUIRED (refused with `log-required` when absent or in a format the mode does not admit), every record MUST have content type `cvm` (refused with `replay-mismatch` otherwise), `chain_len` MUST equal the number of records (refused with `log-required` otherwise), and Section 8 governs the replay from genesis.
+
 ## 10. Endorsements
 
 ### 10.1. Inline endorsements
