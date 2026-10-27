@@ -612,8 +612,8 @@ fn verify_x5c_chain_and_extract_key(
     chain: &[String],
     now: Option<i64>,
 ) -> Result<p384::ecdsa::VerifyingKey> {
+    use p384::pkcs8::DecodePublicKey as _;
     use sha2::Digest;
-    use spki::DecodePublicKey;
     use x509_cert::der::Decode;
 
     if chain.is_empty() {
@@ -825,7 +825,7 @@ fn verify_cert_signature(
 
 fn verify_ecdsa_p384(issuer_spki: &[u8], tbs: &[u8], sig_bytes: &[u8]) -> bool {
     use p384::ecdsa::signature::Verifier as _;
-    use spki::DecodePublicKey as _;
+    use p384::pkcs8::DecodePublicKey as _;
     let Ok(key) = p384::ecdsa::VerifyingKey::from_public_key_der(issuer_spki) else {
         return false;
     };
@@ -837,7 +837,7 @@ fn verify_ecdsa_p384(issuer_spki: &[u8], tbs: &[u8], sig_bytes: &[u8]) -> bool {
 
 fn verify_ecdsa_p256(issuer_spki: &[u8], tbs: &[u8], sig_bytes: &[u8]) -> bool {
     use p256::ecdsa::signature::Verifier as _;
-    use spki::DecodePublicKey as _;
+    use p256::pkcs8::DecodePublicKey as _;
     let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(issuer_spki) else {
         return false;
     };

@@ -99,10 +99,10 @@ impl Platform for GcpSnp {
         store: &Store,
         now: i64,
     ) -> Result<(GcpSnpCollateralSet, Vec<CollateralUsed>)> {
-        let (report, gen, inline) = genuine_report(evidence, now)?;
-        let measurement = (Self::KIND, report.measurement.to_vec());
+        let genuine = genuine_report(evidence, now)?;
+        let measurement = (Self::KIND, genuine.report.measurement.to_vec());
         let (snp, endorsement) = futures_util::join!(
-            SnpCollateralSet::gather(&report, gen, inline, store, now),
+            SnpCollateralSet::gather(genuine, store, now),
             store.get_if_published::<GceEndorsement>(&measurement, now)
         );
         let (snp, mut used) = snp?;

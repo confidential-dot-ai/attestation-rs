@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::PublicKey;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -151,7 +151,7 @@ fn b64_encode_json<T: Serialize>(value: &T) -> Result<String, ApiError> {
 /// Build a JWKS response from an EC P-256 signing key.
 fn build_jwks(signing_key: &SigningKey) -> Result<Value, ApiError> {
     let public_key = PublicKey::from(signing_key.verifying_key());
-    let point = public_key.to_encoded_point(false);
+    let point = public_key.to_sec1_point(false);
 
     let x = URL_SAFE_NO_PAD.encode(
         point

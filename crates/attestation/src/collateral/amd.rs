@@ -5,7 +5,9 @@ use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 use super::{crl_number, refused, AmdKey, Collateral, Dates, VersionFloors};
 use crate::error::Result;
 use crate::platforms::snp::certs;
-use crate::platforms::snp::verify::{check_vek_binding, verify_cert_chain, verify_crl_signature};
+use crate::platforms::snp::verify::{
+    check_vek_binding, verify_bundled_chain, verify_crl_signature,
+};
 use crate::types::{ProcessorGeneration, SnpTcb};
 
 const AMD_KDS: &str = "https://kdsintf.amd.com";
@@ -65,7 +67,7 @@ impl Collateral for Vcek {
         if generation == ProcessorGeneration::Turin && tcb.fmc.is_none() {
             return Err(refused("a Turin VCEK is named by its FMC SPL"));
         }
-        verify_cert_chain(certs::get_ark(generation), certs::get_ask(generation), der)?;
+        verify_bundled_chain(generation, false, der)?;
         check_vek_binding(der, chip_id, tcb, generation)?;
         let (rest, cert) =
             X509Certificate::from_der(der).map_err(|e| refused(format!("VCEK: {e}")))?;

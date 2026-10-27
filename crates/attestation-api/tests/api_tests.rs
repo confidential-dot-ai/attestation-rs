@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use base64::Engine;
+use p256::elliptic_curve::Generate;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -81,7 +82,7 @@ const GCP_ENDORSEMENT: &[u8] =
 fn offline_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut state = test_state_with(f);
     state.verifier = held_verifier(GCP_ENDORSEMENT);
-    let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+    let signing_key = p256::ecdsa::SigningKey::generate();
     let issuer = attestation_api::token::issuer::TokenIssuer::new(
         signing_key,
         "test-issuer".to_string(),
@@ -1089,7 +1090,7 @@ async fn verify_rejects_a_pin_the_platform_does_not_have() {
 #[tokio::test]
 async fn health_reflects_token_issuer_configured() {
     let mut state = test_state();
-    let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+    let signing_key = p256::ecdsa::SigningKey::generate();
     let issuer = attestation_api::token::issuer::TokenIssuer::new(
         signing_key,
         "test-issuer".to_string(),
@@ -1123,7 +1124,7 @@ async fn health_reflects_token_issuer_configured() {
 #[tokio::test]
 async fn jwks_returns_keys_when_token_configured() {
     let mut state = test_state();
-    let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+    let signing_key = p256::ecdsa::SigningKey::generate();
     let issuer = attestation_api::token::issuer::TokenIssuer::new(
         signing_key,
         "test-issuer".to_string(),

@@ -1,10 +1,8 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use der::{Decode, Reader};
-use signature::Verifier as _;
 use spki::DecodePublicKey;
 use x509_parser::prelude::{CertificateRevocationList, FromDer as X509FromDer, X509Certificate};
 
-use sev::certs::snp::{Certificate, Chain, Verifiable};
 use sev::firmware::guest::AttestationReport;
 use sev::parser::ByteParser;
 
@@ -26,6 +24,7 @@ const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 use super::claims::extract_claims;
 use super::evidence::SnpEvidence;
 use super::measurement_registers::{self, MeasurementRegisters};
+use super::signatures;
 
 /// SNP Attestation Report version (must be >= 3 for cpuid fields).
 const MIN_REPORT_VERSION: u32 = 3;
@@ -227,12 +226,17 @@ impl SnpCollateralSet {
     /// when the evidence carries its VEK; a fetched VCEK is checked against
     /// the report here.
     pub(crate) async fn gather(
-        report: &AttestationReport,
-        gen: ProcessorGeneration,
-        inline: Option<Vec<u8>>,
+        genuine: GenuineReport,
         store: &Store,
         now: i64,
     ) -> Result<(Self, Vec<CollateralUsed>)> {
+        let GenuineReport {
+            bytes,
+            report,
+            gen,
+            inline,
+        } = genuine;
+        let report = &report;
         if let Some(vek) = inline {
             let (crl, used) = store
                 .get::<AmdCrl>(&(gen, AmdKey::of_vek(&vek)?), now)
@@ -256,7 +260,7 @@ impl SnpCollateralSet {
             store.get::<AmdCrl>(&crl_id, now)
         );
         let (vcek, vcek_used) = vcek?;
-        check_report(report, &vcek.der, gen, now)?;
+        check_report(&bytes, report, &vcek.der, gen, now)?;
         let (crl, crl_used) = crl?;
         let collateral = Self { vek: vcek.der, crl };
         Ok((collateral, vec![vcek_used, crl_used]))
@@ -286,8 +290,7 @@ impl Platform for Snp {
         store: &Store,
         now: i64,
     ) -> Result<(SnpCollateralSet, Vec<CollateralUsed>)> {
-        let (report, gen, inline) = genuine_report(evidence, now)?;
-        SnpCollateralSet::gather(&report, gen, inline, store, now).await
+        SnpCollateralSet::gather(genuine_report(evidence, now)?, store, now).await
     }
 
     fn verify(
@@ -297,9 +300,9 @@ impl Platform for Snp {
         now: i64,
     ) -> Result<SnpResult> {
         params.validate()?;
-        let (_, report, gen) = parse_evidence(evidence)?;
+        let (bytes, report, gen) = parse_evidence(evidence)?;
         let vek = &collateral.vek;
-        check_report(&report, vek, gen, now)?;
+        check_report(&bytes, &report, vek, gen, now)?;
 
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
@@ -352,34 +355,51 @@ fn parse_evidence(
     Ok((report_bytes, report, gen))
 }
 
-/// The report, its generation and the VEK it carries (if any), once the
-/// report has verified against that VEK: the checks that need no collateral.
-pub(crate) fn genuine_report(
-    evidence: &SnpEvidence,
-    now: i64,
-) -> Result<(AttestationReport, ProcessorGeneration, Option<Vec<u8>>)> {
-    let (_, report, gen) = parse_evidence(evidence)?;
+/// A report that has verified against the VEK it carries, if any.
+pub(crate) struct GenuineReport {
+    /// As the firmware signed it.
+    pub bytes: Vec<u8>,
+    pub report: AttestationReport,
+    pub gen: ProcessorGeneration,
+    /// The VEK the evidence carries.
+    pub inline: Option<Vec<u8>>,
+}
+
+/// The report and the VEK it carries (if any), once the report has verified
+/// against that VEK: the checks that need no collateral.
+pub(crate) fn genuine_report(evidence: &SnpEvidence, now: i64) -> Result<GenuineReport> {
+    let (bytes, report, gen) = parse_evidence(evidence)?;
     let inline = inline_vek(evidence)?;
     if let Some(vek) = &inline {
-        check_report(&report, vek, gen, now)?;
+        check_report(&bytes, &report, vek, gen, now)?;
     }
-    Ok((report, gen, inline))
+    Ok(GenuineReport {
+        bytes,
+        report,
+        gen,
+        inline,
+    })
 }
 
 /// The VEK chains to the bundled AMD roots (VLEK auto-detected), is valid at
 /// `now` and names the report's chip and TCB, and it signed the report.
 fn check_report(
+    report_bytes: &[u8],
     report: &AttestationReport,
     vek: &[u8],
     gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
     verify_vek_endorsement(report, vek, gen, now)?;
-    let cert = Certificate::from_der(vek)
-        .map_err(|e| AttestationError::CertChainError(format!("VEK to sev Certificate: {e}")))?;
-    (&cert, report)
-        .verify()
-        .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))
+    vek_signs(report_bytes, vek)
+}
+
+/// `vek_der` parses and its key signed the raw report.
+fn vek_signs(report_bytes: &[u8], vek_der: &[u8]) -> Result<()> {
+    let vek = signatures::parse_cert(vek_der)
+        .map_err(|e| AttestationError::CertChainError(format!("VEK parse: {e}")))?;
+    signatures::verify_report(&vek, report_bytes)
+        .map_err(AttestationError::SignatureVerificationFailed)
 }
 
 fn inline_vek(evidence: &SnpEvidence) -> Result<Option<Vec<u8>>> {
@@ -461,28 +481,22 @@ pub fn min_tcb_met(tcb: &SnpTcb, min_tcb: &SnpTcb) -> bool {
         || fmc_below)
 }
 
-/// Verify the AMD certificate chain: ARK (self-signed) -> ASK -> VCEK.
-/// Delegates to the sev crate's Verifiable trait.
+/// Verify the AMD certificate chain: ARK (self-signed) -> ASK (or ASVK) ->
+/// VCEK (or VLEK), each link RSASSA-PSS with SHA-384.
 pub fn verify_cert_chain(ark_der: &[u8], ask_der: &[u8], vcek_der: &[u8]) -> Result<()> {
-    let chain = Chain::from_der(ark_der, ask_der, vcek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))?;
-    chain
-        .verify()
-        .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))?;
-    Ok(())
+    let parse = |der| {
+        signatures::parse_cert(der)
+            .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))
+    };
+    let (ark, ask, vek) = (parse(ark_der)?, parse(ask_der)?, parse(vcek_der)?);
+    signatures::verify_chain(&ark, &ask, &vek)
+        .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))
 }
 
-/// Verify a report signature against a VCEK certificate.
-/// Delegates to the sev crate's Verifiable trait.
+/// Verify a report signature against a VCEK (or VLEK) certificate.
 pub fn verify_report_signature(report_bytes: &[u8], vcek_der: &[u8]) -> Result<()> {
-    let report = AttestationReport::from_bytes(report_bytes)
-        .map_err(|e| AttestationError::QuoteParseFailed(format!("SNP report parse: {e}")))?;
-    let vek = Certificate::from_der(vcek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("VCEK parse: {e}")))?;
-    (&vek, &report)
-        .verify()
-        .map_err(|e| AttestationError::SignatureVerificationFailed(format!("{e}")))?;
-    Ok(())
+    parse_report(report_bytes)?;
+    vek_signs(report_bytes, vcek_der)
 }
 
 /// Verify a VEK (VCEK/VLEK) certificate's validity period (notBefore/notAfter)
@@ -521,14 +535,50 @@ pub fn verify_vek_endorsement(
     processor_gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
-    verify_cert_chain(
-        super::certs::get_ark(processor_gen),
-        vek_issuer(vek_der, processor_gen)?,
-        vek_der,
-    )?;
+    verify_bundled_chain(processor_gen, is_vlek_cert(vek_der)?, vek_der)?;
     verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
+}
+
+/// `vek_der` is issued by the bundled ASK of `gen` (the ASVK for a VLEK),
+/// which the bundled ARK signs. The bundled links are checked once per
+/// process; only the VEK's signature is checked per call.
+pub(crate) fn verify_bundled_chain(
+    gen: ProcessorGeneration,
+    vlek: bool,
+    vek_der: &[u8],
+) -> Result<()> {
+    let vek = signatures::parse_cert(vek_der)
+        .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))?;
+    signatures::verify_cert_signature(bundled_issuer(gen, vlek)?, &vek)
+        .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))
+}
+
+/// The bundled ASK (or ASVK) of `gen`, parsed, once the bundled ARK is shown
+/// to sign itself and it. Both are compiled in, so this runs once per process.
+fn bundled_issuer(gen: ProcessorGeneration, vlek: bool) -> Result<&'static x509_cert::Certificate> {
+    static ISSUERS: [std::sync::OnceLock<std::result::Result<x509_cert::Certificate, String>>; 6] =
+        [const { std::sync::OnceLock::new() }; 6];
+    let row = match gen {
+        ProcessorGeneration::Milan => 0,
+        ProcessorGeneration::Genoa => 2,
+        ProcessorGeneration::Turin => 4,
+    };
+    ISSUERS[row + usize::from(vlek)]
+        .get_or_init(|| {
+            let ark = signatures::parse_cert(super::certs::get_ark(gen))?;
+            let issuer = signatures::parse_cert(if vlek {
+                super::certs::get_asvk(gen)
+            } else {
+                super::certs::get_ask(gen)
+            })?;
+            signatures::verify_cert_signature(&ark, &ark)?;
+            signatures::verify_cert_signature(&ark, &issuer)?;
+            Ok(issuer)
+        })
+        .as_ref()
+        .map_err(|e| AttestationError::CertChainError(format!("bundled AMD chain: {e}")))
 }
 
 /// The bundled AMD intermediate that issues `vek_der`: the ASVK for a VLEK
@@ -783,20 +833,15 @@ pub(crate) fn verify_crl_signature(
             let rsa_pub = rsa::RsaPublicKey::from_public_key_der(spki_der).map_err(|e| {
                 AttestationError::CertChainError(format!("CRL issuer RSA key parse: {e}"))
             })?;
-            // ALGORITHM: RSA-PSS SHA-384 verification. The AMD Milan ARK signs
-            // CRLs with RSASSA-PSS using SHA-384 as both hash and MGF1 hash,
-            // salt length = hash length (48 bytes).
-            let verifying_key = rsa::pss::VerifyingKey::<sha2::Sha384>::new(rsa_pub);
-            let sig = rsa::pss::Signature::try_from(sig_value).map_err(|e| {
-                AttestationError::CertChainError(format!("CRL RSA-PSS signature parse: {e}"))
-            })?;
-            verifying_key.verify(tbs_der, &sig).map_err(|e| {
+            signatures::verify_rsa_pss_sha384(rsa_pub, tbs_der, sig_value).map_err(|e| {
                 AttestationError::CertChainError(format!(
                     "CRL RSA-PSS signature verification failed: {e}"
                 ))
             })?;
         }
         OID_ECDSA_WITH_SHA384 => {
+            use p384::ecdsa::signature::Verifier as _;
+            use p384::pkcs8::DecodePublicKey as _;
             // Genoa/Turin ASK uses ECDSA P-384
             let verifying_key = p384::ecdsa::VerifyingKey::from_sec1_bytes(
                 &issuer_cert.public_key().subject_public_key.data,
@@ -835,6 +880,19 @@ pub fn parse_report(report_bytes: &[u8]) -> Result<AttestationReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_bundled_ark_signs_itself_and_its_ask_and_asvk() {
+        for gen in [
+            ProcessorGeneration::Milan,
+            ProcessorGeneration::Genoa,
+            ProcessorGeneration::Turin,
+        ] {
+            for vlek in [false, true] {
+                bundled_issuer(gen, vlek).unwrap_or_else(|e| panic!("{gen:?} vlek={vlek}: {e}"));
+            }
+        }
+    }
     use crate::testing;
     use der::Decode;
 
@@ -1162,14 +1220,12 @@ mod tests {
         ] {
             let ark_der = super::super::certs::get_ark(gen);
             let asvk_der = super::super::certs::get_asvk(gen);
-            // Parse via sev crate to verify the crypto
-            let ark = Certificate::from_der(ark_der)
-                .unwrap_or_else(|e| panic!("{gen:?} ARK sev parse: {e}"));
-            let asvk = Certificate::from_der(asvk_der)
-                .unwrap_or_else(|e| panic!("{gen:?} ASVK sev parse: {e}"));
+            let ark = signatures::parse_cert(ark_der)
+                .unwrap_or_else(|e| panic!("{gen:?} ARK parse: {e}"));
+            let asvk = signatures::parse_cert(asvk_der)
+                .unwrap_or_else(|e| panic!("{gen:?} ASVK parse: {e}"));
             // ARK should verify ASVK
-            (&ark, &asvk)
-                .verify()
+            signatures::verify_cert_signature(&ark, &asvk)
                 .unwrap_or_else(|e| panic!("{gen:?} ARK->ASVK verify failed: {e}"));
         }
     }

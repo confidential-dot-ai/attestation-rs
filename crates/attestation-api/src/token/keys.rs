@@ -1,4 +1,5 @@
 use p256::ecdsa::SigningKey;
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::DecodePrivateKey;
 use std::path::Path;
 
@@ -9,7 +10,7 @@ pub fn load_or_generate(key_path: &str) -> Result<SigningKey, ApiError> {
     if key_path.is_empty() {
         tracing::warn!("no token signing key configured — generating ephemeral EC P-256 key");
         tracing::warn!("tokens signed with ephemeral keys cannot be verified after restart");
-        let key = SigningKey::random(&mut rand::thread_rng());
+        let key = SigningKey::generate();
         return Ok(key);
     }
 
