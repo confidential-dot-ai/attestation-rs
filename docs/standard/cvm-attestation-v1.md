@@ -391,6 +391,53 @@ A `challenge` binding carries no key or an `spki-sha256` or `raw` key. A `certif
 
 The mode is constrained by the platform (Section 4.3): a verifier MUST refuse a mode that the TEE and hosting do not admit.
 
+## 10. Endorsements
+
+### 10.1. Inline endorsements
+
+`cvm_endorsements` carries collateral inside the evidence, so a verifier can appraise offline and a vendor service outage does not stop a verifier that receives fresh collateral. It is a CMW collection (RFC 9999 section 3.3) whose `__cmwc_t` is `tag:confidential.ai,2026:cvm-endorsements#1`, with at least one entry besides `__cmwc_t`, no nested collections, and labels drawn only from this table. Each entry is a CMW record `[type, value, indicator]` whose indicator is 2 (bit 1, endorsements) or 1 (bit 0, reference values); version 1 gives both the same meaning, and defines no label that carries reference values.
+
+| Label | Type | Content | TEE |
+| --- | --- | --- | --- |
+| `snp.vek` | `application/pkix-cert` | the VCEK or VLEK, DER | `sev-snp` |
+| `snp.crl` | `application/pkix-crl` | AMD's CRL for the generation, DER | `sev-snp` |
+| `tdx.tcb_info` | `application/vnd.confidential-ai.pcs-signed+json` | the TDX TCB Info, as the JSON object `{body, issuer_chain}` | `tdx` |
+| `tdx.qe_identity` | `application/vnd.confidential-ai.pcs-signed+json` | the TD QE Identity, as `{body, issuer_chain}` | `tdx` |
+| `tdx.pck_crl` | `application/pkix-crl` | Intel's PCK CRL for the issuing CA, DER | `tdx` |
+| `tdx.root_crl` | `application/pkix-crl` | Intel's SGX Root CA CRL, DER | `tdx` |
+| `nras.jwks` | `application/jwk-set+json` | NRAS's token signing keys (RFC 7517) | any; used only when the envelope carries device submodules |
+
+The `application/pkix-cert` and `application/pkix-crl` types are those of RFC 2585. In `application/vnd.confidential-ai.pcs-signed+json`, `body` is the exact bytes of Intel's PCS response body and `issuer_chain` the PEM issuer chain from the response header, both as base64url byte strings, so Intel's signature verifies over the bytes Intel produced. A label whose TEE is not the `cpu` submodule's TEE is refused.
+
+### 10.2. Authority and precedence
+
+Inline endorsements are inputs the verifier authenticates before use. A verifier:
+
+1. anchors every certificate to the pinned vendor roots (Section 9) and every signed document to its signing chain, and refuses a body presented without its chain;
+2. checks every validity window against the evaluation time before use: a certificate's `notBefore` and `notAfter`, a CRL's `thisUpdate` and `nextUpdate`, a TCB Info's or QE Identity's `nextUpdate`;
+3. binds each artifact to the parameters that name it: a VCEK to the report's chip identifier and reported TCB, a VLEK to the reported TCB, a TCB Info to the PCK certificate's FMSPC, a CRL to its issuer;
+4. prefers its own valid copy of a CRL or a TCB document, so an attester cannot substitute an older valid artifact for a newer one the verifier knows; a VEK is the same key from either source.
+
+An inline artifact that fails its binding or its window is ignored as if absent: the verifier uses its own copy, and when it has none the check is unavailable (`collateral-unavailable`, or skipped under a waiver). An inline artifact whose signature, signing chain or encoding fails is refused with `collateral-invalid`, since no reading of it is authentic, and so is an artifact the verifier itself obtained that fails any check. A VEK is the exception, since Section 9.1.4 authenticates it as part of the report's chain: an inline VEK that cannot be parsed, names the other key type (VCEK or VLEK) than `SIGNING_KEY` does, or fails its binding or window is ignored as if absent, and a bound VEK whose chain fails is refused with `chain-invalid`, whichever source supplied it.
+
+Freshness of collateral is each artifact's own validity window evaluated at the evaluation time. An artifact inside its window is usable however long ago it was fetched, and an artifact outside it is never used, however recently it arrived; the verifier's cache timers play no part.
+
+### 10.3. Collateral keys
+
+A verifier that holds collateral outside the evidence identifies each artifact by a key. The conformance corpus uses these text forms (Section 14.2):
+
+| Key | Artifact |
+| --- | --- |
+| `snp_vcek/<generation>/<chip id hex>-<TCB hex>` | a VCEK: `<generation>` is `Milan`, `Genoa` or `Turin`; `<chip id hex>` is the report's 64-byte `CHIP_ID` in lowercase hexadecimal; `<TCB hex>` is the reported bootloader, TEE, SNP and microcode SPLs as two uppercase hexadecimal digits each, followed by the FMC SPL on Turin |
+| `snp_cert_chain/<generation>` | AMD's ASK and ARK for the generation |
+| `snp_crl/<generation>` | AMD's CRL for the generation |
+| `tdx_tcb_info/<fmspc>` | the TDX TCB Info for an FMSPC in lowercase hexadecimal, with its signing chain |
+| `tdx_qe_identity/td` | the TD QE Identity, with its signing chain |
+| `tdx_pck_crl/<ca>` | the PCK CRL, `<ca>` `platform` or `processor` |
+| `tdx_root_crl` | the SGX Root CA CRL |
+| `nras_jwks/<url>` | the NRAS JWKS served at `<url>`, written as the URL itself; the corpus carries JWKS in `nras[].jwks` (Section 14.2) and uses no key of this form |
+| `cca_corim/<implementation id hex>` | the platform vendor's signed CoRIM for an Arm CCA implementation: the CPAK of each instance and the reference values of the platform software (Section 9.6.4) |
+
 ## 11. Verification procedure
 
 A verifier appraises evidence under a policy, with the relying party's nonce, the digest of the presented certificate in the certificate pattern (which a version 1 verifier receives as `freshness.key`, Section 5.5), collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
