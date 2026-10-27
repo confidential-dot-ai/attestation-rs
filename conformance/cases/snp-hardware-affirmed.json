@@ -1,0 +1,16 @@
+{
+  "id": "snp-hardware-affirmed",
+  "rule": {
+    "section": "9.1.5",
+    "statement": "hardware is 2 when revocation was checked and a TCB floor applied; the cases without either carry no hardware claim"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-hardware-affirmed.json",
+  "policy": "policy/snp-hardware-affirmed.json",
+  "collateral": {
+    "snp_crl/Genoa": "collateral/amd_genoa_crl_2026-08-19.der"
+  },
+  "expect": {
+    "appraisal": "expected/snp-hardware-affirmed.json"
+  }
+}
