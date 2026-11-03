@@ -17,7 +17,8 @@ die() {
 }
 
 [[ $# -eq 2 ]] || die "usage: name-image-release.sh vMAJOR.MINOR.PATCH COMMIT_SHA"
-version=$1 commit=$2
+version="$1"
+commit="$2"
 [[ "$version" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]] ||
   die "$version is not a release version (vMAJOR.MINOR.PATCH)"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "commit must be a full lowercase 40-hex SHA"
@@ -27,11 +28,19 @@ source="$image:sha-${commit:0:7}"
 target="$image:$version"
 
 digest_of() {
-  docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$1" | tr -d '"'
+  docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1"
 }
 
 source_digest=$(digest_of "$source") || die "$source is not published; the release commit's CI image must exist first"
-if existing=$(digest_of "$target" 2>/dev/null); then
+
+# Only a confirmed absence may proceed to tagging: imagetools create would
+# repoint an existing version tag, so any other inspect failure stops here.
+existing=""
+if ! existing=$(digest_of "$target" 2>&1); then
+  [[ "$existing" == *"not found"* ]] || die "could not inspect $target: $existing"
+  existing=""
+fi
+if [[ -n "$existing" ]]; then
   [[ "$existing" == "$source_digest" ]] ||
     die "$target already names $existing, not $source_digest; a release tag is never repointed"
   echo "$target already names $source_digest"
