@@ -312,4 +312,6 @@ jobs:
       # FIXME: Remove these ignores once upstream attestation-rs/sev updates deps.
       # RUSTSEC-2023-0071: rsa (Marvin attack, no patched version available)
       # RUSTSEC-2025-0141: bincode (unmaintained, used by sev crate)
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0141
+      # RUSTSEC-2026-0387: crypto-bigint 0.5 timing (elliptic-curve 0.13 stack,
+      #   held there by sev's p384 ^0.13; exposure analysis in .cargo/audit.toml)
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2026-0387
