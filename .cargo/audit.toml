@@ -14,4 +14,18 @@
 # Watch for an upstream `sev` crate update that drops the rsa
 # dependency or migrates to a fixed version; remove this ignore
 # once the chain is clean.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0387 — timing variability in `crypto-bigint` 0.5
+# (via elliptic-curve 0.13, which p256/p384/ecdsa 0.13/0.16 and
+# `sev` ≤ 8.0.0's p384 ^0.13 require). Fixed only in 0.7.6, i.e.
+# the elliptic-curve 0.14 stack, which `sev` does not yet build on.
+#
+# Exposure here: every ECDSA path in `attestation` is verification
+# over public inputs (Intel PCK/QE chains, AMD VCEK, Azure vTPM),
+# so no secret integer is involved. The one secret-key operation is
+# attestation-api's optional ES256 token issuance (`[token]`, off by
+# default), where the P-256 signing scalar does pass through the
+# affected arithmetic. Operators who enable token issuance accept
+# that until the stack moves to elliptic-curve 0.14; remove this
+# ignore with that upgrade.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
