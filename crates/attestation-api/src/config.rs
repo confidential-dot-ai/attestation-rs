@@ -94,6 +94,14 @@ impl fmt::Display for Bind {
 
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
 
+/// Longest socket path `bind(2)` accepts on Linux: `sun_path` is 108 bytes
+/// including the trailing NUL.
+const MAX_SOCKET_PATH: usize = 107;
+
+/// Bytes the server adds to the socket's directory while binding: it stages
+/// the socket at `<dir>/.sock-<12 hex>/s` before moving it into place.
+pub(crate) const STAGED_SUFFIX_LEN: usize = "/.sock-0123456789ab/s".len();
+
 impl ServerConfig {
     /// Parse and check the listener settings. Resolves `socket_group` names
     /// against `/etc/group`.
@@ -114,6 +122,23 @@ impl ServerConfig {
         if !path.is_absolute() {
             return Err(format!(
                 "server.bind '{}': the socket path must be absolute",
+                self.bind
+            ));
+        }
+        let parent = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(_)) if !rest.ends_with('/') => parent,
+            _ => {
+                return Err(format!(
+                    "server.bind '{}': the socket path must name a file",
+                    self.bind
+                ))
+            }
+        };
+        let staged = parent.as_os_str().len() + STAGED_SUFFIX_LEN;
+        if path.as_os_str().len().max(staged) > MAX_SOCKET_PATH {
+            return Err(format!(
+                "server.bind '{}': the socket path is too long; the socket is staged at \
+                 <dir>/.sock-<12 hex>/s, and both paths must fit in {MAX_SOCKET_PATH} bytes",
                 self.bind
             ));
         }
@@ -445,6 +470,31 @@ mod tests {
                 Err("absolute"),
             ),
             ("empty path", server("unix:", None, None), Err("absolute")),
+            (
+                "root path",
+                server("unix:///", None, None),
+                Err("name a file"),
+            ),
+            (
+                "trailing slash",
+                server("unix:///run/a/", None, None),
+                Err("name a file"),
+            ),
+            (
+                "longest path",
+                server(&format!("unix:///{}/s", "d".repeat(85)), None, None),
+                unix(&format!("/{}/s", "d".repeat(85)), 0o660, None),
+            ),
+            (
+                "directory too long to stage in",
+                server(&format!("unix:///{}/api.sock", "d".repeat(86)), None, None),
+                Err("too long"),
+            ),
+            (
+                "path too long",
+                server(&format!("unix:///run/{}", "s".repeat(103)), None, None),
+                Err("too long"),
+            ),
             (
                 "world-accessible mode",
                 server("unix:///run/a/api.sock", Some("0666"), None),

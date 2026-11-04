@@ -62,6 +62,9 @@ pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListe
         .map_err(|e| context("creating bind directory for", e))?;
 
     let staged = dir.0.join("s");
+    debug_assert!(
+        staged.as_os_str().len() <= parent.as_os_str().len() + crate::config::STAGED_SUFFIX_LEN
+    );
     let listener = UnixListener::bind(&staged).map_err(|e| context("binding", e))?;
     fs::set_permissions(&staged, fs::Permissions::from_mode(mode))
         .map_err(|e| context("chmod", e))?;
