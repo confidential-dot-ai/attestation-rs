@@ -30,11 +30,16 @@ is not loopback. Set `auth.api_keys` before exposing the service.
 To serve on a Unix socket instead, set `bind = "unix:///run/attestation-api/api.sock"`
 (an absolute path). `socket_mode` sets the socket's mode (default `"0660"`;
 modes granting access to other users are refused) and `socket_group` chgrps it
-to a group name or gid, so filesystem permissions decide who can connect. The
-socket is bound in a private 0700 directory, given its mode and group there,
-then renamed into place, so it is never connectable with looser permissions.
-The parent directory must exist. A stale socket at the path is replaced and
-anything else there is a startup error. Shutdown removes the socket file.
+to a group name or gid, so filesystem permissions decide who can connect.
+Group names resolve against `/etc/group` only, not NSS; give a numeric gid for
+groups from LDAP or sssd. The socket is bound in a private 0700 directory
+`.sock-<12 hex>` next to the target, given its mode and group there, then
+renamed into place, so it is never connectable with looser permissions. The
+process therefore needs write access to the parent directory, which must exist,
+and the staging path must fit the 107-byte socket path limit. A process killed
+mid-bind can leave that directory behind; it is safe to delete. A stale socket
+at the path is replaced and anything else there is a startup error. Shutdown
+removes the socket file.
 
 All endpoints except `/health` require `Authorization: Bearer TOKEN` when
 keys are configured. An empty list allows unauthenticated access and logs a

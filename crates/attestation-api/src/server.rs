@@ -153,7 +153,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     let target = state.config.server.bind().map_err(anyhow::Error::msg)?;
     let app = build_router(state);
     let listener = bind(&target).await?;
-    tracing::info!(bind = %target, "starting attestation service");
+    tracing::info!(bind = %target, "listening");
     serve(listener, app, shutdown_signal()).await
 }
 

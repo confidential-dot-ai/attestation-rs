@@ -8,7 +8,7 @@ bind = "127.0.0.1:8400"
 # startup error. The socket file is removed on shutdown.
 # bind = "unix:///run/attestation-api/api.sock"
 # socket_mode = "0660"            # Unix binds only; modes granting "other" access are refused
-# socket_group = "nonroot"        # Unix binds only; name or gid, unset keeps the process group
+# socket_group = "nonroot"        # Unix binds only; gid, or a name from /etc/group (not NSS); unset keeps the process group
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.

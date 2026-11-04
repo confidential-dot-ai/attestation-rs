@@ -49,9 +49,11 @@ async fn main() -> anyhow::Result<()> {
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
         );
     }
-    if matches!(config.server.bind(), Ok(Bind::Tcp(addr)) if !addr.ip().is_loopback()) {
+    let bind = config.server.bind().map_err(anyhow::Error::msg)?;
+    tracing::info!(%bind, "configured listener");
+    if matches!(bind, Bind::Tcp(addr) if !addr.ip().is_loopback()) {
         tracing::warn!(
-            bind = %config.server.bind,
+            %bind,
             "listener is plain HTTP on a non-loopback address; keep it behind a TLS terminator on a private network"
         );
     }
