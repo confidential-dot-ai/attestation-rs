@@ -45,11 +45,11 @@ impl Drop for BindDir {
 }
 
 /// Bind a listening socket at `path` with `mode`, chgrp'd to `group` when
-/// set. A stale socket at `path` is replaced; anything else there is an
-/// error. The parent directory must exist.
+/// set. A socket at `path` that nothing listens on is replaced; a live one
+/// or anything else there is an error. The parent directory must exist.
 pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListener, SocketFile)> {
-    let context = |what: &str, e: io::Error| {
-        io::Error::new(e.kind(), format!("{what} {}: {e}", path.display()))
+    let context = |what: &str, at: &Path, e: io::Error| {
+        io::Error::new(e.kind(), format!("{what} {}: {e}", at.display()))
     };
     let parent = path
         .parent()
@@ -59,17 +59,18 @@ pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListe
     DirBuilder::new()
         .mode(0o700)
         .create(&dir.0)
-        .map_err(|e| context("creating bind directory for", e))?;
+        .map_err(|e| context("creating bind directory", &dir.0, e))?;
 
     let staged = dir.0.join("s");
     debug_assert!(
         staged.as_os_str().len() <= parent.as_os_str().len() + crate::config::STAGED_SUFFIX_LEN
     );
-    let listener = UnixListener::bind(&staged).map_err(|e| context("binding", e))?;
+    let listener = UnixListener::bind(&staged).map_err(|e| context("binding", &staged, e))?;
     fs::set_permissions(&staged, fs::Permissions::from_mode(mode))
-        .map_err(|e| context("chmod", e))?;
+        .map_err(|e| context("chmod", &staged, e))?;
     if let Some(gid) = group {
-        chown(&staged, None, Some(gid)).map_err(|e| context(&format!("chgrp {gid}"), e))?;
+        chown(&staged, None, Some(gid))
+            .map_err(|e| context(&format!("chgrp {gid}"), &staged, e))?;
     }
 
     match fs::symlink_metadata(path) {
@@ -82,12 +83,29 @@ pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListe
                 ),
             ));
         }
-        Ok(_) => {}
+        Ok(_) => match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("{} is in use by another listener", path.display()),
+                ));
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) => {}
+            Err(e) => return Err(context("probing", path, e)),
+        },
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(context("inspecting", e)),
+        Err(e) => return Err(context("inspecting", path, e)),
     }
-    fs::rename(&staged, path).map_err(|e| context("moving socket to", e))?;
-    let meta = fs::symlink_metadata(path).map_err(|e| context("inspecting", e))?;
+    fs::rename(&staged, path).map_err(|e| context("moving socket to", path, e))?;
+    let meta = fs::symlink_metadata(path).map_err(|e| {
+        // The socket is in place but untracked; do not leave it behind.
+        let _ = fs::remove_file(path);
+        context("inspecting", path, e)
+    })?;
     let file = SocketFile {
         path: path.to_path_buf(),
         id: (meta.dev(), meta.ino()),

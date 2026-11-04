@@ -93,12 +93,25 @@ async fn unix_socket_group_and_replacement() {
     assert_eq!(meta.gid(), gid);
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
 
-    let second = bind(&target).await.unwrap();
+    let err = bind(&target)
+        .await
+        .err()
+        .expect("a live socket must not be replaced");
+    assert!(err.to_string().contains("in use"), "second bind() = {err}");
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().count() == 1,
+        "failed bind left files behind"
+    );
+
+    // Something else took over the path: dropping the old listener must not
+    // remove the newcomer's socket.
+    std::fs::remove_file(&path).unwrap();
+    let newcomer = std::os::unix::net::UnixListener::bind(&path).unwrap();
     drop(first);
     assert!(
         path.exists(),
         "dropping a replaced listener removed the new socket"
     );
-    drop(second);
-    assert!(!path.exists(), "socket file remains after drop");
+    drop(newcomer);
+    std::fs::remove_file(&path).unwrap();
 }

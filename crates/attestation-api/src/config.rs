@@ -94,9 +94,12 @@ impl fmt::Display for Bind {
 
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
 
-/// Longest socket path `bind(2)` accepts on Linux: `sun_path` is 108 bytes
-/// including the trailing NUL.
-const MAX_SOCKET_PATH: usize = 107;
+/// Longest socket path `bind(2)` accepts: `sun_path` is 108 bytes on Linux and
+/// 104 on the BSDs and macOS, including the trailing NUL.
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_SOCKET_PATH: usize = 107;
+#[cfg(not(target_os = "linux"))]
+pub(crate) const MAX_SOCKET_PATH: usize = 103;
 
 /// Bytes the server adds to the socket's directory while binding: it stages
 /// the socket at `<dir>/.sock-<12 hex>/s` before moving it into place.
@@ -126,7 +129,7 @@ impl ServerConfig {
             ));
         }
         let parent = match (path.parent(), path.file_name()) {
-            (Some(parent), Some(_)) if !rest.ends_with('/') => parent,
+            (Some(parent), Some(_)) if !rest.ends_with('/') && !rest.ends_with("/.") => parent,
             _ => {
                 return Err(format!(
                     "server.bind '{}': the socket path must name a file",
@@ -161,6 +164,12 @@ fn parse_mode(text: &str) -> Result<u32, String> {
             "server.socket_mode '{text}' grants access to other users; the socket must stay restricted"
         ));
     }
+    // connect(2) needs write permission on the socket node.
+    if mode & 0o200 == 0 {
+        return Err(format!(
+            "server.socket_mode '{text}' has no owner write bit, so no client could connect"
+        ));
+    }
     Ok(mode)
 }
 
@@ -176,15 +185,18 @@ fn resolve_group(group: &GroupSpec) -> Result<u32, String> {
     // ships, which is where the socket group comes from.
     let groups = std::fs::read_to_string("/etc/group")
         .map_err(|e| format!("server.socket_group '{name}': reading /etc/group: {e}"))?;
-    groups
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split(':');
-            (fields.next() == Some(name.as_str()))
-                .then(|| fields.nth(1)?.parse().ok())
-                .flatten()
-        })
+    find_gid(name, &groups)
         .ok_or_else(|| format!("server.socket_group '{name}': no such group in /etc/group"))
+}
+
+/// Looks `name` up in `groups`, the contents of an `/etc/group` file.
+fn find_gid(name: &str, groups: &str) -> Option<u32> {
+    groups.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next() == Some(name))
+            .then(|| fields.nth(1)?.parse().ok())
+            .flatten()
+    })
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -419,6 +431,8 @@ mod tests {
             })
         };
         let name = |n: &str| Some(GroupSpec::Name(n.to_string()));
+        // "/" + dir + "/.sock-<12 hex>/s" must fit MAX_SOCKET_PATH.
+        let longest_dir = MAX_SOCKET_PATH - STAGED_SUFFIX_LEN - 1;
         let cases = [
             (
                 "tcp",
@@ -450,16 +464,6 @@ mod tests {
                 unix("/run/a/api.sock", 0o660, Some(65532)),
             ),
             (
-                "unix group name",
-                server("unix:///run/a/api.sock", None, name("root")),
-                unix("/run/a/api.sock", 0o660, Some(0)),
-            ),
-            (
-                "unknown group name",
-                server("unix:///run/a/api.sock", None, name("no-such-group-x")),
-                Err("no such group"),
-            ),
-            (
                 "bad scheme",
                 server("tcp://127.0.0.1:8400", None, None),
                 Err("invalid server.bind"),
@@ -481,19 +485,41 @@ mod tests {
                 Err("name a file"),
             ),
             (
+                "trailing dot",
+                server("unix:///run/a/.", None, None),
+                Err("name a file"),
+            ),
+            (
                 "longest path",
-                server(&format!("unix:///{}/s", "d".repeat(85)), None, None),
-                unix(&format!("/{}/s", "d".repeat(85)), 0o660, None),
+                server(
+                    &format!("unix:///{}/s", "d".repeat(longest_dir)),
+                    None,
+                    None,
+                ),
+                unix(&format!("/{}/s", "d".repeat(longest_dir)), 0o660, None),
             ),
             (
                 "directory too long to stage in",
-                server(&format!("unix:///{}/api.sock", "d".repeat(86)), None, None),
+                server(
+                    &format!("unix:///{}/api.sock", "d".repeat(longest_dir + 1)),
+                    None,
+                    None,
+                ),
                 Err("too long"),
             ),
             (
                 "path too long",
-                server(&format!("unix:///run/{}", "s".repeat(103)), None, None),
+                server(
+                    &format!("unix:///run/{}", "s".repeat(MAX_SOCKET_PATH - 4)),
+                    None,
+                    None,
+                ),
                 Err("too long"),
+            ),
+            (
+                "mode without owner write",
+                server("unix:///run/a/api.sock", Some("0440"), None),
+                Err("owner write"),
             ),
             (
                 "world-accessible mode",
@@ -544,6 +570,22 @@ mod tests {
             parse("socket_group = \"nonroot\""),
             Some(GroupSpec::Name("nonroot".to_string()))
         );
+    }
+
+    #[test]
+    fn find_gid_in_group_file() {
+        let groups = "root:x:0:\nnonroot:x:65532:\nbroken:x:notanumber:\n";
+        let cases = [
+            ("root", Some(0)),
+            ("nonroot", Some(65532)),
+            ("broken", None),
+            ("missing", None),
+            ("non", None),
+        ];
+        for (name, want) in cases {
+            let got = find_gid(name, groups);
+            assert_eq!(got, want, "find_gid({name:?}) = {got:?}, want {want:?}");
+        }
     }
 
     #[test]
