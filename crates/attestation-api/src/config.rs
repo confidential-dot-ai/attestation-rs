@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Platform names this service can generate evidence for.
 pub const SUPPORTED_ATTESTATION_PLATFORMS: &[&str] =
@@ -54,8 +54,112 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
+    /// `host:port`, or `unix:` followed by an absolute socket path.
     pub bind: String,
+    /// Octal mode of the Unix socket; Unix binds only. Default `"0660"`.
+    pub socket_mode: Option<String>,
+    /// Group (name or gid) the Unix socket is chgrp'd to; Unix binds only.
+    pub socket_group: Option<GroupSpec>,
     pub tls: TlsConfig,
+}
+
+/// A group given by name or numeric gid.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GroupSpec {
+    Id(u32),
+    Name(String),
+}
+
+/// Where the server listens, parsed from [`ServerConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bind {
+    Tcp(SocketAddr),
+    Unix {
+        path: PathBuf,
+        mode: u32,
+        /// Resolved gid; `None` keeps the process group.
+        group: Option<u32>,
+    },
+}
+
+impl fmt::Display for Bind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Bind::Tcp(addr) => write!(f, "{addr}"),
+            Bind::Unix { path, .. } => write!(f, "unix:{}", path.display()),
+        }
+    }
+}
+
+const DEFAULT_SOCKET_MODE: u32 = 0o660;
+
+impl ServerConfig {
+    /// Parse and check the listener settings. Resolves `socket_group` names
+    /// against `/etc/group`.
+    pub fn bind(&self) -> Result<Bind, String> {
+        let Some(rest) = self.bind.strip_prefix("unix:") else {
+            if self.socket_mode.is_some() || self.socket_group.is_some() {
+                return Err(
+                    "server.socket_mode and server.socket_group require a unix: bind".to_string(),
+                );
+            }
+            return self
+                .bind
+                .parse()
+                .map(Bind::Tcp)
+                .map_err(|e| format!("invalid server.bind address '{}': {e}", self.bind));
+        };
+        let path = PathBuf::from(rest.strip_prefix("//").unwrap_or(rest));
+        if !path.is_absolute() {
+            return Err(format!(
+                "server.bind '{}': the socket path must be absolute",
+                self.bind
+            ));
+        }
+        let mode = match &self.socket_mode {
+            None => DEFAULT_SOCKET_MODE,
+            Some(text) => parse_mode(text)?,
+        };
+        let group = self.socket_group.as_ref().map(resolve_group).transpose()?;
+        Ok(Bind::Unix { path, mode, group })
+    }
+}
+
+fn parse_mode(text: &str) -> Result<u32, String> {
+    let mode = u32::from_str_radix(text, 8)
+        .ok()
+        .filter(|m| *m <= 0o777)
+        .ok_or_else(|| format!("server.socket_mode '{text}' is not an octal mode like \"0660\""))?;
+    if mode & 0o007 != 0 {
+        return Err(format!(
+            "server.socket_mode '{text}' grants access to other users; the socket must stay restricted"
+        ));
+    }
+    Ok(mode)
+}
+
+fn resolve_group(group: &GroupSpec) -> Result<u32, String> {
+    let name = match group {
+        GroupSpec::Id(gid) => return Ok(*gid),
+        GroupSpec::Name(name) => name,
+    };
+    if let Ok(gid) = name.parse() {
+        return Ok(gid);
+    }
+    // std has no getgrnam; /etc/group covers the local groups a CVM image
+    // ships, which is where the socket group comes from.
+    let groups = std::fs::read_to_string("/etc/group")
+        .map_err(|e| format!("server.socket_group '{name}': reading /etc/group: {e}"))?;
+    groups
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            (fields.next() == Some(name.as_str()))
+                .then(|| fields.nth(1)?.parse().ok())
+                .flatten()
+        })
+        .ok_or_else(|| format!("server.socket_group '{name}': no such group in /etc/group"))
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -132,6 +236,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:8400".to_string(),
+            socket_mode: None,
+            socket_group: None,
             tls: TlsConfig::default(),
         }
     }
@@ -192,11 +298,7 @@ impl Config {
 
     /// Validate configuration at startup. Returns an error for invalid combinations.
     pub fn validate(&self) -> Result<(), String> {
-        // Validate bind address is parseable
-        self.server
-            .bind
-            .parse::<SocketAddr>()
-            .map_err(|e| format!("invalid server.bind address '{}': {e}", self.server.bind))?;
+        self.server.bind()?;
 
         // The listener is plaintext; accepting this flag would hide that.
         if self.server.tls.enabled {
@@ -274,6 +376,124 @@ mod tests {
         }
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         Config::load(&example).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn server_bind() {
+        let server = |bind: &str, mode: Option<&str>, group: Option<GroupSpec>| ServerConfig {
+            bind: bind.to_string(),
+            socket_mode: mode.map(str::to_string),
+            socket_group: group,
+            tls: TlsConfig::default(),
+        };
+        let unix = |path: &str, mode: u32, group: Option<u32>| {
+            Ok(Bind::Unix {
+                path: PathBuf::from(path),
+                mode,
+                group,
+            })
+        };
+        let name = |n: &str| Some(GroupSpec::Name(n.to_string()));
+        let cases = [
+            (
+                "tcp",
+                server("127.0.0.1:8400", None, None),
+                Ok(Bind::Tcp("127.0.0.1:8400".parse().unwrap())),
+            ),
+            (
+                "unix defaults",
+                server("unix:///run/a/api.sock", None, None),
+                unix("/run/a/api.sock", 0o660, None),
+            ),
+            (
+                "unix single slash",
+                server("unix:/run/a/api.sock", None, None),
+                unix("/run/a/api.sock", 0o660, None),
+            ),
+            (
+                "unix mode and numeric group",
+                server(
+                    "unix:///run/a/api.sock",
+                    Some("0600"),
+                    Some(GroupSpec::Id(65532)),
+                ),
+                unix("/run/a/api.sock", 0o600, Some(65532)),
+            ),
+            (
+                "unix numeric group as string",
+                server("unix:///run/a/api.sock", None, name("65532")),
+                unix("/run/a/api.sock", 0o660, Some(65532)),
+            ),
+            (
+                "unix group name",
+                server("unix:///run/a/api.sock", None, name("root")),
+                unix("/run/a/api.sock", 0o660, Some(0)),
+            ),
+            (
+                "unknown group name",
+                server("unix:///run/a/api.sock", None, name("no-such-group-x")),
+                Err("no such group"),
+            ),
+            (
+                "bad scheme",
+                server("tcp://127.0.0.1:8400", None, None),
+                Err("invalid server.bind"),
+            ),
+            (
+                "relative path",
+                server("unix:run/api.sock", None, None),
+                Err("absolute"),
+            ),
+            ("empty path", server("unix:", None, None), Err("absolute")),
+            (
+                "world-accessible mode",
+                server("unix:///run/a/api.sock", Some("0666"), None),
+                Err("other users"),
+            ),
+            (
+                "socket_mode with tcp",
+                server("127.0.0.1:8400", Some("0660"), None),
+                Err("require a unix: bind"),
+            ),
+            (
+                "socket_group with tcp",
+                server("127.0.0.1:8400", None, Some(GroupSpec::Id(0))),
+                Err("require a unix: bind"),
+            ),
+            (
+                "non-octal mode",
+                server("unix:///run/a/api.sock", Some("0680"), None),
+                Err("not an octal mode"),
+            ),
+            (
+                "mode out of range",
+                server("unix:///run/a/api.sock", Some("4660"), None),
+                Err("not an octal mode"),
+            ),
+        ];
+        for (name, config, want) in cases {
+            let got = config.bind();
+            match (&got, &want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{name}"),
+                (Err(err), Err(want)) => {
+                    assert!(
+                        err.contains(want),
+                        "{name}: bind() = {err:?}, want {want:?}"
+                    )
+                }
+                _ => panic!("{name}: bind() = {got:?}, want {want:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn socket_group_parses_name_or_gid() {
+        let parse = |text: &str| toml::from_str::<ServerConfig>(text).unwrap().socket_group;
+        assert_eq!(parse("socket_group = 65532"), Some(GroupSpec::Id(65532)));
+        assert_eq!(
+            parse("socket_group = \"nonroot\""),
+            Some(GroupSpec::Name("nonroot".to_string()))
+        );
     }
 
     #[test]
