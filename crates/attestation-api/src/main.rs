@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +5,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Config};
+use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Bind, Config};
 use attestation_api::token::{issuer::TokenIssuer, keys};
 use attestation_api::AppState;
 
@@ -50,12 +49,7 @@ async fn main() -> anyhow::Result<()> {
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
         );
     }
-    if !config
-        .server
-        .bind
-        .parse::<SocketAddr>()
-        .is_ok_and(|a| a.ip().is_loopback())
-    {
+    if matches!(config.server.bind(), Ok(Bind::Tcp(addr)) if !addr.ip().is_loopback()) {
         tracing::warn!(
             bind = %config.server.bind,
             "listener is plain HTTP on a non-loopback address; keep it behind a TLS terminator on a private network"
