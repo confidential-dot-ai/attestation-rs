@@ -14,11 +14,13 @@ use attestation_api::AppState;
 async fn unix_socket_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api.sock");
-    let mut config = Config::default();
-    config.server = ServerConfig {
-        bind: format!("unix://{}", path.display()),
-        socket_mode: Some("0660".to_string()),
-        ..ServerConfig::default()
+    let config = Config {
+        server: ServerConfig {
+            bind: format!("unix://{}", path.display()),
+            socket_mode: Some("0660".to_string()),
+            ..ServerConfig::default()
+        },
+        ..Config::default()
     };
     let target = config.server.bind().unwrap();
 
