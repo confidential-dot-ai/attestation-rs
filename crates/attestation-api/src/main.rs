@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         Config::default()
     };
 
-    config.validate().map_err(|e| {
+    let bind = config.validate().map_err(|e| {
         tracing::error!(%e, "invalid configuration");
         anyhow::anyhow!(e)
     })?;
@@ -49,7 +49,6 @@ async fn main() -> anyhow::Result<()> {
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
         );
     }
-    let bind = config.server.bind().map_err(anyhow::Error::msg)?;
     if matches!(bind, Bind::Tcp(addr) if !addr.ip().is_loopback()) {
         tracing::warn!(
             %bind,

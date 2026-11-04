@@ -37,7 +37,8 @@ groups from LDAP or sssd. The socket is bound in a private 0700 directory
 `.sock-<12 hex>` next to the target, given its mode and group there, then
 renamed into place, so it is never connectable with looser permissions. The
 process therefore needs write access to the parent directory, which must exist,
-and the staging path must fit the 107-byte socket path limit. A process killed
+and the staging path must fit the platform's socket path limit (107 bytes on
+Linux, 103 on macOS and the BSDs). A process killed
 mid-bind can leave that directory behind; it is safe to delete. A socket at
 the path that refuses connections is replaced; a live one, one the process
 cannot connect to, or anything else there is a startup error. That check is

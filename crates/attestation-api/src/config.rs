@@ -167,7 +167,7 @@ fn parse_mode(text: &str) -> Result<u32, String> {
     // connect(2) needs write permission on the socket node.
     if mode & 0o200 == 0 {
         return Err(format!(
-            "server.socket_mode '{text}' has no owner write bit, so no client could connect"
+            "server.socket_mode '{text}' must keep owner write (0200) on the socket"
         ));
     }
     Ok(mode)
@@ -333,9 +333,10 @@ impl Config {
         toml::from_str(&contents).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
     }
 
-    /// Validate configuration at startup. Returns an error for invalid combinations.
-    pub fn validate(&self) -> Result<(), String> {
-        self.server.bind()?;
+    /// Validate configuration at startup and return the resolved listener
+    /// target. Returns an error for invalid combinations.
+    pub fn validate(&self) -> Result<Bind, String> {
+        let bind = self.server.bind()?;
 
         // The listener is plaintext; accepting this flag would hide that.
         if self.server.tls.enabled {
@@ -368,7 +369,7 @@ impl Config {
             }
         }
 
-        Ok(())
+        Ok(bind)
     }
 }
 
@@ -519,7 +520,7 @@ mod tests {
             (
                 "mode without owner write",
                 server("unix:///run/a/api.sock", Some("0440"), None),
-                Err("owner write"),
+                Err("owner write (0200)"),
             ),
             (
                 "world-accessible mode",
