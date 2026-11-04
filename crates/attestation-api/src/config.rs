@@ -64,11 +64,37 @@ pub struct ServerConfig {
 }
 
 /// A group given by name or numeric gid.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+/// A group as written in the config: a gid or a name from `/etc/group`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupSpec {
     Id(u32),
     Name(String),
+}
+
+impl<'de> Deserialize<'de> for GroupSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = GroupSpec;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a group name or a gid between 0 and 4294967295")
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<GroupSpec, E> {
+                u32::try_from(v)
+                    .map(GroupSpec::Id)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &self))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<GroupSpec, E> {
+                u32::try_from(v)
+                    .map(GroupSpec::Id)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Unsigned(v), &self))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<GroupSpec, E> {
+                Ok(GroupSpec::Name(v.to_string()))
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
 }
 
 /// Where the server listens, parsed from [`ServerConfig`].
@@ -156,9 +182,12 @@ impl ServerConfig {
 
 fn parse_mode(text: &str) -> Result<u32, String> {
     let mode = u32::from_str_radix(text, 8)
-        .ok()
-        .filter(|m| *m <= 0o777)
-        .ok_or_else(|| format!("server.socket_mode '{text}' is not an octal mode like \"0660\""))?;
+        .map_err(|_| format!("server.socket_mode '{text}' is not an octal mode like \"0660\""))?;
+    if mode > 0o777 {
+        return Err(format!(
+            "server.socket_mode '{text}' sets special bits; only permission bits 0000-0777 are allowed"
+        ));
+    }
     if mode & 0o007 != 0 {
         return Err(format!(
             "server.socket_mode '{text}' grants access to other users; the socket must stay restricted"
@@ -545,7 +574,7 @@ mod tests {
             (
                 "mode out of range",
                 server("unix:///run/a/api.sock", Some("4660"), None),
-                Err("not an octal mode"),
+                Err("special bits"),
             ),
         ];
         for (name, config, want) in cases {
@@ -571,6 +600,19 @@ mod tests {
             parse("socket_group = \"nonroot\""),
             Some(GroupSpec::Name("nonroot".to_string()))
         );
+        for text in [
+            "socket_group = -1",
+            "socket_group = 4294967296",
+            "socket_group = true",
+        ] {
+            let err = toml::from_str::<ServerConfig>(text)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("a group name or a gid between 0 and 4294967295"),
+                "{text}: {err}"
+            );
+        }
     }
 
     #[test]

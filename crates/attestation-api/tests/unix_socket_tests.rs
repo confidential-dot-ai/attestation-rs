@@ -88,15 +88,17 @@ fn other_gid() -> Option<u32> {
     proc_status_ids("Groups:")?.into_iter().find(|g| *g != egid)
 }
 
-fn is_root() -> bool {
-    proc_status_ids("Uid:").is_some_and(|ids| ids.get(1) == Some(&0))
+/// True as root, and wherever the uid cannot be read, since the probe test
+/// only holds for an unprivileged user.
+fn is_root_or_unknown() -> bool {
+    proc_status_ids("Uid:").is_none_or(|ids| ids.get(1) == Some(&0))
 }
 
 #[tokio::test]
 async fn unix_socket_unreachable_is_refused() {
     use attestation_api::config::Bind;
 
-    if is_root() {
+    if is_root_or_unknown() {
         eprintln!("skipping: root can connect to any socket");
         return;
     }

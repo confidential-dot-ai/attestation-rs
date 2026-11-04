@@ -25,11 +25,16 @@ pub struct SocketFile {
 
 impl Drop for SocketFile {
     fn drop(&mut self) {
-        if let Ok(meta) = fs::symlink_metadata(&self.path) {
-            if (meta.dev(), meta.ino()) == self.id {
-                if let Err(e) = fs::remove_file(&self.path) {
-                    tracing::warn!(path = %self.path.display(), error = %e, "removing socket file");
-                }
+        let meta = match fs::symlink_metadata(&self.path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!(path = %self.path.display(), error = %e, "inspecting socket file; not removed");
+                return;
+            }
+        };
+        if (meta.dev(), meta.ino()) == self.id {
+            if let Err(e) = fs::remove_file(&self.path) {
+                tracing::warn!(path = %self.path.display(), error = %e, "removing socket file");
             }
         }
     }
