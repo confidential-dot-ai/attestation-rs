@@ -50,7 +50,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let bind = config.server.bind().map_err(anyhow::Error::msg)?;
-    tracing::info!(%bind, "configured listener");
     if matches!(bind, Bind::Tcp(addr) if !addr.ip().is_loopback()) {
         tracing::warn!(
             %bind,
@@ -92,5 +91,5 @@ async fn main() -> anyhow::Result<()> {
         verifier,
     };
 
-    attestation_api::server::run(state).await
+    attestation_api::server::run(state, bind).await
 }

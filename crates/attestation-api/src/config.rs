@@ -140,7 +140,7 @@ impl ServerConfig {
         let staged = parent.as_os_str().len() + STAGED_SUFFIX_LEN;
         if path.as_os_str().len().max(staged) > MAX_SOCKET_PATH {
             return Err(format!(
-                "server.bind '{}': the socket path is too long; the socket is staged at \
+                "server.bind '{}': the socket path, as configured, is too long; the socket is staged at \
                  <dir>/.sock-<12 hex>/s, and both paths must fit in {MAX_SOCKET_PATH} bytes",
                 self.bind
             ));

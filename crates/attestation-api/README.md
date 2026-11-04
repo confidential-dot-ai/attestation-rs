@@ -39,8 +39,10 @@ renamed into place, so it is never connectable with looser permissions. The
 process therefore needs write access to the parent directory, which must exist,
 and the staging path must fit the 107-byte socket path limit. A process killed
 mid-bind can leave that directory behind; it is safe to delete. A socket at
-the path that nothing listens on is replaced; a live one or anything else there
-is a startup error. Shutdown removes the socket file.
+the path that refuses connections is replaced; a live one, one the process
+cannot connect to, or anything else there is a startup error. That check is
+not atomic with the replacement, so run one instance per path. Shutdown
+removes the socket file.
 
 All endpoints except `/health` require `Authorization: Bearer TOKEN` when
 keys are configured. An empty list allows unauthenticated access and logs a

@@ -115,7 +115,7 @@ pub async fn bind(target: &Bind) -> anyhow::Result<Listener> {
         Bind::Tcp(addr) => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
         #[cfg(unix)]
         Bind::Unix { path, mode, group } => {
-            let (listener, file) = unix::bind(path, *mode, *group)?;
+            let (listener, file) = unix::bind(path, *mode, *group).await?;
             Ok(Listener::Unix(listener, file))
         }
         #[cfg(not(unix))]
@@ -149,8 +149,9 @@ pub async fn serve(
     Ok(())
 }
 
-pub async fn run(state: AppState) -> anyhow::Result<()> {
-    let target = state.config.server.bind().map_err(anyhow::Error::msg)?;
+/// Serve `state` on `target`, which the caller resolved from the config,
+/// until SIGINT or SIGTERM.
+pub async fn run(state: AppState, target: Bind) -> anyhow::Result<()> {
     let app = build_router(state);
     let listener = bind(&target).await?;
     tracing::info!(bind = %target, "listening");

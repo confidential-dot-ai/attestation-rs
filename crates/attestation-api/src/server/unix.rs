@@ -12,6 +12,7 @@ use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::{chown, DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tokio::net::UnixListener;
 
@@ -44,10 +45,20 @@ impl Drop for BindDir {
     }
 }
 
+/// How long a probe of an existing socket may take before it counts as live.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Bind a listening socket at `path` with `mode`, chgrp'd to `group` when
-/// set. A socket at `path` that nothing listens on is replaced; a live one
-/// or anything else there is an error. The parent directory must exist.
-pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListener, SocketFile)> {
+/// set. A socket at `path` that nothing listens on is replaced; a live one,
+/// one this process cannot probe, or anything else there is an error. The
+/// parent directory must exist. The probe and the rename are not atomic, so
+/// two instances started at once against a dead socket can both succeed; a
+/// supervisor must keep the service single-instance.
+pub async fn bind(
+    path: &Path,
+    mode: u32,
+    group: Option<u32>,
+) -> io::Result<(UnixListener, SocketFile)> {
     let context = |what: &str, at: &Path, e: io::Error| {
         io::Error::new(e.kind(), format!("{what} {}: {e}", at.display()))
     };
@@ -83,8 +94,8 @@ pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListe
                 ),
             ));
         }
-        Ok(_) => match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => {
+        Ok(_) => match probe(path).await {
+            Ok(()) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
                     format!("{} is in use by another listener", path.display()),
@@ -111,4 +122,14 @@ pub fn bind(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListe
         id: (meta.dev(), meta.ino()),
     };
     Ok((listener, file))
+}
+
+/// Connects to `path` without blocking the runtime. `Ok` means something
+/// accepted or is still queueing the connection, so the socket is live.
+async fn probe(path: &Path) -> io::Result<()> {
+    match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::UnixStream::connect(path)).await {
+        Ok(Ok(_)) | Err(_) => Ok(()),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Ok(Err(e)) => Err(e),
+    }
 }

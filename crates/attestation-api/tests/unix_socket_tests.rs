@@ -67,6 +67,23 @@ async fn unix_socket_lifecycle() {
     assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");
 }
 
+#[cfg(target_os = "linux")]
+fn effective_gid() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let gids = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Gid:"))
+        .expect("Gid line in /proc/self/status");
+    gids.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn effective_gid() -> u32 {
+    // Falls back to the tempdir's group, which chown may refuse on setgid dirs.
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(std::env::temp_dir()).unwrap().gid()
+}
+
 #[tokio::test]
 async fn unix_socket_group_and_replacement() {
     use attestation_api::config::Bind;
@@ -81,8 +98,8 @@ async fn unix_socket_group_and_replacement() {
     };
     assert!(bind(&missing).await.is_err(), "missing parent must fail");
 
-    // chgrp to a group the process is in: the directory's own group.
-    let gid = std::fs::metadata(dir.path()).unwrap().gid();
+    // chgrp to the effective gid, which chown always allows.
+    let gid = effective_gid();
     let target = Bind::Unix {
         path: path.clone(),
         mode: 0o600,
