@@ -3,6 +3,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::Request;
 use axum::routing::{get, post};
 use axum::{middleware, Router};
+use std::future::Future;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::request_id::{
@@ -12,8 +13,12 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::api;
+use crate::config::Bind;
 use crate::middleware as mw;
 use crate::AppState;
+
+#[cfg(unix)]
+mod unix;
 
 /// Maximum request body size (1 MiB).
 const MAX_BODY_SIZE: usize = 1024 * 1024;
@@ -95,21 +100,62 @@ pub fn build_router(state: AppState) -> Router {
     }
 }
 
-pub async fn run(state: AppState) -> anyhow::Result<()> {
-    let addr: SocketAddr = state.config.server.bind.parse()?;
-    let app = build_router(state);
+/// A bound listener, ready for [`serve`].
+pub enum Listener {
+    Tcp(TcpListener),
+    /// Removes its socket file when dropped.
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener, unix::SocketFile),
+}
 
-    tracing::info!(%addr, "starting attestation service");
+/// Bind the listener for `target`. Unix sockets carry their final mode and
+/// group before they become reachable at their path.
+pub async fn bind(target: &Bind) -> anyhow::Result<Listener> {
+    match target {
+        Bind::Tcp(addr) => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
+        #[cfg(unix)]
+        Bind::Unix { path, mode, group } => {
+            let (listener, file) = unix::bind(path, *mode, *group).await?;
+            Ok(Listener::Unix(listener, file))
+        }
+        #[cfg(not(unix))]
+        Bind::Unix { .. } => anyhow::bail!("unix: binds need a Unix platform"),
+    }
+}
 
-    let listener = TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-
+/// Serve `app` on `listener` until `shutdown` completes and in-flight
+/// requests finish. A Unix socket file is removed on return.
+pub async fn serve(
+    listener: Listener,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    match listener {
+        Listener::Tcp(listener) => {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?
+        }
+        #[cfg(unix)]
+        Listener::Unix(listener, _file) => {
+            axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(shutdown)
+                .await?
+        }
+    }
     Ok(())
+}
+
+/// Serve `state` on `target`, which the caller resolved from the config,
+/// until SIGINT or SIGTERM.
+pub async fn run(state: AppState, target: Bind) -> anyhow::Result<()> {
+    let app = build_router(state);
+    let listener = bind(&target).await?;
+    tracing::info!(bind = %target, "listening");
+    serve(listener, app, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {
