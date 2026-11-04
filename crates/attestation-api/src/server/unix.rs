@@ -125,11 +125,14 @@ pub async fn bind(
 }
 
 /// Connects to `path` without blocking the runtime. `Ok` means something
-/// accepted or is still queueing the connection, so the socket is live.
+/// accepted or is still queueing the connection, so the socket is live. A
+/// connect that does not return within [`PROBE_TIMEOUT`] is a `TimedOut`
+/// error, since a Unix connect only stalls on a wedged filesystem.
 async fn probe(path: &Path) -> io::Result<()> {
     match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::UnixStream::connect(path)).await {
-        Ok(Ok(_)) | Err(_) => Ok(()),
+        Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
         Ok(Err(e)) => Err(e),
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "timed out")),
     }
 }

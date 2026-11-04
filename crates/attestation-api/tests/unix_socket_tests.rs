@@ -67,15 +67,55 @@ async fn unix_socket_lifecycle() {
     assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");
 }
 
-/// The effective gid, which chown always accepts. None where std offers no
-/// way to read it; the chgrp assertions are then skipped.
-fn effective_gid() -> Option<u32> {
+fn proc_status_ids(key: &str) -> Option<Vec<u32>> {
     if !cfg!(target_os = "linux") {
         return None;
     }
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let gids = status.lines().find_map(|l| l.strip_prefix("Gid:"))?;
-    gids.split_whitespace().nth(1)?.parse().ok()
+    let line = status.lines().find_map(|l| l.strip_prefix(key))?;
+    Some(
+        line.split_whitespace()
+            .filter_map(|f| f.parse().ok())
+            .collect(),
+    )
+}
+
+/// A supplementary gid other than the effective gid, so a passing chgrp
+/// assertion proves the chown happened. None where there is no such group
+/// or std offers no way to read it; the chgrp assertions are then skipped.
+fn other_gid() -> Option<u32> {
+    let egid = *proc_status_ids("Gid:")?.get(1)?;
+    proc_status_ids("Groups:")?.into_iter().find(|g| *g != egid)
+}
+
+fn is_root() -> bool {
+    proc_status_ids("Uid:").is_some_and(|ids| ids.get(1) == Some(&0))
+}
+
+#[tokio::test]
+async fn unix_socket_unreachable_is_refused() {
+    use attestation_api::config::Bind;
+
+    if is_root() {
+        eprintln!("skipping: root can connect to any socket");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("api.sock");
+    let other = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let target = Bind::Unix {
+        path: path.clone(),
+        mode: 0o660,
+        group: None,
+    };
+    let err = bind(&target)
+        .await
+        .err()
+        .expect("a socket the probe cannot reach must not be replaced");
+    assert!(err.to_string().contains("probing"), "bind() = {err}");
+    assert!(path.exists(), "the unreachable socket was removed");
+    drop(other);
 }
 
 #[tokio::test]
@@ -92,7 +132,7 @@ async fn unix_socket_group_and_replacement() {
     };
     assert!(bind(&missing).await.is_err(), "missing parent must fail");
 
-    let gid = effective_gid();
+    let gid = other_gid();
     let target = Bind::Unix {
         path: path.clone(),
         mode: 0o600,

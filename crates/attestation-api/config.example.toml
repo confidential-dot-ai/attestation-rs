@@ -9,7 +9,8 @@ bind = "127.0.0.1:8400"
 # file is removed on shutdown.
 # bind = "unix:///run/attestation-api/api.sock"
 # socket_mode = "0660"            # Unix binds only; "other" access or missing owner write is refused
-# socket_group = "nonroot"        # Unix binds only; gid, or a name from /etc/group (not NSS); unset keeps the process group
+# socket_group = "nonroot"        # Unix binds only; gid, or a name from /etc/group (not NSS). Unset keeps the
+#                                 # group the filesystem assigns (the parent's under setgid), so set it in shared dirs
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.
