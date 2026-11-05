@@ -1,0 +1,13 @@
+{
+  "id": "envelope-byte-string-padded",
+  "rule": {
+    "section": "4.7",
+    "statement": "byte strings are base64url without padding"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-byte-string-padded.json",
+  "policy": "policy/envelope-byte-string-padded.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

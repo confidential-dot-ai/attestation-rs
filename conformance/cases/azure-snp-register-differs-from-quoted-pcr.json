@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-register-differs-from-quoted-pcr",
+  "rule": {
+    "section": "4.4",
+    "statement": "a vtpm register equals the quoted PCR of its index"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-register-differs-from-quoted-pcr.json",
+  "policy": "policy/azure-snp-register-differs-from-quoted-pcr.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

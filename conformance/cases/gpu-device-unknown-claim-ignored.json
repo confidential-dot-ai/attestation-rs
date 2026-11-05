@@ -1,0 +1,13 @@
+{
+  "id": "gpu-device-unknown-claim-ignored",
+  "rule": {
+    "section": "4.7",
+    "statement": "an unknown claim in a device submodule is ignored; the appraisal goes on to NRAS, which this case records no exchange for"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/gpu-device-unknown-claim-ignored.json",
+  "policy": "policy/gpu-device-unknown-claim-ignored.json",
+  "expect": {
+    "refusal": "collateral-unavailable"
+  }
+}

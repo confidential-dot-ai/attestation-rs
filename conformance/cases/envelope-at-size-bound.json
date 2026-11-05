@@ -1,0 +1,13 @@
+{
+  "id": "envelope-at-size-bound",
+  "rule": {
+    "section": "4.7",
+    "statement": "the whole envelope is at most 10 MiB: exactly 10 MiB appraises"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/envelope-at-size-bound.json.gz",
+  "policy": "policy/envelope-at-size-bound.json",
+  "expect": {
+    "appraisal": "expected/envelope-at-size-bound.json"
+  }
+}

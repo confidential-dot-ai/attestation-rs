@@ -1,0 +1,13 @@
+{
+  "id": "snp-unknown-submodule-claim-ignored",
+  "rule": {
+    "section": "4.7",
+    "statement": "unknown claims at the top level or in a submodule claims set are ignored, as EAT extensibility requires"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-unknown-submodule-claim-ignored.json",
+  "policy": "policy/snp-unknown-submodule-claim-ignored.json",
+  "expect": {
+    "appraisal": "expected/snp-unknown-submodule-claim-ignored.json"
+  }
+}
