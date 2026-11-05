@@ -1,0 +1,153 @@
+{
+  "cvm_version": 1,
+  "eat_nonce": "aGVsbG8tYXR0ZXN0YXRpb24",
+  "eat_profile": "tag:confidential.ai,2026:cvm#1",
+  "submods": {
+    "cpu": {
+      "bootseed": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+      "cvm_binding": {
+        "mode": "commitment",
+        "pattern": "challenge"
+      },
+      "cvm_chain": {
+        "chain_len": 1
+      },
+      "cvm_endorsements": {
+        "__cmwc_t": "tag:confidential.ai,2026:cvm-endorsements#1",
+        "snp.vek": [
+          "application/pkix-cert",
+          "MIIFPzCCAvOgAwIBAgIBADBBBgkqhkiG9w0BAQowNKAPMA0GCWCGSAFlAwQCAgUAoRwwGgYJKoZIhvcNAQEIMA0GCWCGSAFlAwQCAgUAogMCATAwezEUMBIGA1UECwwLRW5naW5lZXJpbmcxCzAJBgNVBAYTAlVTMRQwEgYDVQQHDAtTYW50YSBDbGFyYTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERldmljZXMxEjAQBgNVBAMMCVNFVi1HZW5vYTAeFw0yNjAyMTcyMzAxMzZaFw0zMzAyMTcyMzAxMzZaMHoxFDASBgNVBAsMC0VuZ2luZWVyaW5nMQswCQYDVQQGEwJVUzEUMBIGA1UEBwwLU2FudGEgQ2xhcmExCzAJBgNVBAgMAkNBMR8wHQYDVQQKDBZBZHZhbmNlZCBNaWNybyBEZXZpY2VzMREwDwYDVQQDDAhTRVYtVkNFSzB2MBAGByqGSM49AgEGBSuBBAAiA2IABIp0WFs7kFJC9d51WvUv7dHvBxJI1CwDn_RXkET7BHtI1rMLTbp0eszXqFhyrBWuCPruXhfTm7iUyxQg-gExv927UmpF2BAmCQKNGhXq7jswYlEyG_XSEJtMIu-frG3dq6OCARMwggEPMBAGCSsGAQQBnHgBAQQDAgEAMBQGCSsGAQQBnHgBAgQHFgVHZW5vYTARBgorBgEEAZx4AQMBBAMCAQowEQYKKwYBBAGceAEDAgQDAgEAMBEGCisGAQQBnHgBAwQEAwIBADARBgorBgEEAZx4AQMFBAMCAQAwEQYKKwYBBAGceAEDBgQDAgEAMBEGCisGAQQBnHgBAwcEAwIBADARBgorBgEEAZx4AQMDBAMCARswEQYKKwYBBAGceAEDCAQDAgEbME0GCSsGAQQBnHgBBARAtfmkyCgOY8l9KI22ZIV33CuEiISqaC16InukDlDesrDRErWZ2HqszaeNBvQlSx6BxNlT7zxpnbOdTgYBPp-kzjBBBgkqhkiG9w0BAQowNKAPMA0GCWCGSAFlAwQCAgUAoRwwGgYJKoZIhvcNAQEIMA0GCWCGSAFlAwQCAgUAogMCATADggIBACIL3uNBEPhG8Ptw7qdLWFMWXC2Pu_kcWbcQYH9ELBkHxp_dYxRJxM4qztvHhJErYtl-95BqTEBK6orL2ET4CVgTVRJWzYb4ascRx5wrTrPCwEPQsI35QI29okDl-HmmoDKtyGb6mMFNjESweB-HlpL_e-AyWm_JSSgH5YvJQtjlixRx40i-4F7sz7X12Y0xEi9HIGiOqnFeCXzB1--fjjnEjo7U3bngEmV4c2yYt5F9vtYpJPCNzhHQgAxlaGlvD0HFPmDXQSnOVPkpoGgquZ96A49temI1oVFNVrG4iacqbOuDJf7Z9EOEdz2fIsO6n7K4LuacZiajJaRRpds_t8xecAV2FfxIa7WJKhZglXmn8wdVXtrD80jf4VJbSPf3HI6i5EbQXwIFvMCnVlu7iqq38phRjqncLMFxLMcnl3G5WwVX6g3VV-ZmahAdW0IruFOcj9auxdtieKj4sq_P36GnlOOsc1sKyNh7xVjhwNxF0CTx63ivoR_HpnXGlYXW614SWsIKZzwFH36H5sqEOjLkuOKnvAASnzEMM0QuPWAQFsxBLhwgajuD06q3DTA4W320LRhHpg40KJGKaePO7WOhr_YOavXkMQ0v58g_SPZ_XlicR6zTu14OlpI-64ON62ui_Fm8iExYdPUvTBIAExx6jXK3F0X3rXXYOknqkDzR",
+          2
+        ]
+      },
+      "cvm_log": {
+        "data": "gaUAAAEDA4GiAAwBWDB06sTjGqApFzGOZFAvGcrCqeaXYW240Ui6NUof2NwY0Jut8NlCOhmSv1RmZeqQUMwJGMgKogAAAVg_owBjYXRzAWRib290AlgwCIKxQwZ5VoObg0YDzWW5KVUermpK7-Nh1Tk31_L8-kOgtKqvs6rYRRaasDMPOH0t",
+        "format": "tcg-cel-cbor"
+      },
+      "cvm_platform": {
+        "hosting": "bare",
+        "tee": "sev-snp",
+        "vendor": "amd"
+      },
+      "cvm_registers": [
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 0,
+          "source": "snp-vmr",
+          "value": "7fy-1JyRVGURgUO9a6GYDg-mzP4CJCvDFnaideMc0AgcnYubqdb07nC5SwMLHgT6"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 1,
+          "source": "snp-vmr",
+          "value": "xkTn7a2IwGS0JPTw8MedRU-Kr-XpQnAhk_vizOMaz-vRhbT31KuKflvG6Ah7JTwl"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 2,
+          "source": "snp-vmr",
+          "value": "4ZG0MUF0bxp_EcyuPSFDi_lLV2K5YEVti_bCcoguehS-n4mFy4r07rsSANGZq9mp"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 3,
+          "source": "snp-vmr",
+          "value": "-kFUUpJKVduoxxZZjr-oq-CAjpTP-m7Uq_KNtMDxiZn_0PLBT_K1thMKNDxjFV1p"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 4,
+          "source": "snp-vmr",
+          "value": "tvnWp9rATaLCo1jUiNVAiY7vf03kRDioM_HSQYNf_j1sv0xqk92xPib__yIEkAWK"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 5,
+          "source": "snp-vmr",
+          "value": "4xhr0duINoHGwGDKPSa3hQVhYzGV_HyteRvMTstl2CwpvL4_j7W1Bda2aeZtVLAV"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 6,
+          "source": "snp-vmr",
+          "value": "vXQE_ykYswrPoM5NiOPAIsHaCvS1aROgiyQNlGud6Owl69OdkE_5loX7p8I1hWqO"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 7,
+          "source": "snp-vmr",
+          "value": "Hz_v4S0EitobtstB1qKSCDRECOFog8gWg9xYOlrDUTzvGjyYXUx8hsn3uGfD1Ohz"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 8,
+          "source": "snp-vmr",
+          "value": "er87mLYwehMP0q-fpkCoWfVTBKrlIjEti1LsOE52PxQf188gtWsaVSa-dDN9boK8"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 9,
+          "source": "snp-vmr",
+          "value": "_D4aohOmpsrAUIB1iUFTiQGEV2IPdG3vEudF_BZu5b6kUuufuvxFgyD04G9QHX0E"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 10,
+          "source": "snp-vmr",
+          "value": "zfZSiTLhurpYRnd1Euw2B9Ezw8V0XwL4-0jljMW7nWt5JaoGoSp5-2KAm8HJW6I_"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 11,
+          "source": "snp-vmr",
+          "value": "_HQWHI717qCOACqQCcACW7h0S2uNqBiDbMGElp2cKEBfAh49bq6ARH3bqorGjwdQ"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 12,
+          "source": "snp-vmr",
+          "value": "Y-LiHsjZ5Rc3VLhGA7FJ1IkgaCTu526ocDFq0HavWuwZ8IJZLvzXevSNDLejwVrc"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 13,
+          "source": "snp-vmr",
+          "value": "oyD24jrjCM_qo7PIMZhxqOU48W2boJQx0V9DzC9DeIyYsV9m0BD12Wlt7oJT5dpO"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 14,
+          "source": "snp-vmr",
+          "value": "ww8qZ9_GX1-Yzejb2v7LTX9pgFwv6lMmVOnohjNY8s26b8EW2PZ1phH8NbNQzHlE"
+        },
+        {
+          "alg": "sha384",
+          "backing": "virtualized",
+          "index": 15,
+          "source": "snp-vmr",
+          "value": "ynlVphAJmNnEdx2U54UJjYeLZtKVbFSl9H6EdpS_0kaiUbsdzZKf2UX6N943scOy"
+        }
+      ],
+      "cvm_report": [
+        "application/vnd.confidential-ai.sev-snp-report",
+        "BQAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAKAAAAAAAbGyUAAAAAAAAAAAAAAAAAAABoZWxsby1hdHRlc3RhdGlvbgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2ZEro5bOQJwpR4Qdk6UHa2g5uJjCK0quBe2zsrBYqZkn-M-aT4YX7mld6xR5VJbIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABzYarZXPdxaOAIp784LfqM9OIskU5jZm6J3-eU50CH9f__________________________________________CgAAAAAAGxsZoAIAAAAAAAAAAAAAAAAAAAAAAAAAAAC1-aTIKA5jyX0ojbZkhXfcK4SIhKpoLXoie6QOUN6ysNEStZnYeqzNp40G9CVLHoHE2VPvPGmds51OBgE-n6TOCgAAAAAAGxsxNwEAMTcBAAoAAAAAABsbCwAAAAAAAAALAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABC0bRrPQgIW95WAvjx-xuGhrTo1JoRvVBCoZCpRhFHJ2j3n7oq0bUKR28M4u1FuqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6jj4xMttpSFo4CjgQZOmeE0xTj0HnOL4dMus9XWy6fNjUtCOcdR303Lu2aqP_JDlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        4
+      ]
+    }
+  }
+}
