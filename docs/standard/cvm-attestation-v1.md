@@ -301,6 +301,20 @@ The combinations a `cpu` submodule may take are fixed by the TEE and the hosting
 
 Each register's `alg` MUST be the quoted bank, its `index` a PCR inside the quote's signed selection, its `value` equal to the entry of `pcrs` at that index, its `source` `vtpm-pcr` and its `backing` `privileged-service`. Each index appears at most once.
 
+### 4.5. Device submodules
+
+A `gpu/<ueid>` or `nvswitch/<ueid>` submodule carries the device evidence exactly as NVIDIA's SDK exchanges it with NRAS:
+
+| Member | Requirement | Value |
+| --- | --- | --- |
+| `arch` | MUST | `HOPPER` or `BLACKWELL` under `gpu/`; `LS10` under `nvswitch/` |
+| `uuid` | MUST | equal to the name's `<ueid>` |
+| `evidence_b64` | MUST | NVIDIA's standard-alphabet base64 text, 1 byte to 1 MiB, passed to NRAS verbatim |
+| `cert_chain_b64` | MUST | NVIDIA's standard-alphabet base64 text, 1 byte to 1 MiB, passed to NRAS verbatim |
+| `cvm_binding` | MUST | `{"pattern": "challenge", "mode": "nras-nonce"}` |
+
+The two base64 members keep NVIDIA's encoding because NRAS consumes them as text; they are the only byte-carrying members of the profile that do not follow Section 4.7. The attester obtains them from the device with the SPDM nonce of Section 5.4 (`nras-nonce`). A device submodule's binding names the challenge pattern because the device protocol takes a nonce on every exchange (Section 5.1); the nonce is the envelope's, so under a `cpu` submodule in the certificate pattern the device evidence is as old as the certificate. Other members of a device submodule are ignored.
+
 ### 4.7. Encoding rules
 
 JSON (the primary encoding):
@@ -819,6 +833,57 @@ The `cpu` submodule's claims are those of Section 9.1.5 or 9.2.5 with hosting `a
 
 Google Cloud SEV-SNP and TDX guests obtain the raw hardware report through the guest kernel, exactly as on bare metal, with hosting `gcp`. Evidence, authentication, binding and claims are those of Sections 9.1 and 9.2, and `gcp` admits the same report types and modes as `bare`.
 
+### 9.7. NVIDIA GPUs and NVSwitch
+
+NVIDIA devices are appraised by NRAS, which verifies each device's SPDM evidence (DMTF DSP0274) and certificate chain against NVIDIA's reference values and returns signed claims. The verifier's role is to bind the devices to the nonce, authenticate NRAS's answer, and apply the device policy.
+
+#### 9.7.1. Request
+
+The verifier groups the device submodules by architecture and sends one request per architecture (in the order `HOPPER`, `BLACKWELL`, `LS10`), to `/v4/attest/gpu` for GPUs and `/v4/attest/switch` for NVSwitches at `https://nras.attestation.nvidia.com`:
+
+```
+{ "nonce": <the device nonce of Section 5.4, lowercase hexadecimal>,
+  "evidence_list": [ { "evidence": <evidence_b64>, "certificate": <cert_chain_b64> }, ... ],
+  "arch": "HOPPER" | "BLACKWELL" | "LS10",
+  "claims_version": "3.0" }
+```
+
+The verifier does not ask NRAS to relax its certificate checks: a request that tells NRAS to accept device certificates whose OCSP status is on hold (the `X-NVIDIA-OCSP-ALLOW-CERT-HOLD` header) is not an appraisal under this profile, and a verifier configured to send one refuses with `unsupported`.
+
+#### 9.7.2. Response
+
+NRAS answers with a detached EAT: `[["JWT", <overall token>], {<name>: <device token>, ...}]`. The verifier:
+
+1. verifies every token as a JWS (RFC 7515) and JWT (RFC 7519) with `alg` `ES384` (RFC 7518), a `kid`, and no `crit`, under a key from NRAS's JWKS (RFC 7517; the endpoint's origin plus `/.well-known/jwks.json`) whose `x5c` chain is valid at the evaluation time and ends at the pinned NVIDIA certificate of Appendix E; it checks `exp` and, when present, `nbf`;
+2. requires every token's `iss` to be the endpoint's origin, the overall token's `x-nvidia-ver` to be `3.0`, and its `x-nvidia-overall-att-result` to be true;
+3. requires the overall token's `eat_nonce` (NVIDIA encodes it in hexadecimal) to equal the device nonce;
+4. requires the overall token's `submods` to hold, for each device token, `["DIGEST", ["SHA-256", <hex>]]` (NRAS also writes the label `SHA256`, which is accepted) equal to the SHA-256 of that device token's compact serialization, and no other entry, and the number of device tokens to equal the number of devices sent;
+5. maps each device token back to its submodule by position: the verifier sends each batch's devices in ascending byte order of their submodule names, NRAS names the tokens `GPU-<i>` and `SWITCH-<i>` with `<i>` the device's position counted from 0, and the kind MUST match the endpoint;
+6. requires each device token's `eat_nonce` (hexadecimal) to equal the device nonce;
+7. requires each device token's architecture, as its `hwmodel` claim names it, to be the batch's. The architecture a `hwmodel` names is read without regard to case: `HOPPER` when it contains `HOPPER` or begins with `GH100`; otherwise `BLACKWELL` when it contains `BLACKWELL` or begins with `GB`; otherwise `LS10` when it contains `LS10`, `LS_10` or `SWITCH`; any other value names none and fails the step. NRAS reports, for example, `GH100 A01 GSP BROM` for a Hopper GPU and `LS_10 A01 FSP BROM` for an NVSwitch.
+
+Failures are refused as follows: a token that fails steps 1 or 2 (other than the overall result), step 4's digests or entries, step 5, or its key identifier, with `device-token-invalid`; a false overall result, a device count that differs, or a failed step 7, with `device-policy`; a nonce that differs (steps 3 and 6), with `binding-mismatch`; an NRAS or JWKS endpoint that cannot be reached, with `collateral-unavailable`.
+
+#### 9.7.3. Device policy and claims
+
+| Gate | Requirement |
+| --- | --- |
+| `allow_debug` false | the device token's `dbgstat` is `disabled` |
+| `require_secboot` | `secboot` is true |
+| `require_nonce_match` | `x-nvidia-gpu-attestation-report-nonce-match` (GPU) or `x-nvidia-switch-attestation-report-nonce-match` (NVSwitch) is true |
+| `require_measres_success` | `measres` is `success` |
+
+A failed gate is refused with `device-policy`.
+
+| Claim | Source |
+| --- | --- |
+| `ear_attester_claims` | the device token's claims, verbatim, plus `cvm_identity` `{ueid}` from the signed `ueid`, and for a GPU `cvm_tcb` `{driver, vbios}` from `x-nvidia-gpu-driver-version` and `x-nvidia-gpu-vbios-version` when both are present |
+| `ear_nvidia_evidence` | `signature_verified`, `parsed` and `nonce_match` from `x-nvidia-{gpu,switch}-attestation-report-signature-verified`, `-parsed` and `-nonce-match` |
+| vector | `sourced-data` 2; `instance-identity` 2 when the signed `ueid` is on the machine allowlist |
+
+The device's identity is the signed `ueid`. The `<ueid>` in the submodule name is the attester's label, is required to equal `uuid`, and is never compared against policy. Under a machine allowlist, a device token without a `ueid` identifies no machine and is refused with `machine-not-allowed`.
+
+
 ## 10. Endorsements
 
 ### 10.1. Inline endorsements
@@ -1066,6 +1131,17 @@ On TDX, the Intel status and the floor are independent requirements: the status 
 On SEV-SNP the `cvm_owner` fields are authenticated by the guest owner's ID block only when `ID_KEY_DIGEST` is pinned (`owner.id_key_digests`); without a pin they are host-chosen. Version 1 offers no pin for `AUTHOR_KEY_DIGEST`. On TDX `MROWNER` and `MROWNERCONFIG` are host-set labels.
 
 Reference values come from the image publisher. A publisher SHOULD publish each image's values in two forms that carry the same values: flat JSON as above, and a signed CoRIM (draft-ietf-rats-corim-11) whose CoMID reference-value triples carry the launch measurement in `digests` (measurement-values-map key 2) and register values in `integrity-registers` (key 14), keyed by the slot index as an unsigned integer and typed by Section 6.1's `alg`. A verifier that ingests both treats them as one source.
+
+### 13.5. Device policy
+
+| Member | Default | Meaning |
+| --- | --- | --- |
+| `gpu.required` | `false` | refuse evidence without a device submodule (`device-required`) |
+| `gpu.expected_archs` | absent | the architectures admitted; a device of another is refused (`device-not-allowed`) |
+| `gpu.device_policy.allow_debug` | `false` | admit a device whose `dbgstat` is not `disabled` |
+| `gpu.device_policy.require_secboot` | `true` | the device token's `secboot` is true |
+| `gpu.device_policy.require_nonce_match` | `true` | NRAS's signed nonce-match claim is true. When false, device evidence NRAS could not bind to this nonce is accepted and reported as `ear_all_submods_bound` `"false"`; such evidence can be a replay, and a production policy SHOULD NOT waive the check |
+| `gpu.device_policy.require_measres_success` | `true` | the device token's `measres` is `success` |
 
 ## 14. Conformance
 
