@@ -1,0 +1,13 @@
+{
+  "id": "tdx-log-without-registers",
+  "rule": {
+    "section": "6.1",
+    "statement": "cvm_registers is required whenever cvm_log is present"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-log-without-registers.json",
+  "policy": "policy/tdx-log-without-registers.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}

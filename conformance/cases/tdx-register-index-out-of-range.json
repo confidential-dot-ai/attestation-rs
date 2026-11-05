@@ -1,0 +1,13 @@
+{
+  "id": "tdx-register-index-out-of-range",
+  "rule": {
+    "section": "6.2",
+    "statement": "for tdx-rtmr the index is the RTMR ordinal 0 to 3"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-register-index-out-of-range.json",
+  "policy": "policy/tdx-register-index-out-of-range.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
