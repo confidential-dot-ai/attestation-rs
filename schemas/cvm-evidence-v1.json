@@ -1,0 +1,575 @@
+{
+  "$defs": {
+    "Backing": {
+      "description": "Who holds a register's value. Ordered weakest first so a policy floor is a\nplain comparison: `seen >= required`.",
+      "enum": [
+        "virtualized",
+        "kernel-service",
+        "privileged-service",
+        "hardware"
+      ],
+      "type": "string"
+    },
+    "Base64Url": {
+      "contentEncoding": "base64url",
+      "description": "bytes, base64url without padding (RFC 4648 section 5), canonical trailing bits",
+      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048]|[A-Za-z0-9_-][AQgw])?$",
+      "type": "string"
+    },
+    "Base64UrlBytes32": {
+      "contentEncoding": "base64url",
+      "description": "exactly 32 bytes, base64url without padding",
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
+      "type": "string"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "description": "`cvm_binding` (section 5).",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/KeyBinding"
+        },
+        "mode": {
+          "$ref": "#/$defs/BindingMode"
+        },
+        "pattern": {
+          "$ref": "#/$defs/FreshnessPattern"
+        }
+      },
+      "required": [
+        "pattern",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "BindingMode": {
+      "enum": [
+        "report-data",
+        "commitment",
+        "vtpm-extradata",
+        "cca-challenge",
+        "nras-nonce"
+      ],
+      "type": "string"
+    },
+    "ChainInfo": {
+      "additionalProperties": false,
+      "description": "`cvm_chain` (section 8.1).",
+      "properties": {
+        "chain_len": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chain_len"
+      ],
+      "type": "object"
+    },
+    "CmwCollection": {
+      "additionalProperties": {
+        "$ref": "#/$defs/CmwEntry"
+      },
+      "description": "RFC 9999 collection: optional __cmwc_t plus labeled records or collections",
+      "maxProperties": 33,
+      "minProperties": 1,
+      "properties": {
+        "__cmwc_t": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "CmwEntry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CmwRecord"
+        },
+        {
+          "$ref": "#/$defs/CmwCollection"
+        }
+      ],
+      "description": "One member of a collection: a record (JSON array) or a nested collection\n(JSON object)."
+    },
+    "CmwRecord": {
+      "description": "RFC 9999 record: [media type, base64url value, optional indicator bits]",
+      "maxItems": 3,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "pattern": "^[^/]+/.+$",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Base64Url"
+        },
+        {
+          "maximum": 31,
+          "minimum": 1,
+          "type": "integer"
+        }
+      ],
+      "type": "array"
+    },
+    "CpuEvidence": {
+      "description": "`cpu` submodule claims set (section 4.3). Unknown claims are ignored;\nunknown fields inside any `cvm_*` object are rejected by the field types.",
+      "properties": {
+        "bootseed": {
+          "$ref": "#/$defs/Base64UrlBytes32",
+          "description": "EAT `bootseed` (key 268): 32 random bytes chosen at boot (section 8.2)."
+        },
+        "cvm_binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "cvm_chain": {
+          "$ref": "#/$defs/ChainInfo"
+        },
+        "cvm_endorsements": {
+          "$ref": "#/$defs/CmwCollection"
+        },
+        "cvm_log": {
+          "$ref": "#/$defs/EventLog"
+        },
+        "cvm_platform": {
+          "$ref": "#/$defs/PlatformHint"
+        },
+        "cvm_provenance": {
+          "description": "Reserved (section 4.3): carried through, never interpreted in v1."
+        },
+        "cvm_registers": {
+          "items": {
+            "$ref": "#/$defs/Register"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "cvm_report": {
+          "$ref": "#/$defs/CmwRecord"
+        },
+        "dbgstat": {
+          "$ref": "#/$defs/DebugStatus",
+          "description": "EAT `dbgstat` (key 263), a hint; the verifier derives the real value\nand refuses a hint that contradicts the signed report."
+        }
+      },
+      "required": [
+        "cvm_platform",
+        "cvm_report",
+        "cvm_binding"
+      ],
+      "type": "object"
+    },
+    "DebugStatus": {
+      "description": "EAT `dbgstat` (RFC 9711 section 4.2.9): the text value in JSON, the\ninteger in CBOR.",
+      "enum": [
+        "enabled",
+        "disabled",
+        "disabled-since-boot",
+        "disabled-permanently",
+        "disabled-fully-and-permanently"
+      ],
+      "type": "string"
+    },
+    "EventLog": {
+      "additionalProperties": false,
+      "description": "`cvm_log` (section 7.1).",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
+        },
+        "format": {
+          "$ref": "#/$defs/LogFormat"
+        }
+      },
+      "required": [
+        "format",
+        "data"
+      ],
+      "type": "object"
+    },
+    "FreshnessPattern": {
+      "enum": [
+        "challenge",
+        "certificate"
+      ],
+      "type": "string"
+    },
+    "GpuArch": {
+      "description": "NVIDIA device architecture as NRAS names it.",
+      "enum": [
+        "HOPPER",
+        "BLACKWELL",
+        "LS10"
+      ],
+      "type": "string"
+    },
+    "GpuDeviceEvidence": {
+      "description": "`gpu/<ueid>` and `nvswitch/<ueid>` submodules: the NRAS device evidence\nplus the nonce binding (section 4.5). A claims set like the others, so an\nunknown claim is ignored (section 4.7).",
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/GpuArch"
+        },
+        "cert_chain_b64": {
+          "description": "Base64 PEM certificate chain, leaf first.",
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cvm_binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evidence_b64": {
+          "description": "Base64 SPDM blob, as the SDK and NRAS exchange it.",
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "uuid": {
+          "pattern": "^[!-.0-~]{1,128}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "arch",
+        "uuid",
+        "evidence_b64",
+        "cert_chain_b64",
+        "cvm_binding"
+      ],
+      "type": "object"
+    },
+    "HashAlg": {
+      "description": "TPM 2.0 algorithm names, as CEL uses them.",
+      "enum": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "type": "string"
+    },
+    "Hosting": {
+      "enum": [
+        "bare",
+        "azure",
+        "gcp",
+        "dstack"
+      ],
+      "type": "string"
+    },
+    "KeyBinding": {
+      "description": "`cvm_binding.key` (section 5.3): an SPKI or TBSCertificate digest, or raw bytes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spki-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "x509-tbs-sha256"
+            },
+            "value": {
+              "$ref": "#/$defs/Base64UrlBytes32"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw"
+            },
+            "value": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/Base64Url"
+                }
+              ],
+              "maxLength": 87380
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LogFormat": {
+      "enum": [
+        "tcg-cel-cbor",
+        "tcg-cel-json",
+        "tdx-ccel",
+        "tpm2-event-log",
+        "dstack-json",
+        "aael"
+      ],
+      "type": "string"
+    },
+    "NestedToken": {
+      "description": "RFC 9711 JSON selector for a nested CBOR token",
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "const": "CBOR"
+        },
+        {
+          "$ref": "#/$defs/Base64Url"
+        }
+      ],
+      "type": "array"
+    },
+    "PlatformHint": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "pattern": "^(Milan|Genoa|Turin|[0-9a-f]{12})$",
+          "type": "string"
+        },
+        "hosting": {
+          "$ref": "#/$defs/Hosting"
+        },
+        "tee": {
+          "$ref": "#/$defs/Tee"
+        },
+        "vendor": {
+          "$ref": "#/$defs/Vendor"
+        }
+      },
+      "required": [
+        "vendor",
+        "tee",
+        "hosting"
+      ],
+      "type": "object"
+    },
+    "Register": {
+      "additionalProperties": false,
+      "description": "One register (section 6.1).",
+      "properties": {
+        "alg": {
+          "$ref": "#/$defs/HashAlg"
+        },
+        "backing": {
+          "$ref": "#/$defs/Backing"
+        },
+        "index": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/RegisterSource"
+        },
+        "value": {
+          "$ref": "#/$defs/Base64Url"
+        }
+      },
+      "required": [
+        "index",
+        "alg",
+        "value",
+        "source",
+        "backing"
+      ],
+      "type": "object"
+    },
+    "RegisterSource": {
+      "enum": [
+        "tdx-rtmr",
+        "snp-vmr",
+        "vtpm-pcr",
+        "cca-rem"
+      ],
+      "type": "string"
+    },
+    "Tee": {
+      "enum": [
+        "sev-snp",
+        "tdx",
+        "cca"
+      ],
+      "type": "string"
+    },
+    "TpmAkBinding": {
+      "additionalProperties": false,
+      "description": "`cvm_tpm_ak`: how the AK is bound into the CPU report.",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/Base64Url",
+          "description": "For `hcl-report`: the Azure HCL report. Its `var_data` carries the AK\npublic key, `SHA-256(var_data)` is `report_data[0..32]` of the CPU\nreport, and its report type must name the same TEE.",
+          "maxLength": 1398102,
+          "minLength": 2
+        },
+        "method": {
+          "$ref": "#/$defs/TpmAkMethod"
+        }
+      },
+      "required": [
+        "method",
+        "data"
+      ],
+      "type": "object"
+    },
+    "TpmAkMethod": {
+      "enum": [
+        "hcl-report"
+      ],
+      "type": "string"
+    },
+    "TpmQuote": {
+      "additionalProperties": false,
+      "description": "`cvm_tpm_quote`: TPMS_ATTEST bytes, its signature, the 24 PCRs of the quoted bank.",
+      "properties": {
+        "bank": {
+          "$ref": "#/$defs/HashAlg"
+        },
+        "message": {
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
+        },
+        "pcrs": {
+          "items": {
+            "$ref": "#/$defs/Base64Url"
+          },
+          "maxItems": 24,
+          "minItems": 24,
+          "type": "array"
+        },
+        "signature": {
+          "$ref": "#/$defs/Base64Url",
+          "maxLength": 1398102,
+          "minLength": 2
+        }
+      },
+      "required": [
+        "message",
+        "signature",
+        "pcrs",
+        "bank"
+      ],
+      "type": "object"
+    },
+    "Vendor": {
+      "enum": [
+        "amd",
+        "intel",
+        "arm"
+      ],
+      "type": "string"
+    },
+    "VtpmEvidence": {
+      "description": "`vtpm` submodule (section 4.4).",
+      "properties": {
+        "cvm_log": {
+          "$ref": "#/$defs/EventLog"
+        },
+        "cvm_registers": {
+          "items": {
+            "$ref": "#/$defs/Register"
+          },
+          "maxItems": 24,
+          "minItems": 1,
+          "type": "array"
+        },
+        "cvm_tpm_ak": {
+          "$ref": "#/$defs/TpmAkBinding"
+        },
+        "cvm_tpm_quote": {
+          "$ref": "#/$defs/TpmQuote"
+        }
+      },
+      "required": [
+        "cvm_tpm_quote",
+        "cvm_tpm_ak",
+        "cvm_registers"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://confidential.ai/schemas/cvm-evidence-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The envelope (section 4.1). Unknown top-level claims are ignored, as EAT\nextensibility requires; everything the profile defines is checked.",
+  "properties": {
+    "cvm_version": {
+      "const": 1,
+      "description": "Always [`CVM_VERSION`].",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "eat_nonce": {
+      "$ref": "#/$defs/Base64Url",
+      "description": "The relying party's challenge, 16 to 64 bytes: 22 to 86 characters.",
+      "maxLength": 86,
+      "minLength": 22
+    },
+    "eat_profile": {
+      "const": "tag:confidential.ai,2026:cvm#1",
+      "description": "Always [`PROFILE_URI`].",
+      "type": "string"
+    },
+    "submods": {
+      "additionalProperties": false,
+      "description": "Keyed by the reserved name forms; see [`SubmodName`].",
+      "maxProperties": 66,
+      "patternProperties": {
+        "^(gpu|nvswitch)/[!-.0-~]{1,128}$": {
+          "$ref": "#/$defs/GpuDeviceEvidence"
+        }
+      },
+      "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpuEvidence"
+            },
+            {
+              "$ref": "#/$defs/NestedToken"
+            }
+          ]
+        },
+        "vtpm": {
+          "$ref": "#/$defs/VtpmEvidence"
+        }
+      },
+      "required": [
+        "cpu"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "eat_profile",
+    "eat_nonce",
+    "cvm_version",
+    "submods"
+  ],
+  "title": "CVM attestation profile v1: evidence envelope",
+  "type": "object"
+}
