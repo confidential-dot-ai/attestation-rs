@@ -1,0 +1,13 @@
+{
+  "id": "snp-inline-vek-for-another-tcb",
+  "rule": {
+    "section": "10.2",
+    "statement": "item 3: an inline VCEK AMD issued for the report's chip at another TCB is not bound to the report and is ignored as if absent; with no other source the VEK is unavailable"
+  },
+  "now": "2026-09-24T00:00:00Z",
+  "evidence": "evidence/snp-inline-vek-for-another-tcb.json",
+  "policy": "policy/snp-inline-vek-for-another-tcb.json",
+  "expect": {
+    "refusal": "collateral-unavailable"
+  }
+}
