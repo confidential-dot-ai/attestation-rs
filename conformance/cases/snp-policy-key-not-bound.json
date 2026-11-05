@@ -1,0 +1,13 @@
+{
+  "id": "snp-policy-key-not-bound",
+  "rule": {
+    "section": "5.2",
+    "statement": "a key the policy requires and the envelope does not bind is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-policy-key-not-bound.json",
+  "policy": "policy/snp-policy-key-not-bound.json",
+  "expect": {
+    "refusal": "binding-mismatch"
+  }
+}

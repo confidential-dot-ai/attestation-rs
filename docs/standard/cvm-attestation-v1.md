@@ -335,6 +335,62 @@ RFC 9711 section 6.3 lists the decisions a profile makes. For this profile:
 | 6.3.11 freshness | `eat_nonce` at the top, bound per submodule in a declared mode (Section 5) |
 | 6.3.12 claims requirements | Sections 4.1 to 4.6 |
 
+## 5. Freshness and binding
+
+### 5.1. Patterns
+
+`cvm_binding.pattern` names how the nonce was chosen:
+
+- `challenge`: the relying party chose `eat_nonce` for this exchange. This is the pattern for every exchange with a live peer.
+- `certificate`: the evidence is bound to an X.509 certificate (RFC 5280) that lives for the CVM's lifetime, as in attested TLS. The attester chose `eat_nonce` when it created the certificate, and binds the certificate through a key of kind `x509-tbs-sha256` (Section 5.3). The evidence is as fresh as the certificate: the relying party MUST check the certificate's validity window, and SHOULD refuse a certificate whose `notBefore` is older than the evidence age it accepts. A version 1 verifier receives the certificate's digest (Section 5.5), and MUST NOT emit `not_before` or `not_after`; the members are defined for verifiers that receive the certificate itself.
+
+A device submodule always declares `challenge`, because the device protocol takes a nonce on every exchange; the nonce it answers is the envelope's, whichever party chose it (Section 4.5).
+
+`eat_nonce` is REQUIRED in both patterns and is at least 16 bytes. A binding without a nonce is not defined by this profile.
+
+### 5.2. Anchor
+
+The anchor is the value an attester binds. The verifier derives it from the nonce the relying party supplied and the key binding (Section 5.3):
+
+```
+without a key:  anchor = nonce
+with a key:     anchor = SHA-384("ats-anchor-v1"
+                                 || u8(len(nonce)) || nonce
+                                 || u8(len(kind))  || kind
+                                 || u16be(len(value)) || value)
+```
+
+`kind` is the key kind's ASCII name and `value` the key value of Section 5.3. When the policy names a key (`freshness.key`, Section 13.1), the evidence's `cvm_binding.key` MUST equal it, and the verifier refuses with `binding-mismatch` otherwise. When the policy names none, the verifier uses the evidence's key, if any, and reports it in `cvm_freshness.key`; a relying party that relies on that binding MUST compare the reported key with the key of its own channel. The certificate pattern requires the policy to name the key (Section 5.5). Vectors are in Appendix B.1.
+
+### 5.3. Key kinds
+
+`cvm_binding.key` is `{kind, value}`:
+
+| Kind | Value | Pattern |
+| --- | --- | --- |
+| `spki-sha256` | the 32-byte SHA-256 of the DER `SubjectPublicKeyInfo` of the key being bound | `challenge` |
+| `raw` | an opaque byte string the relying party chose, 0 to 65535 bytes | `challenge` |
+| `x509-tbs-sha256` | the 32-byte SHA-256 of the DER `TBSCertificate` of the certificate being bound, which covers its public key, validity, subject and subject alternative names | `certificate` |
+| `tls-exporter` | reserved for version 2: the 32-byte TLS exporter value (RFC 9266, label `EXPORTER-Channel-Binding`, empty context) | none; a version 1 verifier MUST refuse it |
+
+A `challenge` binding carries no key or an `spki-sha256` or `raw` key. A `certificate` binding carries exactly an `x509-tbs-sha256` key.
+
+### 5.4. Binding modes
+
+`cvm_binding.mode` declares where the anchor is bound. The verifier computes the expected value and compares it with the signed field in constant time over the whole field; a mismatch is refused with `binding-mismatch`. The one exception is the device nonce match that NRAS reports (Section 9.7.3), which a policy may tolerate and which the appraisal then reports through `ear_all_submods_bound` `"false"`.
+
+| Mode | Attesters | Rule |
+| --- | --- | --- |
+| `report-data` | SEV-SNP without a register provider, and TDX, on any hosting other than `azure` | the report's 64-byte report data equals `pad64(anchor)` |
+| `commitment` | SEV-SNP with a register provider | the report data equals `header16 \|\| C` of Section 8.1, with `caller_data = pad64(anchor)` |
+| `vtpm-extradata` | Azure SEV-SNP and TDX | the TPM quote's `extraData` equals `anchor`, and the hardware report binds the quote's key (Section 9.4) |
+| `cca-challenge` | Arm CCA | the realm token's challenge equals `pad64(anchor)` |
+| `nras-nonce` | NVIDIA GPUs and NVSwitch | the device's SPDM nonce equals `SHA-256(nonce \|\| "NVIDIA-GPU-EAT-v1")` for a GPU and `SHA-256(nonce \|\| "NVIDIA-SWITCH-EAT-v1")` for an NVSwitch |
+
+`extraData` is a `TPM2B_DATA`, which holds at most `sizeof(TPMT_HA)` bytes: 50 on a vTPM whose largest digest is SHA-384. An unkeyed nonce bound in `vtpm-extradata` mode is therefore 16 to 50 bytes, and a keyed anchor (48 bytes) always fits. The `nras-nonce` rule binds the nonce itself and ignores the key, because NRAS derives the device challenge from a nonce it is given. Device evidence therefore carries no key binding; it answers the same nonce as the `cpu` submodule, which is all `ear_all_submods_bound` states (Section 15.6).
+
+The mode is constrained by the platform (Section 4.3): a verifier MUST refuse a mode that the TEE and hosting do not admit.
+
 ## 11. Verification procedure
 
 A verifier appraises evidence under a policy, with the relying party's nonce, the digest of the presented certificate in the certificate pattern (which a version 1 verifier receives as `freshness.key`, Section 5.5), collateral, and an evaluation time. Every step fails closed: a failure is a refusal with the code of Section 14.4, and no appraisal is produced.
@@ -453,3 +509,42 @@ A refusal names the rule family that failed:
 The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.9") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
+
+## Appendix B. Test vectors
+
+All values are hexadecimal. The vectors are published machine-readably in `docs/standard/vectors/cvm_profile_vectors.json`, generated by an implementation of the formulas that shares no code with any verifier, and checked against the reference implementation. Reproducing them establishes agreement on the formulas; conformance additionally requires the corpus of Section 14.
+
+Inputs used throughout:
+
+```
+nonce              000102030405060708090a0b0c0d0e0f
+spki-sha256 value  1111111111111111111111111111111111111111111111111111111111111111
+x509-tbs value     2222222222222222222222222222222222222222222222222222222222222222
+bootseed           3333333333333333333333333333333333333333333333333333333333333333
+```
+
+### B.1. Anchor and device nonces (Sections 5.2 and 5.4)
+
+Without a key, `anchor = nonce`.
+
+With the key `{kind: "spki-sha256", value: 0x11 repeated 32 times}`:
+
+```
+input  6174732d616e63686f722d7631 10 000102030405060708090a0b0c0d0e0f
+       0b 73706b692d736861323536 0020 1111111111111111111111111111111111111111111111111111111111111111
+anchor f98d63e4c2e788b0b92ce5d7d1f2609b191f2933f4e5e7884bfeafc4c7a16ed8e050bf2649e1e85ad4b6c89ae70e35d7
+pad64  f98d63e4c2e788b0b92ce5d7d1f2609b191f2933f4e5e7884bfeafc4c7a16ed8e050bf2649e1e85ad4b6c89ae70e35d700000000000000000000000000000000
+```
+
+With the key `{kind: "x509-tbs-sha256", value: 0x22 repeated 32 times}`:
+
+```
+anchor 6537d4a660c13227cc3c2a54a9d7ba6eef051ab942f0acf1d065ba279f01ab001d309f2dbb8d3c8e8cdc6cf966a45f04
+```
+
+NRAS nonces derived from `nonce`:
+
+```
+gpu     a5db775022742960966c4ad77b3d903d6645eee00575a557cd18963d31251325
+switch  84982aa6b0e69839ac5b84d62d2c16f30239baa2a99add9975d09aa439c47051
+```
