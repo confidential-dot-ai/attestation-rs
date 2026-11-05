@@ -1,0 +1,13 @@
+{
+  "id": "snp-certificate-pattern-without-presented-certificate",
+  "rule": {
+    "section": "5.5",
+    "statement": "the verifier compares the certificate it was presented with; without it the certificate pattern is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-certificate-pattern-without-presented-certificate.json",
+  "policy": "policy/snp-certificate-pattern-without-presented-certificate.json",
+  "expect": {
+    "refusal": "binding-mismatch"
+  }
+}
