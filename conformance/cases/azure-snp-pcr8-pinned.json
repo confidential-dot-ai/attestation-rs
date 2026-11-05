@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-pcr8-pinned",
+  "rule": {
+    "section": "12.4",
+    "statement": "vtpm: executables is 2 when the launch measurement is pinned and every pinned PCR matches"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-pcr8-pinned.json",
+  "policy": "policy/azure-snp-pcr8-pinned.json",
+  "expect": {
+    "appraisal": "expected/azure-snp-pcr8-pinned.json"
+  }
+}
