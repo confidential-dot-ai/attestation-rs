@@ -462,6 +462,73 @@ For device submodules: the verifier sends one NRAS request per architecture with
 
 A verifier MUST appraise every submodule the envelope carries. It MUST refuse the whole envelope when any submodule fails.
 
+## 13. Verifier policy
+
+### 13.1. Shape and defaults
+
+The policy is a verifier input, chosen by the relying party. It is a JSON object under the encoding rules of Section 4.7 (a `null` member, an object written as an array, or an unknown member fails its validation with `policy-invalid`). Every member is optional and every default fails closed:
+
+| Member | Default | Meaning |
+| --- | --- | --- |
+| `reference` | every array and map empty, `host_data` absent | reference values, Section 13.4 |
+| `min_backing` | `hardware` | the minimum backing of every verified register |
+| `freshness.key` | absent | the key binding the relying party requires (Section 5.2) |
+| `commitment.header16` | `QVRTLU1SLTEBARAAAAAAAA` | the `ats-mr-v1` header, base64url; any other value fails validation |
+| `commitment.seed` | `YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn` | the `ats-mr-v1` seed, base64url; any other value fails validation |
+| `tcb.floors` | `{}` | named TCB floors, Section 13.2 |
+| `tcb.default_floor` | absent | the floor applied to machines without their own |
+| `tcb.tdx_allowed_status` | `["UpToDate"]` | the accepted Intel TCB statuses; `Revoked` can never be listed |
+| `tcb.require_revocation` | `true` | revocation MUST be checked. When false, an SEV-SNP CRL that cannot be obtained is skipped; on TDX the collateral checks run together, and are skipped only when no collateral is available and both waivers are set |
+| `tcb.require_signed_collateral` | `true` | the vendor TCB assessment MUST be made from signed collateral. When false, and on TDX together with `require_revocation` false, a TDX appraisal without collateral skips the PCK and Root CA CRLs, the TCB Info and the QE Identity check of Section 9.2.3 step 4 (the binding of the attestation key to the PCK certificate, step 2, always runs); on Arm CCA it waives only the platform software reference values (Section 9.6.4). A production policy SHOULD NOT waive it |
+| `policy_bits.allow_debug` | `false` | admit a guest whose debug facility is enabled |
+| `policy_bits.allow_migration` | `false` | admit a migratable guest |
+| `policy_bits.require_vmpl0` | `true` | SEV-SNP: the report's VMPL is 0 |
+| `policy_bits.require_sept_ve_disable` | `true` | TDX: `SEPT_VE_DISABLE` is set |
+| `policy_bits.require_zero_reserved_attributes` | `true` | TDX: every reserved TD attribute bit is zero |
+| `policy_bits.allow_service_td` | `false` | TDX 1.5: admit a non-zero `MRSERVICETD` |
+| `identity.machines` | absent | machine allowlist, Section 13.3 |
+| `owner.id_key_digests` | absent | SEV-SNP: the accepted ID key digests (48 bytes each) |
+| `gpu` | Section 13.5 | device requirements |
+
+A pin that nothing in the evidence can satisfy is refused with `reference-mismatch`: PCR pins without a `vtpm` submodule, slot owners without workload slots, a register pin for a register the appraisal does not report, `owner.id_key_digests` on a TD quote.
+
+### 13.2. TCB floors
+
+A floor is named, so a fleet carries one floor per generation and moves a machine between floors without editing every policy. A floor constrains at least one platform, and a `tdx` member without members constrains nothing and fails validation:
+
+```
+TcbFloor = {
+  ? snp: { min: { bootloader, tee, snp, microcode, ? fmc },
+           ? values: [ 1*4 ("reported" / "current" / "committed" / "launch") ] },
+  ? tdx: { ? min_tee_tcb_svn: bytes16, ? min_tcb_evaluation_data_number: uint }
+}
+```
+
+An SEV-SNP floor bounds each TCB value it names, componentwise, and all four when `values` is omitted: `reported`, the TCB the VEK was derived for; `current`, the firmware running when the report was signed; `committed`, the anti-rollback floor below which the firmware cannot be loaded again; `launch`, the TCB the firmware recorded when the guest was launched or imported. A floor on `reported` alone leaves a host free to roll firmware back to its committed version between attestations, and a guest launched on vulnerable firmware keeps that exposure after a live update; the default closes both. A floor that names the FMC SPL fails a report without one, which is every generation before Turin. `values` names each value at most once.
+
+On TDX, the Intel status and the floor are independent requirements: the status MUST be in `tdx_allowed_status` for every quote, and a floor adds `tee_tcb_svn` componentwise and the TCB Info's `tcbEvaluationDataNumber`. The evaluation number is what stops an older TCB Info, still inside its validity window and validly signed, from reporting a status that a later TCB recovery changed.
+
+`default_floor` and every machine's `tcb_floor` MUST name a floor in `floors`.
+
+### 13.3. Machine allowlists
+
+`identity.machines` is a non-empty array of `{id, tcb_floor?}`. `id` is the submodule's `cvm_identity` value (SEV-SNP `chip_id`, TDX `ppid`, Arm CCA `instance_id`, and for a device the UTF-8 bytes of its `ueid`), 1 to 128 bytes, compared after the hardware chain authenticated it. When the allowlist is present, an identity absent from it is refused with `machine-not-allowed`. A machine that names a `tcb_floor` is held to that floor and every other machine to `default_floor`. An SEV-SNP report endorsed by a VLEK, or whose `CHIP_ID` is all zero (a host that masks the chip identity produces one), identifies no machine and never matches an allowlist entry.
+
+### 13.4. Reference values
+
+| Member | Value |
+| --- | --- |
+| `reference.launch_measurement` | an array of `{alg, value}` digests; when non-empty the launch measurement MUST equal one of them |
+| `reference.registers` | slot (decimal text) to a non-empty array of digests; each named register MUST equal one of them |
+| `reference.pcrs` | PCR number 0 to 23 (decimal text) to a non-empty array of digests, for the `vtpm` submodule |
+| `reference.slot_owners` | workload slot to the `owner` its claim record MUST name |
+| `reference.host_data` | 1 to 48 bytes that `cvm_host_data.value` MUST equal after zero-padding to the platform's length. A pin longer than the platform's field (32 bytes on SEV-SNP) is refused with `reference-mismatch`; on Arm CCA a pin covers the first 48 bytes of the RPV and requires the remaining 16 to be zero |
+| `owner.id_key_digests` | SEV-SNP: `ID_KEY_DIGEST` MUST equal one of them |
+
+On SEV-SNP the `cvm_owner` fields are authenticated by the guest owner's ID block only when `ID_KEY_DIGEST` is pinned (`owner.id_key_digests`); without a pin they are host-chosen. Version 1 offers no pin for `AUTHOR_KEY_DIGEST`. On TDX `MROWNER` and `MROWNERCONFIG` are host-set labels.
+
+Reference values come from the image publisher. A publisher SHOULD publish each image's values in two forms that carry the same values: flat JSON as above, and a signed CoRIM (draft-ietf-rats-corim-11) whose CoMID reference-value triples carry the launch measurement in `digests` (measurement-values-map key 2) and register values in `integrity-registers` (key 14), keyed by the slot index as an unsigned integer and typed by Section 6.1's `alg`. A verifier that ingests both treats them as one source.
+
 ## 14. Conformance
 
 This section defines verifier conformance. A verifier conforms to this profile when it reproduces the decision of every case of the conformance corpus at the corpus version it declares, and meets the requirements of Sections 4 to 13 and 15.9 that the corpus does not yet cover (`UNCOVERED.md`). The CDDL module constrains shapes, the vectors of Appendix B constrain formulas, and the corpus constrains decisions. An attester conforms when it produces evidence under Sections 4, 5 and 9 that a conforming verifier appraises; a register provider conforms to Sections 7.3 and 8.1 to 8.6. Version 1 publishes no corpus for attesters or register providers.

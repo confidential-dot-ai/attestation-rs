@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-owner-key-accepted",
+  "rule": {
+    "section": "13.4",
+    "statement": "owner.id_key_digests: a report whose ID key is listed appraises"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-owner-key-accepted.json",
+  "policy": "policy/azure-snp-owner-key-accepted.json",
+  "expect": {
+    "appraisal": "expected/azure-snp-owner-key-accepted.json"
+  }
+}
