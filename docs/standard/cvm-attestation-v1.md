@@ -765,6 +765,56 @@ dstack's log is carried as `dstack-json` (Section 7.1): a JSON array of events `
 - A log that breaks these shape rules (a name containing `:`, a missing, extra or non-matching `preimage`, another `version`) is refused with `log-invalid`; a runtime event whose recomputed digest differs from its `digest` is refused with `replay-mismatch`.
 - Replay is `R = SHA-384(R || digest)` from zero for each RTMR the log extends, and each MUST reproduce the signed RTMR.
 
+### 9.4. Microsoft Azure confidential VMs
+
+On Azure the guest runs above a paravisor (the HCL) that holds a vTPM. The relying party's anchor is bound in the TPM quote's `extraData`, and the hardware report binds the vTPM's attestation key (AK). The `cpu` submodule carries the hardware report with binding `vtpm-extradata`; the `vtpm` submodule carries the TPM quote, the HCL report and the PCRs.
+
+#### 9.4.1. HCL report
+
+The attester writes a 64-byte request to the vTPM's NV index 0x01400002 and reads the HCL report from NV index 0x01400001. Its layout, little-endian:
+
+| Offset | Length | Field |
+| --- | --- | --- |
+| 0x000 | 4 | signature `HCLA` |
+| 0x004 | 4 | version |
+| 0x008 | 4 | report size |
+| 0x00C | 4 | request type |
+| 0x010 | 4 | status |
+| 0x014 | 12 | reserved |
+| 0x020 | 1184 | hardware report area: an SNP report (1184 bytes), or a TDX TD report (1024 bytes followed by zero bytes) |
+| 0x4C0 | 4 | data size |
+| 0x4C4 | 4 | version |
+| 0x4C8 | 4 | report type: 2 SEV-SNP, 4 TDX |
+| 0x4CC | 4 | report data hash type: 1 SHA-256 |
+| 0x4D0 | 4 | variable data size |
+| 0x4D4 | variable | variable data: a JSON object |
+
+The report type MUST name the TEE of the `cpu` submodule, the hash type MUST be 1, and the `version` at 0x4C4 MUST be 1: OpenHCL's request version 2 inserts a 4-byte extension before the variable data, which this layout does not describe. The variable data is exactly `variable data size` bytes. Its `keys` array holds the AK as exactly one JWK (RFC 7517) whose `kid` is `HCLAkPub`, an RSA key (`kty` `RSA`, `n` and `e` in base64url) of 2048 bits. Everything in the HCL report outside the hardware area and the variable data is unsigned, and the variable data is bound only through its digest (Section 9.4.2), so a violation of this section is refused with `envelope-invalid`. The paravisor creates the AK as a restricted signing key, so it signs only structures the TPM itself generated, which is what gives the `TPMS_ATTEST` `magic` check below its meaning; this profile relies on that property of the paravisor, which the pinned launch measurement covers.
+
+#### 9.4.2. Key binding
+
+The hardware report binds the variable data: `REPORT_DATA[0..32] == SHA-256(variable data)` for SEV-SNP, and `REPORTDATA[0..32] == SHA-256(variable data)` in the TD quote for TDX. The remaining 32 bytes carry no meaning in this profile.
+
+For SEV-SNP the `cpu` submodule's report MUST be byte for byte the 1184-byte hardware area of the HCL report, authenticated by Section 9.1. Azure SNP reports can be version 2 (Section 9.1.3). The attester obtains the VCEK from Azure's instance metadata service (`http://169.254.169.254/metadata/THIM/amd/certification`) and carries it as `snp.vek`.
+
+For TDX the TD report inside the HCL report is authenticated only by a platform MAC and is not evidence a remote verifier can check. The attester obtains a TD quote over it from Azure's quoting endpoint (`http://169.254.169.254/acc/tdquote`), and the `cpu` submodule carries that quote, authenticated by Section 9.2.
+
+#### 9.4.3. TPM quote
+
+`cvm_tpm_quote.bank` MUST be `sha256`, and the quote's `pcrSelect` MUST hold exactly one `TPMS_PCR_SELECTION`, for `TPM_ALG_SHA256`; otherwise the verifier refuses with `unsupported`. Then:
+
+1. The AK from the HCL report verifies the RSASSA-PKCS1-v1_5 SHA-256 signature (RFC 8017) over `cvm_tpm_quote.message`; a failure is refused with `signature-invalid`.
+2. The message is a `TPMS_ATTEST` with `magic` `TPM_GENERATED_VALUE` (0xFF544347) and `type` `TPM_ST_ATTEST_QUOTE` (0x8018); a failure is refused with `report-invalid`.
+3. `extraData` equals `anchor` in length and value (Section 5.4); a failure is refused with `binding-mismatch`.
+4. The quoted `pcrDigest` equals the SHA-256 of the concatenation of the selected PCR values, in selection order (PCR `8i + b` for bit `b` of selection byte `i`), taken from `cvm_tpm_quote.pcrs`; a failure is refused with `register-mismatch`.
+5. Each register of the `vtpm` submodule is a PCR inside the signed selection; one outside it is refused with `register-mismatch`. That a register equals its entry of `cvm_tpm_quote.pcrs` is a shape rule of Section 4.4 (`envelope-invalid`).
+
+#### 9.4.4. Registers, logs and claims
+
+The PCRs are `vtpm-pcr` registers with backing `privileged-service`. A `tpm2-event-log` replays into every PCR it extends from its PC Client starting value (Section 7.4). In version 1 the `vtpm` submodule's log is a `tpm2-event-log`; another format is refused with `unsupported`. The Azure launch measurement is the SNP `MEASUREMENT` or the TDX `MRTD` of the hardware report and covers the paravisor and firmware. The nonce reaches the hardware report only through the paravisor that holds the AK, so `vtpm-extradata` establishes freshness only when the paravisor is established: a verifier MUST refuse `vtpm-extradata` with `binding-mismatch` unless `reference.launch_measurement` is set. Without that rule a guest on other hardware could present a fabricated HCL report with its own AK, bind it once into a genuine report, and sign quotes for any nonce. Guest configuration delivered as Confidential Containers initdata is pinned through PCR 8, whose value is `SHA-256(zeros32 || d)` when initdata is the only extend into PCR 8, `d` being the 32-byte initdata digest the Confidential Containers runtime computes.
+
+The `cpu` submodule's claims are those of Section 9.1.5 or 9.2.5 with hosting `azure`; the `vtpm` submodule's are `cvm_registers`, `cvm_freshness` and `cvm_tpm_ak`.
+
 ### 9.5. Google Cloud confidential VMs
 
 Google Cloud SEV-SNP and TDX guests obtain the raw hardware report through the guest kernel, exactly as on bare metal, with hosting `gcp`. Evidence, authentication, binding and claims are those of Sections 9.1 and 9.2, and `gcp` admits the same report types and modes as `bare`.

@@ -1,0 +1,13 @@
+{
+  "id": "azure-snp-hcl-report-type-for-tdx",
+  "rule": {
+    "section": "9.4.1",
+    "statement": "the HCL report's type names the TEE of the cpu submodule; an SEV-SNP cpu with report type 4 (TDX) is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/azure-snp-hcl-report-type-for-tdx.json",
+  "policy": "policy/azure-snp-hcl-report-type-for-tdx.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
