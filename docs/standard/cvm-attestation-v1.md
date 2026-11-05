@@ -1441,6 +1441,164 @@ The corpus version is `<profile version>.<revision>`, `1.0` at first publication
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
 
+## 15. Security considerations
+
+### 15.1. Unprotected evidence
+
+The envelope carries no signature (Section 4.1), so every decision rests on the classification of Section 3.4. A verifier that uses a hint to make a decision, or reads a bound field before binding it, fails open. The profile constrains every hint by the signed field it describes (a register's `backing` by its `source`, `cvm_platform` by the report, `dbgstat` by the debug bit) so that a free choice by the attester never widens what a verifier accepts. The exception is `hosting`, which no signed field describes; each path it admits is verified in full on its own terms (Section 3.4).
+
+### 15.2. Backing is a floor
+
+A policy states the minimum backing, and the verifier reports the weakest backing it saw. A `kernel-service` or `virtualized` register never satisfies a `hardware` requirement, and a verifier never reports a backing higher than either the evidence's claim or what the verifier established. A relying party that accepts software registers does so by lowering `min_backing` explicitly, and its policy identifier records that choice.
+
+### 15.3. Measurement coverage
+
+Registers record what measured producers extend. Code that runs through a path that extends no register leaves no trace. On every platform this includes guest root executing a program the runtime did not measure. Guest root can also extend registers on every platform: vTPM PCRs through the TPM device, TDX RTMRs through the kernel, SEV-SNP slots through the register provider. Only the provider records such an extend in the log; elsewhere it surfaces as a replay failure, or as `replayed` false for a register the log does not have to reproduce (Section 7.4). The guarantee is therefore "what the sanctioned producers recorded". A deployment that needs "everything that ran" either measures every execution into a slot (an exec hook feeding a register) or removes the paths (no interactive root, no exec outside the measured runtime). `backing` and per-slot `replayed` let a relying party see which it received.
+
+### 15.4. Software registers on SEV-SNP
+
+When the image satisfies Sections 8.4 to 8.6, Section 8's construction keeps every guest user, root included, from rewriting or hiding records; root can still append records under any owner identity it can assume (Section 8.4 item 6). It is not secure against code executing in the guest kernel: a kernel exploit can rewrite registers, patch the provider, and compute commitments over fabricated state. This residual is why such registers are never `hardware` and why version 1 reports them as `virtualized` (Section 8.7). The mitigations are the hardening rows of Section 8.6, panic on oops so that attempts stop the node, chain memory (Section 8.8) so that a rewritten history shows as a restart or a fork, and deterministic reference values for images whose register values are known in advance.
+
+The commitment header is pinned in full, so an attacker cannot use its 16 bytes as free choice next to the commitment. The domain tags `ats-anchor-v1`, `ats-mr-v1/seed`, `ats-mr-v1/genesis`, `ats-mr-v1/record` and `ats-mr-v1/commit` separate the tagged hashes from one another. The extend `SHA-384(R || d)` carries no tag. Its input is 96 bytes; every tagged input either has another length or begins with its ASCII tag, so an extend input and a tagged input coincide only when a register value, a SHA-384 output, begins with that tag.
+
+### 15.5. Debug and privileged configuration
+
+With the TEE's guest-debug facility enabled, the host reads and writes guest memory and every other claim is meaningless. Verifiers refuse debug by default and check debug, VMPL, TD attributes and lifecycle before any register claim is evaluated. A setting that cannot be checked is treated as unsafe. A migration agent (SEV-SNP `MIGRATE_MA`) and a service TD bound to a TD (TDX `MRSERVICETD`) can read guest state by design; policies refuse both by default (`allow_migration`, `allow_service_td`), and a policy that admits one extends the trusted computing base to it.
+
+### 15.6. Multiple attesters
+
+`ear_all_submods_bound` states that every submodule answered the same nonce. It does not establish that a GPU is physically attached to the CPU that reported it, that the data path between them is protected, or that the devices share a host. An attacker with a genuine GPU elsewhere can answer the same nonce. Device assignment into the TEE's trust boundary (TDISP and its vendor implementations) is out of scope for version 1. A relying party that needs co-location establishes it through the deployment.
+
+### 15.7. Freshness
+
+The nonce is at least 16 bytes, and in the challenge pattern the relying party chooses it. The verifier compares the envelope's nonce with the one the relying party gave it, because an appraisal bound only to the envelope's own nonce accepts a replay. Every comparison of a binding value is constant time over the full field. In the certificate pattern the evidence is as fresh as the certificate: the relying party bounds its age, and the certificate lives no longer than the CVM.
+
+### 15.8. Collateral
+
+The TCB a verifier evaluates comes from signed data: on SEV-SNP the report's four TCB values, of which `REPORTED_TCB` is cross-checked against the VEK's extensions; on TDX the PCK certificate's components and PCESVN, and the quote's `TEE_TCB_SVN`. A TCB Info older than one the verifier has seen can still be inside its validity window; `tcbEvaluationDataNumber` floors close that gap. In the same way, a CRL still inside its window can predate a revocation: a verifier that keeps state SHOULD refuse a CRL whose CRL number is lower than one it has accepted for the same issuer, and SHOULD refresh collateral at the vendor's publication cadence. A verifier prefers its own valid collateral to the attester's (Section 10.2).
+
+### 15.9. Evaluation time
+
+The evaluation time is an input so that decisions are reproducible and conformance is testable. A verifier deployed as a service MUST take the evaluation time from its own clock; accepting it from an untrusted caller lets that caller revive expired collateral. Re-verifying a recorded appraisal with its recorded time and its `ear_raw_evidence` establishes what was decided then; whether it still holds takes a fresh appraisal.
+
+### 15.10. Parsing
+
+Evidence is attacker-controlled. Each bound of Section 4.7 is checked before the input it covers is parsed, and the nesting bound keeps an ignored claim from exhausting a recursive parser; the one-encoding rules, for JSON and CBOR alike, close parser differentials in which two implementations read different values from the same bytes; every binary length is converted with overflow checks so that the same bytes parse identically on 32-bit and 64-bit targets; and a binary log parses whole or is refused.
+
+### 15.11. Delegated appraisal
+
+Two parts of the appraisal are delegated. NVIDIA devices are appraised by NRAS, and the verifier relies on NRAS's signed result and device claims; a compromise of NRAS or its signing keys defeats device appraisal. On Azure, the paravisor that hosts the vTPM is part of the trusted computing base: its code is covered by the hardware launch measurement, which a relying party pins, and the vTPM's attestation key is bound by the hardware report (Section 9.4).
+
+### 15.12. Reference values
+
+Reference values carry the security of Section 8.6 and of every launch measurement pin. A relying party obtains them from a source it authenticates (a signed CoRIM, a signed manifest), and any transparency or freshness proof that accompanies them carries an age bound the relying party checks.
+
+### 15.13. Results
+
+An appraisal is a statement by the verifier. Across a trust boundary it is signed or delivered over an authenticated channel (Section 12.1), and the relying party authenticates the verifier. A signed appraisal can be replayed like any signed statement, so a relying party MUST check that its `eat_nonce` is the nonce it issued or, in the certificate pattern, that its `iat` is within the age it accepts. An appraisal's policy identifier tells the relying party which requirements were applied; a relying party that accepts appraisals produced under policies it did not choose accepts those policies.
+
+### 15.14. Settings version 1 does not normalize
+
+Some signed settings are carried in the raw report and neither normalized nor enforced by version 1: on SEV-SNP, `POLICY` bits 21 to 25 (`CXL_ALLOW`, `MEM_AES_256_XTS`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM`, `PAGE_SWAP_DISABLE`), `PLATFORM_INFO` bits 2 to 7 (`ECC_EN`, `RAPL_DIS`, `CIPHERTEXT_HIDING_DRAM_EN`, `ALIAS_CHECK_COMPLETE`, `IOMMU_WRITE_SAFE`, `TIO_EN`), and `LAUNCH_MIT_VECTOR` and `CURRENT_MIT_VECTOR`, which on platforms without the hardware fix that `IOMMU_WRITE_SAFE` reports state the verified mitigations; on TDX, `TEE_TCB_SVN2`. Two of these bear directly on isolation: `ALIAS_CHECK_COMPLETE` reports that the firmware checked the memory configuration for aliased addresses, which defends against memory-aliasing attacks on SEV-SNP integrity, and `CXL_ALLOW` admits CXL-attached memory into the guest. A relying party that depends on them reads them from the hardware report in the evidence (Section 4.3) until a later version adds policy members for them.
+
+### 15.15. Relay and channel binding
+
+An appraisal without a key binding shows that a CVM in the appraised state answered the nonce. It does not show that the relying party's channel peer is that CVM: a peer can relay the nonce to a genuine CVM and return its evidence. A relying party that releases a secret on the strength of an appraisal MUST encrypt the secret to, or deliver it over a channel authenticated by, a key the evidence binds (`spki-sha256` or `x509-tbs-sha256`, Section 5.3), named in the policy's `freshness.key` or compared with the appraisal's `cvm_freshness.key` (Section 5.2). The `tls-exporter` kind that version 2 reserves binds the channel itself.
+
+### 15.16. Time of check and key custody
+
+An appraisal describes the state when the report was signed. Registers that keep changing (RTMR 3, workload slots, PCRs) can move on after it, and a kernel compromise after it can exfiltrate a bound key; in the certificate pattern the appraisal then vouches for that key for the certificate's lifetime. The private half of a bound key MUST be generated inside the CVM and MUST NOT leave it. A relying party that needs current state appraises again at an interval its risk accepts, or uses the challenge pattern on every connection.
+
+### 15.17. Verifier resources
+
+Evidence drives work the verifier does before it has authenticated anything: an unverified `CHIP_ID` and TCB select the VCEK a verifier requests from AMD KDS, which rate-limits repeated requests, and device submodules drive up to three NRAS requests per envelope. A verifier applies the bounds of Section 4.7 before any request, caches collateral by its key (Section 10.3), bounds its concurrent requests, and requests collateral only from origins its configuration names (Section 9.6.6).
+
+### 15.18. Profile version
+
+The envelope is unprotected, so whoever handles it chooses the profile version it claims. A relying party that needs a guarantee a later version adds checks the profile URI in `ear_appraisal_policy_ids`.
+
+## 16. Privacy considerations
+
+`cvm_identity` carries stable hardware identifiers: the SEV-SNP chip identifier, the TDX PPID, the Arm CCA instance identifier and the GPU UEID. Each identifies one physical machine or device for its lifetime and can correlate a workload across relying parties and over time. `ear_raw_evidence` carries the same identifiers inside the raw reports and certificates. A verifier SHOULD omit the OPTIONAL `ear_raw_evidence` when it forwards an appraisal to a party that does not hold the evidence (the relying party that supplied the evidence learns nothing from it), and a deployment that forwards appraisals to parties that do not need identity SHOULD remove `cvm_identity` before forwarding; conformance compares appraisals as the verifier produces them. A relying party that keeps appraisals keeps these identifiers with them.
+
+An SEV-SNP host can mask the chip identifier, and the report then carries zeros that identify no machine (Section 13.3); such a report verifies only under a VLEK, the key a cloud provider holds, since a VCEK-signed report is cross-checked against its `CHIP_ID` (Section 9.1.4). A VLEK alone removes the chip identifier from the endorsement certificate and leaves it in the report. The identifiers also appear outside `cvm_identity`: in the `snp` compatibility object (`chip_id`), in the NRAS device claims (`ueid`), in the device submodules' names (`gpu/<ueid>`, `nvswitch/<ueid>`), and in the vTPM's `cvm_tpm_ak`, which is stable for a VM instance. A deployment that removes identity before forwarding removes those as well, and the forwarded appraisal is no longer covered by any signature over the original.
+
+Identifiers also leave the appraisal path. In the certificate pattern the evidence, with the chip identifier or the PCK chain that carries the PPID, goes to every peer the certificate is presented to (RFC 9999 section 7 raises the same concern). A verifier discloses identifiers to vendors when it fetches collateral: the chip identifier and TCB go to AMD KDS in the request URL, and the full device evidence goes to NRAS. Within one launch, `REPORT_ID`, `bootseed` and the TPM quote's `clockInfo` correlate attestations of the same guest.
+
+Event logs record what producers measured: container image digests, configuration digests, and in claim records the producer names. A relying party that receives the log learns the workload's composition. Deployments that treat the composition as confidential deliver evidence only to relying parties entitled to it.
+
+In the challenge pattern the relying party chooses the nonce, and it carries no information about the attester. In the certificate pattern the attester chooses it, and it can carry whatever the attester puts there. Host-set fields (Section 3.5) can carry deployment labels chosen by the host, which a relying party sees.
+
+## 17. IANA considerations
+
+### 17.1. Media types
+
+The following media types are registered in the vendor tree (RFC 6838 section 3.2) through IANA's registration form, which is submitted when this document is published. For all three: Author and change controller Confidential AI; person and email address to contact for further information, Mahmoud Shehata, mahmoud@confidential.ai; deprecated alias names, none; Macintosh file type code, none.
+
+`application/vnd.confidential-ai.sev-snp-report`
+
+- Type name: application
+- Subtype name: vnd.confidential-ai.sev-snp-report
+- Required parameters: none
+- Optional parameters: none
+- Encoding considerations: binary
+- Security considerations: the content is an AMD SEV-SNP attestation report signed by the AMD Secure Processor; it is authentic only after its signature is verified to AMD's root (Section 9.1 of this document). It contains a stable chip identifier (Section 16).
+- Interoperability considerations: the content is exactly 1184 bytes as the firmware produced it
+- Published specification: this document, Section 9.1, and AMD's SEV Secure Nested Paging Firmware ABI Specification
+- Applications that use this media type: attestation verifiers and attesters for confidential virtual machines
+- Fragment identifier considerations: none
+- Additional information: magic number none; file extension none
+- Intended usage: COMMON
+- Restrictions on usage: none
+
+`application/vnd.confidential-ai.tdx-quote`
+
+- Type name: application
+- Subtype name: vnd.confidential-ai.tdx-quote
+- Required parameters: none
+- Optional parameters: none
+- Encoding considerations: binary
+- Security considerations: the content is an Intel TDX quote; it is authentic only after its signature, its quoting enclave report and its PCK chain are verified to Intel's root (Section 9.2). The PCK certificate it embeds identifies the platform (Section 16).
+- Interoperability considerations: quote versions 4 and 5
+- Published specification: this document, Section 9.2, and Intel's TDX DCAP quote format
+- Applications that use this media type: attestation verifiers and attesters for confidential virtual machines
+- Fragment identifier considerations: none
+- Additional information: magic number none; file extension none
+- Intended usage: COMMON
+- Restrictions on usage: none
+
+`application/vnd.confidential-ai.pcs-signed+json`
+
+- Type name: application
+- Subtype name: vnd.confidential-ai.pcs-signed+json
+- Required parameters: none
+- Optional parameters: none
+- Encoding considerations: binary, as for every `+json` type (RFC 6839 section 3.1); a JSON object (RFC 8259) `{"body": <base64url>, "issuer_chain": <base64url>}`
+- Security considerations: `body` is a document signed by Intel PCS and `issuer_chain` the PEM chain that verifies it; the content is authentic only after that signature is verified to Intel's root (Sections 9.2.3 and 10.2)
+- Interoperability considerations: the +json suffix applies (RFC 6839)
+- Published specification: this document, Section 10.1
+- Applications that use this media type: attestation verifiers that carry Intel collateral offline
+- Fragment identifier considerations: as for application/json
+- Additional information: none
+- Intended usage: COMMON
+- Restrictions on usage: none
+
+### 17.2. CWT and EAT claims
+
+The profile's claims use CBOR keys in the Private Use range of the CWT Claims registry (RFC 8392 section 9.1.1, keys below -65536), listed in Appendix A, and JSON names in the `cvm_` namespace, which are Private Names under RFC 7519 section 4.3. Private use protects against no collision (RFC 8126 section 4.1): draft-ietf-rats-ear-04 assigns -70002, which this profile uses for `cvm_report`, to `ear_veraison_key_attestation` in attestation results. Both registries register under Specification Required, CWT keys from -65536 to -257 and JWT claim names alike, and this document is such a specification. Version 1 requests no registration; registering the `cvm_` claims in both registries would give them keys in the Specification Required range, and the private keys would then be replaced in a new profile version.
+
+### 17.3. CBOR tags
+
+This document defines no CBOR tags. It uses tag 601 (UCCS, RFC 9781). It accepts the Arm CCA token under tags 399 and 907, which are not assigned in the IANA CBOR Tags registry at the time of writing; a verifier accepts exactly those two by allowlist (Section 9.6).
+
+### 17.4. TCG Canonical Event Log content type
+
+The CEL content type `cvm` with value 200 (Section 7.3) is outside the values the TCG CEL specification assigns. A registration request will be submitted to the Trusted Computing Group when this document is published; until one is granted, 200 is used through the CEL extension socket, and an assignment would replace it in a new profile version.
+
+### 17.5. EAT profile
+
+The profile identifier `tag:confidential.ai,2026:cvm#1` is a tag URI (RFC 4151) and needs no registration.
+
 ## Appendix A. CBOR claim keys
 
 Profile claims use integer keys in the CWT private-use range (RFC 8392 section 9.1.1, keys below -65536). Standard claims keep their registered keys.
