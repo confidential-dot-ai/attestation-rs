@@ -38,6 +38,9 @@ struct ErrorBody {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, error_key) = match &self {
+            ApiError::Verification(attestation::AttestationError::QuoteQueueFull) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "quote_queue_full")
+            }
             // Collateral this service could not fetch, so it is the upstream that
             // failed and not the submitted evidence.
             ApiError::Verification(attestation::AttestationError::CertFetchError(_)) => {
@@ -62,9 +65,10 @@ impl IntoResponse for ApiError {
             }
             // The inner error alone: `Verification`'s "verification failed" prefix
             // would name the evidence this status exists to stop naming.
-            ApiError::Verification(inner @ attestation::AttestationError::CertFetchError(_)) => {
-                inner.to_string()
-            }
+            ApiError::Verification(
+                inner @ (attestation::AttestationError::CertFetchError(_)
+                | attestation::AttestationError::QuoteQueueFull),
+            ) => inner.to_string(),
             other => other.to_string(),
         };
 
@@ -111,5 +115,12 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error_key(resp).await, "verification_failed");
+    }
+
+    #[tokio::test]
+    async fn quote_backpressure_is_unavailable_not_a_verification_verdict() {
+        let resp = ApiError::Verification(AttestationError::QuoteQueueFull).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_key(resp).await, "quote_queue_full");
     }
 }

@@ -10,6 +10,9 @@ use crate::utils::pad_report_data;
 
 use super::evidence::TdxEvidence;
 
+#[path = "quote_worker.rs"]
+mod quote_worker;
+
 const TSM_REPORT_PATH: &str = "/sys/kernel/config/tsm/report";
 const TDX_GUEST_DEV: &str = "/dev/tdx_guest";
 const CCEL_DATA_PATH: &str = "/sys/firmware/acpi/tables/data/CCEL";
@@ -111,6 +114,12 @@ pub async fn generate_evidence_with(
         .try_into()
         .map_err(|_| AttestationError::ReportDataTooLarge { max: 64 })?;
 
+    quote_worker::generate(padded_arr, method).await
+}
+
+// ConfigFS and vsock perform blocking hardware I/O. Only the quote worker
+// calls this function; HTTP verification must remain runnable while it waits.
+fn generate_evidence_sync(padded_arr: [u8; 64], method: TdxQuoteMethod) -> Result<TdxEvidence> {
     let quote_bytes = match method {
         TdxQuoteMethod::Auto => generate_quote_auto(&padded_arr)?,
         TdxQuoteMethod::Vsock => {

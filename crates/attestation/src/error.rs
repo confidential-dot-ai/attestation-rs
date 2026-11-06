@@ -39,6 +39,9 @@ pub enum AttestationError {
     #[error("TEE hardware access failed: {0}")]
     HardwareAccessFailed(String),
 
+    #[error("TDX quote queue is full; retry later")]
+    QuoteQueueFull,
+
     #[error("TCB version mismatch: {0}")]
     TcbMismatch(String),
 
