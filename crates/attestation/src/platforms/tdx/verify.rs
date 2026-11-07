@@ -667,9 +667,9 @@ pub(crate) fn verify_quote(
 }
 
 /// Evaluate Intel's collateral for a genuine quote into `result`: PCK
-/// revocation, the TCB status (the platform's combined with the QE's), and
-/// whether the params accept it. A QE that is not Intel's (MRSIGNER,
-/// ISVPRODID, MISCSELECT, ATTRIBUTES) is an error about the quote.
+/// revocation, the TCB status (the platform's combined with the TDX module's
+/// and the QE's), and whether the params accept it. A QE or TDX module that
+/// is not the one Intel lists is an error about the quote.
 pub(crate) fn check_collateral(
     result: &mut TdxResult,
     quote_bytes: &[u8],
@@ -699,12 +699,8 @@ pub(crate) fn check_collateral(
 
     let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
     let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
-    let mut status = super::dcap::evaluate_tcb_status(
-        &collateral.tcb_info.json,
-        &quote.body.tee_tcb_svn,
-        &pck.der,
-        now,
-    )?;
+    let mut status =
+        super::dcap::evaluate_tcb_status(&collateral.tcb_info.json, &quote.body, &pck.der, now)?;
     let qe_status =
         super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);

@@ -297,6 +297,10 @@ pub struct DcapVerificationStatus {
     /// `tcb_status` (`None` when the QE identity was not evaluated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qe_tcb_status: Option<TdxTcbStatus>,
+    /// The TDX module's own TCB status, already combined into `tcb_status`
+    /// (`None` for a module without a major version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tdx_module_tcb_status: Option<TdxTcbStatus>,
 }
 
 /// AMD processor generation for SNP.

@@ -81,7 +81,10 @@ Default CPU checks disallow debug; SNP requires VMPL 0 and applies no caller
 minimum TCB unless set. TDX defaults accept `UpToDate`, `SWHardeningNeeded`,
 `ConfigurationNeeded`, `ConfigurationAndSWHardeningNeeded`, `OutOfDate` and
 `OutOfDateConfigurationNeeded`, **not just UpToDate**. They refuse `Revoked`
-and `NoMatchingLevel`. Choose a narrower nonempty set when required.
+and `NoMatchingLevel`. Choose a narrower nonempty set when required. The TDX
+status is the lowest of the platform's TCB level, the TDX module's and the
+QE's. A quote whose TDX module does not match Intel's TCB Info (MRSIGNERSEAM,
+SEAMATTRIBUTES, or no TCB level for its SVN) is refused.
 
 `report_data` is at most 64 bytes and zero-padded for CPU reports; Azure binds
 it to the vTPM quote nonce instead. `host_data` is at most 32 bytes; TDX
