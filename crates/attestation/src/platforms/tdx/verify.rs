@@ -705,10 +705,11 @@ pub(crate) fn check_collateral(
         &pck.der,
         now,
     )?;
-    let qe_status =
+    let (qe_status, qe_date) =
         super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
     status.qe_tcb_status = Some(qe_status);
+    status.qe_tcb_date = qe_date;
 
     result.tcb_status_accepted = Some(params.accepted_tcb_statuses.contains(&status.tcb_status));
     result.tcb_status = Some(status);
@@ -774,6 +775,58 @@ mod tests {
             check(&set),
             Err(AttestationError::CertChainError(_))
         ));
+    }
+
+    /// A recorded quote against Intel's signed collateral pinned at
+    /// testing::NOW reports the tcbDate of the platform and QE levels it
+    /// matched, as attestation-cli prints them.
+    #[tokio::test]
+    async fn the_matched_levels_tcb_dates_are_reported() {
+        let quote_bytes = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+        let quote = parse_tdx_quote(quote_bytes).unwrap();
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let (set, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
+        let mut result = verify_quote(quote_bytes, &TdxParams::default(), now)
+            .unwrap()
+            .1;
+        check_collateral(
+            &mut result,
+            quote_bytes,
+            &quote,
+            &TdxParams::default(),
+            &set,
+            now,
+        )
+        .unwrap();
+        let status = result.tcb_status.unwrap();
+        assert_eq!(status.tcb_status, TdxTcbStatus::UpToDate);
+        assert_eq!(status.tcb_date.as_deref(), Some("2025-08-13T00:00:00Z"));
+        assert_eq!(status.qe_tcb_date.as_deref(), Some("2025-08-13T00:00:00Z"));
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["tcb_date"], "2025-08-13T00:00:00Z");
+        assert_eq!(json["qe_tcb_date"], "2025-08-13T00:00:00Z");
+
+        // A platform behind Intel's latest level carries that older level's
+        // date: here the same quote against its TCB Info without the newest
+        // level, which only the evaluation sees (it checks no signature).
+        let pck = PckChain::of(quote_bytes, &quote).unwrap();
+        let mut info: serde_json::Value = serde_json::from_slice(&set.tcb_info.json).unwrap();
+        info["tcbInfo"]["tcbLevels"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let behind = super::super::dcap::evaluate_tcb_status(
+            &serde_json::to_vec(&info).unwrap(),
+            &quote.body.tee_tcb_svn,
+            &pck.der,
+            now,
+        )
+        .unwrap();
+        assert_eq!(behind.tcb_status, TdxTcbStatus::OutOfDate);
+        assert_eq!(behind.tcb_date.as_deref(), Some("2025-05-14T00:00:00Z"));
     }
 
     // Load real test fixtures at compile time

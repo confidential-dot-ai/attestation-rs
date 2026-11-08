@@ -649,6 +649,10 @@ struct TcbInfoJson {
 struct TcbLevelJson {
     tcb: TcbComponentsJson,
     tcb_status: String,
+    /// When Intel certified this level against every advisory published
+    /// by then (ISO 8601).
+    #[serde(default)]
+    tcb_date: Option<String>,
     #[serde(rename = "advisoryIDs", default)]
     advisory_ids: Vec<String>,
 }
@@ -877,8 +881,10 @@ pub fn evaluate_tcb_status(
             tcb_status,
             fmspc,
             advisory_ids: level.advisory_ids.clone(),
+            tcb_date: level.tcb_date.clone(),
             collateral_expired,
             qe_tcb_status: None,
+            qe_tcb_date: None,
         });
     }
 
@@ -897,8 +903,10 @@ pub fn evaluate_tcb_status(
                 tcb_status,
                 fmspc,
                 advisory_ids: level.advisory_ids.clone(),
+                tcb_date: level.tcb_date.clone(),
                 collateral_expired,
                 qe_tcb_status: None,
+                qe_tcb_date: None,
             });
         }
     }
@@ -914,8 +922,10 @@ fn no_matching_level(fmspc: String, collateral_expired: bool) -> DcapVerificatio
         tcb_status: TdxTcbStatus::NoMatchingLevel,
         fmspc,
         advisory_ids: Vec::new(),
+        tcb_date: None,
         collateral_expired,
         qe_tcb_status: None,
+        qe_tcb_date: None,
     }
 }
 
@@ -999,6 +1009,8 @@ struct EnclaveIdentityFields {
 struct QeIdentityTcbLevel {
     tcb: QeIdentityTcb,
     tcb_status: String,
+    #[serde(default)]
+    tcb_date: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1095,7 +1107,10 @@ pub fn parse_qe_identity(qe_identity_json: &[u8]) -> Result<QeIdentity> {
 /// is a value for the caller's accepted statuses.
 ///
 /// `qe_report_body`: 384-byte QE report body from the quote auth data.
-pub fn check_qe_report(qe_report_body: &[u8], identity: &QeIdentity) -> Result<TdxTcbStatus> {
+pub fn check_qe_report(
+    qe_report_body: &[u8],
+    identity: &QeIdentity,
+) -> Result<(TdxTcbStatus, Option<String>)> {
     if qe_report_body.len() < QE_REPORT_BODY_SIZE {
         return Err(AttestationError::QuoteParseFailed(format!(
             "QE report body too short: {} bytes, expected {}",
@@ -1159,10 +1174,10 @@ pub fn check_qe_report(qe_report_body: &[u8], identity: &QeIdentity) -> Result<T
         .iter()
         .find(|level| qe_isvsvn >= level.tcb.isvsvn)
     {
-        Some(level) => parse_tcb_status(&level.tcb_status),
+        Some(level) => Ok((parse_tcb_status(&level.tcb_status)?, level.tcb_date.clone())),
         None => {
             log::warn!("QE ISVSVN {qe_isvsvn} is below every level in the QE Identity");
-            Ok(TdxTcbStatus::NoMatchingLevel)
+            Ok((TdxTcbStatus::NoMatchingLevel, None))
         }
     }
 }
@@ -1615,7 +1630,7 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_slice(IDENTITY).unwrap();
         json["enclaveIdentity"]["tcbLevels"] = levels;
         let identity = parse_qe_identity(&serde_json::to_vec(&json).unwrap()).unwrap();
-        check_qe_report(auth.qe_report_body, &identity)
+        check_qe_report(auth.qe_report_body, &identity).map(|(status, _)| status)
     }
 
     #[test]

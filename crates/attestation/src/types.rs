@@ -297,6 +297,14 @@ pub struct DcapVerificationStatus {
     /// `tcb_status` (`None` when the QE identity was not evaluated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qe_tcb_status: Option<TdxTcbStatus>,
+    /// The `tcbDate` of the matched platform TCB level (ISO 8601): when
+    /// Intel certified it against every advisory published by then. A
+    /// caller bounds how long it accepts a TCB that is behind from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcb_date: Option<String>,
+    /// The `tcbDate` of the matched QE Identity level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qe_tcb_date: Option<String>,
 }
 
 /// AMD processor generation for SNP.
