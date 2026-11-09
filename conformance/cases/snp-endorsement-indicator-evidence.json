@@ -1,0 +1,13 @@
+{
+  "id": "snp-endorsement-indicator-evidence",
+  "rule": {
+    "section": "10.1",
+    "statement": "an endorsement's indicator is exactly 2, or 1 for reference values"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-endorsement-indicator-evidence.json",
+  "policy": "policy/snp-endorsement-indicator-evidence.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
