@@ -1,0 +1,13 @@
+{
+  "id": "snp-raw-key-too-long",
+  "rule": {
+    "section": "5.3",
+    "statement": "a raw key value is at most 65535 bytes"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-raw-key-too-long.json",
+  "policy": "policy/snp-raw-key-too-long.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
