@@ -1,0 +1,13 @@
+{
+  "id": "policy-unknown-member",
+  "rule": {
+    "section": "13.1",
+    "statement": "a policy with an unknown member fails its validation"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-unknown-member.json",
+  "policy": "policy/policy-unknown-member.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

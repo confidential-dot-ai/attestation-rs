@@ -1,0 +1,43 @@
+{
+  "commitment": {
+    "header16": "QVRTLU1SLTEBARAAAAAAAA",
+    "seed": "YM3K6sPxWpbLKhuF1CxaTRKfztZUNQRMklD9_--YmEzDvUIJcsOvWCleD2G6IeSn"
+  },
+  "freshness": {},
+  "gpu": {
+    "device_policy": {
+      "allow_debug": false,
+      "require_measres_success": true,
+      "require_nonce_match": true,
+      "require_secboot": true
+    },
+    "required": false
+  },
+  "min_backing": "hardware",
+  "policy_bits": {
+    "allow_debug": false,
+    "allow_migration": false,
+    "allow_service_td": false,
+    "require_sept_ve_disable": true,
+    "require_vmpl0": true,
+    "require_zero_reserved_attributes": true
+  },
+  "reference": {
+    "launch_measurement": [],
+    "pcrs": {},
+    "registers": {},
+    "slot_owners": {}
+  },
+  "tcb": {
+    "floors": {
+      "f": {
+        "tdx": {}
+      }
+    },
+    "require_revocation": false,
+    "require_signed_collateral": false,
+    "tdx_allowed_status": [
+      "UpToDate"
+    ]
+  }
+}

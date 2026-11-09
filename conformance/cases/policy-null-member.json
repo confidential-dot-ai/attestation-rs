@@ -1,0 +1,13 @@
+{
+  "id": "policy-null-member",
+  "rule": {
+    "section": "13.1",
+    "statement": "null is not a value in a policy either"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-null-member.json",
+  "policy": "policy/policy-null-member.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}

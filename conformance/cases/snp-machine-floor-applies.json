@@ -1,0 +1,13 @@
+{
+  "id": "snp-machine-floor-applies",
+  "rule": {
+    "section": "13.3",
+    "statement": "a machine's own tcb_floor applies"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/snp-machine-floor-applies.json",
+  "policy": "policy/snp-machine-floor-applies.json",
+  "expect": {
+    "refusal": "tcb-not-allowed"
+  }
+}

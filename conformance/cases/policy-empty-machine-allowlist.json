@@ -1,0 +1,13 @@
+{
+  "id": "policy-empty-machine-allowlist",
+  "rule": {
+    "section": "13.3",
+    "statement": "an empty allowlist admits nothing and is refused"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/policy-empty-machine-allowlist.json",
+  "policy": "policy/policy-empty-machine-allowlist.json",
+  "expect": {
+    "refusal": "policy-invalid"
+  }
+}
