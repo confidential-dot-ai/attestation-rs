@@ -1,0 +1,125 @@
+{
+  "ear_all_submods_bound": "true",
+  "eat_nonce": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQg",
+  "eat_profile": "tag:ietf.org,2026:rats/ear#04",
+  "submods": {
+    "cpu": {
+      "ear_appraisal_policy_ids": [
+        "tag:confidential.ai,2026:cvm#1",
+        "ni:///sha-384;BiiF55xXLjSVyP_Ll4a93-UYESorGJ8HEi1oRMGz1jAbTdq9iPT9UTX3TNvgsjYy"
+      ],
+      "ear_attester_claims": {
+        "cvm_freshness": {
+          "mode": "report-data",
+          "pattern": "challenge"
+        },
+        "cvm_host_data": {
+          "semantics": "tdx-mrconfigid",
+          "value": "AWBhjNDCPRXZIbeIuPw6DQJKxyKVGF2jukHVoGW8eqgzAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_identity": {
+          "ppid": "b2DznIZ1ALBUNeyAXKAb6g"
+        },
+        "cvm_launch_measurement": {
+          "alg": "sha384",
+          "value": "8gMtN9SC86qjtILn34zZF-uGQdmdUbq2TP9uVJ0V9Y603H8gc2X9QkqEk1x5uMt0"
+        },
+        "cvm_owner": {
+          "mr_owner": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "mr_owner_config": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "cvm_platform": {
+          "generation": "90c06f000000",
+          "hosting": "dstack",
+          "tee": "tdx",
+          "vendor": "intel"
+        },
+        "cvm_policy": {
+          "debug": false,
+          "migratable": false,
+          "reserved_bits_zero": true,
+          "sept_ve_disable": true
+        },
+        "cvm_registers": [
+          {
+            "alg": "sha384",
+            "backing": "hardware",
+            "index": 0,
+            "replayed": true,
+            "source": "tdx-rtmr",
+            "value": "-EONs2uW-F2HUv9_JKiewFx57J7aK6cyyJf7lwykKTZbdHGxwFTLhPF7HCsjumZA"
+          },
+          {
+            "alg": "sha384",
+            "backing": "hardware",
+            "index": 1,
+            "replayed": true,
+            "source": "tdx-rtmr",
+            "value": "T_yLzTOrwbvx13IZbcbZ9oy-ZMB7FqdKwIWqIq6XZzG7s0pZJV8RnsGyulMBjPqO"
+          },
+          {
+            "alg": "sha384",
+            "backing": "hardware",
+            "index": 2,
+            "replayed": true,
+            "source": "tdx-rtmr",
+            "value": "6pHVuFOWT3Ef1gxx0dSpbr6XWAFhCoaevtuV_Ko3LUlhN30Tmm86OyHErENS9wdI"
+          },
+          {
+            "alg": "sha384",
+            "backing": "hardware",
+            "index": 3,
+            "replayed": true,
+            "source": "tdx-rtmr",
+            "value": "tJEZZSqEvu7pDGFJksH2dGGxftrEpPYDTHKxR8UfrmaSDrLSPo1AKH_Ov1rComPo"
+          }
+        ],
+        "cvm_tcb": {
+          "fmspc": "90c06f000000",
+          "pcesvn": 13,
+          "pck_tcb": "BAQCAgQBAAUAAAAAAAAAAA",
+          "tee_tcb_svn": "DgEEAAAAAAAAAAAAAAAAAA"
+        },
+        "dbgstat": "disabled-since-boot",
+        "tdx_mrconfigid": "0160618cd0c23d15d921b788b8fc3a0d024ac72295185da3ba41d5a065bc7aa833000000000000000000000000000000",
+        "tdx_mrowner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tdx_mrownerconfig": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tdx_mrseam": "346bc77a1846cac214dd2e8edeb9ee4349449d6c3f9ff2c52149a634c27b7fd1bd314c2ef6b973eeebd55742952531a1",
+        "tdx_mrsignerseam": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "tdx_mrtd": "f2032d37d482f3aaa3b482e7df8cd917eb8641d99d51bab64cff6e549d15f58eb4dc7f207365fd424a84935c79b8cb74",
+        "tdx_rtmr0": "f8438db36b96f85d8752ff7f24a89ec05c79ec9eda2ba732c897fb970ca429365b7471b1c054cb84f17b1c2b23ba6640",
+        "tdx_rtmr1": "4ffc8bcd33abc1bbf1d772196dc6d9f68cbe64c07b16a74ac085aa22ae976731bbb34a59255f119ec1b2ba53018cfa8e",
+        "tdx_rtmr2": "ea91d5b853964f711fd60c71d1d4a96ebe975801610a869ebedb95fcaa372d4961377d139a6f3a3b21c4ac4352f70748",
+        "tdx_rtmr3": "b49119652a84beeee90c614992c1f67461b17edac4a4f6034c72b147c51fae66920eb2d23e8d40287fcebf5ac2a263e8",
+        "tdx_td_attributes": "0000001000000000",
+        "tdx_tee_tcb_svn": "0e010400000000000000000000000000",
+        "tdx_xfam": "e702060000000000"
+      },
+      "ear_status": "affirming",
+      "ear_trustworthiness_vector": {
+        "configuration": 2,
+        "runtime-opaque": 2
+      },
+      "ear_verifier_claims": {
+        "cvm_backing_min": {
+          "required": "hardware",
+          "weakest_seen": "hardware"
+        },
+        "cvm_collateral": {
+          "tdx_pck_crl": {
+            "status": "skipped"
+          },
+          "tdx_qe_identity": {
+            "status": "skipped"
+          },
+          "tdx_root_crl": {
+            "status": "skipped"
+          },
+          "tdx_tcb_info": {
+            "status": "skipped"
+          }
+        }
+      }
+    }
+  }
+}
