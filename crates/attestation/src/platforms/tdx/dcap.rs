@@ -12,7 +12,7 @@ use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
 use crate::error::{AttestationError, Result};
 use crate::types::{DcapVerificationStatus, TdxTcbStatus};
 
-use super::verify::{QuoteVersion, QUOTE_HEADER_SIZE, REPORT_BODY_SIZE};
+use super::verify::{QuoteVersion, TdxReportBody, QUOTE_HEADER_SIZE, REPORT_BODY_SIZE};
 
 /// Intel SGX Root CA public key (ECDSA P-256, uncompressed SEC1).
 ///
@@ -638,10 +638,49 @@ struct TcbInfoWrapper {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TcbInfoJson {
+    version: u32,
     tcb_levels: Vec<TcbLevelJson>,
     /// ISO 8601 timestamp indicating when this TCB Info expires.
     #[serde(default)]
     next_update: Option<String>,
+    #[serde(default)]
+    tdx_module: Option<TdxModuleJson>,
+    #[serde(default)]
+    tdx_module_identities: Option<Vec<TdxModuleIdentityJson>>,
+}
+
+/// TCB Info v3 `tdxModule`: the identity of a module with major version 0.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TdxModuleJson {
+    mrsigner: String,
+    attributes: String,
+    attributes_mask: String,
+}
+
+/// TCB Info v3 `tdxModuleIdentities[]`: one per module major version.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TdxModuleIdentityJson {
+    id: String,
+    mrsigner: String,
+    attributes: String,
+    attributes_mask: String,
+    tcb_levels: Vec<TdxModuleTcbLevelJson>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TdxModuleTcbLevelJson {
+    tcb: TdxModuleTcbJson,
+    tcb_status: String,
+    #[serde(rename = "advisoryIDs", default)]
+    advisory_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TdxModuleTcbJson {
+    isvsvn: u8,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -808,115 +847,206 @@ pub fn verify_tcb_info_signature(
     Ok(())
 }
 
-/// Evaluate TCB status for a TDX quote against Intel TCB Info collateral
-/// whose signature has been checked ([`crate::collateral::TcbInfo`]).
+/// TEE_TCB_SVN byte holding the TDX module's SVN within its major version.
+const TDX_MODULE_SVN: usize = 0;
+/// TEE_TCB_SVN byte holding the TDX module's major version.
+const TDX_MODULE_MAJOR_VERSION: usize = 1;
+
+/// Evaluate a TDX quote's TCB status against Intel TCB Info whose signature
+/// has been checked ([`crate::collateral::TcbInfo`]).
 ///
-/// Matches the quote's TCB SVNs against the TCB levels from Intel PCS,
-/// returning the status and any security advisories.
+/// The quote's TDX module must match `tdxModule`, or the `tdxModuleIdentities`
+/// entry for its major version (TEE_TCB_SVN\[1\]) with a TCB level for its SVN
+/// (TEE_TCB_SVN\[0\]); anything else is an error. The status is the worse of
+/// the platform level's and the module's.
 ///
-/// `tee_tcb_svn`: 16-byte TEE TCB SVN from the TDX quote body.
 /// `pck_der`: the quote's PCK chain (for the SGX TCB components and FMSPC).
 pub fn evaluate_tcb_status(
     tcb_info_json: &[u8],
-    tee_tcb_svn: &[u8; 16],
+    body: &TdxReportBody,
     pck_der: &[Vec<u8>],
     now: i64,
 ) -> Result<DcapVerificationStatus> {
     let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
         .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
+    let tcb_info = wrapper.tcb_info;
 
-    // Check if collateral has expired (nextUpdate is in the past)
-    let collateral_expired = wrapper
-        .tcb_info
+    let collateral_expired = tcb_info
         .next_update
         .as_deref()
-        .and_then(|ts| {
-            // Intel PCS uses ISO 8601: "2024-03-07T00:00:00Z"
-            // Try common formats
-            chrono_parse_is_past(ts, now)
-        })
+        .and_then(|ts| chrono_parse_is_past(ts, now))
         .unwrap_or(false);
     if collateral_expired {
         log::warn!("TCB Info collateral has expired (nextUpdate in the past)");
     }
 
+    let module = check_tdx_module(&tcb_info, body)?;
     let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components_from_der(pck_der)?;
     let fmspc = hex::encode(extract_fmspc_from_pck_der(pck_der)?);
 
-    // TCB level matching (follows Intel DCAP QVL algorithm).
-    //
-    // Pass 1 — SGX match: find the first level where all PCK SGX component
-    //   SVNs >= level SVNs and PCESVN >= level PCESVN.
-    // Pass 2 — TDX match: starting from the SGX-matched level, find the first
-    //   level where all tee_tcb_svn values >= level TDX component SVNs.
-    //   When tdxtcbcomponents is absent from a level it is treated as a match
-    //   (the level applies to all TDX TCB values).
-
-    // Pass 1: find the first SGX-matching level index.
-    let Some(sgx_match_idx) = wrapper.tcb_info.tcb_levels.iter().position(|level| {
-        let sgx_comps: Vec<u8> = level.tcb.sgxtcbcomponents.iter().map(|c| c.svn).collect();
-        sgx_comps.len() >= 16
-            && pck_compsvn
-                .iter()
-                .zip(sgx_comps.iter())
-                .all(|(&pck, &lvl)| pck >= lvl)
+    // A versioned module's two TEE_TCB_SVN bytes are graded by its identity.
+    let tdx_start = if module.is_some() { 2 } else { 0 };
+    let mut matched = None;
+    for level in &tcb_info.tcb_levels {
+        let tdx = level.tcb.tdxtcbcomponents.as_deref().unwrap_or_default();
+        if level.tcb.sgxtcbcomponents.len() != 16 || tdx.len() != 16 {
+            return Err(AttestationError::CertChainError(
+                "TCB Info level does not list 16 SGX and 16 TDX TCB components".into(),
+            ));
+        }
+        if svns_meet(&pck_compsvn, &level.tcb.sgxtcbcomponents, 0)
             && pck_pcesvn >= level.tcb.pcesvn
-    }) else {
-        return Ok(no_matching_level(fmspc, collateral_expired));
-    };
-
-    // Pass 2: find the first TDX-matching level at or after the SGX match.
-    let tee_tcb_svn_nonzero = tee_tcb_svn.iter().any(|&v| v != 0);
-    if !tee_tcb_svn_nonzero {
-        // All-zero tee_tcb_svn means the quote carries no TDX module TCB
-        // information (e.g. early TDX implementations or SGX-only paths).
-        // Skip TDX component matching and use the SGX-matched level directly.
-        let level = &wrapper.tcb_info.tcb_levels[sgx_match_idx];
-        let tcb_status = parse_tcb_status(&level.tcb_status)?;
-        return Ok(DcapVerificationStatus {
-            tcb_status,
-            fmspc,
-            advisory_ids: level.advisory_ids.clone(),
-            collateral_expired,
-            qe_tcb_status: None,
-        });
-    }
-
-    for level in &wrapper.tcb_info.tcb_levels[sgx_match_idx..] {
-        let tdx_ok = match level.tcb.tdxtcbcomponents.as_ref() {
-            Some(tdx_comps) => tdx_comps
-                .iter()
-                .zip(tee_tcb_svn.iter())
-                .all(|(comp, &svn)| svn >= comp.svn),
-            // When tdxtcbcomponents is absent the level applies universally
-            None => true,
-        };
-        if tdx_ok {
-            let tcb_status = parse_tcb_status(&level.tcb_status)?;
-            return Ok(DcapVerificationStatus {
-                tcb_status,
-                fmspc,
-                advisory_ids: level.advisory_ids.clone(),
-                collateral_expired,
-                qe_tcb_status: None,
-            });
+            && svns_meet(&body.tee_tcb_svn, tdx, tdx_start)
+        {
+            matched = Some(level);
+            break;
         }
     }
+    let module_status = module.as_ref().map(|m| m.status);
+    let Some(level) = matched else {
+        log::warn!("TDX TCB is below every level in the TCB Info");
+        return Ok(DcapVerificationStatus {
+            tcb_status: TdxTcbStatus::NoMatchingLevel,
+            fmspc,
+            advisory_ids: Vec::new(),
+            collateral_expired,
+            qe_tcb_status: None,
+            tdx_module_tcb_status: module_status,
+        });
+    };
 
-    Ok(no_matching_level(fmspc, collateral_expired))
-}
-
-/// The status of a TCB below every listed level: a genuine fact about the
-/// machine, left to the caller's accepted statuses.
-fn no_matching_level(fmspc: String, collateral_expired: bool) -> DcapVerificationStatus {
-    log::warn!("TDX TCB is below every level in the TCB Info");
-    DcapVerificationStatus {
-        tcb_status: TdxTcbStatus::NoMatchingLevel,
+    let mut tcb_status = parse_tcb_status(&level.tcb_status)?;
+    let mut advisory_ids = level.advisory_ids.clone();
+    if let Some(module) = module {
+        tcb_status = combine_tcb_status(tcb_status, module.status);
+        for id in module.advisory_ids {
+            if !advisory_ids.contains(&id) {
+                advisory_ids.push(id);
+            }
+        }
+    }
+    Ok(DcapVerificationStatus {
+        tcb_status,
         fmspc,
-        advisory_ids: Vec::new(),
+        advisory_ids,
         collateral_expired,
         qe_tcb_status: None,
+        tdx_module_tcb_status: module_status,
+    })
+}
+
+/// Every SVN from `start` on is at least the level's.
+fn svns_meet(svns: &[u8; 16], level: &[SvnComponent], start: usize) -> bool {
+    svns[start..]
+        .iter()
+        .zip(&level[start..])
+        .all(|(&svn, component)| svn >= component.svn)
+}
+
+/// A TDX module's TCB status within its major version.
+struct TdxModuleTcb {
+    status: TdxTcbStatus,
+    advisory_ids: Vec<String>,
+}
+
+/// Check the quote's TDX module against the TCB Info and, for a module with
+/// a major version, grade its SVN against that version's TCB levels.
+fn check_tdx_module(tcb_info: &TcbInfoJson, body: &TdxReportBody) -> Result<Option<TdxModuleTcb>> {
+    let refuse = |msg: String| AttestationError::CertChainError(msg);
+    let module = tcb_info
+        .tdx_module
+        .as_ref()
+        .filter(|_| tcb_info.version >= 3)
+        .ok_or_else(|| {
+            refuse(format!(
+                "TCB Info version {} has no tdxModule to check the TDX module against",
+                tcb_info.version
+            ))
+        })?;
+
+    let major = body.tee_tcb_svn[TDX_MODULE_MAJOR_VERSION];
+    let identity = if major == 0 {
+        None
+    } else {
+        let id = format!("TDX_{major:02X}");
+        let found = tcb_info
+            .tdx_module_identities
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|identity| identity.id.eq_ignore_ascii_case(&id));
+        Some(found.ok_or_else(|| {
+            refuse(format!(
+                "TCB Info has no TDX module identity {id} for the quote's module"
+            ))
+        })?)
+    };
+
+    let (mrsigner, attributes, mask) = match identity {
+        Some(i) => (&i.mrsigner, &i.attributes, &i.attributes_mask),
+        None => (
+            &module.mrsigner,
+            &module.attributes,
+            &module.attributes_mask,
+        ),
+    };
+    let mrsigner: [u8; 48] = hex_array(mrsigner, "TDX module MRSIGNER")?;
+    let attributes: [u8; 8] = hex_array(attributes, "TDX module attributes")?;
+    let mask: [u8; 8] = hex_array(mask, "TDX module attributesMask")?;
+    if !crate::utils::constant_time_eq(&body.mrsigner_seam, &mrsigner) {
+        return Err(refuse(
+            "MRSIGNERSEAM does not match the TCB Info's TDX module".into(),
+        ));
     }
+    if !masked_eq(&body.seam_attributes, &attributes, &mask) {
+        return Err(refuse(
+            "SEAMATTRIBUTES does not match the TCB Info's TDX module (masked)".into(),
+        ));
+    }
+
+    let Some(identity) = identity else {
+        return Ok(None);
+    };
+    let svn = body.tee_tcb_svn[TDX_MODULE_SVN];
+    let level = identity
+        .tcb_levels
+        .iter()
+        .find(|level| svn >= level.tcb.isvsvn)
+        .ok_or_else(|| {
+            refuse(format!(
+                "TDX module {} SVN {svn} is below every level of its identity",
+                identity.id
+            ))
+        })?;
+    let status = match level.tcb_status.as_str() {
+        "UpToDate" => TdxTcbStatus::UpToDate,
+        "OutOfDate" => TdxTcbStatus::OutOfDate,
+        "Revoked" => TdxTcbStatus::Revoked,
+        s => return Err(refuse(format!("unknown TDX module TCB status: {s}"))),
+    };
+    Ok(Some(TdxModuleTcb {
+        status,
+        advisory_ids: level.advisory_ids.clone(),
+    }))
+}
+
+/// `actual` and `expected` agree on every bit `mask` sets.
+fn masked_eq(actual: &[u8], expected: &[u8], mask: &[u8]) -> bool {
+    actual.len() == expected.len()
+        && actual.len() == mask.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .zip(mask)
+            .all(|((a, e), m)| a & m == e & m)
+}
+
+/// A collateral field of exactly `N` hex-encoded bytes.
+fn hex_array<const N: usize>(value: &str, name: &str) -> Result<[u8; N]> {
+    hex::decode(value)
+        .ok()
+        .and_then(|b| <[u8; N]>::try_from(b).ok())
+        .ok_or_else(|| AttestationError::CertChainError(format!("{name} is not {N} hex bytes")))
 }
 
 /// Check if an ISO 8601 timestamp (e.g. "2024-03-07T00:00:00Z") is before
@@ -1065,23 +1195,15 @@ pub fn parse_qe_identity(qe_identity_json: &[u8]) -> Result<QeIdentity> {
 
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
         .map_err(|e| AttestationError::CertChainError(format!("QE Identity fields parse: {e}")))?;
-    fn bytes<const N: usize>(hex_value: &str, name: &str) -> Result<[u8; N]> {
-        hex::decode(hex_value)
-            .ok()
-            .and_then(|b| <[u8; N]>::try_from(b).ok())
-            .ok_or_else(|| {
-                AttestationError::CertChainError(format!("QE Identity {name} is not {N} hex bytes"))
-            })
-    }
     Ok(QeIdentity {
         mrsigner: hex::decode(&identity.mrsigner).map_err(|e| {
             AttestationError::CertChainError(format!("QE Identity MRSIGNER hex decode: {e}"))
         })?,
         isvprodid: identity.isvprodid,
-        miscselect: bytes(&identity.miscselect, "MISCSELECT")?,
-        miscselect_mask: bytes(&identity.miscselect_mask, "MISCSELECT_MASK")?,
-        attributes: bytes(&identity.attributes, "ATTRIBUTES")?,
-        attributes_mask: bytes(&identity.attributes_mask, "ATTRIBUTES_MASK")?,
+        miscselect: hex_array(&identity.miscselect, "QE Identity MISCSELECT")?,
+        miscselect_mask: hex_array(&identity.miscselect_mask, "QE Identity MISCSELECT_MASK")?,
+        attributes: hex_array(&identity.attributes, "QE Identity ATTRIBUTES")?,
+        attributes_mask: hex_array(&identity.attributes_mask, "QE Identity ATTRIBUTES_MASK")?,
         tcb_levels: identity.tcb_levels,
     })
 }
@@ -1127,13 +1249,6 @@ pub fn check_qe_report(qe_report_body: &[u8], identity: &QeIdentity) -> Result<T
             qe_isvprodid, identity.isvprodid
         )));
     }
-    let masked_eq = |actual: &[u8], expected: &[u8], mask: &[u8]| {
-        actual
-            .iter()
-            .zip(expected)
-            .zip(mask)
-            .all(|((a, e), m)| a & m == e & m)
-    };
     if !masked_eq(
         qe_miscselect,
         &identity.miscselect,
@@ -1167,9 +1282,9 @@ pub fn check_qe_report(qe_report_body: &[u8], identity: &QeIdentity) -> Result<T
     }
 }
 
-/// The platform TCB status adjusted for the QE's TCB status, as Intel's QVL
-/// combines them: a revoked or unlisted QE wins, and an out-of-date QE makes
-/// the platform out of date.
+/// The platform TCB status adjusted for a component's (the QE's or the TDX
+/// module's): a revoked or unlisted component wins, and an out-of-date one
+/// makes the platform out of date.
 pub fn combine_tcb_status(platform: TdxTcbStatus, qe: TdxTcbStatus) -> TdxTcbStatus {
     use TdxTcbStatus::*;
     match (platform, qe) {
@@ -1637,6 +1752,121 @@ mod tests {
             qe_status_with_levels(serde_json::json!([level(4, "SomethingNew")])),
             Err(AttestationError::CertChainError(_))
         ));
+    }
+
+    fn test_data(file: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/test_data/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// A recorded quote's body and PCK chain, with Intel's signed TCB Info
+    /// for its FMSPC (signature checked here).
+    fn recorded(quote: &[u8], fmspc: &str) -> (TdxReportBody, Vec<Vec<u8>>, Vec<u8>) {
+        use crate::collateral::Collateral;
+        let parsed = super::super::verify::parse_tdx_quote(quote).unwrap();
+        let body_end = compute_body_end(quote, parsed.quote_version).unwrap();
+        let auth = parse_auth_data(quote, body_end).unwrap();
+        let pck = parse_pem_to_der(auth.pck_cert_chain_pem).unwrap();
+        assert_eq!(
+            hex::encode(extract_fmspc_from_pck_der(&pck).unwrap()),
+            fmspc
+        );
+        let (json, chain) = crate::testing::raw(
+            &format!("2026-10-14/tcb_info_{fmspc}.json"),
+            Some("2026-10-14/tcb_signing_chain.pem"),
+        );
+        let id = hex::decode(fmspc).unwrap().try_into().unwrap();
+        crate::collateral::TcbInfo::verify(&json, chain.as_deref(), &id).unwrap();
+        (parsed.body, pck, json)
+    }
+
+    fn status(
+        body: &TdxReportBody,
+        pck: &[Vec<u8>],
+        json: &[u8],
+    ) -> Result<(TdxTcbStatus, Option<TdxTcbStatus>)> {
+        let s = evaluate_tcb_status(json, body, pck, crate::testing::NOW)?;
+        assert!(!s.collateral_expired);
+        Ok((s.tcb_status, s.tdx_module_tcb_status))
+    }
+
+    #[test]
+    fn up_to_date_tdx_module_on_an_up_to_date_platform() {
+        use TdxTcbStatus::*;
+        // TEE_TCB_SVN 07 03 04: module TDX_03 at SVN 7 (UpToDate from 5).
+        let (body, pck, json) = recorded(&test_data("tdx_quote_00a06d080000.dat"), "00a06d080000");
+        assert_eq!(
+            status(&body, &pck, &json).unwrap(),
+            (UpToDate, Some(UpToDate))
+        );
+        // TEE_TCB_SVN 0d 01 04: module TDX_01 at SVN 13 (UpToDate from 11).
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&test_data("az_tdx/confos-boot-evidence.json")).unwrap();
+        let quote = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(evidence["td_quote"].as_str().unwrap())
+            .unwrap();
+        let (body, pck, json) = recorded(&quote, "90c06f000000");
+        assert_eq!(
+            status(&body, &pck, &json).unwrap(),
+            (UpToDate, Some(UpToDate))
+        );
+    }
+
+    #[test]
+    fn out_of_date_tdx_module_makes_the_quote_out_of_date() {
+        use TdxTcbStatus::*;
+        // TEE_TCB_SVN 0a 01 03: module TDX_01 at SVN 10, below its UpToDate 11.
+        let (body, pck, json) = recorded(&test_data("tdx_quote_live.dat"), "b0c06f000000");
+        assert_eq!(
+            status(&body, &pck, &json).unwrap(),
+            (OutOfDate, Some(OutOfDate))
+        );
+
+        // An UpToDate platform whose TDX_03 module is one SVN below its
+        // UpToDate level (5): the module alone makes the quote OutOfDate.
+        let (mut body, pck, json) =
+            recorded(&test_data("tdx_quote_00a06d080000.dat"), "00a06d080000");
+        body.tee_tcb_svn[TDX_MODULE_SVN] = 4;
+        assert_eq!(
+            status(&body, &pck, &json).unwrap(),
+            (OutOfDate, Some(OutOfDate))
+        );
+    }
+
+    #[test]
+    fn tdx_module_svn_bytes_do_not_grade_the_platform() {
+        use TdxTcbStatus::*;
+        // TEE_TCB_SVN 02 01 06 on a TCB Info whose levels list TDX component 0
+        // as 5 or 3: a versioned module's bytes are skipped, so the platform
+        // matches its SVN-6 level, and the module (TDX_01 at 2) is OutOfDate.
+        let (body, pck, json) = recorded(&test_data("az_tdx/td-quote.bin"), "00806f050000");
+        assert_eq!(
+            status(&body, &pck, &json).unwrap(),
+            (OutOfDate, Some(OutOfDate))
+        );
+    }
+
+    #[test]
+    fn a_tdx_module_intel_does_not_list_is_refused() {
+        let (body, pck, json) = recorded(&test_data("tdx_quote_00a06d080000.dat"), "00a06d080000");
+        let refused = |edit: &dyn Fn(&mut TdxReportBody)| {
+            let mut body = body.clone();
+            edit(&mut body);
+            matches!(
+                status(&body, &pck, &json),
+                Err(AttestationError::CertChainError(_))
+            )
+        };
+        // No TDX_02 identity in the TCB Info.
+        assert!(refused(&|b| b.tee_tcb_svn[TDX_MODULE_MAJOR_VERSION] = 2));
+        // Below TDX_03's lowest level (3).
+        assert!(refused(&|b| b.tee_tcb_svn[TDX_MODULE_SVN] = 2));
+        assert!(refused(&|b| b.mrsigner_seam[0] ^= 1));
+        assert!(refused(&|b| b.seam_attributes[7] = 0x80));
+        // Major version 0 is checked against `tdxModule`.
+        assert!(refused(&|b| {
+            b.tee_tcb_svn[TDX_MODULE_MAJOR_VERSION] = 0;
+            b.mrsigner_seam[47] = 1;
+        }));
     }
 
     #[test]
