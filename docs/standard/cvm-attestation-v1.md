@@ -411,6 +411,12 @@ A `challenge` binding carries no key or an `spki-sha256` or `raw` key. A `certif
 
 The mode is constrained by the platform (Section 4.3): a verifier MUST refuse a mode that the TEE and hosting do not admit.
 
+### 5.5. Certificate carriage
+
+When evidence rides in an X.509 certificate, it is carried in the `id-pe-cmw` extension (RFC 9999 section 4.4, OID 1.3.6.1.5.5.7.1.35) in the extension's `json` choice, as the JSON CMW record `[type, value, 4]` whose `type` is `application/eat-ucs+json; eat_profile="tag:confidential.ai,2026:cvm#1"` and whose `value` is the base64url of the envelope. RFC 5280 section 4.2 forbids a repeated extension, so a certificate with more than one `id-pe-cmw` extension is refused. The `x509-tbs-sha256` value is the SHA-256 of the certificate's DER `TBSCertificate` with the `id-pe-cmw` extension removed, since the extension cannot cover its own digest: the remaining extensions keep their order and encoding; the `Extensions` SEQUENCE, the `[3]` field that holds it and the enclosing `TBSCertificate` SEQUENCE are re-encoded with DER lengths; `version` is unchanged; and the `[3]` field is omitted when no extension remains. For a certificate without the extension the value is the SHA-256 of its `TBSCertificate`. The relying party computes this value from the certificate it was presented and supplies it as `freshness.key`; without it the verifier MUST refuse the `certificate` pattern with `binding-mismatch`.
+
+The dstack attested-TLS certificate extensions (private arc `1.3.6.1.4.1.62397.1`) are outside this profile.
+
 ## 6. Measurement registers
 
 ### 6.1. Register entries
@@ -1434,6 +1440,39 @@ A refusal names the rule family that failed:
 The corpus version is `<profile version>.<revision>`, `1.0` at first publication. A change to any case, including a new case, raises the revision. A change that alters a decision in Sections 4 to 13 lands together with the case that shows it. An implementation states the version it passes (for example, "conforms to `tag:confidential.ai,2026:cvm#1`, corpus 1.9") and pins that version in its continuous integration.
 
 The reference implementation generates the expected results (Section 18). A case the reference implementation fails is a defect in one or the other, fixed before the corpus version is published. Where a requirement the corpus does not cover differs from what the reference implementation does, Section 18 lists the difference and the text governs.
+
+## Appendix A. CBOR claim keys
+
+Profile claims use integer keys in the CWT private-use range (RFC 8392 section 9.1.1, keys below -65536). Standard claims keep their registered keys.
+
+| Claim | Key | Defined in |
+| --- | --- | --- |
+| `cvm_version` | -70000 | Section 4.1 |
+| `cvm_platform` | -70001 | Sections 4.3, 12.2 |
+| `cvm_report` | -70002 | Section 4.3 |
+| `cvm_binding` | -70003 | Section 5 |
+| `cvm_endorsements` | -70004 | Section 10.1 |
+| `cvm_registers` | -70005 | Section 6 |
+| `cvm_log` | -70006 | Section 7 |
+| `cvm_chain` | -70007 | Section 8 |
+| `cvm_provenance` | -70008 | reserved, Section 4.3 |
+| `cvm_tpm_quote` | -70010 | Section 4.4 |
+| `cvm_tpm_ak` | -70011 | Section 4.4 |
+| `cvm_launch_measurement` | -70020 | Section 12.2 |
+| `cvm_freshness` | -70021 | Section 12.2 |
+| `cvm_host_data` | -70022 | Section 12.2 |
+| `cvm_owner` | -70023 | Section 12.2 |
+| `cvm_policy` | -70024 | Section 12.2 |
+| `cvm_tcb` | -70025 | Section 12.2 |
+| `cvm_identity` | -70026 | Section 12.2 |
+| `cvm_workload_id` | -70027 | reserved, Section 12.2 |
+| `cvm_collateral` | -70030 | Section 12.3 |
+| `cvm_reference` | -70031 | Section 12.3 |
+| `cvm_backing_min` | -70032 | Section 12.3 |
+
+Result claims use the EAR labels of draft-ietf-rats-ear-04: `ear_status` 1000, `ear_trustworthiness_vector` 1001, `ear_raw_evidence` 1002, `ear_appraisal_policy_ids` 1003, `ear_verifier_id` 1004 (`developer` 0, `build` 1), `ear_attester_claims` 1005, `ear_verifier_claims` 1006, `ear_device_topology` 1007 (unused in version 1).
+
+The compatibility claims (the `tdx_*` claims of Section 12.6 and the `snp` object of Section 12.7) keep text keys in both encodings, because the vocabularies they mirror define none. So do `ear_all_submods_bound` and `ear_nvidia_evidence`, which draft-kykdxy-rats-tdx-cgpu-ear-profile-02 defines with JSON names and no CBOR keys. A version 1 verifier ignores `cvm_provenance`, as EAT extensibility requires for a whole claim, and never emits `cvm_workload_id`.
 
 ## Appendix B. Test vectors
 
