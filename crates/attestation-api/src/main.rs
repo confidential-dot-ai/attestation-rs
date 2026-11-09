@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +48,17 @@ async fn main() -> anyhow::Result<()> {
     if config.auth.api_keys.is_empty() {
         tracing::warn!(
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
+        );
+    }
+    if !config
+        .server
+        .bind
+        .parse::<SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback())
+    {
+        tracing::warn!(
+            bind = %config.server.bind,
+            "listener is plain HTTP on a non-loopback address; keep it behind a TLS terminator on a private network"
         );
     }
 

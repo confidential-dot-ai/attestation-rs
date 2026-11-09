@@ -171,7 +171,10 @@ cargo doc --locked --workspace --no-deps
 The default API build verifies GPU bundles. For collection, add
 `--features nvidia-gpu-attest` on a suitably provisioned Linux guest.
 `docker build .` builds the API image, published as
-`ghcr.io/confidential-dot-ai/attestation-api`.
+`ghcr.io/confidential-dot-ai/attestation-api`. Every `main` commit is pushed
+as `sha-<first 7 of the commit>`; a release adds its `vX.Y.Z` name to that
+same manifest (`.github/scripts/name-image-release.sh`), so the version and
+the commit resolve to one digest.
 
 Tests include fixtures, network tests and hardware-gated paths. The matrix
 shows supported functionality, not live hardware test coverage; individual

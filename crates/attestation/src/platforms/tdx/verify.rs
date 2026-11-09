@@ -1235,6 +1235,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_verify_evidence_init_data_match_and_mismatch() {
+        let quote = parse_tdx_quote(V4_QUOTE).unwrap();
+        let evidence = make_tdx_evidence(V4_QUOTE);
+        let verify_with = |init_data: Vec<u8>| {
+            let params = TdxParams {
+                allow_debug: true,
+                init_data: Some(init_data),
+                ..Default::default()
+            };
+            let evidence = evidence.clone();
+            async move { verify(&evidence, &params).await }
+        };
+
+        let r = verify_with(quote.body.mr_config_id.to_vec()).await.unwrap();
+        assert_eq!(r.init_data_match, Some(true));
+        let mut wrong = quote.body.mr_config_id;
+        wrong[0] ^= 0xFF;
+        let r = verify_with(wrong.to_vec()).await.unwrap();
+        assert_eq!(r.init_data_match, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[tokio::test]
     async fn test_verify_evidence_mixed_rtmr_match_and_mismatch() {
         let quote = parse_tdx_quote(V4_QUOTE).unwrap();
         let evidence = make_tdx_evidence(V4_QUOTE);
