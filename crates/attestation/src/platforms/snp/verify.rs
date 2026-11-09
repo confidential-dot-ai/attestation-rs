@@ -236,7 +236,6 @@ impl SnpCollateralSet {
             gen,
             inline,
         } = genuine;
-        let report = &report;
         if let Some(vek) = inline {
             let (crl, used) = store
                 .get::<AmdCrl>(&(gen, AmdKey::of_vek(&vek)?), now)
@@ -260,7 +259,7 @@ impl SnpCollateralSet {
             store.get::<AmdCrl>(&crl_id, now)
         );
         let (vcek, vcek_used) = vcek?;
-        check_report(&bytes, report, &vcek.der, gen, now)?;
+        check_report(&bytes, &report, &vcek.der, gen, now)?;
         let (crl, crl_used) = crl?;
         let collateral = Self { vek: vcek.der, crl };
         Ok((collateral, vec![vcek_used, crl_used]))
@@ -431,7 +430,7 @@ pub(crate) fn vek_revoked(
             crl.generation, crl.key
         )));
     }
-    let (_, issuer) = X509Certificate::from_der(vek_issuer(vek_der, processor_gen)?)
+    let (_, issuer) = X509Certificate::from_der(issuer_der(processor_gen, key))
         .map_err(|e| AttestationError::CertChainError(format!("VEK issuer x509 parse: {e}")))?;
     let (_, list) = CertificateRevocationList::from_der(&crl.der)
         .map_err(|e| AttestationError::CertChainError(format!("AMD CRL parse: {e}")))?;
@@ -484,13 +483,19 @@ pub fn min_tcb_met(tcb: &SnpTcb, min_tcb: &SnpTcb) -> bool {
 /// Verify the AMD certificate chain: ARK (self-signed) -> ASK (or ASVK) ->
 /// VCEK (or VLEK), each link RSASSA-PSS with SHA-384.
 pub fn verify_cert_chain(ark_der: &[u8], ask_der: &[u8], vcek_der: &[u8]) -> Result<()> {
-    let parse = |der| {
-        signatures::parse_cert(der)
-            .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))
-    };
-    let (ark, ask, vek) = (parse(ark_der)?, parse(ask_der)?, parse(vcek_der)?);
+    let (ark, ask, vek) = (
+        chain_cert(ark_der)?,
+        chain_cert(ask_der)?,
+        chain_cert(vcek_der)?,
+    );
     signatures::verify_chain(&ark, &ask, &vek)
         .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))
+}
+
+/// A certificate of the AMD chain, parsed.
+fn chain_cert(der: &[u8]) -> Result<x509_cert::Certificate> {
+    signatures::parse_cert(der)
+        .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))
 }
 
 /// Verify a report signature against a VCEK (or VLEK) certificate.
@@ -535,44 +540,47 @@ pub fn verify_vek_endorsement(
     processor_gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
-    verify_bundled_chain(processor_gen, is_vlek_cert(vek_der)?, vek_der)?;
+    verify_bundled_chain(processor_gen, AmdKey::of_vek(vek_der)?, vek_der)?;
     verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
 }
 
-/// `vek_der` is issued by the bundled ASK of `gen` (the ASVK for a VLEK),
-/// which the bundled ARK signs. The bundled links are checked once per
-/// process; only the VEK's signature is checked per call.
+/// `vek_der`, a VEK of kind `key`, is issued by the bundled ASK of `gen` (the
+/// ASVK for a VLEK), which the bundled ARK signs. The bundled links are
+/// checked once per process; only the VEK's signature is checked per call.
 pub(crate) fn verify_bundled_chain(
     gen: ProcessorGeneration,
-    vlek: bool,
+    key: AmdKey,
     vek_der: &[u8],
 ) -> Result<()> {
-    let vek = signatures::parse_cert(vek_der)
-        .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))?;
-    signatures::verify_cert_signature(bundled_issuer(gen, vlek)?, &vek)
+    let vek = chain_cert(vek_der)?;
+    signatures::verify_cert_signature(bundled_issuer(gen, key)?, &vek)
         .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))
 }
 
-/// The bundled ASK (or ASVK) of `gen`, parsed, once the bundled ARK is shown
-/// to sign itself and it. Both are compiled in, so this runs once per process.
-fn bundled_issuer(gen: ProcessorGeneration, vlek: bool) -> Result<&'static x509_cert::Certificate> {
+/// The bundled issuer of `gen`'s VEKs of kind `key`, parsed, once the bundled
+/// ARK is shown to sign itself and it. Both are compiled in, so this runs
+/// once per process.
+fn bundled_issuer(
+    gen: ProcessorGeneration,
+    key: AmdKey,
+) -> Result<&'static x509_cert::Certificate> {
+    use ProcessorGeneration::{Genoa, Milan, Turin};
     static ISSUERS: [std::sync::OnceLock<std::result::Result<x509_cert::Certificate, String>>; 6] =
         [const { std::sync::OnceLock::new() }; 6];
-    let row = match gen {
-        ProcessorGeneration::Milan => 0,
-        ProcessorGeneration::Genoa => 2,
-        ProcessorGeneration::Turin => 4,
+    let slot = match (gen, key) {
+        (Milan, AmdKey::Vcek) => 0,
+        (Milan, AmdKey::Vlek) => 1,
+        (Genoa, AmdKey::Vcek) => 2,
+        (Genoa, AmdKey::Vlek) => 3,
+        (Turin, AmdKey::Vcek) => 4,
+        (Turin, AmdKey::Vlek) => 5,
     };
-    ISSUERS[row + usize::from(vlek)]
+    ISSUERS[slot]
         .get_or_init(|| {
             let ark = signatures::parse_cert(super::certs::get_ark(gen))?;
-            let issuer = signatures::parse_cert(if vlek {
-                super::certs::get_asvk(gen)
-            } else {
-                super::certs::get_ask(gen)
-            })?;
+            let issuer = signatures::parse_cert(issuer_der(gen, key))?;
             signatures::verify_cert_signature(&ark, &ark)?;
             signatures::verify_cert_signature(&ark, &issuer)?;
             Ok(issuer)
@@ -581,14 +589,13 @@ fn bundled_issuer(gen: ProcessorGeneration, vlek: bool) -> Result<&'static x509_
         .map_err(|e| AttestationError::CertChainError(format!("bundled AMD chain: {e}")))
 }
 
-/// The bundled AMD intermediate that issues `vek_der`: the ASVK for a VLEK
-/// (ARK → ASVK → VLEK), the ASK for a VCEK (ARK → ASK → VCEK).
-fn vek_issuer(vek_der: &[u8], processor_gen: ProcessorGeneration) -> Result<&'static [u8]> {
-    Ok(if is_vlek_cert(vek_der)? {
-        super::certs::get_asvk(processor_gen)
-    } else {
-        super::certs::get_ask(processor_gen)
-    })
+/// The bundled AMD intermediate that issues VEKs of kind `key`: the ASVK for
+/// a VLEK (ARK → ASVK → VLEK), the ASK for a VCEK (ARK → ASK → VCEK).
+fn issuer_der(gen: ProcessorGeneration, key: AmdKey) -> &'static [u8] {
+    match key {
+        AmdKey::Vcek => super::certs::get_ask(gen),
+        AmdKey::Vlek => super::certs::get_asvk(gen),
+    }
 }
 
 /// Check if a VEK certificate is a VLEK (versioned loaded endorsement key)
@@ -880,19 +887,6 @@ pub fn parse_report(report_bytes: &[u8]) -> Result<AttestationReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_bundled_ark_signs_itself_and_its_ask_and_asvk() {
-        for gen in [
-            ProcessorGeneration::Milan,
-            ProcessorGeneration::Genoa,
-            ProcessorGeneration::Turin,
-        ] {
-            for vlek in [false, true] {
-                bundled_issuer(gen, vlek).unwrap_or_else(|e| panic!("{gen:?} vlek={vlek}: {e}"));
-            }
-        }
-    }
     use crate::testing;
     use der::Decode;
 
@@ -1209,24 +1203,15 @@ mod tests {
     }
 
     #[test]
-    fn test_asvk_chain_validates() {
-        // ARK → ASVK chain should verify for all generations
-        // (We can't do full chain verify without a real VLEK cert, but we can
-        // verify the ARK → ASVK link)
+    fn every_bundled_ark_signs_itself_and_its_ask_and_asvk() {
         for gen in [
             ProcessorGeneration::Milan,
             ProcessorGeneration::Genoa,
             ProcessorGeneration::Turin,
         ] {
-            let ark_der = super::super::certs::get_ark(gen);
-            let asvk_der = super::super::certs::get_asvk(gen);
-            let ark = signatures::parse_cert(ark_der)
-                .unwrap_or_else(|e| panic!("{gen:?} ARK parse: {e}"));
-            let asvk = signatures::parse_cert(asvk_der)
-                .unwrap_or_else(|e| panic!("{gen:?} ASVK parse: {e}"));
-            // ARK should verify ASVK
-            signatures::verify_cert_signature(&ark, &asvk)
-                .unwrap_or_else(|e| panic!("{gen:?} ARK->ASVK verify failed: {e}"));
+            for key in [AmdKey::Vcek, AmdKey::Vlek] {
+                bundled_issuer(gen, key).unwrap_or_else(|e| panic!("{gen:?} {key:?}: {e}"));
+            }
         }
     }
 

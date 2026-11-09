@@ -131,11 +131,10 @@ fn scalar_be(le: &[u8; SIG_COMPONENT_LEN]) -> Result<p384::FieldBytes, String> {
     if le[P384_SCALAR_LEN..].iter().any(|&b| b != 0) {
         return Err("non-zero bytes beyond the P-384 scalar".into());
     }
-    let mut be = [0u8; P384_SCALAR_LEN];
-    for (out, b) in be.iter_mut().zip(le[..P384_SCALAR_LEN].iter().rev()) {
-        *out = *b;
-    }
-    Ok(be.into())
+    let mut be = p384::FieldBytes::default();
+    be.copy_from_slice(&le[..P384_SCALAR_LEN]);
+    be.reverse();
+    Ok(be)
 }
 
 #[cfg(test)]

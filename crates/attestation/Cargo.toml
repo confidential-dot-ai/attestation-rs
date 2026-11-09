@@ -63,10 +63,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # Verification only (see the workspace Cargo.toml on default features).
 p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 p384 = { workspace = true, features = ["ecdsa", "pkcs8"] }
-# RUSTSEC-2023-0071: rsa 0.9 has a timing side-channel in RSA PKCS#1 v1.5
-# *decryption* (Marvin Attack). This library uses rsa only for RSA-PSS signature
-# *verification* (no private key on the verifier side), so the direct attack
-# path does not apply. Accepted until a fixed version is available upstream.
+# RUSTSEC-2023-0071 is ignored in .cargo/audit.toml, which says why.
 rsa = { version = "0.9", features = ["sha2"] }
 x509-cert = "0.2"
 x509-parser = { version = "0.16", optional = true }

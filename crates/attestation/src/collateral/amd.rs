@@ -67,7 +67,7 @@ impl Collateral for Vcek {
         if generation == ProcessorGeneration::Turin && tcb.fmc.is_none() {
             return Err(refused("a Turin VCEK is named by its FMC SPL"));
         }
-        verify_bundled_chain(generation, false, der)?;
+        verify_bundled_chain(generation, AmdKey::Vcek, der)?;
         check_vek_binding(der, chip_id, tcb, generation)?;
         let (rest, cert) =
             X509Certificate::from_der(der).map_err(|e| refused(format!("VCEK: {e}")))?;
