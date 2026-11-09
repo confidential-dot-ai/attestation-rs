@@ -1,0 +1,24 @@
+{
+  "id": "tdx-debug-attribute-refused",
+  "rule": {
+    "section": "11",
+    "statement": "step 4: TD debug bit clear unless policy allows"
+  },
+  "now": "2026-03-17T00:00:00Z",
+  "evidence": "evidence/tdx-debug-attribute-refused.json",
+  "collateral": {
+    "tdx_pck_crl/platform": "collateral/pck_crl_platform.der",
+    "tdx_qe_identity/td": {
+      "body": "collateral/td_qe_identity.json",
+      "signing_chain": "collateral/qe_identity_signing_chain.pem"
+    },
+    "tdx_root_crl": "collateral/root_ca_crl.der",
+    "tdx_tcb_info/50806f000000": {
+      "body": "collateral/tcb_info_50806f000000.json",
+      "signing_chain": "collateral/tcb_signing_chain.pem"
+    }
+  },
+  "expect": {
+    "refusal": "guest-policy"
+  }
+}
