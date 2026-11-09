@@ -1,0 +1,7 @@
+# Collapsed in diffs: the recorded evidence, policies, collateral and expected
+# appraisals of the conformance corpus; the JSON Schemas, generated from the
+# reference implementation's types; and the standalone CDDL module, which is
+# the same bytes as Appendix C of the standard.
+conformance/inputs/** linguist-generated=true
+schemas/*.json linguist-generated=true
+schemas/cvm-profile-v1.cddl linguist-generated=true
