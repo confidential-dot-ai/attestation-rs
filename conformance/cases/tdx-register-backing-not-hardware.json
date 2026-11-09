@@ -1,0 +1,13 @@
+{
+  "id": "tdx-register-backing-not-hardware",
+  "rule": {
+    "section": "6.4",
+    "statement": "backing is constrained by source: hardware for tdx-rtmr"
+  },
+  "now": "2026-09-22T00:00:00Z",
+  "evidence": "evidence/tdx-register-backing-not-hardware.json",
+  "policy": "policy/tdx-register-backing-not-hardware.json",
+  "expect": {
+    "refusal": "envelope-invalid"
+  }
+}
