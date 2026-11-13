@@ -24,8 +24,27 @@ access-control recommendation. The service speaks plain HTTP only and refuses
 address only the terminator reaches: loopback for a sidecar (the example
 config does this), a private address for an ingress. The container image runs
 with no config and so binds `0.0.0.0:8400`; run it only behind a terminator on
-a private network. The service logs a warning at startup when the bind address
-is not loopback. Set `auth.api_keys` before exposing the service.
+a private network. The service logs a warning at startup when it binds a
+non-loopback TCP address. Set `auth.api_keys` before exposing the service.
+
+To serve on a Unix socket instead, set `bind = "unix:///run/attestation-api/api.sock"`
+(an absolute path). `socket_mode` sets the socket's mode (default `"0660"`;
+modes granting access to other users, or without owner write, are refused) and
+`socket_group` chgrps it to a group name or gid, so filesystem permissions
+decide who can connect. Unset, the socket keeps the group the filesystem
+assigns: the process group, or the parent's under a setgid directory, so set
+it explicitly in shared directories. Group names resolve against `/etc/group`
+only, not NSS; give a numeric gid for groups from LDAP or sssd. The socket is bound in a private 0700 directory
+`.sock-<12 hex>` next to the target, given its mode and group there, then
+renamed into place, so it is never connectable with looser permissions. The
+process therefore needs write access to the parent directory, which must exist,
+and the staging path must fit the platform's socket path limit (107 bytes on
+Linux, 103 on macOS and the BSDs). A process killed
+mid-bind can leave that directory behind; it is safe to delete. A socket at
+the path that refuses connections is replaced; a live one, one the process
+cannot connect to, or anything else there is a startup error. That check is
+not atomic with the replacement, so run one instance per path. Shutdown
+removes the socket file.
 
 All endpoints except `/health` require `Authorization: Bearer TOKEN` when
 keys are configured. An empty list allows unauthenticated access and logs a

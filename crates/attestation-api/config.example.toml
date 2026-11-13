@@ -3,6 +3,14 @@
 # front of the service: loopback for a sidecar, or an address only the
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
+# Or serve on a Unix socket at an absolute path. The parent directory must
+# exist. A socket at the path that refuses connections is replaced; a live or
+# unreachable one, or any other file there, is a startup error. The socket
+# file is removed on shutdown.
+# bind = "unix:///run/attestation-api/api.sock"
+# socket_mode = "0660"            # Unix binds only; "other" access or missing owner write is refused
+# socket_group = "nonroot"        # Unix binds only; gid, or a name from /etc/group (not NSS). Unset keeps the
+#                                 # group the filesystem assigns (the parent's under setgid), so set it in shared dirs
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.
