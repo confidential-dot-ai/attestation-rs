@@ -134,41 +134,32 @@ pub async fn serve(
     max_connections: usize,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
-    let open = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
-    tokio::select! {
-        _ = accept(listener, router, open.clone()) => {}
-        _ = shutdown => {}
-    }
-    let all = open.acquire_many(max_connections as u32);
-    let _ = tokio::time::timeout(Duration::from_secs(5), all).await;
-}
-
-async fn accept(
-    listener: TcpListener,
-    router: Router,
-    open: std::sync::Arc<tokio::sync::Semaphore>,
-) {
     use hyper_util::rt::{TokioIo, TokioTimer};
+    let open = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    tokio::pin!(shutdown);
     loop {
-        let connection = open.clone().acquire_owned().await.expect("never closed");
-        let (io, _) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(e) => {
-                tracing::warn!(%e, "accept");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
+        let next = async { (open.clone().acquire_owned().await, listener.accept().await) };
+        let next = tokio::select! {
+            next = next => next,
+            _ = &mut shutdown => break,
+        };
+        let (permit, Ok((io, _))) = next else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
         };
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        let connection = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_TIMEOUT)
+            .serve_connection(TokioIo::new(io), service);
+        let connection = graceful.watch(connection);
         tokio::spawn(async move {
-            let _connection = connection;
-            let _ = hyper::server::conn::http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(HEADER_TIMEOUT)
-                .serve_connection(TokioIo::new(io), service)
-                .await;
+            let _permit = permit;
+            let _ = connection.await;
         });
     }
+    let _ = tokio::time::timeout(Duration::from_secs(5), graceful.shutdown()).await;
 }
 
 async fn shutdown_signal() {
