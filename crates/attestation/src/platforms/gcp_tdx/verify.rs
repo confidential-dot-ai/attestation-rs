@@ -90,7 +90,7 @@ impl Platform for GcpTdx {
         store: &Store,
         now: i64,
     ) -> Result<(GcpTdxCollateralSet, Vec<CollateralUsed>)> {
-        let (quote_bytes, quote, _) = genuine_quote(evidence, now)?;
+        let (quote_bytes, quote) = genuine_quote(evidence, now)?;
         let mrtd = (Self::KIND, quote.body.mr_td.to_vec());
         let (tdx, endorsement) = futures_util::join!(
             TdxCollateralSet::gather(&quote_bytes, &quote, store, now),

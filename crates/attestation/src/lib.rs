@@ -703,22 +703,12 @@ mod tests {
 
     #[tokio::test]
     async fn warm_a_changed_byte_or_another_time_still_fails() {
-        use platforms::tdx::verify::{genuine_quote, verify_quote};
         let now = crate::testing::NOW;
         let verifier = Verifier::new(crate::testing::warm_tdx(now).await);
         let all = Policies::all();
-        assert!(verifier
-            .verify_offline(&tdx_envelope(), &all)
-            .await
-            .unwrap()
-            .passed());
-        let evidence = serde_json::from_slice::<AttestationEvidence>(&tdx_envelope()).unwrap();
-        let evidence = serde_json::from_value(evidence.evidence).unwrap();
-        let (_, _, genuine) = genuine_quote(&evidence, now).unwrap();
-        let params = TdxParams::default();
-        assert!(verify_quote(V5_QUOTE, &params, now, Some(&genuine)).is_ok());
+        let verified = verifier.verify_offline(&envelope(V5_QUOTE), &all).await;
+        assert!(verified.unwrap().passed());
         for quote in tampered_quotes() {
-            assert!(verify_quote(&quote, &params, now, Some(&genuine)).is_err());
             assert!(verifier
                 .verify_offline(&envelope(&quote), &all)
                 .await
@@ -726,7 +716,6 @@ mod tests {
         }
         // After the PCK leaf's notAfter, and before its notBefore.
         for at in [4_102_444_800, 1_000_000_000] {
-            assert!(verify_quote(V5_QUOTE, &params, at, Some(&genuine)).is_err());
             let other_time = Verifier::new(crate::testing::warm_tdx(at).await);
             assert!(other_time
                 .verify_offline(&tdx_envelope(), &all)
