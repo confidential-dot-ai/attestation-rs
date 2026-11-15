@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::Json;
 use std::sync::Arc;
 
-use attestation::Attempt;
+use attestation::{Attempt, Fetched};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,9 +13,19 @@ use crate::pool::Refused;
 use crate::token::issuer::{PassedVerification, TokenIssuer};
 use crate::AppState;
 
-/// Rounds of collateral fetches one verification may need: each round
-/// fetches what the previous attempt found missing.
-const MAX_FETCHES: usize = 8;
+/// Rounds of vendor requests one verification may need: each round asks
+/// what the previous attempt found missing. Cold TDX or SNP with a GPU
+/// bundle needs three (platform collateral, NRAS, NRAS key set).
+const MAX_FETCHES: usize = 3;
+
+/// Collateral unavailable for this request, retryable at once.
+fn unavailable(detail: &str) -> ApiError {
+    ApiError::Verification(attestation::AttestationError::CollateralUnavailable {
+        collateral: "collateral".to_string(),
+        retry_after: Some(1),
+        detail: detail.to_string(),
+    })
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,29 +130,36 @@ pub async fn handler(
 
     // Verification is CPU-bound: the pool runs it, with the token signing,
     // off the async workers, and refuses at once what it cannot start soon.
-    // The pool never waits on a vendor: collateral that is not in memory
-    // yet is fetched here, on the async workers, and the verification is
-    // queued again.
+    // The pool never waits on a vendor: what a verification must ask a
+    // vendor first (collateral, NRAS) is asked here, on the async workers,
+    // within `fetch_deadline_ms` for the request, and the verification is
+    // queued again with the answers. Each vendor request is made once per
+    // request, so the rounds end; MAX_FETCHES bounds them anyway.
     let evidence: Arc<[u8]> = evidence_json.into();
     let policies = Arc::new(req.policies);
     let issuer = req.issue_token.then(|| state.token_issuer.clone());
+    let fetch_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(state.config.server.fetch_deadline_ms);
+    let mut fetched = Fetched::default();
     let mut fetches = 0;
     let (result, token) = loop {
         let job = {
-            let (verifier, evidence, policies, issuer) = (
+            let (verifier, evidence, policies, issuer, fetched) = (
                 state.verifier.clone(),
                 evidence.clone(),
                 policies.clone(),
                 issuer.clone(),
+                fetched.clone(),
             );
             async move {
-                match verifier.verify_cached(&evidence, &policies).await {
+                match verifier.verify_cached(&evidence, &policies, &fetched).await {
                     Attempt::Done(result) => with_token(result?, issuer, &policies).map(Ok),
                     Attempt::Fetch(fetch) => Ok(Err(fetch)),
                 }
             }
         };
-        // A verification back from a fetch was admitted already.
+        // A verification back from a fetch was admitted already; it is
+        // refused only when the queue is far past the admission limit.
         let attempt = if fetches == 0 {
             state.verify_pool.run(job).await
         } else {
@@ -152,14 +169,19 @@ pub async fn handler(
             Refused::Full | Refused::Expired => ApiError::Overloaded,
             Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
         })??;
-        match attempt {
+        let fetch = match attempt {
             Ok(done) => break done,
-            Err(_) if fetches == MAX_FETCHES => return Err(ApiError::Overloaded),
-            Err(fetch) => match fetch.run().await {
-                None => fetches += 1,
-                Some(result) => break with_token(result?, issuer, &policies)?,
-            },
+            Err(fetch) => fetch,
+        };
+        if fetches == MAX_FETCHES {
+            return Err(unavailable(
+                "more vendor requests than one verification makes",
+            ));
         }
+        tokio::time::timeout_at(fetch_deadline, fetch.run(&mut fetched))
+            .await
+            .map_err(|_| unavailable("the vendors did not answer in time"))?;
+        fetches += 1;
     };
     let passed = result.passed();
 

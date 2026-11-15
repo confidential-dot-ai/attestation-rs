@@ -1541,3 +1541,17 @@ async fn forged_snp_reports_waiting_on_the_vendor_do_not_hold_verification_threa
         f.abort();
     }
 }
+
+/// Vendor requests for one request are bounded by `fetch_deadline_ms`:
+/// past it the answer is a retryable 502, not a hang and not 503.
+#[tokio::test]
+async fn a_request_waiting_on_a_silent_vendor_gets_502_at_the_fetch_deadline() {
+    let (base, _) = silent_vendor().await;
+    let mut state = test_state_with(|c| c.server.fetch_deadline_ms = 300);
+    state.verifier = online_state(&base).verifier;
+    let started = std::time::Instant::now();
+    let (status, json) = post_verify(state, snp_body(false)).await;
+    assert!(started.elapsed() < SOON, "{:?}", started.elapsed());
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["error"], "collateral_unavailable");
+}

@@ -65,10 +65,13 @@ pub struct ServerConfig {
     /// it take at most this long; past that it is refused at once with 503
     /// and `Retry-After`.
     pub max_queue_wait_ms: u64,
-    /// A verification the threads have not answered within this long is
-    /// dropped (unstarted if still queued) and the request gets 503.
-    /// Collateral fetches happen outside the threads and are not counted.
+    /// A verification that has not reached a thread within this long is
+    /// dropped unstarted, and the request gets 503.
     pub queue_deadline_ms: u64,
+    /// Vendor requests (collateral, NRAS) one `/verify` request may wait for
+    /// in all; past that it gets 502 `collateral_unavailable` with
+    /// `Retry-After`. They are made outside the verification threads.
+    pub fetch_deadline_ms: u64,
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -150,6 +153,7 @@ impl Default for ServerConfig {
             io_threads: 0,
             max_queue_wait_ms: 30,
             queue_deadline_ms: 200,
+            fetch_deadline_ms: 10_000,
         }
     }
 }
@@ -243,10 +247,13 @@ impl Config {
                 .to_string());
         }
 
-        if self.server.max_queue_wait_ms == 0 || self.server.queue_deadline_ms == 0 {
-            return Err(
-                "server.max_queue_wait_ms and server.queue_deadline_ms must be > 0".to_string(),
-            );
+        if self.server.max_queue_wait_ms == 0
+            || self.server.queue_deadline_ms == 0
+            || self.server.fetch_deadline_ms == 0
+        {
+            return Err("server.max_queue_wait_ms, server.queue_deadline_ms and \
+                 server.fetch_deadline_ms must be > 0"
+                .to_string());
         }
 
         // Validate token duration when token is enabled

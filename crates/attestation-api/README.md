@@ -114,7 +114,7 @@ where `<platform>` is the token's platform claim.
 | 422 `platform_not_allowed` | No policy for the evidence platform |
 | 422 `verification_failed` | Evidence/collateral cannot be verified |
 | 502 `collateral_unavailable` | Missing collateral could not be fetched; bounded retry may help |
-| 503 `overloaded` | The verification queue is full (`server.max_queue_wait_ms`, `server.queue_deadline_ms`); retry after `Retry-After` |
+| 503 `overloaded` | The verification queue is full (`server.max_queue_wait_ms`) or no thread took the request in time (`server.queue_deadline_ms`); retry after `Retry-After` |
 
 Honor `Retry-After` on collateral failures and overload when provided. Match error keys, not
 message text. A request for tokens without token configuration also fails;

@@ -21,8 +21,7 @@ use tokio::sync::oneshot;
 pub enum Refused {
     /// The queue holds more work than the threads start within `max_wait`.
     Full,
-    /// No answer within the deadline; the job is dropped (unstarted, or at
-    /// its next await).
+    /// No thread took the job within the deadline; it never starts.
     Expired,
     /// The job panicked.
     Panicked,
@@ -35,7 +34,7 @@ pub struct Stats {
     pub done: u64,
     /// Refused at admission.
     pub full: u64,
-    /// Not answered within the deadline.
+    /// Not started within the deadline.
     pub expired: u64,
     /// Dropped because the caller went away.
     pub gone: u64,
@@ -72,6 +71,10 @@ struct Shared {
 #[cfg(target_os = "linux")]
 const VERIFY_NICE: i32 = 10;
 
+/// A job already admitted once is refused only past this many times
+/// `max_wait` of work queued.
+const RERUN_SLACK: u32 = 4;
+
 /// The CPU time assumed for a job until one has run.
 const FIRST_COST: Duration = Duration::from_millis(5);
 
@@ -99,7 +102,7 @@ fn nanos(d: Duration) -> u64 {
 impl Pool {
     /// `threads` threads; a job is admitted while the queue ahead of it
     /// takes them at most `max_wait`, and its caller gets
-    /// [`Refused::Expired`] when it has no answer within `deadline`.
+    /// [`Refused::Expired`] when no thread took it within `deadline`.
     pub fn new(threads: usize, max_wait: Duration, deadline: Duration) -> Self {
         let threads = threads.max(1);
         // Admission keeps the queue near max_wait of work; this bounds it
@@ -155,8 +158,8 @@ impl Pool {
     }
 
     /// As [`Self::run`], for the next step of work already admitted (a
-    /// verification that had to fetch collateral first): it is not refused
-    /// for the queue ahead of it, only when the queue is at its bound.
+    /// verification that had to ask a vendor first): it is refused only when
+    /// the queue holds [`RERUN_SLACK`] times `max_wait` of work.
     pub async fn rerun<T, F>(&self, job: F) -> Result<T, Refused>
     where
         F: Future<Output = T> + Send + 'static,
@@ -173,17 +176,23 @@ impl Pool {
         let s = &self.shared;
         let ahead = s.queued.fetch_add(1, Relaxed);
         // With fewer jobs queued than threads, one is idle or nearly so.
-        if admit && ahead >= s.threads {
+        if ahead >= s.threads {
             let cost = Duration::from_nanos(s.cost_ns.load(Relaxed));
             let wait = cost.saturating_mul(u32::try_from(ahead + 1).unwrap_or(u32::MAX))
                 / u32::try_from(s.threads).unwrap_or(u32::MAX);
-            if wait > s.max_wait {
+            let limit = if admit {
+                s.max_wait
+            } else {
+                s.max_wait * RERUN_SLACK
+            };
+            if wait > limit {
                 s.queued.fetch_sub(1, Relaxed);
                 s.full.fetch_add(1, Relaxed);
                 return Err(Refused::Full);
             }
         }
-        let (mut tx, rx) = oneshot::channel();
+        let (mut tx, mut rx) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel::<()>();
         let shared = s.clone();
         let runtime = tokio::runtime::Handle::current();
         let queued_at = Instant::now();
@@ -192,7 +201,7 @@ impl Pool {
             s.queued.fetch_sub(1, Relaxed);
             let waited = queued_at.elapsed();
             s.wait_ns.fetch_add(nanos(waited), Relaxed);
-            if tx.is_closed() {
+            if tx.is_closed() || started_tx.send(()).is_err() {
                 // A caller past the deadline was counted as expired.
                 if waited < s.deadline {
                     s.gone.fetch_add(1, Relaxed);
@@ -231,15 +240,19 @@ impl Pool {
             s.full.fetch_add(1, Relaxed);
             return Err(Refused::Full);
         }
-        // Dropping `rx` at the deadline closes `tx`: the job never starts,
-        // or stops at its next await.
-        match tokio::time::timeout(s.deadline, rx).await {
-            Ok(out) => out.unwrap_or(Err(Refused::Panicked)),
-            Err(_) => {
-                s.expired.fetch_add(1, Relaxed);
-                Err(Refused::Expired)
+        // The deadline is for reaching a thread. Returning drops the
+        // receivers: a job not started yet never starts.
+        tokio::select! {
+            biased;
+            out = &mut rx => return out.unwrap_or(Err(Refused::Panicked)),
+            started = tokio::time::timeout(s.deadline, started_rx) => {
+                if !matches!(started, Ok(Ok(()))) {
+                    s.expired.fetch_add(1, Relaxed);
+                    return Err(Refused::Expired);
+                }
             }
         }
+        rx.await.unwrap_or(Err(Refused::Panicked))
     }
 
     pub fn stats(&self) -> Stats {
