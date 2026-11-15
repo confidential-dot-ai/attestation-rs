@@ -3,6 +3,9 @@
 # front of the service: loopback for a sidecar, or an address only the
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
+# /verify requests handled at once; more get 503 with Retry-After: 1.
+# Default: 32 per CPU.
+# max_concurrent_verifications = 128
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.

@@ -110,7 +110,20 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    let result = state.verifier.verify(&evidence_json, &req.policies).await?;
+    // Past the limit, refuse at once rather than queue until clients time
+    // out. Verification is CPU-bound: run it off the async workers, so that
+    // they keep accepting and reading requests.
+    let Ok(_slot) = state.verifications.clone().try_acquire_owned() else {
+        return Err(ApiError::Overloaded);
+    };
+    let verifier = state.verifier.clone();
+    let policies = req.policies.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let result = tokio::task::spawn_blocking(move || {
+        runtime.block_on(verifier.verify(&evidence_json, &policies))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("verification task: {e}")))??;
     let passed = PassedVerification::new(&result);
 
     let token = match &passed {

@@ -90,11 +90,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let _ = attestation::detect();
 
-    let state = AppState {
-        config,
-        token_issuer,
-        verifier,
-    };
+    let state = AppState::new(config, token_issuer, verifier);
 
     attestation_api::server::run(state).await
 }

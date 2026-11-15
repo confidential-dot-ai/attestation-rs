@@ -18,11 +18,11 @@ fn test_state() -> AppState {
 fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
-    AppState {
-        config: Arc::new(config),
-        token_issuer: None,
-        verifier: Arc::new(attestation::Verifier::new(attestation::Context::new())),
-    }
+    AppState::new(
+        Arc::new(config),
+        None,
+        Arc::new(attestation::Verifier::new(attestation::Context::new())),
+    )
 }
 
 /// A verifier that holds Intel's collateral for the TDX fixtures and Google's
@@ -571,6 +571,65 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
         "evidence": evidence,
         "policies": { "snp": {} },
     })
+}
+
+/// Beyond `max_concurrent_verifications` at once, `/verify` answers 503
+/// with `Retry-After` at once; a slot is free again when a request ends.
+#[tokio::test]
+async fn verifications_beyond_the_limit_are_refused_at_once() {
+    // A vendor that takes the connection and never answers, so a
+    // verification that fetches its VCEK stays in progress.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (accepted, mut fetching) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+            let _ = accepted.send(());
+        }
+    });
+    let mut state = test_state_with(|c| c.server.max_concurrent_verifications = 1);
+    state.verifier = online_state(&base).verifier;
+    let app = build_api_router(state);
+    let send = |app: axum::Router| {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&snp_body(false)).unwrap()))
+                .unwrap(),
+        )
+    };
+    let wait = std::time::Duration::from_millis(300);
+
+    let first = tokio::spawn(send(app.clone()));
+    fetching
+        .recv()
+        .await
+        .expect("the first verification fetches");
+    let resp = tokio::time::timeout(wait, send(app.clone()))
+        .await
+        .expect("refused at once")
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()["retry-after"], "1");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "overloaded");
+
+    // The slot is free once the first request is gone: the next one is
+    // admitted and waits on the vendor like the first.
+    first.abort();
+    let _ = first.await;
+    assert!(tokio::time::timeout(wait, send(app.clone())).await.is_err());
+    fetching
+        .recv()
+        .await
+        .expect("the next verification fetches");
 }
 
 /// The kernel guest's full measurement-register log (4096 events) through

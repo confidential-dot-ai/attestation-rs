@@ -114,8 +114,9 @@ where `<platform>` is the token's platform claim.
 | 422 `platform_not_allowed` | No policy for the evidence platform |
 | 422 `verification_failed` | Evidence/collateral cannot be verified |
 | 502 `collateral_unavailable` | Missing collateral could not be fetched; bounded retry may help |
+| 503 `overloaded` | `server.max_concurrent_verifications` reached; retry after `Retry-After` |
 
-Honor `Retry-After` on collateral failures when provided. Match error keys, not
+Honor `Retry-After` on collateral failures and overload when provided. Match error keys, not
 message text. A request for tokens without token configuration also fails;
 turn on token configuration before requesting them.
 

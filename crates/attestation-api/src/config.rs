@@ -56,6 +56,10 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
+    /// `/verify` requests handled at once; more are refused at once with
+    /// 503 and `Retry-After`, rather than queued until they time out.
+    /// Default: 32 per CPU.
+    pub max_concurrent_verifications: usize,
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -133,6 +137,8 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
+            max_concurrent_verifications: 32
+                * std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         }
     }
 }
@@ -204,6 +210,10 @@ impl Config {
                  Evidence endpoints must not be routable: terminate TLS in front of the service and \
                  bind to an address only the terminator reaches (loopback for a sidecar)"
                 .to_string());
+        }
+
+        if self.server.max_concurrent_verifications == 0 {
+            return Err("server.max_concurrent_verifications must be > 0".to_string());
         }
 
         // Validate token duration when token is enabled
