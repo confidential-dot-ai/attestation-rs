@@ -151,10 +151,29 @@ impl Pool {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        self.queue(job, true).await
+    }
+
+    /// As [`Self::run`], for the next step of work already admitted (a
+    /// verification that had to fetch collateral first): it is not refused
+    /// for the queue ahead of it, only when the queue is at its bound.
+    pub async fn rerun<T, F>(&self, job: F) -> Result<T, Refused>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.queue(job, false).await
+    }
+
+    async fn queue<T, F>(&self, job: F, admit: bool) -> Result<T, Refused>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
         let s = &self.shared;
         let ahead = s.queued.fetch_add(1, Relaxed);
         // With fewer jobs queued than threads, one is idle or nearly so.
-        if ahead >= s.threads {
+        if admit && ahead >= s.threads {
             let cost = Duration::from_nanos(s.cost_ns.load(Relaxed));
             let wait = cost.saturating_mul(u32::try_from(ahead + 1).unwrap_or(u32::MAX))
                 / u32::try_from(s.threads).unwrap_or(u32::MAX);

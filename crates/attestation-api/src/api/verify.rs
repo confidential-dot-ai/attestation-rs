@@ -142,14 +142,16 @@ pub async fn handler(
                 }
             }
         };
-        let attempt = state
-            .verify_pool
-            .run(job)
-            .await
-            .map_err(|refused| match refused {
-                Refused::Full | Refused::Expired => ApiError::Overloaded,
-                Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
-            })??;
+        // A verification back from a fetch was admitted already.
+        let attempt = if fetches == 0 {
+            state.verify_pool.run(job).await
+        } else {
+            state.verify_pool.rerun(job).await
+        }
+        .map_err(|refused| match refused {
+            Refused::Full | Refused::Expired => ApiError::Overloaded,
+            Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
+        })??;
         match attempt {
             Ok(done) => break done,
             Err(_) if fetches == MAX_FETCHES => return Err(ApiError::Overloaded),
