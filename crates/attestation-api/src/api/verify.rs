@@ -16,8 +16,8 @@ use crate::AppState;
 /// Rounds of vendor requests one verification may need: each round asks
 /// what the previous attempt found missing. The most any platform needs
 /// today is three, for cold TDX or SNP evidence with a GPU bundle: the
-/// platform collateral (fetched together, e.g. VCEK and CRL), then NRAS,
-/// then NRAS's key set. A step that needs a fourth round would get a
+/// platform collateral (fetched together, e.g. VCEK and CRL), then NRAS
+/// (every arch group of the bundle at once), then NRAS's key set. A step that needs a fourth round would get a
 /// retryable 502 on its first, cold call; the test
 /// `a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds`
 /// pins the count.

@@ -3,7 +3,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -94,13 +93,21 @@ fn tdx_body() -> serde_json::Value {
 
 /// The genuine TDX quote with a GPU bundle no NRAS answer is attached for.
 fn tdx_gpu_body(uuid: &str) -> serde_json::Value {
+    tdx_bundle_body(&[(attestation::NvidiaGpuArch::Hopper, uuid)])
+}
+
+/// As [`tdx_gpu_body`], with these devices.
+fn tdx_bundle_body(devices: &[(attestation::NvidiaGpuArch, &str)]) -> serde_json::Value {
     let bundle = attestation::NvidiaGpuEvidenceBundle {
-        devices: vec![attestation::NvidiaGpuDeviceEvidence {
-            arch: attestation::NvidiaGpuArch::Hopper,
-            uuid: uuid.into(),
-            evidence_b64: BASE64.encode(uuid),
-            cert_chain_b64: String::new(),
-        }],
+        devices: devices
+            .iter()
+            .map(|&(arch, uuid)| attestation::NvidiaGpuDeviceEvidence {
+                arch,
+                uuid: uuid.into(),
+                evidence_b64: BASE64.encode(uuid),
+                cert_chain_b64: String::new(),
+            })
+            .collect(),
         binding: Default::default(),
     };
     serde_json::json!({
@@ -398,10 +405,23 @@ async fn rereview_one_admitted_request_runs_at_most_twice_on_the_pool() {
 }
 
 /// A cold verification of TDX evidence with a GPU bundle needs the most
-/// vendor rounds of any platform: the platform collateral, then NRAS, then
-/// NRAS's key set. It ends within MAX_FETCHES with the library's answer.
+/// vendor rounds of any platform: the platform collateral, then NRAS (every
+/// arch group at once), then NRAS's key set. It ends within MAX_FETCHES with
+/// the library's answer.
 #[tokio::test]
 async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds() {
+    cold_tdx_rounds(&[(attestation::NvidiaGpuArch::Hopper, "GPU-0")]).await;
+}
+
+/// GPUs and NVSwitches go to two NRAS endpoints with two nonces: both are
+/// asked in the same round.
+#[tokio::test]
+async fn a_cold_tdx_verification_with_gpus_and_switches_ends_within_the_fetch_rounds() {
+    use attestation::NvidiaGpuArch::{Hopper, Ls10};
+    cold_tdx_rounds(&[(Hopper, "GPU-0"), (Ls10, "SWITCH-0")]).await;
+}
+
+async fn cold_tdx_rounds(devices: &[(attestation::NvidiaGpuArch, &str)]) {
     use attestation::collateral::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let file = |f: &str| std::fs::read(format!("{DIR}{f}")).unwrap();
@@ -457,6 +477,12 @@ async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds(
             "/v3/attest/gpu".into(),
             "X-None",
             String::new(),
+            eat.clone().into_bytes(),
+        ),
+        (
+            "/v3/attest/switch".into(),
+            "X-None",
+            String::new(),
             eat.into_bytes(),
         ),
         (
@@ -499,15 +525,16 @@ async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds(
         }
     });
     let nras = format!("{base}/v3/attest/gpu");
+    let switch = format!("{base}/v3/attest/switch");
     let ctx = || {
         attestation::Context::new()
             .with_test_vendor(&base)
-            .with_nras_urls(nras.clone(), nras.clone())
+            .with_nras_urls(nras.clone(), switch.clone())
             .unwrap()
             .at(AT)
             .unwrap()
     };
-    let body = tdx_gpu_body("GPU-0");
+    let body = tdx_bundle_body(devices);
     let envelope = serde_json::json!({
         "platform": "tdx",
         "evidence": body["evidence"],
@@ -536,6 +563,3 @@ async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds(
     // Three rounds of vendor requests, then the verdict.
     assert_eq!(st.verify_pool.stats().done, 4);
 }
-
-#[allow(dead_code)]
-fn _unused(_: AtomicUsize, _: Ordering) {}

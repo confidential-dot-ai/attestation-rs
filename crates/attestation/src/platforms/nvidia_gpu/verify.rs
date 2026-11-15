@@ -19,8 +19,8 @@ pub struct GpuCollateralSet {
     pub jwks: NrasJwks,
 }
 
-/// Send each architecture group of the bundle to NRAS and get its signing
-/// keys, refetching them once if a token names a key they lack.
+/// Send each architecture group of the bundle to NRAS, all at once, and get
+/// its signing keys, refetching them once if a token names a key they lack.
 pub async fn gather_bundle(
     bundle: &NvidiaGpuEvidenceBundle,
     params: &NvidiaGpuParams,
@@ -29,9 +29,9 @@ pub async fn gather_bundle(
 ) -> Result<(GpuCollateralSet, CollateralUsed)> {
     let user_nonce = check_preconditions(bundle, params)?;
     let jwks_url = store.nras_jwks_url()?;
-    let mut nras = std::collections::BTreeMap::new();
-    for (arch, devices) in group_by_arch(bundle) {
-        let request = NrasRequest {
+    let requests: Vec<NrasRequest> = group_by_arch(bundle)
+        .into_iter()
+        .map(|(arch, devices)| NrasRequest {
             nonce: hex::encode(arch_nonce(arch, user_nonce, bundle)),
             evidence_list: devices
                 .iter()
@@ -42,8 +42,15 @@ pub async fn gather_bundle(
                 .collect(),
             arch,
             claims_version: "2.0".into(),
-        };
-        nras.insert(arch, nras_attest(store, &request, now).await?);
+        })
+        .collect();
+    // All groups at once: a cached-only view then puts off every NRAS
+    // request in one round, rather than one round per group.
+    let answers =
+        futures_util::future::join_all(requests.iter().map(|r| nras_attest(store, r, now))).await;
+    let mut nras = std::collections::BTreeMap::new();
+    for (request, answer) in requests.iter().zip(answers) {
+        nras.insert(request.arch, answer?);
     }
     let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
     let known = |jwks: &NrasJwks| {
