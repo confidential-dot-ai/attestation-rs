@@ -541,14 +541,23 @@ pub fn verify_vek_endorsement(
     processor_gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
-    verify_cert_chain(
-        super::certs::get_ark(processor_gen),
-        vek_issuer(vek_der, processor_gen)?,
-        vek_der,
-    )?;
+    // The bundled ARK -> ASK/ASVK links are fixed at build time (test
+    // `bundled_amd_roots_verify`); only the VEK's signature varies.
+    verify_issued_by(vek_issuer(vek_der, processor_gen)?, vek_der)?;
     verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
+}
+
+/// `cert_der` is signed (RSA-PSS) by `issuer_der`.
+fn verify_issued_by(issuer_der: &[u8], cert_der: &[u8]) -> Result<()> {
+    let parse = |der| {
+        Certificate::from_der(der)
+            .map_err(|e| AttestationError::CertChainError(format!("chain parse: {e}")))
+    };
+    (&parse(issuer_der)?, &parse(cert_der)?)
+        .verify()
+        .map_err(|e| AttestationError::CertChainError(format!("chain verify: {e}")))
 }
 
 /// The bundled AMD intermediate that issues `vek_der`: the ASVK for a VLEK
@@ -1171,6 +1180,27 @@ mod tests {
     }
 
     #[test]
+    fn bundled_amd_roots_verify() {
+        for gen in [
+            ProcessorGeneration::Milan,
+            ProcessorGeneration::Genoa,
+            ProcessorGeneration::Turin,
+        ] {
+            let ark = super::super::certs::get_ark(gen);
+            verify_issued_by(ark, ark).unwrap_or_else(|e| panic!("{gen:?} ARK: {e}"));
+            for issuer in [
+                super::super::certs::get_ask(gen),
+                super::super::certs::get_asvk(gen),
+            ] {
+                verify_issued_by(ark, issuer).unwrap_or_else(|e| panic!("{gen:?}: {e}"));
+            }
+        }
+        // A link the other way round fails.
+        let (ark, ask) = super::super::certs::get_bundled_certs(ProcessorGeneration::Genoa);
+        assert!(verify_issued_by(ask, ark).is_err());
+    }
+
+    #[test]
     fn test_asvk_chain_validates() {
         // ARK → ASVK chain should verify for all generations
         // (We can't do full chain verify without a real VLEK cert, but we can
@@ -1216,6 +1246,23 @@ mod tests {
             .await
             .expect_err("the CRL was needed and is held nowhere");
         assert!(err.is_retryable());
+    }
+
+    /// An inline VEK must be signed by the bundled ASK: one whose signature
+    /// is changed is refused, though it names the report's chip and key.
+    #[tokio::test]
+    async fn an_inline_vek_amd_did_not_sign_is_refused() {
+        let crl = || vec![testing::amd_crl(ProcessorGeneration::Genoa)];
+        let params = SnpParams::default();
+        let good = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        assert!(testing::verify::<Snp>(&good, &params, crl()).await.is_ok());
+        let mut vek = LIVE_VCEK_GENOA.to_vec();
+        *vek.last_mut().unwrap() ^= 1;
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, &vek);
+        let err = testing::verify::<Snp>(&evidence, &params, crl())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
     }
 
     /// `Snp::verify` skips the report check `Snp::gather` did only for that
