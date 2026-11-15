@@ -91,8 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = attestation::detect();
 
     // Safe only with the connection cap: server.max_connections < max_open_files.
-    #[cfg(unix)]
-    match attestation::utils::raise_open_files(config.server.max_open_files) {
+    match rlimit::increase_nofile_limit(config.server.max_open_files) {
         Ok(limit) => tracing::info!(limit, "open files limit"),
         Err(e) => tracing::warn!(%e, "could not raise the open files limit"),
     }

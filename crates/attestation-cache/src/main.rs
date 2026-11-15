@@ -28,8 +28,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
-    #[cfg(unix)]
-    if let Err(e) = attestation::utils::raise_open_files(MAX_OPEN_FILES) {
+    if let Err(e) = rlimit::increase_nofile_limit(MAX_OPEN_FILES) {
         tracing::warn!(%e, "could not raise the open files limit");
     }
     let path = cli

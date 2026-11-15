@@ -14,33 +14,6 @@ pub fn pad_report_data(data: &[u8], target_len: usize) -> crate::error::Result<V
     Ok(padded)
 }
 
-/// Raise the soft limit on open files to `ceiling`, at most the hard limit
-/// (and `OPEN_MAX` on macOS); never lower it. Returns the soft limit now.
-#[cfg(unix)]
-pub fn raise_open_files(ceiling: u64) -> std::io::Result<u64> {
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: getrlimit and setrlimit only read and write `limit`.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    #[allow(unused_mut)]
-    let mut wanted = limit.rlim_max.min(ceiling);
-    #[cfg(target_os = "macos")]
-    {
-        wanted = wanted.min(libc::OPEN_MAX as u64);
-    }
-    if wanted > limit.rlim_cur {
-        limit.rlim_cur = wanted;
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(limit.rlim_cur)
-}
-
 /// SHA-256 hash.
 pub fn sha256(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -338,23 +311,6 @@ pub(crate) mod b64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_open_files_limit_is_raised_to_the_ceiling_and_never_lowered() {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-            0
-        );
-        limit.rlim_cur = limit.rlim_max.min(512);
-        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-        assert_eq!(raise_open_files(0).unwrap(), limit.rlim_cur);
-        assert_eq!(raise_open_files(u64::MAX).unwrap(), limit.rlim_max);
-    }
 
     #[test]
     fn test_pad_report_data_exact() {
