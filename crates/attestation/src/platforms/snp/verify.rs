@@ -529,8 +529,9 @@ pub fn verify_vek_validity_period(vek_der: &[u8], now: i64) -> Result<()> {
 }
 
 /// Verify the full endorsement-key policy for an inline VEK against the
-/// bundled AMD roots: the ARK → ASK/ASVK → VEK chain (VLEK auto-detected from
-/// the certificate CN), the VEK validity period, and the VEK's chip-id/TCB OID
+/// bundled AMD roots: the ASK/ASVK → VEK link (VLEK auto-detected from the
+/// certificate CN; the bundled ARK → ASK/ASVK links are constants a test
+/// checks), the VEK validity period, and the VEK's chip-id/TCB OID
 /// cross-validation against the report. This is step 6 of
 /// [`Snp::verify`] as one unit, for callers that resolve the VEK
 /// themselves. Revocation is out of scope; use [`Snp`] for verification with

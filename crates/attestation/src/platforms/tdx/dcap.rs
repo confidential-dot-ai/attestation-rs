@@ -224,9 +224,11 @@ pub fn verify_qe_report_signature(
 ///
 /// Validates:
 ///   - Root CA public key matches hardcoded Intel trust anchor
-///   - Root CA self-signs correctly
+///   - Root CA self-signs correctly (not checked again for the bundled root
+///     certificate itself, whose self-signature a test checks)
 ///   - Intermediate is signed by Root CA
 ///   - Leaf is signed by Intermediate
+///   - every certificate is valid at `now`
 ///
 /// Returns the PCK leaf's ECDSA P-256 public key for QE report signature verification.
 pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> {
