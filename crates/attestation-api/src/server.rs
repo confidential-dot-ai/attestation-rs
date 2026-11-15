@@ -120,23 +120,35 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     tracing::info!(%addr, "starting attestation service");
 
     let listener = TcpListener::bind(addr).await?;
-    tokio::select! {
-        result = serve(listener, app, connections) => result?,
-        _ = shutdown_signal() => {}
-    }
+    serve(listener, app, connections, shutdown_signal()).await;
     Ok(())
 }
 
 /// Serve `router` on `listener`, at most `max_connections` at a time: the
 /// rest wait in the listen backlog. A client that is slow to send its
-/// headers is disconnected.
+/// headers is disconnected. After `shutdown`, open connections get a few
+/// seconds to finish.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
     max_connections: usize,
-) -> std::io::Result<()> {
-    use hyper_util::rt::{TokioIo, TokioTimer};
+    shutdown: impl std::future::Future<Output = ()>,
+) {
     let open = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
+    tokio::select! {
+        _ = accept(listener, router, open.clone()) => {}
+        _ = shutdown => {}
+    }
+    let all = open.acquire_many(max_connections as u32);
+    let _ = tokio::time::timeout(Duration::from_secs(5), all).await;
+}
+
+async fn accept(
+    listener: TcpListener,
+    router: Router,
+    open: std::sync::Arc<tokio::sync::Semaphore>,
+) {
+    use hyper_util::rt::{TokioIo, TokioTimer};
     loop {
         let connection = open.clone().acquire_owned().await.expect("never closed");
         let (io, _) = match listener.accept().await {

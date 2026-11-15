@@ -18,6 +18,7 @@ pub struct Admission {
     places: Arc<Semaphore>,
     queue_deadline: Duration,
     cold: Arc<Semaphore>,
+    cold_places: Arc<Semaphore>,
     fetch_deadline: Duration,
 }
 
@@ -28,7 +29,10 @@ impl Admission {
             workers: Arc::new(Semaphore::new(workers)),
             places: Arc::new(Semaphore::new(workers * (1 + config.queue_per_worker))),
             queue_deadline: Duration::from_millis(config.queue_deadline_ms),
-            cold: Arc::new(Semaphore::new(config.cold_workers)),
+            cold: Arc::new(Semaphore::new(config.cold_workers())),
+            cold_places: Arc::new(Semaphore::new(
+                config.cold_workers() * (1 + config.queue_per_worker),
+            )),
             fetch_deadline: Duration::from_millis(config.fetch_deadline_ms),
         }
     }
@@ -54,13 +58,16 @@ impl Admission {
         .await
     }
 
-    /// Run `job`, which may wait for vendors, in the cold lane: 502 when it
-    /// has not finished within the fetch deadline. A job that has started
-    /// runs to its end, so the fetches it started finish in the store.
+    /// Run `job`, which may wait for vendors, in the cold lane: 503 at once
+    /// when its queue is full, 502 when it has not finished within the fetch
+    /// deadline. A job that has started runs to its end, so the fetches it
+    /// started finish in the store.
     pub async fn cold<T: Send + 'static>(
         &self,
         job: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, ApiError> {
+        let place = self.cold_places.clone().try_acquire_owned();
+        let _place = place.map_err(|_| ApiError::Overloaded)?;
         let deadline = Instant::now() + self.fetch_deadline;
         let late = || {
             ApiError::Verification(attestation::AttestationError::CollateralUnavailable {

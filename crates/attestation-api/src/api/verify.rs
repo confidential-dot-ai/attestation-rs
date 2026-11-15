@@ -103,6 +103,8 @@ pub async fn handler(
             "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
+    // Without an attached NRAS answer, a GPU bundle always needs NRAS.
+    let needs_nras = req.nvidia_gpu.is_some() && req.collateral.is_none();
     let evidence_json = build_evidence_envelope(
         &platform.to_string(),
         req.evidence,
@@ -126,13 +128,17 @@ pub async fn handler(
             ))
         }
     };
-    let answer = match state.admission.run(job(true)).await? {
-        Err(ApiError::Verification(e)) if e.is_retryable() => {
-            state.admission.cold(job(false)).await?
-        }
-        answer => answer,
+    let offline = match needs_nras {
+        false => Some(state.admission.run(job(true)).await?),
+        true => None,
     };
-    answer.map(Json)
+    let missing =
+        |a: &Result<_, _>| matches!(a, Err(ApiError::Verification(e)) if e.is_retryable());
+    match offline {
+        Some(answer) if !missing(&answer) => answer,
+        _ => state.admission.cold(job(false)).await?,
+    }
+    .map(Json)
 }
 
 /// Verify, `offline` or fetching what is missing, and sign a token for a

@@ -65,8 +65,9 @@ pub struct ServerConfig {
 
 /// Bounded verification: `workers` jobs at once (0: one per vCPU), and
 /// `queue_per_worker` waiting per worker for at most `queue_deadline_ms`.
-/// Evidence that needs a fetch is verified by one of `cold_workers`, within
-/// `fetch_deadline_ms`.
+/// Evidence that needs a fetch is verified by one of `cold_workers` (0: half
+/// the workers), with as long a queue, within `fetch_deadline_ms`, after
+/// `warm` (collateral URLs) was fetched at start.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VerifyConfig {
@@ -75,24 +76,43 @@ pub struct VerifyConfig {
     pub queue_deadline_ms: u64,
     pub cold_workers: usize,
     pub fetch_deadline_ms: u64,
+    pub warm: Vec<String>,
 }
 
 impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
             workers: 0,
-            queue_per_worker: 32,
+            queue_per_worker: 16,
             queue_deadline_ms: 50,
-            cold_workers: 8,
+            cold_workers: 0,
             fetch_deadline_ms: 10_000,
+            warm: default_warm(),
         }
     }
+}
+
+/// The collateral every TDX and SNP verification needs, whatever the chip.
+fn default_warm() -> Vec<String> {
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral, PckCa, PckCrl, QeIdentity, RootCrl};
+    use attestation::ProcessorGeneration::{Genoa, Milan, Turin};
+    let mut urls = vec![QeIdentity::url(&()), RootCrl::url(&())];
+    urls.extend([PckCa::Platform, PckCa::Processor].map(|ca| PckCrl::url(&ca)));
+    urls.extend([Milan, Genoa, Turin].map(|g| AmdCrl::url(&(g, AmdKey::Vcek))));
+    urls
 }
 
 impl VerifyConfig {
     pub fn workers(&self) -> usize {
         match self.workers {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            n => n,
+        }
+    }
+
+    pub fn cold_workers(&self) -> usize {
+        match self.cold_workers {
+            0 => (self.workers() / 2).max(1),
             n => n,
         }
     }
@@ -268,13 +288,12 @@ impl Config {
         // safe only with the connection cap below it.
         let (v, s) = (&self.verify, &self.server);
         if v.queue_deadline_ms < v.queue_per_worker.max(1) as u64
-            || v.cold_workers == 0
             || v.fetch_deadline_ms == 0
             || !(1..s.max_open_files).contains(&(s.max_connections as u64))
         {
             return Err(
-                "[verify] needs queue_deadline_ms >= queue_per_worker and nonzero \
-                 cold_workers and fetch_deadline_ms; [server] needs \
+                "[verify] needs queue_deadline_ms >= queue_per_worker and a nonzero \
+                 fetch_deadline_ms; [server] needs \
                  0 < max_connections < max_open_files"
                     .to_string(),
             );

@@ -1453,20 +1453,28 @@ async fn an_endorsement_google_does_not_publish_is_a_verdict() {
 }
 
 #[tokio::test]
-async fn evidence_waiting_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
+async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
     let (silent, _) = nras(Duration::from_secs(60), "").await;
     let state = online_held_state(&silent, |c| {
-        c.verify.workers = 2;
+        (
+            c.verify.workers,
+            c.verify.cold_workers,
+            c.verify.queue_per_worker,
+        ) = (2, 1, 4);
         c.verify.queue_deadline_ms = 5000; // debug builds verify slowly
     });
-    for chip in 0..2 {
-        let mut report = SNP_REPORT.to_vec();
-        report[0x1A0] = chip; // CHIP_ID: a VCEK no one holds
-        let mut body = snp_body(false);
-        body["evidence"]["attestation_report"] = BASE64.encode(report).into();
-        tokio::spawn(post_verify(state.clone(), body));
-    }
+    let cold: Vec<_> = (0..8)
+        .map(|chip| {
+            let mut report = SNP_REPORT.to_vec();
+            report[0x1A0] = chip; // CHIP_ID: a VCEK no one holds
+            let mut body = snp_body(false);
+            body["evidence"]["attestation_report"] = BASE64.encode(report).into();
+            tokio::spawn(post_verify(state.clone(), body))
+        })
+        .collect();
     tokio::time::sleep(Duration::from_millis(200)).await;
+    // The cold lane holds one running and four queued; the rest get 503 at once.
+    assert_eq!(cold.iter().filter(|c| c.is_finished()).count(), 3);
     let tdx = serde_json::json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
     let tasks: Vec<_> = (0..6)
         .map(|_| tokio::spawn(post_verify(state.clone(), tdx.clone())))
@@ -1505,7 +1513,8 @@ async fn slow_headers_are_cut_off_and_connections_past_the_cap_wait() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = build_api_router(test_state());
-    tokio::spawn(attestation_api::server::serve(listener, router, 1));
+    let serve = attestation_api::server::serve(listener, router, 1, std::future::pending());
+    tokio::spawn(serve);
     let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
     slow.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

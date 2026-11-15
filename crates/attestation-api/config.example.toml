@@ -8,10 +8,13 @@ max_open_files = 65536            # Soft limit to raise to, at most the hard lim
 
 [verify]
 workers = 0                       # 0 = one per vCPU
-queue_per_worker = 32
+queue_per_worker = 16
 queue_deadline_ms = 50            # Waiting longer for a worker: 503
-cold_workers = 8                  # Verifications that fetch missing collateral
+cold_workers = 0                  # Verifications that fetch (0 = half the workers)
 fetch_deadline_ms = 10000         # Fetching longer: 502
+# Collateral URLs fetched before serving. Absent: Intel's QE Identity and CRLs
+# and AMD's VCEK CRLs. Add the TCB Info URL of each FMSPC in the fleet.
+# warm = []
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.
