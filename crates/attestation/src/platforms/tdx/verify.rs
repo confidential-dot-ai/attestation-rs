@@ -1385,3 +1385,176 @@ mod tests {
         assert!(matches!(err, AttestationError::InvalidParams(_)));
     }
 }
+
+
+#[cfg(test)]
+mod perf_review_negative {
+    //! Review tests: the remembered-signature cache and the gather/verify
+    //! skip must not let a warm cache pass different bytes.
+    use super::*;
+    use crate::platforms::tdx::dcap;
+
+    const Q: &[u8] = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+    const NOW: i64 = crate::testing::NOW;
+
+    fn ev(q: &[u8]) -> TdxEvidence {
+        TdxEvidence { quote: BASE64.encode(q), cc_eventlog: None }
+    }
+
+    fn offset(whole: &[u8], part: &[u8]) -> usize {
+        part.as_ptr() as usize - whole.as_ptr() as usize
+    }
+
+    struct Offsets { qe_body: usize, qe_sig: usize, att_key: usize, pem: usize, pem_len: usize, sig: usize }
+
+    fn offsets() -> Offsets {
+        let quote = parse_tdx_quote(Q).unwrap();
+        let end = dcap::compute_body_end(Q, quote.quote_version).unwrap();
+        let a = dcap::parse_auth_data(Q, end).unwrap();
+        Offsets {
+            qe_body: offset(Q, a.qe_report_body),
+            qe_sig: offset(Q, a.qe_report_signature),
+            att_key: offset(Q, a.attestation_pub_key),
+            pem: offset(Q, a.pck_cert_chain_pem),
+            pem_len: a.pck_cert_chain_pem.len(),
+            sig: end + 4,
+        }
+    }
+
+    async fn warm() -> TdxCollateralSet {
+        let ctx = crate::testing::context(crate::testing::intel());
+        let (set, _) = Tdx::gather(&ev(Q), ctx.store(), NOW).await.unwrap();
+        // Warm twice through the full path.
+        assert!(Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).is_ok());
+        assert!(verify_quote(Q, &TdxParams::default(), NOW).is_ok());
+        set
+    }
+
+    fn flipped(at: usize) -> Vec<u8> {
+        let mut q = Q.to_vec();
+        q[at] ^= 1;
+        q
+    }
+
+    #[tokio::test]
+    async fn warm_cache_then_tampered_parts_fail() {
+        let set = warm().await;
+        let o = offsets();
+        let cases = [
+            ("qe report body (non-binding byte)", o.qe_body + 10),
+            ("qe report body (report data)", o.qe_body + 320),
+            ("qe report signature", o.qe_sig + 5),
+            ("attestation key", o.att_key + 3),
+            ("quote signature", o.sig + 7),
+            ("quote body", 600),
+        ];
+        for (what, at) in cases {
+            let q = flipped(at);
+            assert!(verify_quote(&q, &TdxParams::default(), NOW).is_err(), "{what}: verify_quote");
+            assert!(Tdx::verify(&ev(&q), &TdxParams::default(), &set, NOW).is_err(), "{what}: Tdx::verify");
+            let ctx = crate::testing::context(crate::testing::intel());
+            assert!(Tdx::gather(&ev(&q), ctx.store(), NOW).await.is_err(), "{what}: gather");
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_cache_then_tampered_pck_chain_fails() {
+        let _ = warm().await;
+        let o = offsets();
+        let pem = std::str::from_utf8(&Q[o.pem..o.pem + o.pem_len]).unwrap();
+        let mut der = dcap::parse_pem_to_der(pem.as_bytes()).unwrap();
+        assert!(dcap::verify_pck_cert_chain(pem.as_bytes(), NOW).is_ok());
+        let enc = |der: &[Vec<u8>]| der.iter()
+            .map(|d| pem::encode(&pem::Pem::new("CERTIFICATE", d.clone()))).collect::<String>();
+        // Leaf signature byte, intermediate signature byte, leaf TBS byte.
+        for (i, from_end) in [(0usize, 1usize), (1, 1), (0, 200)] {
+            let mut d = der.clone();
+            let n = d[i].len();
+            d[i][n - from_end] ^= 1;
+            assert!(dcap::verify_pck_cert_chain(enc(&d).as_bytes(), NOW).is_err(), "cert {i} -{from_end}");
+        }
+        // Leaf presented as its own issuer (same message+sig, other key).
+        der[1] = der[0].clone();
+        assert!(dcap::verify_pck_cert_chain(enc(&der).as_bytes(), NOW).is_err());
+    }
+
+    #[tokio::test]
+    async fn warm_cache_then_expired_chain_fails() {
+        let set = warm().await;
+        let later = 4_102_444_800;
+        assert!(Tdx::verify(&ev(Q), &TdxParams::default(), &set, later).is_err());
+        assert!(verify_quote(Q, &TdxParams::default(), later).is_err());
+        let before = 0;
+        assert!(verify_quote(Q, &TdxParams::default(), before).is_err());
+    }
+
+    fn crl_revoking(serial: &[u8]) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap().self_signed(&key).unwrap();
+        rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2027, 1, 1),
+            crl_number: rcgen::SerialNumber::from(2u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from_slice(serial),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }],
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&ca, &key).unwrap().der().to_vec()
+    }
+
+    #[tokio::test]
+    async fn warm_cache_then_revoked_pck_or_platform_ca_fails() {
+        use x509_parser::prelude::{FromDer, X509Certificate};
+        let mut set = warm().await;
+        let ok = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap();
+        assert_eq!(ok.crl_ok, Some(true));
+        let o = offsets();
+        let der = dcap::parse_pem_to_der(&Q[o.pem..o.pem + o.pem_len]).unwrap();
+        let serial = |d: &[u8]| X509Certificate::from_der(d).unwrap().1.raw_serial().to_vec();
+        let pck_crl = set.pck_crl.der.clone();
+        set.pck_crl.der = crl_revoking(&serial(&der[0]));
+        let r = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap();
+        assert_eq!(r.crl_ok, Some(false));
+        assert!(!r.passed());
+        set.pck_crl.der = pck_crl;
+        set.root_crl.der = crl_revoking(&serial(&der[1]));
+        let r = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap();
+        assert_eq!(r.crl_ok, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[tokio::test]
+    async fn warm_cache_then_unaccepted_tcb_status_fails() {
+        let set = warm().await;
+        let actual = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap().tcb_status.unwrap().tcb_status;
+        let other = if actual == TdxTcbStatus::Revoked { TdxTcbStatus::UpToDate } else { TdxTcbStatus::Revoked };
+        let params = TdxParams { accepted_tcb_statuses: vec![other], ..TdxParams::default() };
+        let r = Tdx::verify(&ev(Q), &params, &set, NOW).unwrap();
+        assert_eq!(r.tcb_status_accepted, Some(false));
+        assert!(!r.passed());
+    }
+
+    #[test]
+    fn concurrent_genuine_and_tampered_quotes() {
+        let o = offsets();
+        let bad: Vec<Vec<u8>> = [o.qe_body + 10, o.qe_sig + 5, o.sig + 7, o.att_key + 3]
+            .iter().map(|&at| flipped(at)).collect();
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let bad = &bad;
+                s.spawn(move || {
+                    for i in 0..50 {
+                        assert!(verify_quote(Q, &TdxParams::default(), NOW).is_ok());
+                        let q = &bad[(t + i) % bad.len()];
+                        assert!(verify_quote(q, &TdxParams::default(), NOW).is_err());
+                    }
+                });
+            }
+        });
+    }
+}
