@@ -17,6 +17,15 @@ complete examples rather than copying obsolete parameter names.
 | `CertFetchError` | `CollateralUnavailable { collateral, retry_after, detail }` |
 | Single digest pins | Nonempty sets: `Vec<[u8; 48]>` |
 
+Source changes for code that implements or builds collateral types:
+
+- `TdxCollateralSet` and `SnpCollateralSet` have a private field. Build them
+  with `Platform::gather`, not with struct literals.
+- `Collateral` now requires `Clone + Send + Sync + 'static`, and
+  `Collateral::Id` requires `Clone + PartialEq + Send + Sync + 'static`.
+- New: `Verifier::verify_cached`, `Attempt`, `Fetch` and `Fetched`, for callers
+  that verify on a few CPU-bound threads and make vendor requests elsewhere.
+
 Choose platforms explicitly; omitted policies refuse evidence. Use
 [the Rust example](../crates/attestation/README.md#rust-verification) and handle
 both `Ok(v)` with `!v.passed()` and non-retryable errors. Only collateral
@@ -62,6 +71,13 @@ or grace flags. [CLI guide](../crates/attestation-cli/README.md).
   `result.collateral`. HTTP 200 alone is not acceptance.
 - Retry 502 `collateral_unavailable` with bounded backoff and `Retry-After`;
   400/422 are not transient collateral failures.
+- `/verify` may answer 503 `overloaded` with `Retry-After: 1` when its
+  verification queue is full; retry it like 502.
+- The listener serves at most `server.max_connections` (default 4096)
+  connections at once. A connection must send its request headers within
+  10 s and a body within 10 s, and is closed after 60 s, once its request in
+  progress is answered. Clients that keep connections open longer must
+  reconnect.
 - Delete `[certs]` configuration. Move NRAS URL overrides to `[nras]` as
   `gpu_url` / `switch_url`. Removed `/certs/status` and `/certs/refresh` routes
   are no longer available. Unknown settings fail startup.
