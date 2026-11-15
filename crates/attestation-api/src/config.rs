@@ -59,7 +59,7 @@ pub struct ServerConfig {
     /// Threads that run verifications, one at a time each. 0: one per CPU.
     pub verify_threads: usize,
     /// Threads that read requests and write responses. 0: one per four
-    /// CPUs, at least one.
+    /// CPUs, at least two.
     pub io_threads: usize,
     /// A `/verify` request is queued only while the verifications ahead of
     /// it take at most this long; past that it is refused at once with 503
@@ -167,7 +167,7 @@ impl ServerConfig {
 
     pub fn io_threads(&self) -> usize {
         match self.io_threads {
-            0 => cpus().div_ceil(4),
+            0 => (cpus() / 4).max(2),
             n => n,
         }
     }
