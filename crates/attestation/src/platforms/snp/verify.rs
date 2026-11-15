@@ -1188,12 +1188,12 @@ mod tests {
             ProcessorGeneration::Turin,
         ] {
             let ark = super::super::certs::get_ark(gen);
-            verify_issued_by(ark, ark).unwrap_or_else(|e| panic!("{gen:?} ARK: {e}"));
-            for issuer in [
-                super::super::certs::get_ask(gen),
-                super::super::certs::get_asvk(gen),
+            assert!(verify_issued_by(ark, ark).is_ok(), "{gen:?} ARK");
+            for (name, issuer) in [
+                ("ASK", super::super::certs::get_ask(gen)),
+                ("ASVK", super::super::certs::get_asvk(gen)),
             ] {
-                verify_issued_by(ark, issuer).unwrap_or_else(|e| panic!("{gen:?}: {e}"));
+                assert!(verify_issued_by(ark, issuer).is_ok(), "{gen:?} {name}");
             }
         }
         // A link the other way round fails.

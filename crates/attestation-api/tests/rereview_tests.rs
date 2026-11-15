@@ -524,7 +524,7 @@ async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds(
     let app = build_api_router(st.clone());
     let (status, json) = json(send(&app, body).await.unwrap()).await;
     let api_requests = seen.lock().unwrap().len() - lib_requests;
-    eprintln!("library: {lib}; api: {status} {json}; vendor requests {api_requests}");
+    eprintln!("api: {status} {json}; vendor requests {api_requests}");
     assert!(
         json["message"]
             .as_str()
