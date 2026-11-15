@@ -397,5 +397,145 @@ async fn rereview_one_admitted_request_runs_at_most_twice_on_the_pool() {
     assert!(jobs <= 2, "pool jobs for one request: {jobs}");
 }
 
+/// A cold verification of TDX evidence with a GPU bundle needs the most
+/// vendor rounds of any platform: the platform collateral, then NRAS, then
+/// NRAS's key set. It ends within MAX_FETCHES with the library's answer.
+#[tokio::test]
+async fn a_cold_tdx_verification_with_a_gpu_bundle_ends_within_the_fetch_rounds() {
+    use attestation::collateral::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let file = |f: &str| std::fs::read(format!("{DIR}{f}")).unwrap();
+    let chain = |f: &str| {
+        String::from_utf8(file(f))
+            .unwrap()
+            .replace('\n', "%0A")
+            .replace(' ', "%20")
+    };
+    let path = |url: String| url.split_once("://").unwrap().1.to_string();
+    let kid = serde_json::from_slice::<serde_json::Value>(&file("nras_jwks.json")).unwrap()["keys"]
+        [0]["kid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"ES384","kid":"{kid}"}}"#));
+    let claims = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{}}}"#, AT + 3600));
+    let eat = serde_json::json!([["JWT", format!("{header}.{claims}.sig")], {}]).to_string();
+    let fmspc = |f: &str| TcbInfo::url(&hex::decode(f).unwrap().try_into().unwrap());
+    let signing = chain("tcb_signing_chain.pem");
+    let replies: Vec<(String, &str, String, Vec<u8>)> = vec![
+        (
+            path(fmspc("50806f000000")),
+            "TCB-Info-Issuer-Chain",
+            signing.clone(),
+            file("tcb_info_50806f000000.json"),
+        ),
+        (
+            path(QeIdentity::url(&())),
+            "SGX-Enclave-Identity-Issuer-Chain",
+            signing,
+            file("td_qe_identity.json"),
+        ),
+        (
+            path(PckCrl::url(&PckCa::Platform)),
+            "SGX-PCK-CRL-Issuer-Chain",
+            chain("pck_crl_platform_chain.pem"),
+            file("pck_crl_platform.der"),
+        ),
+        (
+            path(PckCrl::url(&PckCa::Processor)),
+            "SGX-PCK-CRL-Issuer-Chain",
+            chain("pck_crl_processor_chain.pem"),
+            file("pck_crl_processor.pem"),
+        ),
+        (
+            path(RootCrl::url(&())),
+            "X-None",
+            String::new(),
+            file("root_ca_crl.der"),
+        ),
+        (
+            "/v3/attest/gpu".into(),
+            "X-None",
+            String::new(),
+            eat.into_bytes(),
+        ),
+        (
+            "jwks".into(),
+            "X-None",
+            String::new(),
+            file("nras_jwks.json"),
+        ),
+    ];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let replies = Arc::new(replies);
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (replies, log) = (replies.clone(), log.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                log.lock().unwrap().push(line.clone());
+                let reply = replies.iter().find(|(p, ..)| line.contains(p.as_str()));
+                let (status, header, value, body) = match reply {
+                    Some((_, h, v, b)) => (200, *h, v.clone(), b.clone()),
+                    None => (404, "X-None", String::new(), Vec::new()),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{header}: {value}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+            });
+        }
+    });
+    let nras = format!("{base}/v3/attest/gpu");
+    let ctx = || {
+        attestation::Context::new()
+            .with_test_vendor(&base)
+            .with_nras_urls(nras.clone(), nras.clone())
+            .unwrap()
+            .at(AT)
+            .unwrap()
+    };
+    let body = tdx_gpu_body("GPU-0");
+    let envelope = serde_json::json!({
+        "platform": "tdx",
+        "evidence": body["evidence"],
+        "nvidia_gpu": body["nvidia_gpu"],
+    });
+    let policies: attestation::Policies = serde_json::from_value(body["policies"].clone()).unwrap();
+    let lib = attestation::Verifier::new(ctx())
+        .verify(envelope.to_string().as_bytes(), &policies)
+        .await
+        .expect_err("the made-up NRAS token does not verify");
+    let lib_requests = seen.lock().unwrap().len();
+
+    let st = state(ctx(), |_| {});
+    let app = build_api_router(st.clone());
+    let (status, json) = json(send(&app, body).await.unwrap()).await;
+    let api_requests = seen.lock().unwrap().len() - lib_requests;
+    eprintln!("library: {lib}; api: {status} {json}; vendor requests {api_requests}");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap()
+            .ends_with(&lib.to_string()),
+        "{status} {json}"
+    );
+    assert_eq!(api_requests, lib_requests);
+    // Three rounds of vendor requests, then the verdict.
+    assert_eq!(st.verify_pool.stats().done, 4);
+}
+
 #[allow(dead_code)]
 fn _unused(_: AtomicUsize, _: Ordering) {}
