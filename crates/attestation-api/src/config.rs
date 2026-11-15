@@ -72,6 +72,8 @@ pub struct ServerConfig {
     /// in all; past that it gets 502 `collateral_unavailable` with
     /// `Retry-After`. They are made outside the verification threads.
     pub fetch_deadline_ms: u64,
+    /// Connections served at once; more wait in the listen backlog.
+    pub max_connections: usize,
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -142,6 +144,9 @@ pub struct AttestationConfig {
     pub tdx_quote_method: String,
 }
 
+/// The most `server.max_connections` may be.
+const MAX_CONNECTIONS: usize = 1 << 20;
+
 // --- Defaults ---
 
 impl Default for ServerConfig {
@@ -154,6 +159,7 @@ impl Default for ServerConfig {
             max_queue_wait_ms: 30,
             queue_deadline_ms: 200,
             fetch_deadline_ms: 10_000,
+            max_connections: 4096,
         }
     }
 }
@@ -254,6 +260,11 @@ impl Config {
             return Err("server.max_queue_wait_ms, server.queue_deadline_ms and \
                  server.fetch_deadline_ms must be > 0"
                 .to_string());
+        }
+        if !(1..=MAX_CONNECTIONS).contains(&self.server.max_connections) {
+            return Err(format!(
+                "server.max_connections must be between 1 and {MAX_CONNECTIONS}"
+            ));
         }
 
         // Validate token duration when token is enabled

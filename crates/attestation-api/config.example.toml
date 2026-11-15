@@ -9,12 +9,16 @@ bind = "127.0.0.1:8400"
 # max_queue_wait_ms for a thread gets 503 with Retry-After: 1 at once; one
 # no thread took within queue_deadline_ms gets 503. Vendor requests for one
 # /verify request may take fetch_deadline_ms in all; past that it gets 502
-# collateral_unavailable with Retry-After.
+# collateral_unavailable with Retry-After. At most max_connections
+# connections are served at once; a connection must send its request headers
+# within 10 s, a request body within 10 s, and gets an answer within
+# queue_deadline_ms + fetch_deadline_ms + 30 s.
 # verify_threads = 0
 # io_threads = 0
 # max_queue_wait_ms = 30
 # queue_deadline_ms = 200
 # fetch_deadline_ms = 10000
+# max_connections = 4096
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.
