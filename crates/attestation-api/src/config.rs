@@ -63,10 +63,10 @@ pub struct ServerConfig {
     pub max_open_files: u64,
 }
 
-/// Bounded verification: `workers` jobs at once (0: one per vCPU), and
+/// Bounded verification: `workers` jobs at once (0: two per vCPU), and
 /// `queue_per_worker` waiting per worker for at most `queue_deadline_ms`.
 /// Evidence that needs a fetch is verified by one of `cold_workers` (0: half
-/// the workers), with as long a queue, within `fetch_deadline_ms`, after
+/// the vCPUs), with as long a queue, within `fetch_deadline_ms`, after
 /// `warm` (collateral URLs) was fetched at start.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -83,7 +83,7 @@ impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
             workers: 0,
-            queue_per_worker: 16,
+            queue_per_worker: 8,
             queue_deadline_ms: 50,
             cold_workers: 0,
             fetch_deadline_ms: 10_000,
@@ -103,19 +103,25 @@ fn default_warm() -> Vec<String> {
 }
 
 impl VerifyConfig {
+    /// Two per vCPU by default: with one, a vCPU idles while a finished job
+    /// hands its slot to the next.
     pub fn workers(&self) -> usize {
         match self.workers {
-            0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            0 => 2 * vcpus(),
             n => n,
         }
     }
 
     pub fn cold_workers(&self) -> usize {
         match self.cold_workers {
-            0 => (self.workers() / 2).max(1),
+            0 => (vcpus() / 2).max(1),
             n => n,
         }
     }
+}
+
+fn vcpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
