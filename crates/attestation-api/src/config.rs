@@ -49,6 +49,7 @@ pub struct Config {
     pub nras: NrasConfig,
     pub token: TokenConfig,
     pub attestation: AttestationConfig,
+    pub verify: VerifyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,6 +57,45 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
+    /// Connections served at once; more wait in the listen backlog.
+    pub max_connections: usize,
+    /// Raise the soft open-files limit to this (at most the hard limit).
+    pub max_open_files: u64,
+}
+
+/// Bounded verification: `workers` jobs at once (0: one per vCPU), and
+/// `queue_per_worker` waiting per worker for at most `queue_deadline_ms`.
+/// Evidence that needs a fetch is verified by one of `cold_workers`, within
+/// `fetch_deadline_ms`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    pub workers: usize,
+    pub queue_per_worker: usize,
+    pub queue_deadline_ms: u64,
+    pub cold_workers: usize,
+    pub fetch_deadline_ms: u64,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            workers: 0,
+            queue_per_worker: 32,
+            queue_deadline_ms: 50,
+            cold_workers: 8,
+            fetch_deadline_ms: 10_000,
+        }
+    }
+}
+
+impl VerifyConfig {
+    pub fn workers(&self) -> usize {
+        match self.workers {
+            0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            n => n,
+        }
+    }
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -133,6 +173,8 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
+            max_connections: 4096,
+            max_open_files: 65_536,
         }
     }
 }
@@ -219,6 +261,23 @@ impl Config {
                     "invalid attestation.tdx_quote_method '{other}' (expected: auto, vsock, configfs)"
                 ));
             }
+        }
+
+        // A queued request must be able to wait for the queue ahead of it
+        // (about a millisecond per verification); the open-files limit is
+        // safe only with the connection cap below it.
+        let (v, s) = (&self.verify, &self.server);
+        if v.queue_deadline_ms < v.queue_per_worker.max(1) as u64
+            || v.cold_workers == 0
+            || v.fetch_deadline_ms == 0
+            || !(1..s.max_open_files).contains(&(s.max_connections as u64))
+        {
+            return Err(
+                "[verify] needs queue_deadline_ms >= queue_per_worker and nonzero \
+                 cold_workers and fetch_deadline_ms; [server] needs \
+                 0 < max_connections < max_open_files"
+                    .to_string(),
+            );
         }
 
         for platform in &self.attestation.platforms {

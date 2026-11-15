@@ -110,26 +110,64 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    let result = state.verifier.verify(&evidence_json, &req.policies).await?;
+    // A job verifies with the collateral in memory and attached; when some
+    // is missing, a second job in the cold lane fetches it as the library does.
+    let job = |offline: bool| {
+        let (state, evidence, policies) =
+            (state.clone(), evidence_json.clone(), req.policies.clone());
+        let runtime = tokio::runtime::Handle::current();
+        move || {
+            runtime.block_on(verify(
+                &state,
+                &evidence,
+                &policies,
+                req.issue_token,
+                offline,
+            ))
+        }
+    };
+    let answer = match state.admission.run(job(true)).await? {
+        Err(ApiError::Verification(e)) if e.is_retryable() => {
+            state.admission.cold(job(false)).await?
+        }
+        answer => answer,
+    };
+    answer.map(Json)
+}
+
+/// Verify, `offline` or fetching what is missing, and sign a token for a
+/// passing result when asked.
+async fn verify(
+    state: &AppState,
+    evidence: &[u8],
+    policies: &attestation::Policies,
+    issue_token: bool,
+    offline: bool,
+) -> Result<VerifyResponse, ApiError> {
+    let result = if offline {
+        state.verifier.verify_offline(evidence, policies).await?
+    } else {
+        state.verifier.verify(evidence, policies).await?
+    };
     let passed = PassedVerification::new(&result);
 
     let token = match &passed {
-        Some(passed) if req.issue_token => {
+        Some(passed) if issue_token => {
             let issuer = state
                 .token_issuer
                 .as_ref()
                 .ok_or(ApiError::TokenNotConfigured)?;
-            Some(issuer.issue(passed, &req.policies)?)
+            Some(issuer.issue(passed, policies)?)
         }
         _ => None,
     };
     let passed = passed.is_some();
 
-    Ok(Json(VerifyResponse {
+    Ok(VerifyResponse {
         result,
         passed,
         token,
-    }))
+    })
 }
 
 /// Params below the server's floors are refused unless its config allows

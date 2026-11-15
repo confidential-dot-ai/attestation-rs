@@ -41,7 +41,7 @@ nvidia-gpu-attest = ["nvidia-gpu", "dep:nv-attestation-sdk"]
 # Azure vTPM attesters use az-cvm-vtpm directly with default features disabled
 # to avoid the az-cvm-vtpm verifier/OpenSSL path while composing with the
 # combined SNP/TDX attestation-api feature set.
-attest = ["snp", "tdx", "dep:libc", "dep:tempfile", "dep:pem-rfc7468", "dep:az-cvm-vtpm", "dep:zerocopy"]
+attest = ["snp", "tdx", "dep:tempfile", "dep:pem-rfc7468", "dep:az-cvm-vtpm", "dep:zerocopy"]
 az-snp-attest = ["attest", "az-snp"] # Compatibility alias; use `attest` + `az-snp`.
 az-tdx-attest = ["attest", "az-tdx"] # Compatibility alias; use `attest` + `az-tdx`.
 
@@ -80,7 +80,7 @@ signature = "2"
 scroll = "0.12"
 
 # Attest-side dependencies (cross-platform parts)
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 tempfile = { version = "3", optional = true }
 sev = { version = "7", default-features = false, features = ["snp", "crypto_nossl"], optional = true }
 pem-rfc7468 = { version = "1", optional = true, features = ["alloc"] }

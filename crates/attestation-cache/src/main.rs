@@ -6,6 +6,9 @@ use attestation_cache::{Cache, Config};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+/// The soft open-files limit to raise to, at most the hard limit.
+const MAX_OPEN_FILES: u64 = 65_536;
+
 #[derive(Parser)]
 #[command(
     name = "attestation-cache",
@@ -25,6 +28,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    #[cfg(unix)]
+    if let Err(e) = attestation::utils::raise_open_files(MAX_OPEN_FILES) {
+        tracing::warn!(%e, "could not raise the open files limit");
+    }
     let path = cli
         .config
         .as_deref()

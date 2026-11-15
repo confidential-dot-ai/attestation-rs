@@ -2,7 +2,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use base64::Engine;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tower::ServiceExt;
 
 use attestation_api::config::Config;
@@ -19,6 +20,7 @@ fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config::default();
     f(&mut config);
     AppState {
+        admission: Arc::new(attestation_api::admission::Admission::new(&config.verify)),
         config: Arc::new(config),
         token_issuer: None,
         verifier: Arc::new(attestation::Verifier::new(attestation::Context::new())),
@@ -29,6 +31,13 @@ fn test_state_with(f: impl FnOnce(&mut Config)) -> AppState {
 /// endorsement of the GCP TDX quote's firmware, evaluated while they are
 /// current, and fetches nothing.
 fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
+    let ctx = attestation::Context::offline();
+    Arc::new(held_in(ctx, Some(endorsement_body)))
+}
+
+/// A verifier on `ctx` holding Intel's collateral for the TDX fixtures and,
+/// when given, Google's endorsement of the GCP TDX quote's firmware.
+fn held_in(ctx: attestation::Context, endorsement: Option<&[u8]>) -> attestation::Verifier {
     use attestation::collateral::*;
     const DIR: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -45,7 +54,7 @@ fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
         held(url, &format!("tcb_info_{fmspc}.json"), signing)
     };
     let mrtd = hex::decode("c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5").unwrap();
-    let held = vec![
+    let mut held = vec![
         tcb_info("50806f000000"),
         tcb_info("00806f050000"),
         held(QeIdentity::url(&()), "td_qe_identity.json", signing),
@@ -60,18 +69,13 @@ fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
             Some("pck_crl_processor_chain.pem"),
         ),
         held(RootCrl::url(&()), "root_ca_crl.der", None),
-        (
-            GceEndorsement::url(&(attestation::PlatformType::GcpTdx, mrtd)),
-            endorsement_body.to_vec(),
-            None,
-        ),
     ];
+    if let Some(body) = endorsement {
+        let url = GceEndorsement::url(&(attestation::PlatformType::GcpTdx, mrtd));
+        held.push((url, body.to_vec(), None));
+    }
     // 2026-10-16T00:00:00Z.
-    let ctx = attestation::Context::offline()
-        .with_held(held)
-        .at(1_792_108_800)
-        .unwrap();
-    Arc::new(attestation::Verifier::new(ctx))
+    attestation::Verifier::new(ctx.with_held(held).at(1_792_108_800).unwrap())
 }
 
 const GCP_ENDORSEMENT: &[u8] =
@@ -1313,4 +1317,212 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
     ).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json["error"], "verification_failed");
+}
+
+// --- Admission, the cold lane, and parity with the library ---
+
+/// A fake vendor and NRAS on localhost: after `delay`, the fixture NRAS key
+/// set for a key-set path, else an NRAS answer whose token names `kid` (not
+/// validly signed). Returns its base URL and the request bodies it answered.
+async fn nras(delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+    let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
+    let header = part(serde_json::json!({ "alg": "ES384", "kid": kid }));
+    let token = format!(
+        "{header}.{}.c2ln",
+        part(serde_json::json!({ "exp": 4_102_444_800i64 }))
+    );
+    let answer = serde_json::json!([["JWT", token], { "GPU-0": token }]).to_string();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, body: String| {
+        let (log, answer) = (log.clone(), answer.clone());
+        async move {
+            tokio::time::sleep(delay).await;
+            if uri.path().ends_with("jwks.json") {
+                return NRAS_JWKS.to_vec();
+            }
+            log.lock().unwrap().push(body);
+            answer.into_bytes()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (base, seen)
+}
+
+const NRAS_JWKS: &[u8] =
+    include_bytes!("../../attestation/test_data/collateral/2026-10-14/nras_jwks.json");
+
+fn nras_kid() -> String {
+    let jwks: serde_json::Value = serde_json::from_slice(NRAS_JWKS).unwrap();
+    jwks["keys"][0]["kid"].as_str().unwrap().to_string()
+}
+
+/// A state that holds the TDX collateral and asks the vendors and NRAS at `base`.
+fn online_held_state(base: &str, f: impl FnOnce(&mut Config)) -> AppState {
+    let mut state = test_state_with(|c| {
+        c.attestation.allow_debug = true;
+        f(c);
+    });
+    let nras = format!("{base}/v3/attest/gpu");
+    let ctx = attestation::Context::new()
+        .with_test_vendor(base)
+        .with_nras_urls(nras.clone(), nras)
+        .unwrap();
+    state.verifier = Arc::new(held_in(ctx, None));
+    state
+}
+
+/// The TDX fixture with a GPU bundle of one device per arch in `archs`.
+fn gpu_body(archs: &[attestation::NvidiaGpuArch]) -> serde_json::Value {
+    let devices: Vec<_> = archs
+        .iter()
+        .enumerate()
+        .map(|(i, arch)| serde_json::json!({ "arch": arch, "uuid": format!("GPU-{i}"), "evidence_b64": format!("EVIDENCE-{i}"), "cert_chain_b64": "" }))
+        .collect();
+    serde_json::json!({
+        "platform": "tdx",
+        "evidence": tdx_v4_evidence(),
+        "nvidia_gpu": { "devices": devices, "binding": attestation::NvidiaGpuBinding::default() },
+        "policies": {
+            "tdx": { "allow_debug": true, "report_data": tdx_v4_report_data() },
+            "nvidia_gpu": { "user_nonce": tdx_v4_report_data() },
+        },
+    })
+}
+
+/// NRAS answers after 400 ms; each arch group goes to it once, with its own
+/// evidence. The answer is the library's (the fake tokens do not verify).
+#[tokio::test]
+async fn each_gpu_group_goes_to_nras_once_and_the_answer_is_the_librarys() {
+    use attestation::NvidiaGpuArch::{Blackwell, Hopper, Ls10};
+    let (base, seen) = nras(Duration::from_millis(400), &nras_kid()).await;
+    let body = gpu_body(&[Hopper, Blackwell, Ls10]);
+    let (status, json) = post_verify(online_held_state(&base, |_| {}), body.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    assert_eq!(json["error"], "verification_failed");
+    let posts = seen.lock().unwrap().clone();
+    assert_eq!(posts.len(), 3);
+    for (i, arch) in ["HOPPER", "BLACKWELL", "LS10"].into_iter().enumerate() {
+        let post = posts
+            .iter()
+            .find(|p| p.contains(&format!("\"arch\":\"{arch}\"")))
+            .unwrap();
+        assert!(post.contains(&format!("EVIDENCE-{i}")) && post.matches("EVIDENCE-").count() == 1);
+    }
+
+    let envelope = serde_json::json!({ "platform": "tdx", "evidence": body["evidence"], "nvidia_gpu": body["nvidia_gpu"] });
+    let policies = serde_json::from_value(body["policies"].clone()).unwrap();
+    let lib = online_held_state(&base, |_| {})
+        .verifier
+        .verify(envelope.to_string().as_bytes(), &policies)
+        .await;
+    assert!(lib.is_err_and(|e| !e.is_retryable() && !e.is_invalid_params()));
+}
+
+#[tokio::test]
+async fn a_token_under_an_unknown_kid_is_retryable_after_one_nras_post() {
+    let (base, seen) = nras(Duration::ZERO, "next").await;
+    let body = gpu_body(&[attestation::NvidiaGpuArch::Hopper]);
+    let (status, json) = post_verify(online_held_state(&base, |_| {}), body).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_endorsement_google_does_not_publish_is_a_verdict() {
+    const QUOTE: &[u8] = include_bytes!("../../attestation/test_data/gcp_tdx/boot-quote.dat");
+    let base = vendor(vec![]).await;
+    let mut state = test_state();
+    state.verifier = Arc::new(held_in(
+        attestation::Context::new().with_test_vendor(&base),
+        None,
+    ));
+    let (status, json) = post_verify(
+        state,
+        serde_json::json!({
+            "platform": "gcp-tdx",
+            "evidence": { "quote": BASE64.encode(QUOTE) },
+            "policies": { "gcp-tdx": {} },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["result"]["endorsement_match"], false);
+}
+
+#[tokio::test]
+async fn evidence_waiting_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
+    let (silent, _) = nras(Duration::from_secs(60), "").await;
+    let state = online_held_state(&silent, |c| {
+        c.verify.workers = 2;
+        c.verify.queue_deadline_ms = 5000; // debug builds verify slowly
+    });
+    for chip in 0..2 {
+        let mut report = SNP_REPORT.to_vec();
+        report[0x1A0] = chip; // CHIP_ID: a VCEK no one holds
+        let mut body = snp_body(false);
+        body["evidence"]["attestation_report"] = BASE64.encode(report).into();
+        tokio::spawn(post_verify(state.clone(), body));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let tdx = serde_json::json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
+    let tasks: Vec<_> = (0..6)
+        .map(|_| tokio::spawn(post_verify(state.clone(), tdx.clone())))
+        .collect();
+    for task in tasks {
+        let answer = tokio::time::timeout(Duration::from_secs(5), task).await;
+        let (status, json) = answer.unwrap().unwrap();
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+}
+
+#[tokio::test]
+async fn a_cold_piece_from_a_silent_vendor_is_a_502_at_the_fetch_deadline() {
+    let (silent, _) = nras(Duration::from_secs(60), "").await;
+    let state = online_held_state(&silent, |c| c.verify.fetch_deadline_ms = 300);
+    let start = std::time::Instant::now();
+    let resp = build_api_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(snp_body(false).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!((300..2000).contains(&start.elapsed().as_millis()));
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.headers()["retry-after"], "1");
+}
+
+#[tokio::test]
+async fn slow_headers_are_cut_off_and_connections_past_the_cap_wait() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_api_router(test_state());
+    tokio::spawn(attestation_api::server::serve(listener, router, 1));
+    let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut next = tokio::net::TcpStream::connect(addr).await.unwrap();
+    next.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    let waiting = tokio::time::timeout(Duration::from_secs(1), next.read_to_end(&mut answer));
+    assert!(waiting.await.is_err(), "served past the connection cap");
+    // The header timeout (10 s) frees the only connection for the next one.
+    let _ = tokio::time::timeout(Duration::from_secs(11), slow.read_to_end(&mut Vec::new()))
+        .await
+        .expect("slow headers are cut off");
+    tokio::time::timeout(Duration::from_secs(2), next.read_to_end(&mut answer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200"));
 }

@@ -113,11 +113,20 @@ where `<platform>` is the token's platform claim.
 | 415 `unsupported_media_type` | Missing JSON content type |
 | 422 `platform_not_allowed` | No policy for the evidence platform |
 | 422 `verification_failed` | Evidence/collateral cannot be verified |
-| 502 `collateral_unavailable` | Missing collateral could not be fetched; bounded retry may help |
+| 502 `collateral_unavailable` | Missing collateral could not be fetched (or not within `verify.fetch_deadline_ms`); bounded retry may help |
+| 503 `overloaded` | Every verification worker is busy and the queue is full, or no worker was free within `verify.queue_deadline_ms`; nothing was verified |
 
-Honor `Retry-After` on collateral failures when provided. Match error keys, not
+502 and 503 carry `Retry-After` (1 s unless a vendor asked for longer); honor it. Match error keys, not
 message text. A request for tokens without token configuration also fails;
 turn on token configuration before requesting them.
+
+Verification runs on `[verify] workers` threads (default: one per vCPU), at
+most `queue_per_worker` more requests waiting per worker. Evidence whose
+collateral is not in memory, or that needs NRAS, is verified again in a
+separate lane of `cold_workers` that fetches it, so vendor time never holds a
+worker. `[server] max_connections` caps open connections (more wait in the
+listen backlog); headers and the body must each arrive within 10 s. At start
+the soft open-files limit is raised to `max_open_files`, at most the hard limit.
 
 One in-memory verifier/store is reused for the process. The API has no disk
 cache or explicit collateral-upstream configuration. It uses native

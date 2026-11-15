@@ -90,10 +90,18 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let _ = attestation::detect();
 
+    // Safe only with the connection cap: server.max_connections < max_open_files.
+    #[cfg(unix)]
+    match attestation::utils::raise_open_files(config.server.max_open_files) {
+        Ok(limit) => tracing::info!(limit, "open files limit"),
+        Err(e) => tracing::warn!(%e, "could not raise the open files limit"),
+    }
+    let admission = Arc::new(attestation_api::admission::Admission::new(&config.verify));
     let state = AppState {
         config,
         token_issuer,
         verifier,
+        admission,
     };
 
     attestation_api::server::run(state).await

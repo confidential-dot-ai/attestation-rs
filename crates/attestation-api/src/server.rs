@@ -1,14 +1,17 @@
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
 use axum::{middleware, Router};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
-use tower_http::trace::TraceLayer;
+use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
+use tracing::Level;
 use uuid::Uuid;
 
 use crate::api;
@@ -17,6 +20,11 @@ use crate::AppState;
 
 /// Maximum request body size (1 MiB).
 const MAX_BODY_SIZE: usize = 1024 * 1024;
+/// How long a client may take to send the request headers, and the body.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest one verification job takes, for the request deadline.
+const VERIFY_BUDGET: Duration = Duration::from_secs(2);
 
 /// Generates UUID v4 request IDs for requests that don't already have one.
 #[derive(Clone)]
@@ -31,23 +39,23 @@ impl MakeRequestId for UuidRequestId {
 
 /// Observability layers shared by all routes (request ID + tracing).
 fn observability_layers(router: Router) -> Router {
+    // 503 and 502 refusals (overloaded, collateral unavailable) are warnings.
+    let trace = TraceLayer::new_for_http().on_failure(DefaultOnFailure::new().level(Level::WARN));
     router
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
-                let request_id = request
-                    .headers()
-                    .get("x-request-id")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("-");
-                tracing::info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    uri = %request.uri(),
-                    request_id = %request_id,
-                )
-            }),
-        )
+        .layer(trace.make_span_with(|request: &Request<Body>| {
+            let request_id = request
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                uri = %request.uri(),
+                request_id = %request_id,
+            )
+        }))
         .layer(SetRequestIdLayer::x_request_id(UuidRequestId))
 }
 
@@ -97,19 +105,58 @@ pub fn build_router(state: AppState) -> Router {
 
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     let addr: SocketAddr = state.config.server.bind.parse()?;
-    let app = build_router(state);
+    let (connections, verify) = (state.config.server.max_connections, &state.config.verify);
+    // A request gets 503 once its body, queue, fetch and verification time is spent.
+    let deadline = Duration::from_millis(verify.queue_deadline_ms + verify.fetch_deadline_ms)
+        + BODY_TIMEOUT
+        + 2 * VERIFY_BUDGET;
+    let app = build_router(state.clone())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            deadline,
+        ))
+        .layer(RequestBodyTimeoutLayer::new(BODY_TIMEOUT));
 
     tracing::info!(%addr, "starting attestation service");
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-
+    tokio::select! {
+        result = serve(listener, app, connections) => result?,
+        _ = shutdown_signal() => {}
+    }
     Ok(())
+}
+
+/// Serve `router` on `listener`, at most `max_connections` at a time: the
+/// rest wait in the listen backlog. A client that is slow to send its
+/// headers is disconnected.
+pub async fn serve(
+    listener: TcpListener,
+    router: Router,
+    max_connections: usize,
+) -> std::io::Result<()> {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    let open = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
+    loop {
+        let connection = open.clone().acquire_owned().await.expect("never closed");
+        let (io, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                tracing::warn!(%e, "accept");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let service = hyper_util::service::TowerToHyperService::new(router.clone());
+        tokio::spawn(async move {
+            let _connection = connection;
+            let _ = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_TIMEOUT)
+                .serve_connection(TokioIo::new(io), service)
+                .await;
+        });
+    }
 }
 
 async fn shutdown_signal() {
