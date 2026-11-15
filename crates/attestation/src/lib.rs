@@ -361,10 +361,8 @@ impl Verifier {
         self.verify_envelope(envelope, policies, &store).await
     }
 
-    /// As [`Self::verify`], but never waits for a vendor or NRAS: only
-    /// collateral attached, held or already in memory is used. Anything else
-    /// is [`AttestationError::CollateralUnavailable`], which
-    /// [`Self::verify`] would fetch.
+    /// As [`Self::verify`] with only attached, held or in-memory collateral;
+    /// anything else is [`AttestationError::CollateralUnavailable`].
     pub async fn verify_offline(
         &self,
         evidence_json: &[u8],
@@ -674,11 +672,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Warm: the fixture quote with one byte changed in the body, quote
-    /// signature, attestation key, QE report, its signature, or the PCK
-    /// leaf's TBS or signature (a base64 character) fails, from 8 threads at
-    /// once, while the genuine quote passes; so does the genuine quote after
-    /// the PCK leaf's notAfter or before its notBefore.
+    /// Warm, 8 threads: a byte changed in the body, quote signature, key, QE report
+    /// or signature, or PCK leaf fails; so does the quote outside the leaf's dates.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn warm_a_changed_byte_or_another_time_still_fails() {
         let body_end = 54 + u32::from_le_bytes(V5_QUOTE[50..54].try_into().unwrap()) as usize;
@@ -701,7 +696,11 @@ mod tests {
             envelope(&quote)
         }));
         let now = crate::testing::NOW;
-        let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now).await));
+        let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now)));
+        assert!(verifier
+            .verify(&tdx_envelope(), &Policies::all())
+            .await
+            .is_ok());
         let tasks = (0..8).map(|t| {
             let (verifier, tampered) = (verifier.clone(), tampered.clone());
             tokio::spawn(async move {
@@ -718,7 +717,7 @@ mod tests {
             task.unwrap();
         }
         for at in [4_102_444_800, 1_000_000_000] {
-            let other_time = Verifier::new(crate::testing::warm_tdx(at).await);
+            let other_time = Verifier::new(crate::testing::warm_tdx(at));
             let verified = other_time
                 .verify_offline(&tdx_envelope(), &Policies::all())
                 .await;

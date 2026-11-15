@@ -3,6 +3,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
@@ -103,7 +104,6 @@ pub async fn handler(
             "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
-    // Without an attached NRAS answer, a GPU bundle always needs NRAS.
     let needs_nras = req.nvidia_gpu.is_some() && req.collateral.is_none();
     let evidence_json = build_evidence_envelope(
         &platform.to_string(),
@@ -112,37 +112,31 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    // A job verifies with the collateral in memory and attached; when some
-    // is missing, a second job in the cold lane fetches it as the library does.
+    // Verify offline on a worker; if collateral (or, for a GPU bundle without
+    // attached answers, NRAS) is missing, verify in the cold lane.
+    let (evidence, policies, token) = (
+        Arc::new(evidence_json),
+        Arc::new(req.policies),
+        req.issue_token,
+    );
     let job = |offline: bool| {
-        let (state, evidence, policies) =
-            (state.clone(), evidence_json.clone(), req.policies.clone());
+        let (state, evidence, policies) = (state.clone(), evidence.clone(), policies.clone());
         let runtime = tokio::runtime::Handle::current();
-        move || {
-            runtime.block_on(verify(
-                &state,
-                &evidence,
-                &policies,
-                req.issue_token,
-                offline,
-            ))
-        }
-    };
-    let offline = match needs_nras {
-        false => Some(state.admission.run(job(true)).await?),
-        true => None,
+        move || runtime.block_on(verify(&state, &evidence, &policies, token, offline))
     };
     let missing =
         |a: &Result<_, _>| matches!(a, Err(ApiError::Verification(e)) if e.is_retryable());
-    match offline {
-        Some(answer) if !missing(&answer) => answer,
-        _ => state.admission.cold(job(false)).await?,
+    match needs_nras {
+        false => match state.admission.run(job(true)).await? {
+            answer if !missing(&answer) => answer,
+            _ => state.admission.cold(job(false)).await?,
+        },
+        true => state.admission.cold(job(false)).await?,
     }
     .map(Json)
 }
 
-/// Verify, `offline` or fetching what is missing, and sign a token for a
-/// passing result when asked.
+/// Verify, and sign a token for a passing result when asked.
 async fn verify(
     state: &AppState,
     evidence: &[u8],

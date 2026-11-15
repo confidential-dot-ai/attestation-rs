@@ -27,7 +27,6 @@ pub enum ApiError {
     #[error("internal error: {0}")]
     Internal(String),
 
-    /// Every verification slot is busy: no work was done.
     #[error("overloaded, retry later")]
     Overloaded,
 }

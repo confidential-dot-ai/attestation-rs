@@ -1156,8 +1156,7 @@ mod tests {
 
     #[test]
     fn test_asvk_chain_validates() {
-        // The bundled ARK signs itself, its ASK and ASVK, for all generations.
-        // Verification relies on this test instead of checking them per report.
+        // The bundled ARK signs itself, its ASK and ASVK: not checked per report.
         for gen in [
             ProcessorGeneration::Milan,
             ProcessorGeneration::Genoa,

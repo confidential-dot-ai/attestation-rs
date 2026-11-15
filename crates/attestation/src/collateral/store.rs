@@ -177,9 +177,8 @@ fn check<C: Collateral>(
     })
 }
 
-/// The piece `entry` holds, for `id`: the copy verified when it was stored
-/// if it was verified as this type for this id, else verified now. Sound
-/// because `Collateral::verify` is pure in body, chain and id.
+/// The piece `entry` holds: as verified when stored if for this type and id,
+/// else verified now (`Collateral::verify` is pure in body, chain and id).
 fn piece<C: Collateral>(entry: &Entry, id: &C::Id) -> std::result::Result<C, Failure> {
     match entry.parsed.downcast_ref::<(C::Id, C)>() {
         Some((verified_for, piece)) if verified_for == id => Ok(piece.clone()),
@@ -201,8 +200,7 @@ pub struct Store {
     floors: VersionFloors,
     /// When set, every response a lookup used, each once.
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
-    /// Use only what is held, attached or in memory: never wait for a
-    /// vendor. A refresh that is due runs in the background.
+    /// Use only held, attached or in-memory pieces; never wait for a vendor.
     pub(crate) offline: bool,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
@@ -491,6 +489,7 @@ mod native {
     use std::time::{Duration, Instant};
 
     use moka::ops::compute::Op;
+    use tokio::sync::{OwnedSemaphorePermit as Permit, Semaphore};
 
     use super::*;
     use crate::collateral::disk::Disk;
@@ -507,8 +506,7 @@ mod native {
     /// At most this many pieces not held anywhere are fetched from one
     /// vendor host per second.
     pub(crate) const COLD_PER_SECOND: u32 = 10;
-    /// At most this many requests (fetches and NRAS POSTs) are in flight to
-    /// one vendor host.
+    /// At most this many fetches and NRAS POSTs in flight to one vendor host.
     pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
 
     /// One vendor host: until when it asked to be left alone, the cold
@@ -518,7 +516,7 @@ mod native {
         paused_until: Option<Instant>,
         second: Option<Instant>,
         cold: u32,
-        in_flight: Option<Arc<tokio::sync::Semaphore>>,
+        in_flight: Option<Arc<Semaphore>>,
     }
 
     /// The vendor host of `url`.
@@ -573,9 +571,8 @@ mod native {
                     })
         }
 
-        /// The copy in memory, else a fetched one. A copy that is due for
-        /// refresh but still acceptable is served while the refresh runs in
-        /// the background. `offline` never waits for an upstream.
+        /// The copy in memory (an acceptable one even when due, refreshing it in
+        /// the background), else a fetched one unless `offline`.
         pub(super) async fn entry<C: Collateral>(
             self: &Arc<Self>,
             url: String,
@@ -618,9 +615,8 @@ mod native {
             }
         }
 
-        /// Refresh `url` in the background, unless there is no runtime to run
-        /// it on. Refreshes of one piece run one at a time, and those after a
-        /// fetch find it no longer due. True when it is running.
+        /// Refresh `url` in the background, if there is a runtime; refreshes of
+        /// a piece run one at a time and later ones find it not due.
         fn refresh_later<C: Collateral>(self: &Arc<Self>, url: &str, id: &C::Id, now: i64) -> bool {
             let Ok(runtime) = tokio::runtime::Handle::try_current() else {
                 return false;
@@ -734,19 +730,14 @@ mod native {
         }
 
         /// One of the [`IN_FLIGHT_PER_HOST`] request slots of `url`'s host.
-        pub(super) fn slot(
-            &self,
-            url: &str,
-        ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, Failure> {
+        pub(super) fn slot(&self, url: &str) -> std::result::Result<Permit, Failure> {
             let mut hosts = self.lock_hosts();
             let host = hosts.entry(host(url).to_string()).or_default();
             let slots = host
                 .in_flight
-                .get_or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(IN_FLIGHT_PER_HOST)));
-            slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| wait(1, "too many requests in flight to this vendor"))
+                .get_or_insert_with(|| Semaphore::new(IN_FLIGHT_PER_HOST).into());
+            let busy = |_| wait(1, "too many requests in flight to this vendor");
+            slots.clone().try_acquire_owned().map_err(busy)
         }
 
         /// Count a fetch of a piece held nowhere against its vendor host's

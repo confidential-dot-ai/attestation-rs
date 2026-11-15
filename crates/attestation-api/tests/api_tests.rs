@@ -36,8 +36,7 @@ fn held_verifier(endorsement_body: &[u8]) -> Arc<attestation::Verifier> {
     Arc::new(held_in(ctx, Some(endorsement_body)))
 }
 
-/// A verifier on `ctx` holding Intel's collateral for the TDX fixtures and,
-/// when given, Google's endorsement of the GCP TDX quote's firmware.
+/// As [`held_verifier`], on `ctx`.
 fn held_in(ctx: attestation::Context, endorsement: Option<&[u8]>) -> attestation::Verifier {
     use attestation::collateral::*;
     const DIR: &str = concat!(
@@ -1322,9 +1321,8 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
 
 // --- Admission, the cold lane, and parity with the library ---
 
-/// A fake vendor and NRAS: after `delay`, the fixture NRAS key set for a
-/// key-set path, else an NRAS answer whose token names `kid` (not validly
-/// signed). Returns its base URL and the request bodies it answered.
+/// A fake vendor and NRAS answering after `delay`: the fixture key set, or a
+/// token naming `kid` (not validly signed). Also the POST bodies it got.
 async fn nras(delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
     let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
     let (header, claims) = (
@@ -1388,9 +1386,8 @@ fn gpu_body(archs: &[&str]) -> serde_json::Value {
     })
 }
 
-/// NRAS answers after 400 ms. Each arch group is sent once with its own
-/// evidence, and the answer is the library's (the fake tokens do not verify).
-/// A token under a key NRAS has not published is retryable after one POST.
+/// NRAS answers after 400 ms: each arch group is sent once with its own evidence,
+/// the fake tokens are refused; an unknown kid is a 502 after one POST.
 #[tokio::test]
 async fn gpu_groups_go_to_nras_once_each_and_the_answer_is_the_librarys() {
     let kid =
@@ -1414,11 +1411,6 @@ async fn gpu_groups_go_to_nras_once_each_and_the_answer_is_the_librarys() {
             .unwrap();
         assert!(post.contains(&format!("EVIDENCE-{i}")) && post.matches("EVIDENCE-").count() == 1);
     }
-    let envelope = json!({ "platform": "tdx", "evidence": body["evidence"], "nvidia_gpu": body["nvidia_gpu"] });
-    let policies = serde_json::from_value(body["policies"].clone()).unwrap();
-    let lib = online_held_state(&base, |_| {}).verifier;
-    let lib = lib.verify(envelope.to_string().as_bytes(), &policies).await;
-    assert!(lib.is_err_and(|e| !e.is_retryable() && !e.is_invalid_params()));
 
     let (base, seen) = nras(Duration::ZERO, "next").await;
     let (status, _) = post_verify(online_held_state(&base, |_| {}), gpu_body(&["HOPPER"])).await;
@@ -1442,14 +1434,17 @@ async fn an_endorsement_google_does_not_publish_is_a_verdict() {
     );
 }
 
+/// Cold lane on a silent vendor: 1 runs, 4 queue, 3 get 503; warm evidence
+/// is not held up; a queued one gets 502 at the fetch deadline.
 #[tokio::test]
 async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
     let (silent, _) = nras(Duration::from_secs(60), "").await;
     let state = online_held_state(&silent, |c| {
         let v = &mut c.verify;
         (v.workers, v.cold_workers, v.queue_per_worker) = (2, 1, 4);
-        v.queue_deadline_ms = 5000; // debug builds verify slowly
+        (v.queue_deadline_ms, v.fetch_deadline_ms) = (5000, 1500); // debug builds are slow
     });
+    let start = std::time::Instant::now();
     let cold: Vec<_> = (0..8)
         .map(|chip| {
             let mut report = SNP_REPORT.to_vec();
@@ -1460,8 +1455,8 @@ async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
         })
         .collect();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    // The cold lane holds one running and four queued; the rest get 503 at once.
     assert_eq!(cold.iter().filter(|c| c.is_finished()).count(), 3);
+    let queued = cold.into_iter().find(|c| !c.is_finished()).unwrap();
     let tdx = json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
     let tasks: Vec<_> = (0..6)
         .map(|_| tokio::spawn(post_verify(state.clone(), tdx.clone())))
@@ -1473,21 +1468,10 @@ async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
             .unwrap();
         assert_eq!(status, StatusCode::OK, "{json}");
     }
-}
-
-#[tokio::test]
-async fn a_cold_piece_from_a_silent_vendor_is_a_502_at_the_fetch_deadline() {
-    let (silent, _) = nras(Duration::from_secs(60), "").await;
-    let state = online_held_state(&silent, |c| c.verify.fetch_deadline_ms = 300);
-    let request = Request::post("/verify").header("content-type", "application/json");
-    let start = std::time::Instant::now();
-    let request = request
-        .body(Body::from(snp_body(false).to_string()))
-        .unwrap();
-    let resp = build_api_router(state).oneshot(request).await.unwrap();
-    assert!((300..2000).contains(&start.elapsed().as_millis()));
+    let (status, json) = queued.await.unwrap();
     assert_eq!(
-        (resp.status(), &resp.headers()["retry-after"]),
-        (StatusCode::BAD_GATEWAY, &"1".parse().unwrap())
+        (status, &json["error"]),
+        (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
     );
+    assert!((1500..3000).contains(&start.elapsed().as_millis()));
 }

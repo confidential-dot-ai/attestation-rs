@@ -68,9 +68,8 @@ pub trait Platform {
         now: i64,
     ) -> Result<Self::Result>;
 
-    /// [`Self::gather`], then [`Self::verify`]: what [`crate::Verifier`]
-    /// runs. A platform may override it to check the evidence's signature
-    /// once for both.
+    /// [`Self::gather`] then [`Self::verify`]; overridden to check the
+    /// evidence's signature once.
     fn gather_and_verify(
         evidence: &Self::Evidence,
         params: &Self::Params,

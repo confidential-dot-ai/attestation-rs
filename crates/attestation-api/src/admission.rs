@@ -1,8 +1,5 @@
-//! Bounded verification. A job runs on the blocking pool once one of
-//! `workers` slots is free; at most `queue_per_worker` per worker wait, each
-//! no longer than the queue deadline. Evidence whose collateral is not in
-//! memory is verified again in a separate, small cold lane that may wait for
-//! vendors, so vendor time never holds a worker slot.
+//! Bounded verification on the blocking pool, and a separate cold lane for
+//! evidence that waits for vendors, so vendor time never holds a worker.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,22 +21,18 @@ pub struct Admission {
 
 impl Admission {
     pub fn new(config: &VerifyConfig) -> Self {
-        let workers = config.workers();
+        let (workers, cold) = (config.workers(), config.cold_workers());
         Self {
             workers: Arc::new(Semaphore::new(workers)),
             places: Arc::new(Semaphore::new(workers * (1 + config.queue_per_worker))),
             queue_deadline: Duration::from_millis(config.queue_deadline_ms),
-            cold: Arc::new(Semaphore::new(config.cold_workers())),
-            cold_places: Arc::new(Semaphore::new(
-                config.cold_workers() * (1 + config.queue_per_worker),
-            )),
+            cold: Arc::new(Semaphore::new(cold)),
+            cold_places: Arc::new(Semaphore::new(cold * (1 + config.queue_per_worker))),
             fetch_deadline: Duration::from_millis(config.fetch_deadline_ms),
         }
     }
 
-    /// Run `job` on a worker: 503 at once when the queue is full, or when no
-    /// worker is free within the queue deadline. Dropping the returned future
-    /// before the job starts means it never runs.
+    /// Run `job` on a worker, else 503 (queue full, or the queue deadline).
     pub async fn run<T: Send + 'static>(
         &self,
         job: impl FnOnce() -> T + Send + 'static,
@@ -47,8 +40,8 @@ impl Admission {
         let place = self.places.clone().try_acquire_owned();
         let _place = place.map_err(|_| ApiError::Overloaded)?;
         let deadline = Instant::now() + self.queue_deadline;
-        let worker = timeout_at(deadline, self.workers.clone().acquire_owned())
-            .await
+        let worker = timeout_at(deadline, self.workers.clone().acquire_owned()).await;
+        let worker = worker
             .map_err(|_| ApiError::Overloaded)?
             .expect("never closed");
         blocking(move || {
@@ -58,10 +51,8 @@ impl Admission {
         .await
     }
 
-    /// Run `job`, which may wait for vendors, in the cold lane: 503 at once
-    /// when its queue is full, 502 when it has not finished within the fetch
-    /// deadline. A job that has started runs to its end, so the fetches it
-    /// started finish in the store.
+    /// Run `job` in the cold lane: 503 when its queue is full, 502 after the
+    /// fetch deadline. A started job runs to its end, finishing its fetches.
     pub async fn cold<T: Send + 'static>(
         &self,
         job: impl FnOnce() -> T + Send + 'static,
@@ -89,9 +80,8 @@ impl Admission {
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
-    tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))
+    let job = tokio::task::spawn_blocking(job);
+    job.await.map_err(|e| ApiError::Internal(e.to_string()))
 }
 
 #[cfg(test)]
@@ -100,8 +90,7 @@ mod tests {
 
     use super::*;
 
-    /// One worker and `queue_per_worker` places, with the worker held until
-    /// the returned sender is dropped.
+    /// One worker, held until the sender is dropped.
     async fn busy(queue_per_worker: usize) -> (Arc<Admission>, std::sync::mpsc::Sender<()>) {
         let admission = Arc::new(Admission::new(&VerifyConfig {
             workers: 1,
@@ -133,12 +122,7 @@ mod tests {
         }
         // Queued, and the client went away.
         let (admission, hold) = busy(1).await;
-        let queued = tokio::spawn({
-            let (admission, job) = (admission.clone(), job());
-            async move { admission.run(job).await }
-        });
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        queued.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(10), admission.run(job())).await;
         drop(hold);
         tokio::time::sleep(Duration::from_millis(50)).await;
         admission.run(|| ()).await.unwrap();

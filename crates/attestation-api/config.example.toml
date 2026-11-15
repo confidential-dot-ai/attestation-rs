@@ -12,9 +12,8 @@ queue_per_worker = 8
 queue_deadline_ms = 50            # Waiting longer for a worker: 503
 cold_workers = 0                  # Verifications that fetch (0 = half the vCPUs)
 fetch_deadline_ms = 10000         # Fetching longer: 502
-# Collateral URLs fetched before serving. Absent: Intel's QE Identity and CRLs
-# and AMD's VCEK CRLs. Add the TCB Info URL of each FMSPC in the fleet.
-# warm = []
+# Collateral URLs fetched before serving (default: Intel's QE Identity and
+# CRLs, AMD's CRLs); add each fleet FMSPC's TCB Info URL. warm = [...]
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.

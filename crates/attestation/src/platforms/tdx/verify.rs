@@ -567,8 +567,7 @@ impl Platform for Tdx {
         Self::verify_checked(evidence, params, collateral, now, None)
     }
 
-    /// The quote's signature and PCK chain are checked once, before the
-    /// gather; the checked quote is evaluated after it.
+    /// The quote's signature and PCK chain are checked once.
     async fn gather_and_verify(
         evidence: &TdxEvidence,
         params: &TdxParams,
@@ -584,8 +583,7 @@ impl Platform for Tdx {
 }
 
 impl Tdx {
-    /// [`Platform::verify`], with the quote bytes and quote of `evidence`
-    /// when [`genuine_quote`] has just checked them.
+    /// [`Platform::verify`]; `checked` is what [`genuine_quote`] returned.
     fn verify_checked(
         evidence: &TdxEvidence,
         params: &TdxParams,
@@ -770,60 +768,92 @@ mod tests {
         let (mut set, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
             .await
             .unwrap();
-        let check = |set: &TdxCollateralSet, params: &TdxParams| {
-            let mut result = verify_quote(quote_bytes, params, now).unwrap().1;
-            check_collateral(&mut result, quote_bytes, &quote, params, set, now).map(|_| result)
-        };
-        let result = check(&set, &TdxParams::default()).unwrap();
-        assert_eq!(result.crl_ok, Some(true));
-        assert!(result.passed());
-
-        // A CRL (its signature was checked when stored) listing `cert`.
-        let revoking = |cert: &[u8]| {
-            let (_, cert) =
-                <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(cert)
-                    .unwrap();
-            let key = rcgen::KeyPair::generate().unwrap();
-            let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+        let check = |set: &TdxCollateralSet| {
+            let mut result = verify_quote(quote_bytes, &TdxParams::default(), now)
                 .unwrap()
-                .self_signed(&key)
-                .unwrap();
-            let crl = rcgen::CertificateRevocationListParams {
-                this_update: rcgen::date_time_ymd(2026, 1, 1),
-                next_update: rcgen::date_time_ymd(2027, 1, 1),
-                crl_number: rcgen::SerialNumber::from(2u64),
-                issuing_distribution_point: None,
-                revoked_certs: vec![rcgen::RevokedCertParams {
-                    serial_number: rcgen::SerialNumber::from_slice(cert.raw_serial()),
-                    revocation_time: rcgen::date_time_ymd(2026, 1, 1),
-                    reason_code: None,
-                    invalidity_date: None,
-                }],
-                key_identifier_method: rcgen::KeyIdMethod::Sha256,
-            }
-            .signed_by(&ca, &key)
-            .unwrap();
-            crl.der().to_vec()
+                .1;
+            check_collateral(
+                &mut result,
+                quote_bytes,
+                &quote,
+                &TdxParams::default(),
+                set,
+                now,
+            )
         };
-        let (pck_crl, root_crl) = (set.pck_crl.der.clone(), set.root_crl.der.clone());
-        set.root_crl.der = revoking(&set.tcb_info.signer);
+        assert!(check(&set).is_ok());
+
+        let (_, signer) =
+            <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(
+                &set.tcb_info.signer,
+            )
+            .unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let crl = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2027, 1, 1),
+            crl_number: rcgen::SerialNumber::from(2u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from_slice(signer.raw_serial()),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }],
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&ca, &key)
+        .unwrap();
+        set.root_crl.der = crl.der().to_vec();
         assert!(matches!(
-            check(&set, &TdxParams::default()),
+            check(&set),
             Err(AttestationError::CertChainError(_))
         ));
-        // The PCK leaf in the PCK CRL, the Platform CA in the Root CRL.
+
+        // A CRL listing the PCK leaf and its Platform CA, as the PCK CRL, then
+        // as the Root CRL: crl_ok is false. An unaccepted TCB status fails.
         let pck = PckChain::of(quote_bytes, &quote).unwrap();
-        let crl_ok = |set: &TdxCollateralSet| check(set, &TdxParams::default()).unwrap().crl_ok;
-        (set.pck_crl.der, set.root_crl.der) = (revoking(&pck.der[0]), root_crl.clone());
-        assert_eq!(crl_ok(&set), Some(false));
-        (set.pck_crl.der, set.root_crl.der) = (pck_crl, revoking(&pck.der[1]));
-        assert_eq!(crl_ok(&set), Some(false));
-        set.root_crl.der = root_crl;
-        // A TCB status the params do not accept.
-        let status = result.tcb_status.unwrap().tcb_status;
+        let serial = |der: &[u8]| {
+            let (_, cert) = <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(der).unwrap();
+            rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from_slice(cert.raw_serial()),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }
+        };
+        let listing = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2027, 1, 1),
+            crl_number: rcgen::SerialNumber::from(2u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![serial(&pck.der[0]), serial(&pck.der[1])],
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&ca, &key)
+        .unwrap();
+        let result = |set: &TdxCollateralSet, params: &TdxParams| {
+            let mut result = verify_quote(quote_bytes, params, now).unwrap().1;
+            check_collateral(&mut result, quote_bytes, &quote, params, set, now).unwrap();
+            result
+        };
+        let (fresh, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
         let mut params = TdxParams::default();
+        assert_eq!(result(&fresh, &params).crl_ok, Some(true));
+        set.root_crl.der = fresh.root_crl.der.clone();
+        set.pck_crl.der = listing.der().to_vec();
+        assert_eq!(result(&set, &params).crl_ok, Some(false));
+        (set.root_crl.der, set.pck_crl.der) = (listing.der().to_vec(), fresh.pck_crl.der.clone());
+        assert_eq!(result(&set, &params).crl_ok, Some(false));
+        let status = result(&fresh, &params).tcb_status.unwrap().tcb_status;
         params.accepted_tcb_statuses.retain(|s| *s != status);
-        assert!(!check(&set, &params).unwrap().passed());
+        assert!(!result(&fresh, &params).passed());
     }
 
     // Load real test fixtures at compile time

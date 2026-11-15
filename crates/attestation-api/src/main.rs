@@ -91,9 +91,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = attestation::detect();
 
     // Safe only with the connection cap: server.max_connections < max_open_files.
-    match rlimit::increase_nofile_limit(config.server.max_open_files) {
-        Ok(limit) => tracing::info!(limit, "open files limit"),
-        Err(e) => tracing::warn!(%e, "could not raise the open files limit"),
+    if let Err(e) = rlimit::increase_nofile_limit(config.server.max_open_files) {
+        tracing::warn!(%e, "could not raise the open files limit");
     }
     // Fetch the collateral every request needs before serving, for at most 10 s.
     let (mut warming, now) = (tokio::task::JoinSet::new(), verifier.context().now());
@@ -102,10 +101,6 @@ async fn main() -> anyhow::Result<()> {
         warming.spawn(async move { verifier.context().store().serve(&url, now).await });
     }
     let _ = tokio::time::timeout(Duration::from_secs(10), warming.join_all()).await;
-    tracing::info!(
-        pieces = verifier.context().store().count(),
-        "collateral warmed"
-    );
     let admission = Arc::new(attestation_api::admission::Admission::new(&config.verify));
     let state = AppState {
         config,

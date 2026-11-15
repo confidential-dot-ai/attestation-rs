@@ -120,9 +120,6 @@ where `<platform>` is the token's platform claim.
 message text. A request for tokens without token configuration also fails;
 turn on token configuration before requesting them.
 
-`config.example.toml` describes the limits on verification work, queues,
-fetches and connections (`[verify]`, `[server]`).
-
 One in-memory verifier/store is reused for the process. The API has no disk
 cache or explicit collateral-upstream configuration. It uses native
 [host discovery](../../docs/collateral.md#upstream-selection) and attached

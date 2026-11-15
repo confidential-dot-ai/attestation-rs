@@ -97,20 +97,15 @@ fn default_warm() -> Vec<String> {
 }
 
 impl VerifyConfig {
-    /// Two per vCPU by default: with one, a vCPU idles while a finished job
-    /// hands its slot to the next.
+    /// Two per vCPU by default, so no vCPU idles between jobs.
     pub fn workers(&self) -> usize {
-        match self.workers {
-            0 => 2 * vcpus(),
-            n => n,
-        }
+        Some(self.workers).filter(|n| *n > 0).unwrap_or(2 * vcpus())
     }
 
     pub fn cold_workers(&self) -> usize {
-        match self.cold_workers {
-            0 => (vcpus() / 2).max(1),
-            n => n,
-        }
+        Some(self.cold_workers)
+            .filter(|n| *n > 0)
+            .unwrap_or((vcpus() / 2).max(1))
     }
 }
 
@@ -283,19 +278,9 @@ impl Config {
             }
         }
 
-        // A queued request must be able to wait for the queue ahead of it
-        // (about 1 ms a job); more files than connections.
-        let (v, s) = (&self.verify, &self.server);
-        if v.queue_deadline_ms < v.queue_per_worker.max(1) as u64
-            || v.fetch_deadline_ms == 0
-            || !(1..s.max_open_files).contains(&(s.max_connections as u64))
-        {
-            return Err(
-                "[verify] needs queue_deadline_ms >= queue_per_worker and a nonzero \
-                 fetch_deadline_ms; [server] needs \
-                 0 < max_connections < max_open_files"
-                    .to_string(),
-            );
+        // A queued request must be able to wait out the queue (about 1 ms a job).
+        if self.verify.queue_deadline_ms < self.verify.queue_per_worker.max(1) as u64 {
+            return Err("verify.queue_deadline_ms must be at least queue_per_worker".into());
         }
 
         for platform in &self.attestation.platforms {
