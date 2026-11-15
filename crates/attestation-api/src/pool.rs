@@ -66,6 +66,10 @@ struct Shared {
     run_ns: AtomicU64,
 }
 
+/// The nice value of the verification threads.
+#[cfg(target_os = "linux")]
+const VERIFY_NICE: i32 = 10;
+
 /// The run time assumed for a job until one has run.
 const FIRST_COST: Duration = Duration::from_millis(5);
 
@@ -85,6 +89,11 @@ impl Pool {
             std::thread::Builder::new()
                 .name(format!("verify-{i}"))
                 .spawn(move || {
+                    // Below the I/O threads, so that a busy pool does not
+                    // slow accepting and reading requests; Linux sets the
+                    // nice value per thread.
+                    #[cfg(target_os = "linux")]
+                    let _ = rustix::process::setpriority_process(None, VERIFY_NICE);
                     while let Ok(job) = jobs.recv() {
                         job();
                     }
