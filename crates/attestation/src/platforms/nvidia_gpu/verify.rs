@@ -88,7 +88,7 @@ async fn nras_attest(store: &Store, request: &NrasRequest, now: i64) -> Result<s
     let key = nras_answer_url(request);
     let body = match store.held_body(&key).filter(|b| !expired(b, now)) {
         Some(body) => body.to_vec(),
-        None => ask_nras(store, request).await?,
+        None => store.nras_attest(key.clone(), request).await?,
     };
     let answer = serde_json::from_slice(&body)
         .map_err(|e| AttestationError::NrasResponseParse(e.to_string()))?;
@@ -128,19 +128,6 @@ fn nras_answer_url(request: &NrasRequest) -> String {
         _ => NRAS_GPU_URL,
     };
     format!("{url}#nonce={}", request.nonce)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn ask_nras(store: &Store, request: &NrasRequest) -> Result<Vec<u8>> {
-    match store.vendor() {
-        Some(vendor) => vendor.nras_attest(request).await,
-        None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn ask_nras(_store: &Store, _request: &NrasRequest) -> Result<Vec<u8>> {
-    Err(crate::error::Unavailable::offline().into_error("NRAS attestation"))
 }
 
 /// `jwks` (a key set) with only the keys the tokens in `answers` name.

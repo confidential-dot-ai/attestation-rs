@@ -45,6 +45,8 @@ pub use nvidia::NrasJwks;
 pub use serve::Served;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use store::Deferred;
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::Fetched;
 pub use store::{CollateralUsed, Source, Store};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vendor::VSOCK_PORT;

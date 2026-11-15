@@ -317,43 +317,35 @@ fn parse_envelope(evidence_json: &[u8]) -> Result<AttestationEvidence> {
 
 /// The outcome of [`Verifier::verify_cached`].
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::large_enum_variant)] // returned, not stored
 pub enum Attempt {
     Done(Result<Verified>),
-    /// Collateral to fetch before verifying again.
+    /// Vendor requests to make before verifying again.
     Fetch(Fetch),
 }
 
-/// Vendor requests [`Verifier::verify_cached`] put off, and what it
-/// concluded without them.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct Fetch {
-    deferred: Vec<collateral::Deferred>,
-    without: Result<Verified>,
-}
+pub use collateral::Fetched;
+
+/// Vendor requests [`Verifier::verify_cached`] put off.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Fetch(Vec<collateral::Deferred>);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Fetch {
-    /// The vendor URLs to fetch.
+    /// The vendor URLs to ask.
     pub fn urls(&self) -> impl Iterator<Item = &str> {
-        self.deferred.iter().map(|(url, _)| url.as_str())
+        self.0.iter().map(|(url, _)| url.as_str())
     }
 
-    /// Fetch (and check) every piece into the verifier's memory, all at
-    /// once; concurrent fetches of one piece share one request. `None`: all
-    /// fetched, verify again. `Some`: a fetch failed, and this is the answer
-    /// [`Verifier::verify`] gives: the verdict without the piece when there
-    /// was one (an attached copy that does not pass), else the fetch error.
-    pub async fn run(self) -> Option<Result<Verified>> {
-        let fetched: Result<()> =
-            futures_util::future::join_all(self.deferred.into_iter().map(|(_, fetch)| fetch))
-                .await
-                .into_iter()
-                .collect();
-        match (fetched, self.without) {
-            (Ok(()), _) => None,
-            (Err(_), Ok(verified)) => Some(Ok(verified)),
-            (Err(e), Err(_)) => Some(Err(e)),
-        }
+    /// Make every request at once (a collateral piece is fetched, checked
+    /// and kept in memory; concurrent fetches of one piece share one
+    /// request), and add what each gave, failures included, to `fetched`
+    /// for the next [`Verifier::verify_cached`].
+    pub async fn run(self, fetched: &mut Fetched) {
+        let (urls, fetches): (Vec<_>, Vec<_>) = self.0.into_iter().unzip();
+        let outcomes = futures_util::future::join_all(fetches).await;
+        std::sync::Arc::make_mut(&mut fetched.0).extend(urls.into_iter().zip(outcomes));
     }
 }
 
@@ -404,29 +396,34 @@ impl Verifier {
     }
 
     /// As [`Self::verify`], but it never waits on a vendor: collateral comes
-    /// only from the envelope and from memory. When a piece must be fetched
-    /// first (or refreshed), the answer is [`Attempt::Fetch`]: run it where
-    /// waiting is cheap, then call this again. For callers that verify on a
-    /// few CPU-bound threads.
+    /// from the envelope, memory and `fetched`. When a vendor must be asked
+    /// first (a piece to fetch or refresh, an NRAS answer), the answer is
+    /// [`Attempt::Fetch`]: run it where waiting is cheap, then call this
+    /// again with what it gave. A request is put off once per verification:
+    /// once `fetched` has its outcome, failures included, the answer is the
+    /// one [`Self::verify`] gives. For callers that verify on a few
+    /// CPU-bound threads.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn verify_cached(&self, evidence_json: &[u8], policies: &Policies) -> Attempt {
+    pub async fn verify_cached(
+        &self,
+        evidence_json: &[u8],
+        policies: &Policies,
+        fetched: &Fetched,
+    ) -> Attempt {
         let envelope = match parse_envelope(evidence_json) {
             Ok(envelope) => envelope,
             Err(e) => return Attempt::Done(Err(e)),
         };
-        let store = self
-            .ctx
-            .store()
-            .view_cached(envelope.held_collateral(), &policies.floors);
+        let store =
+            self.ctx
+                .store()
+                .view_cached(envelope.held_collateral(), &policies.floors, fetched);
         let verified = self.verify_envelope(envelope, policies, &store).await;
         let deferred = store.take_deferred();
         if deferred.is_empty() {
             Attempt::Done(verified)
         } else {
-            Attempt::Fetch(Fetch {
-                deferred,
-                without: verified,
-            })
+            Attempt::Fetch(Fetch(deferred))
         }
     }
 

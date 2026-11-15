@@ -130,7 +130,7 @@ fn refresh_at(dates: &Dates) -> i64 {
 }
 
 #[derive(Clone)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     Unavailable(Unavailable),
     /// Why the piece does not verify.
     Refused(String),
@@ -211,19 +211,45 @@ pub struct Store {
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
-    /// When set, a lookup that would ask a vendor adds the request here
-    /// instead and fails as unavailable (see [`Self::view_cached`]).
+    /// When set, the view is cached-only (see [`Self::view_cached`]).
     #[cfg(not(target_arch = "wasm32"))]
-    deferred: Option<Arc<Mutex<Vec<Deferred>>>>,
+    cached: Option<Arc<Cached>>,
+}
+
+/// What a cached-only view put off, and what earlier fetches for the same
+/// verification gave.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Cached {
+    deferred: Mutex<Vec<Deferred>>,
+    fetched: Fetched,
 }
 
 /// A vendor request a cached-only view put off: the URL, and the fetch
-/// (and check) that stores the piece in memory.
+/// (and check), with what it gave.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type Deferred = (
     String,
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
+    std::pin::Pin<Box<dyn std::future::Future<Output = Outcome> + Send>>,
 );
+
+/// What a put-off vendor request gave.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(crate) enum Outcome {
+    /// The piece is in memory, from there.
+    Stored(Source),
+    /// An answer for this verification only (NRAS's, bound to its nonce).
+    Answer(Vec<u8>),
+    Failed(Failure),
+    /// NRAS refused the request.
+    Refused(String),
+}
+
+/// What the vendor requests put off for one verification gave, by URL: a
+/// cached-only view answers from it as a lookup that asked would have.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub struct Fetched(pub(crate) Arc<HashMap<String, Outcome>>);
 
 impl Store {
     /// Holds only what the caller supplies: no memory, disk or network.
@@ -237,7 +263,7 @@ impl Store {
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
             #[cfg(not(target_arch = "wasm32"))]
-            deferred: None,
+            cached: None,
         }
     }
 
@@ -261,22 +287,30 @@ impl Store {
             #[cfg(not(target_arch = "wasm32"))]
             native: self.native.clone(),
             #[cfg(not(target_arch = "wasm32"))]
-            deferred: None,
+            cached: None,
         }
     }
 
-    /// As [`Self::view`], but it never waits on a vendor: a piece not in
-    /// memory (or due for a refresh) is unavailable, and its fetch is put off
-    /// for [`Self::take_deferred`]. CPU-bound callers verify with this view
-    /// and fetch outside their threads.
+    /// As [`Self::view`], but it never waits on a vendor. A vendor request
+    /// a lookup would make is put off for [`Self::take_deferred`] (the
+    /// lookup fails as unavailable), unless `fetched` has its outcome: then
+    /// the lookup answers as it would have after asking. CPU-bound callers
+    /// verify with this view and fetch outside their threads.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn view_cached(&self, attached: Vec<HeldResponse>, floors: &VersionFloors) -> Self {
+    pub(crate) fn view_cached(
+        &self,
+        attached: Vec<HeldResponse>,
+        floors: &VersionFloors,
+        fetched: &Fetched,
+    ) -> Self {
+        let fetches = self.native.as_ref().is_some_and(|n| n.vendor.is_some());
         Self {
-            deferred: self
-                .native
-                .as_ref()
-                .is_some_and(|n| n.vendor.is_some())
-                .then(Arc::default),
+            cached: fetches.then(|| {
+                Arc::new(Cached {
+                    deferred: Mutex::default(),
+                    fetched: fetched.clone(),
+                })
+            }),
             ..self.view(attached, floors, false)
         }
     }
@@ -284,24 +318,67 @@ impl Store {
     /// The vendor requests a cached-only view put off, each URL once.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn take_deferred(&self) -> Vec<Deferred> {
-        self.deferred.as_ref().map_or_else(Vec::new, |d| {
-            std::mem::take(&mut *d.lock().unwrap_or_else(|e| e.into_inner()))
+        self.cached.as_ref().map_or_else(Vec::new, |c| {
+            std::mem::take(&mut *c.deferred.lock().unwrap_or_else(|e| e.into_inner()))
         })
     }
 
     /// Put off `fetch` of `url`, unless already put off.
     #[cfg(not(target_arch = "wasm32"))]
     fn defer(
-        &self,
-        deferred: &Mutex<Vec<Deferred>>,
+        cached: &Cached,
         url: String,
-        fetch: impl std::future::Future<Output = Result<()>> + Send + 'static,
+        fetch: impl std::future::Future<Output = Outcome> + Send + 'static,
     ) -> Failure {
-        let mut deferred = deferred.lock().unwrap_or_else(|e| e.into_inner());
+        let mut deferred = cached.deferred.lock().unwrap_or_else(|e| e.into_inner());
         if !deferred.iter().any(|(u, _)| *u == url) {
             deferred.push((url, Box::pin(fetch)));
         }
         Failure::Unavailable(Unavailable::detail("not in memory yet"))
+    }
+
+    /// NRAS's answer to `request` (held under `key`), asked now, or put off
+    /// in a cached-only view.
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) async fn nras_attest(
+        &self,
+        key: String,
+        request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
+    ) -> Result<Vec<u8>> {
+        const NAME: &str = "NRAS attestation";
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(native) = self.native.as_ref().filter(|n| n.vendor.is_some()) {
+            let Some(cached) = &self.cached else {
+                return native.nras_attest(request).await;
+            };
+            match cached.fetched.0.get(&key) {
+                Some(Outcome::Answer(body)) => return Ok(body.clone()),
+                Some(Outcome::Failed(f)) => return Err(f.clone().into_error(NAME)),
+                Some(Outcome::Refused(why)) => {
+                    return Err(AttestationError::NrasRequestFailed(why.clone()))
+                }
+                Some(Outcome::Stored(_)) | None => {}
+            }
+            let (native, request) = (native.clone(), request.clone());
+            let ask = async move {
+                match native.nras_attest(&request).await {
+                    Ok(body) => Outcome::Answer(body),
+                    Err(AttestationError::CollateralUnavailable {
+                        retry_after,
+                        detail,
+                        ..
+                    }) => Outcome::Failed(Failure::Unavailable(Unavailable {
+                        status: None,
+                        retry_after,
+                        detail,
+                    })),
+                    Err(AttestationError::NrasRequestFailed(why)) => Outcome::Refused(why),
+                    Err(e) => Outcome::Refused(e.to_string()),
+                }
+            };
+            return Err(Self::defer(cached, key, ask).into_error(NAME));
+        }
+        Err(Unavailable::offline().into_error(NAME))
     }
 
     /// Keep `url`'s response in what a recording view used.
@@ -454,24 +531,27 @@ impl Store {
     ) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            if let Some(deferred) = &self.deferred {
-                if let Some(entry) = native.mem.get(&url).await {
-                    if !native.due(&entry, now, false) {
-                        return Ok((entry, Source::Memory));
+            if let Some(cached) = &self.cached {
+                let held = native.mem.get(&url).await;
+                match (cached.fetched.0.get(&url), held) {
+                    (Some(Outcome::Failed(f)), _) => return Err(f.clone()),
+                    (Some(Outcome::Stored(from)), Some(entry)) => return Ok((entry, *from)),
+                    (_, Some(entry)) if !native.due(&entry, now, false) => {
+                        return Ok((entry, Source::Memory))
                     }
+                    _ => {}
                 }
                 let (native, id) = (native.clone(), id.clone());
                 let fetch = {
                     let url = url.clone();
                     async move {
-                        native
-                            .entry::<C>(url, &id, now)
-                            .await
-                            .map(drop)
-                            .map_err(|e| e.into_error(&C::name(&id)))
+                        match native.entry::<C>(url, &id, now).await {
+                            Ok((_, from)) => Outcome::Stored(from),
+                            Err(f) => Outcome::Failed(f),
+                        }
                     }
                 };
-                return Err(self.defer(deferred, url, fetch));
+                return Err(Self::defer(cached, url, fetch));
             }
             return native.entry::<C>(url, id, now).await;
         }
@@ -504,16 +584,30 @@ impl Store {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
             let url = C::url(id);
-            if let (Some(deferred), true) = (&self.deferred, native.mem.contains_key(&url)) {
-                let (native, piece) = (native.clone(), id.clone());
-                let fetch = {
-                    let url = url.clone();
-                    async move {
-                        let (_, _, failure) = native.refresh::<C>(&url, &piece, true, now).await;
-                        failure.map_or(Ok(()), |e| Err(e.into_error(&C::name(&piece))))
+            if let Some(cached) = &self.cached {
+                match cached.fetched.0.get(&url) {
+                    Some(Outcome::Failed(f)) => return Err(f.clone().into_error(&C::name(id))),
+                    Some(_) => return Ok(()),
+                    None => {}
+                }
+                // As the refresh would: nothing within recheck of the last
+                // time the vendor was asked.
+                match native.mem.get(&url).await {
+                    Some(entry) if native.due(&entry, now, true) => {
+                        let (native, piece) = (native.clone(), id.clone());
+                        let fetch = {
+                            let url = url.clone();
+                            async move {
+                                match native.refresh::<C>(&url, &piece, true, now).await {
+                                    (_, _, Some(f)) => Outcome::Failed(f),
+                                    (_, _, None) => Outcome::Stored(Source::Memory),
+                                }
+                            }
+                        };
+                        return Err(Self::defer(cached, url, fetch).into_error(&C::name(id)));
                     }
-                };
-                return Err(self.defer(deferred, url, fetch).into_error(&C::name(id)));
+                    _ => return Ok(()),
+                }
             }
             if native.mem.contains_key(&url) {
                 let (_, _, failure) = native.refresh::<C>(&url, id, true, now).await;
@@ -644,6 +738,18 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
+            }
+        }
+
+        /// POST `request` to NRAS.
+        #[cfg(feature = "nvidia-gpu")]
+        pub(crate) async fn nras_attest(
+            &self,
+            request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
+        ) -> Result<Vec<u8>> {
+            match &self.vendor {
+                Some(vendor) => vendor.nras_attest(request).await,
+                None => Err(Unavailable::offline().into_error("NRAS attestation")),
             }
         }
 
@@ -1216,7 +1322,8 @@ mod tests {
         let v = vendor(vec![pcs("2026-10-14/td_qe_identity.json")], Duration::ZERO).await;
         let ctx = ctx(&v);
         let floors = VersionFloors::default();
-        let view = ctx.store().view_cached(vec![], &floors);
+        let fetched = Fetched::default();
+        let view = ctx.store().view_cached(vec![], &floors, &fetched);
         assert!(view
             .get::<QeIdentity>(&(), NOW)
             .await
@@ -1225,14 +1332,49 @@ mod tests {
         let deferred = view.take_deferred();
         assert_eq!(deferred.len(), 1);
         assert_eq!(v.hits.load(Ordering::SeqCst), 0);
-        for (_, fetch) in deferred {
-            fetch.await.unwrap();
+        let mut outcomes = HashMap::new();
+        for (url, fetch) in deferred {
+            outcomes.insert(url, fetch.await);
         }
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
-        let view = ctx.store().view_cached(vec![], &floors);
+        let fetched = Fetched(Arc::new(outcomes));
+        let view = ctx.store().view_cached(vec![], &floors, &fetched);
         let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
-        assert_eq!((used.version, used.from), (Some(20), Source::Memory));
+        assert_eq!((used.version, used.from), (Some(20), Source::Vendor));
         assert!(view.take_deferred().is_empty());
+        // Another verification finds it in memory.
+        let view = ctx
+            .store()
+            .view_cached(vec![], &floors, &Fetched::default());
+        let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
+        assert_eq!(used.from, Source::Memory);
+    }
+
+    /// A failed fetch is answered as a lookup that asked: a 404 for a piece
+    /// the evidence does not name stays "not found", and a retry of the
+    /// verification does not ask again.
+    #[tokio::test]
+    async fn a_cached_view_answers_a_failed_fetch_as_the_lookup_would() {
+        let v = vendor(vec![status(404, vec![])], Duration::ZERO).await;
+        let ctx = ctx(&v);
+        let floors = VersionFloors::default();
+        let view = ctx
+            .store()
+            .view_cached(vec![], &floors, &Fetched::default());
+        assert!(view.lookup::<QeIdentity>(&(), NOW).await.is_err());
+        let mut outcomes = HashMap::new();
+        for (url, fetch) in view.take_deferred() {
+            outcomes.insert(url, fetch.await);
+        }
+        let view = ctx
+            .store()
+            .view_cached(vec![], &floors, &Fetched(Arc::new(outcomes)));
+        match view.lookup::<QeIdentity>(&(), NOW).await {
+            Err(Failure::Unavailable(e)) => assert!(e.not_found()),
+            _ => panic!("a 404"),
+        }
+        assert!(view.take_deferred().is_empty());
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
