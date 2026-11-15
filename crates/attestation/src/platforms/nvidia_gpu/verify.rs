@@ -1062,6 +1062,69 @@ mod tests {
         }
     }
 
+    /// A Hopper and a Blackwell group share the GPU nonce. With only the
+    /// Hopper group's NRAS answer held, the Blackwell group must still be
+    /// sent to NRAS (offline here), not answered with the Hopper answer.
+    #[tokio::test]
+    async fn a_held_nras_answer_is_used_only_for_its_own_arch_group() {
+        const NOW: i64 = 1_792_022_400;
+        let user_nonce = vec![7u8; MIN_GPU_USER_NONCE_LEN];
+        let device = |arch, uuid: &str| NvidiaGpuDeviceEvidence {
+            arch,
+            uuid: uuid.into(),
+            evidence_b64: uuid.into(),
+            cert_chain_b64: String::new(),
+        };
+        let bundle = NvidiaGpuEvidenceBundle {
+            devices: vec![
+                device(NvidiaGpuArch::Hopper, "GPU-H"),
+                device(NvidiaGpuArch::Blackwell, "GPU-B"),
+            ],
+            binding: NvidiaGpuBinding::default(),
+        };
+        let jwks = include_bytes!("../../../test_data/collateral/2026-10-14/nras_jwks.json");
+        let kid = serde_json::from_slice::<Jwks>(jwks).unwrap().keys[0]
+            .kid
+            .clone();
+        let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
+        let token = format!(
+            "{}.{}.c2ln",
+            part(serde_json::json!({ "alg": "ES384", "kid": kid })),
+            part(serde_json::json!({ "exp": NOW + 3600 })),
+        );
+        let answer = serde_json::json!([["JWT", token], { "GPU-H": token }]);
+        let hopper = NrasRequest {
+            nonce: hex::encode(gpu_nonce(&user_nonce, &bundle.binding)),
+            evidence_list: vec![NrasEvidenceEntry {
+                evidence: "GPU-H".into(),
+                certificate: String::new(),
+            }],
+            arch: NvidiaGpuArch::Hopper,
+            claims_version: "2.0".into(),
+        };
+        let jwks_url = crate::context::Context::held([])
+            .store()
+            .nras_jwks_url()
+            .unwrap();
+        let ctx = crate::context::Context::held([
+            (
+                nras_answer_url(&hopper),
+                serde_json::to_vec(&answer).unwrap(),
+                None,
+            ),
+            (jwks_url, jwks.to_vec(), None),
+        ]);
+        let params = NvidiaGpuParams {
+            user_nonce: Some(user_nonce),
+            ..Default::default()
+        };
+        let err = gather_bundle(&bundle, &params, ctx.store(), NOW)
+            .await
+            .map(|(set, _)| set.nras.into_keys().collect::<Vec<_>>())
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err}");
+    }
+
     #[test]
     fn split_eat_parses_valid_detached_eat() {
         let v = serde_json::json!([
