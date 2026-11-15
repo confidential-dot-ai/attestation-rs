@@ -65,8 +65,9 @@ pub struct ServerConfig {
     /// it take at most this long; past that it is refused at once with 503
     /// and `Retry-After`.
     pub max_queue_wait_ms: u64,
-    /// A queued verification that has waited this long is dropped before
-    /// it starts, with 503.
+    /// A verification the threads have not answered within this long is
+    /// dropped (unstarted if still queued) and the request gets 503.
+    /// Collateral fetches happen outside the threads and are not counted.
     pub queue_deadline_ms: u64,
 }
 

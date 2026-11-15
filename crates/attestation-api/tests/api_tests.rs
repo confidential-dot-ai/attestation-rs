@@ -598,17 +598,6 @@ async fn silent_vendor() -> (String, tokio::sync::mpsc::UnboundedReceiver<()>) {
     (base, vcek_fetches)
 }
 
-fn send_snp(app: &axum::Router) -> tokio::task::JoinHandle<axum::response::Response> {
-    let request = Request::builder()
-        .method("POST")
-        .uri("/verify")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&snp_body(false)).unwrap()))
-        .unwrap();
-    let app = app.clone();
-    tokio::spawn(async move { app.oneshot(request).await.unwrap() })
-}
-
 async fn assert_overloaded(resp: axum::response::Response) {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers()["retry-after"], "1");
@@ -621,70 +610,83 @@ async fn assert_overloaded(resp: axum::response::Response) {
 
 const SOON: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// With the one verification thread busy and a request already queued,
-/// `/verify` answers 503 with `Retry-After` at once. When the client of the
-/// busy request goes away, its verification stops and the queued one starts.
+/// Holds every thread of `state`'s pool for `busy`, from when this returns.
+async fn hold_the_pool(state: &AppState, busy: std::time::Duration) {
+    for _ in 0..state.verify_pool.threads() {
+        let pool = state.verify_pool.clone();
+        let (started, running) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            pool.run(async move {
+                let _ = started.send(());
+                std::thread::sleep(busy);
+            })
+            .await
+        });
+        running.await.unwrap();
+    }
+}
+
+fn send_tdx(app: &axum::Router) -> tokio::task::JoinHandle<axum::response::Response> {
+    let body = serde_json::json!({
+        "platform": "tdx",
+        "evidence": tdx_v4_evidence(),
+        "policies": { "tdx": { "allow_debug": true, "report_data": tdx_v4_report_data() } }
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/verify")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let app = app.clone();
+    tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+}
+
+/// With the verification thread busy and a request already queued,
+/// `/verify` answers 503 with `Retry-After` at once.
 #[tokio::test]
 async fn verifications_beyond_the_queue_are_refused_at_once() {
-    let (base, mut vcek_fetches) = silent_vendor().await;
-    let mut state = test_state_with(|c| {
+    let state = offline_state_with(|c| {
+        c.attestation.allow_debug = true;
         c.server.verify_threads = 1;
         c.server.max_queue_wait_ms = 1;
-        c.server.queue_deadline_ms = 60_000;
+        c.server.queue_deadline_ms = 5_000;
     });
-    state.verifier = online_state(&base).verifier;
-    let app = build_api_router(state);
+    let app = build_api_router(state.clone());
+    hold_the_pool(&state, std::time::Duration::from_millis(500)).await;
 
-    let first = send_snp(&app);
-    vcek_fetches
-        .recv()
-        .await
-        .expect("the first verification starts");
-    let queued = send_snp(&app);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let refused = tokio::time::timeout(std::time::Duration::from_millis(300), send_snp(&app))
+    let queued = send_tdx(&app);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let refused = tokio::time::timeout(std::time::Duration::from_millis(100), send_tdx(&app))
         .await
         .expect("refused at once")
         .unwrap();
     assert_overloaded(refused).await;
-
-    first.abort();
-    tokio::time::timeout(SOON, vcek_fetches.recv())
-        .await
-        .expect("the queued verification starts")
-        .unwrap();
-    assert!(!queued.is_finished());
+    assert_eq!(queued.await.unwrap().status(), StatusCode::OK);
 }
 
-/// A request still queued at `queue_deadline_ms` is dropped unstarted with
-/// 503 when it reaches a thread.
+/// A queued request gets 503 when the threads stay busy past
+/// `queue_deadline_ms`, and its verification never runs.
 #[tokio::test]
-async fn a_request_queued_past_its_deadline_is_dropped() {
-    let (base, mut vcek_fetches) = silent_vendor().await;
-    let mut state = test_state_with(|c| {
+async fn a_queued_request_gets_503_at_its_deadline() {
+    let state = offline_state_with(|c| {
+        c.attestation.allow_debug = true;
         c.server.verify_threads = 1;
         c.server.queue_deadline_ms = 100;
     });
-    state.verifier = online_state(&base).verifier;
-    let app = build_api_router(state);
+    let app = build_api_router(state.clone());
+    hold_the_pool(&state, std::time::Duration::from_secs(2)).await;
 
-    let first = send_snp(&app);
-    vcek_fetches
-        .recv()
+    let started = std::time::Instant::now();
+    let resp = tokio::time::timeout(SOON, send_tdx(&app))
         .await
-        .expect("the first verification starts");
-    let late = send_snp(&app);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    first.abort();
-    let resp = tokio::time::timeout(SOON, late)
-        .await
-        .expect("answered once the thread is free")
+        .expect("answered at the deadline")
         .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
     assert_overloaded(resp).await;
-    assert!(
-        vcek_fetches.try_recv().is_err(),
-        "the late request did not start"
-    );
+    // Only the job holding the thread ever started.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(state.verify_pool.stats().done, 1);
 }
 
 /// The kernel guest's full measurement-register log (4096 events) through
@@ -1427,4 +1429,115 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
     ).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json["error"], "verification_failed");
+}
+
+/// SNP evidence without an inline VEK names its VCEK by CHIP_ID/TCB before
+/// any signature is checked, so forged, unsigned reports with fresh CHIP_IDs
+/// make vendor requests. They wait for the vendor off the verification
+/// threads: genuine requests that need no fetch are still answered (from
+/// the security review).
+#[tokio::test]
+async fn forged_snp_reports_waiting_on_the_vendor_do_not_hold_verification_threads() {
+    use attestation::collateral::*;
+    let (base, mut vcek_fetches) = silent_vendor().await;
+    let threads = 2;
+    let mut state = test_state_with(|c| {
+        c.server.verify_threads = threads;
+        c.attestation.allow_debug = true;
+    });
+    const DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../attestation/test_data/collateral/2026-10-14/"
+    );
+    let held = |url: String, file: &str, chain: Option<&str>| {
+        let body = std::fs::read(format!("{DIR}{file}")).unwrap();
+        let chain = chain.map(|c| std::fs::read_to_string(format!("{DIR}{c}")).unwrap());
+        (url, body, chain)
+    };
+    let signing = Some("tcb_signing_chain.pem");
+    let fmspc = |f: &str| TcbInfo::url(&hex::decode(f).unwrap().try_into().unwrap());
+    let pieces = vec![
+        held(fmspc("50806f000000"), "tcb_info_50806f000000.json", signing),
+        held(fmspc("00806f050000"), "tcb_info_00806f050000.json", signing),
+        held(QeIdentity::url(&()), "td_qe_identity.json", signing),
+        held(
+            PckCrl::url(&PckCa::Platform),
+            "pck_crl_platform.der",
+            Some("pck_crl_platform_chain.pem"),
+        ),
+        held(
+            PckCrl::url(&PckCa::Processor),
+            "pck_crl_processor.pem",
+            Some("pck_crl_processor_chain.pem"),
+        ),
+        held(RootCrl::url(&()), "root_ca_crl.der", None),
+    ];
+    let ctx = attestation::Context::new()
+        .with_test_vendor(&base)
+        .with_held(pieces)
+        .at(1_792_108_800)
+        .unwrap();
+    state.verifier = Arc::new(attestation::Verifier::new(ctx));
+    let app = build_api_router(state);
+
+    let tdx = || {
+        let body = serde_json::json!({
+            "platform": "tdx",
+            "evidence": tdx_v4_evidence(),
+            "policies": { "tdx": { "allow_debug": true, "report_data": tdx_v4_report_data() } }
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let app = app.clone();
+        tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+    };
+    // Genuine TDX passes while the pool is free.
+    assert_eq!(tdx().await.unwrap().status(), StatusCode::OK);
+
+    // Forged SNP reports: fresh CHIP_ID, signature zeroed (never valid).
+    let mut forged = Vec::new();
+    for i in 0..threads {
+        let mut report = SNP_REPORT.to_vec();
+        report[0x1A0] = 0xA0 + i as u8;
+        for b in &mut report[0x2A0..0x4A0] {
+            *b = 0;
+        }
+        let body = serde_json::json!({
+            "platform": "snp",
+            "evidence": { "attestation_report": BASE64.encode(&report) },
+            "policies": { "snp": {} },
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let app = app.clone();
+        forged.push(tokio::spawn(
+            async move { app.oneshot(request).await.unwrap() },
+        ));
+        tokio::time::timeout(SOON, vcek_fetches.recv())
+            .await
+            .expect("forged report fetches a VCEK");
+    }
+    // The forged reports wait on the vendor; genuine evidence that needs no
+    // fetch is answered as usual.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let genuine: Vec<_> = (0..threads + 4).map(|_| tdx()).collect();
+    for g in genuine {
+        let resp = tokio::time::timeout(SOON, g)
+            .await
+            .expect("answered")
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert!(forged.iter().all(|f| !f.is_finished()));
+    for f in forged {
+        f.abort();
+    }
 }

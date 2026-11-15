@@ -61,7 +61,7 @@ rand = { workspace = true }
 hex = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "time"] }
 
 [dev-dependencies]
 attestation = { workspace = true, features = ["test-vendor"] }

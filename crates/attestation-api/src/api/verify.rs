@@ -1,14 +1,21 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::Json;
+use std::sync::Arc;
+
+use attestation::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
 use crate::pool::Refused;
-use crate::token::issuer::PassedVerification;
+use crate::token::issuer::{PassedVerification, TokenIssuer};
 use crate::AppState;
+
+/// Rounds of collateral fetches one verification may need: each round
+/// fetches what the previous attempt found missing.
+const MAX_FETCHES: usize = 8;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,27 +120,45 @@ pub async fn handler(
 
     // Verification is CPU-bound: the pool runs it, with the token signing,
     // off the async workers, and refuses at once what it cannot start soon.
-    let verifier = state.verifier.clone();
+    // The pool never waits on a vendor: collateral that is not in memory
+    // yet is fetched here, on the async workers, and the verification is
+    // queued again.
+    let evidence: Arc<[u8]> = evidence_json.into();
+    let policies = Arc::new(req.policies);
     let issuer = req.issue_token.then(|| state.token_issuer.clone());
-    let (result, token) = state
-        .verify_pool
-        .run(async move {
-            let result = verifier.verify(&evidence_json, &req.policies).await?;
-            let token = match (PassedVerification::new(&result), issuer) {
-                (Some(passed), Some(issuer)) => Some(
-                    issuer
-                        .ok_or(ApiError::TokenNotConfigured)?
-                        .issue(&passed, &req.policies)?,
-                ),
-                _ => None,
-            };
-            Ok::<_, ApiError>((result, token))
-        })
-        .await
-        .map_err(|refused| match refused {
-            Refused::Full | Refused::Expired => ApiError::Overloaded,
-            Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
-        })??;
+    let mut fetches = 0;
+    let (result, token) = loop {
+        let job = {
+            let (verifier, evidence, policies, issuer) = (
+                state.verifier.clone(),
+                evidence.clone(),
+                policies.clone(),
+                issuer.clone(),
+            );
+            async move {
+                match verifier.verify_cached(&evidence, &policies).await {
+                    Attempt::Done(result) => with_token(result?, issuer, &policies).map(Ok),
+                    Attempt::Fetch(fetch) => Ok(Err(fetch)),
+                }
+            }
+        };
+        let attempt = state
+            .verify_pool
+            .run(job)
+            .await
+            .map_err(|refused| match refused {
+                Refused::Full | Refused::Expired => ApiError::Overloaded,
+                Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
+            })??;
+        match attempt {
+            Ok(done) => break done,
+            Err(_) if fetches == MAX_FETCHES => return Err(ApiError::Overloaded),
+            Err(fetch) => match fetch.run().await {
+                None => fetches += 1,
+                Some(result) => break with_token(result?, issuer, &policies)?,
+            },
+        }
+    };
     let passed = result.passed();
 
     Ok(Json(VerifyResponse {
@@ -141,6 +166,23 @@ pub async fn handler(
         passed,
         token,
     }))
+}
+
+/// `result` and, when asked for (`issuer` is `Some`) and it passed, a token.
+fn with_token(
+    result: attestation::Verified,
+    issuer: Option<Option<Arc<TokenIssuer>>>,
+    policies: &attestation::Policies,
+) -> Result<(attestation::Verified, Option<String>), ApiError> {
+    let token = match (PassedVerification::new(&result), issuer) {
+        (Some(passed), Some(issuer)) => Some(
+            issuer
+                .ok_or(ApiError::TokenNotConfigured)?
+                .issue(&passed, policies)?,
+        ),
+        _ => None,
+    };
+    Ok((result, token))
 }
 
 /// Params below the server's floors are refused unless its config allows

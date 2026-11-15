@@ -5,6 +5,7 @@
 //! responses, so they never wait behind a verification. A request is queued
 //! only while the threads can start it within `max_wait`; past that it is
 //! refused at once, so that clients get a fast 503 rather than a timeout.
+//! Jobs must not wait on I/O: a thread that waits serves no one.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -20,7 +21,8 @@ use tokio::sync::oneshot;
 pub enum Refused {
     /// The queue holds more work than the threads start within `max_wait`.
     Full,
-    /// The job waited past its deadline and was dropped unstarted.
+    /// No answer within the deadline; the job is dropped (unstarted, or at
+    /// its next await).
     Expired,
     /// The job panicked.
     Panicked,
@@ -33,13 +35,13 @@ pub struct Stats {
     pub done: u64,
     /// Refused at admission.
     pub full: u64,
-    /// Dropped unstarted past their deadline.
+    /// Not answered within the deadline.
     pub expired: u64,
     /// Dropped because the caller went away.
     pub gone: u64,
     /// Total time jobs waited in the queue.
     pub wait: Duration,
-    /// Total time jobs ran.
+    /// Total CPU time of jobs.
     pub run: Duration,
 }
 
@@ -56,7 +58,7 @@ struct Shared {
     deadline: Duration,
     /// Jobs queued and not yet started.
     queued: AtomicUsize,
-    /// Moving average of the run time of a job, in nanoseconds.
+    /// Moving average of the CPU time of a job, in nanoseconds.
     cost_ns: AtomicU64,
     done: AtomicU64,
     full: AtomicU64,
@@ -70,8 +72,25 @@ struct Shared {
 #[cfg(target_os = "linux")]
 const VERIFY_NICE: i32 = 10;
 
-/// The run time assumed for a job until one has run.
+/// The CPU time assumed for a job until one has run.
 const FIRST_COST: Duration = Duration::from_millis(5);
+
+/// The CPU time of the calling thread; elsewhere than Linux, wall time.
+fn thread_time() -> Duration {
+    #[cfg(target_os = "linux")]
+    {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+        Duration::new(
+            u64::try_from(t.tv_sec).unwrap_or(0),
+            u32::try_from(t.tv_nsec).unwrap_or(0),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        START.elapsed()
+    }
+}
 
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
@@ -79,11 +98,13 @@ fn nanos(d: Duration) -> u64 {
 
 impl Pool {
     /// `threads` threads; a job is admitted while the queue ahead of it
-    /// takes them at most `max_wait`, and dropped unstarted once it waited
-    /// `deadline`.
+    /// takes them at most `max_wait`, and its caller gets
+    /// [`Refused::Expired`] when it has no answer within `deadline`.
     pub fn new(threads: usize, max_wait: Duration, deadline: Duration) -> Self {
         let threads = threads.max(1);
-        let (queue, jobs) = crossbeam_channel::bounded::<Job>(threads * 1024);
+        // Admission keeps the queue near max_wait of work; this bounds it
+        // when the cost estimate is low.
+        let (queue, jobs) = crossbeam_channel::bounded::<Job>(threads * 64);
         for i in 0..threads {
             let jobs = jobs.clone();
             std::thread::Builder::new()
@@ -122,9 +143,9 @@ impl Pool {
         self.shared.threads
     }
 
-    /// Run `job` on a pool thread (with the caller's runtime for its I/O)
-    /// and return its output. Dropping the returned future drops the job,
-    /// queued or running.
+    /// Run `job` on a pool thread and return its output. `job` runs on the
+    /// caller's runtime handle but must not wait on I/O. Dropping the
+    /// returned future drops the job, queued or running.
     pub async fn run<T, F>(&self, job: F) -> Result<T, Refused>
     where
         F: Future<Output = T> + Send + 'static,
@@ -153,15 +174,13 @@ impl Pool {
             let waited = queued_at.elapsed();
             s.wait_ns.fetch_add(nanos(waited), Relaxed);
             if tx.is_closed() {
-                s.gone.fetch_add(1, Relaxed);
+                // A caller past the deadline was counted as expired.
+                if waited < s.deadline {
+                    s.gone.fetch_add(1, Relaxed);
+                }
                 return;
             }
-            if waited > s.deadline {
-                s.expired.fetch_add(1, Relaxed);
-                let _ = tx.send(Err(Refused::Expired));
-                return;
-            }
-            let started = Instant::now();
+            let started = thread_time();
             let out = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 runtime.block_on(async {
                     tokio::select! {
@@ -170,7 +189,7 @@ impl Pool {
                     }
                 })
             }));
-            let ran = nanos(started.elapsed());
+            let ran = nanos(thread_time().saturating_sub(started));
             s.run_ns.fetch_add(ran, Relaxed);
             // cost += (ran - cost) / 8; a racing update loses one sample.
             let cost = s.cost_ns.load(Relaxed);
@@ -193,7 +212,15 @@ impl Pool {
             s.full.fetch_add(1, Relaxed);
             return Err(Refused::Full);
         }
-        rx.await.unwrap_or(Err(Refused::Panicked))
+        // Dropping `rx` at the deadline closes `tx`: the job never starts,
+        // or stops at its next await.
+        match tokio::time::timeout(s.deadline, rx).await {
+            Ok(out) => out.unwrap_or(Err(Refused::Panicked)),
+            Err(_) => {
+                s.expired.fetch_add(1, Relaxed);
+                Err(Refused::Expired)
+            }
+        }
     }
 
     pub fn stats(&self) -> Stats {

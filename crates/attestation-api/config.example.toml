@@ -4,10 +4,10 @@
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
 # Verifications run on verify_threads threads (0: one per CPU); io_threads
-# (0: one per four CPUs, at least two) serve connections. A /verify request
-# that would wait more than max_queue_wait_ms for a thread gets 503 with
-# Retry-After: 1 at once; one still queued after queue_deadline_ms is
-# dropped with 503.
+# (0: one per four CPUs, at least two) serve connections and fetch
+# collateral. A /verify request that would wait more than max_queue_wait_ms
+# for a thread gets 503 with Retry-After: 1 at once; one the threads have
+# not answered within queue_deadline_ms gets 503.
 # verify_threads = 0
 # io_threads = 0
 # max_queue_wait_ms = 30
