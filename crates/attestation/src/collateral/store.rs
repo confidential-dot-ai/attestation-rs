@@ -1069,6 +1069,9 @@ mod tests {
         // Still due: refetched again, and replaced.
         let new = qe_identity(&ctx).await.unwrap();
         assert_eq!((new.0, new.1), (Some(20), Source::Vendor));
+        // Memory now serves the new piece, not the one verified before.
+        let held = qe_identity(&ctx).await.unwrap();
+        assert_eq!((held.0, held.1), (Some(20), Source::Memory));
     }
 
     #[tokio::test]
