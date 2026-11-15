@@ -554,7 +554,7 @@ impl Platform for Tdx {
         store: &Store,
         now: i64,
     ) -> Result<(TdxCollateralSet, Vec<CollateralUsed>)> {
-        let (quote_bytes, quote) = genuine_quote(evidence, now)?;
+        let (quote_bytes, quote, _) = genuine_quote(evidence, now)?;
         TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await
     }
 
@@ -564,9 +564,50 @@ impl Platform for Tdx {
         collateral: &TdxCollateralSet,
         now: i64,
     ) -> Result<TdxResult> {
+        Self::verify_checked(evidence, params, collateral, now, None)
+    }
+
+    /// The quote's signature and PCK chain are checked once, in gather.
+    async fn gather_and_verify(
+        evidence: &TdxEvidence,
+        params: &TdxParams,
+        store: &Store,
+        now: i64,
+    ) -> Result<(TdxResult, Vec<CollateralUsed>)> {
+        let (quote_bytes, quote, genuine) = genuine_quote(evidence, now)?;
+        let (collateral, used) = TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await?;
+        let result = Self::verify_checked(evidence, params, &collateral, now, Some(&genuine))?;
+        Ok((result, used))
+    }
+}
+
+/// Proof that a quote's signature and PCK chain verified at a time. Only
+/// [`genuine_quote`], which runs those checks, makes one.
+pub(crate) struct Genuine([u8; 32]);
+
+impl Genuine {
+    fn of(quote_bytes: &[u8], now: i64) -> Self {
+        let digest = crate::utils::sha256(&[quote_bytes, &now.to_be_bytes()].concat());
+        Self(digest.try_into().expect("a SHA-256 digest"))
+    }
+
+    /// True when this proof is for these quote bytes at `now`.
+    fn covers(&self, quote_bytes: &[u8], now: i64) -> bool {
+        self.0 == Self::of(quote_bytes, now).0
+    }
+}
+
+impl Tdx {
+    fn verify_checked(
+        evidence: &TdxEvidence,
+        params: &TdxParams,
+        collateral: &TdxCollateralSet,
+        now: i64,
+        genuine: Option<&Genuine>,
+    ) -> Result<TdxResult> {
         params.validate()?;
         let quote_bytes = decode_quote(evidence)?;
-        let (quote, mut result) = verify_quote(&quote_bytes, params, now)?;
+        let (quote, mut result) = verify_quote(&quote_bytes, params, now, genuine)?;
 
         result.report_data_match = params
             .report_data
@@ -612,12 +653,16 @@ impl Platform for Tdx {
 
 /// The quote, once its signature and PCK chain (at `now`) have verified:
 /// the checks that need no collateral.
-pub(crate) fn genuine_quote(evidence: &TdxEvidence, now: i64) -> Result<(Vec<u8>, TdxQuote)> {
+pub(crate) fn genuine_quote(
+    evidence: &TdxEvidence,
+    now: i64,
+) -> Result<(Vec<u8>, TdxQuote, Genuine)> {
     let quote_bytes = decode_quote(evidence)?;
     let quote = parse_tdx_quote(&quote_bytes)?;
     verify_quote_signature(&quote_bytes, &quote)?;
     super::dcap::verify_dcap_chain(&quote_bytes, quote.quote_version, now)?;
-    Ok((quote_bytes, quote))
+    let genuine = Genuine::of(&quote_bytes, now);
+    Ok((quote_bytes, quote, genuine))
 }
 
 fn decode_quote(evidence: &TdxEvidence) -> Result<Vec<u8>> {
@@ -627,8 +672,9 @@ fn decode_quote(evidence: &TdxEvidence) -> Result<Vec<u8>> {
         .map_err(|e| AttestationError::EvidenceDeserialize(format!("quote base64: {e}")))
 }
 
-/// Verify a TD quote (signature, DCAP chain) and evaluate the params' quote
-/// rules: MRTD, RTMRs, debug. `report_data_match` and `init_data_match` are
+/// Verify a TD quote (signature, DCAP chain; skipped when `genuine` proves
+/// them for these bytes at `now`) and evaluate the params' quote rules: MRTD,
+/// RTMRs, debug. `report_data_match` and `init_data_match` are
 /// left `None`: where those values live depends on the platform (quote body
 /// or vTPM). Collateral is [`check_collateral`], once every genuineness check
 /// of the platform has passed.
@@ -636,10 +682,13 @@ pub(crate) fn verify_quote(
     quote_bytes: &[u8],
     params: &TdxParams,
     now: i64,
+    genuine: Option<&Genuine>,
 ) -> Result<(TdxQuote, TdxResult)> {
     let quote = parse_tdx_quote(quote_bytes)?;
-    verify_quote_signature(quote_bytes, &quote)?;
-    super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, now)?;
+    if !genuine.is_some_and(|g| g.covers(quote_bytes, now)) {
+        verify_quote_signature(quote_bytes, &quote)?;
+        super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, now)?;
+    }
 
     let body = &quote.body;
     let compare = |allowed: &Option<Vec<[u8; 48]>>, actual: &[u8; 48]| {
@@ -729,51 +778,60 @@ mod tests {
         let (mut set, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
             .await
             .unwrap();
-        let check = |set: &TdxCollateralSet| {
-            let mut result = verify_quote(quote_bytes, &TdxParams::default(), now)
-                .unwrap()
-                .1;
-            check_collateral(
-                &mut result,
-                quote_bytes,
-                &quote,
-                &TdxParams::default(),
-                set,
-                now,
-            )
+        let check = |set: &TdxCollateralSet, params: &TdxParams| {
+            let mut result = verify_quote(quote_bytes, params, now, None).unwrap().1;
+            check_collateral(&mut result, quote_bytes, &quote, params, set, now).map(|_| result)
         };
-        assert!(check(&set).is_ok());
+        let result = check(&set, &TdxParams::default()).unwrap();
+        assert_eq!(result.crl_ok, Some(true));
+        assert!(result.passed());
 
-        let (_, signer) =
-            <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(
-                &set.tcb_info.signer,
-            )
+        // A CRL (its signature was checked when stored) listing `cert`.
+        let revoking = |cert: &[u8]| {
+            let (_, cert) =
+                <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(cert)
+                    .unwrap();
+            let key = rcgen::KeyPair::generate().unwrap();
+            let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            let crl = rcgen::CertificateRevocationListParams {
+                this_update: rcgen::date_time_ymd(2026, 1, 1),
+                next_update: rcgen::date_time_ymd(2027, 1, 1),
+                crl_number: rcgen::SerialNumber::from(2u64),
+                issuing_distribution_point: None,
+                revoked_certs: vec![rcgen::RevokedCertParams {
+                    serial_number: rcgen::SerialNumber::from_slice(cert.raw_serial()),
+                    revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                    reason_code: None,
+                    invalidity_date: None,
+                }],
+                key_identifier_method: rcgen::KeyIdMethod::Sha256,
+            }
+            .signed_by(&ca, &key)
             .unwrap();
-        let key = rcgen::KeyPair::generate().unwrap();
-        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let crl = rcgen::CertificateRevocationListParams {
-            this_update: rcgen::date_time_ymd(2026, 1, 1),
-            next_update: rcgen::date_time_ymd(2027, 1, 1),
-            crl_number: rcgen::SerialNumber::from(2u64),
-            issuing_distribution_point: None,
-            revoked_certs: vec![rcgen::RevokedCertParams {
-                serial_number: rcgen::SerialNumber::from_slice(signer.raw_serial()),
-                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
-                reason_code: None,
-                invalidity_date: None,
-            }],
-            key_identifier_method: rcgen::KeyIdMethod::Sha256,
-        }
-        .signed_by(&ca, &key)
-        .unwrap();
-        set.root_crl.der = crl.der().to_vec();
+            crl.der().to_vec()
+        };
+        let (pck_crl, root_crl) = (set.pck_crl.der.clone(), set.root_crl.der.clone());
+        set.root_crl.der = revoking(&set.tcb_info.signer);
         assert!(matches!(
-            check(&set),
+            check(&set, &TdxParams::default()),
             Err(AttestationError::CertChainError(_))
         ));
+        // The PCK leaf in the PCK CRL, the Platform CA in the Root CRL.
+        let pck = PckChain::of(quote_bytes, &quote).unwrap();
+        let crl_ok = |set: &TdxCollateralSet| check(set, &TdxParams::default()).unwrap().crl_ok;
+        (set.pck_crl.der, set.root_crl.der) = (revoking(&pck.der[0]), root_crl.clone());
+        assert_eq!(crl_ok(&set), Some(false));
+        (set.pck_crl.der, set.root_crl.der) = (pck_crl, revoking(&pck.der[1]));
+        assert_eq!(crl_ok(&set), Some(false));
+        set.root_crl.der = root_crl;
+        // A TCB status the params do not accept.
+        let status = result.tcb_status.unwrap().tcb_status;
+        let mut params = TdxParams::default();
+        params.accepted_tcb_statuses.retain(|s| *s != status);
+        assert!(!check(&set, &params).unwrap().passed());
     }
 
     // Load real test fixtures at compile time

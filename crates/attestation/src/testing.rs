@@ -82,6 +82,27 @@ pub(crate) fn intel() -> Vec<HeldResponse> {
     pieces
 }
 
+/// A context with Intel's collateral for `tdx_quote_00a06d080000.dat` in
+/// memory, as after a first verification, evaluated at `now`.
+#[cfg(all(feature = "tdx", not(target_arch = "wasm32")))]
+pub(crate) async fn warm_tdx(now: i64) -> Context {
+    use crate::collateral::{Collateral, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
+    let ctx = Context::offline().at(now).unwrap();
+    let held = intel();
+    let piece = |url: String| held.iter().find(|h| h.0 == url).unwrap().clone();
+    let (store, fmspc) = (ctx.store(), [0x00, 0xa0, 0x6d, 0x08, 0x00, 0x00]);
+    store
+        .keep::<TcbInfo>(&fmspc, piece(TcbInfo::url(&fmspc)))
+        .await;
+    store
+        .keep::<QeIdentity>(&(), piece(QeIdentity::url(&())))
+        .await;
+    let ca = PckCa::Platform;
+    store.keep::<PckCrl>(&ca, piece(PckCrl::url(&ca))).await;
+    store.keep::<RootCrl>(&(), piece(RootCrl::url(&()))).await;
+    ctx
+}
+
 /// A context that holds `responses` and nothing else, at [`NOW`].
 pub(crate) fn context(responses: Vec<HeldResponse>) -> Context {
     Context::held(responses).at(NOW).unwrap()

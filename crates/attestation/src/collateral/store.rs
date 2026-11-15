@@ -6,6 +6,7 @@
 //! by the vendor URL. In memory a piece is kept until a newer valid copy
 //! replaces it; a failed refetch keeps the old copy.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -99,6 +100,8 @@ struct Entry {
     issuer_chain: Option<String>,
     dates: Dates,
     origin: Source,
+    /// `(id, piece)`: what `body` verified as, and for which id.
+    parsed: Arc<dyn Any + Send + Sync>,
     /// When to ask the upstream for a newer copy (Unix seconds).
     refresh_at: i64,
     #[cfg(not(target_arch = "wasm32"))]
@@ -160,18 +163,28 @@ fn check<C: Collateral>(
     issuer_chain: Option<String>,
     origin: Source,
 ) -> std::result::Result<Entry, Failure> {
-    let dates = C::verify(&body, issuer_chain.as_deref(), id)
-        .map_err(Failure::refused)?
-        .dates();
+    let piece = C::verify(&body, issuer_chain.as_deref(), id).map_err(Failure::refused)?;
+    let dates = piece.dates();
     Ok(Entry {
         body,
         issuer_chain,
         refresh_at: refresh_at(&dates),
         dates,
         origin,
+        parsed: Arc::new((id.clone(), piece)),
         #[cfg(not(target_arch = "wasm32"))]
         checked_at: std::time::Instant::now(),
     })
+}
+
+/// The piece `entry` holds, for `id`: the copy verified when it was stored
+/// if it was verified as this type for this id, else verified now. Sound
+/// because `Collateral::verify` is pure in body, chain and id.
+fn piece<C: Collateral>(entry: &Entry, id: &C::Id) -> std::result::Result<C, Failure> {
+    match entry.parsed.downcast_ref::<(C::Id, C)>() {
+        Some((verified_for, piece)) if verified_for == id => Ok(piece.clone()),
+        _ => C::verify(&entry.body, entry.issuer_chain.as_deref(), id).map_err(Failure::refused),
+    }
 }
 
 /// Vendor responses by URL: body and issuer chain.
@@ -188,6 +201,9 @@ pub struct Store {
     floors: VersionFloors,
     /// When set, every response a lookup used, each once.
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
+    /// Use only what is held, attached or in memory: never wait for a
+    /// vendor. A refresh that is due runs in the background.
+    pub(crate) offline: bool,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
 }
@@ -201,6 +217,7 @@ impl Store {
             missing: Arc::default(),
             floors: VersionFloors::default(),
             used: None,
+            offline: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
         }
@@ -223,6 +240,7 @@ impl Store {
             missing: self.missing.clone(),
             floors: floors.clone(),
             used: record.then(Arc::default),
+            offline: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: self.native.clone(),
         }
@@ -302,8 +320,7 @@ impl Store {
         // The newest of the copies on hand; on a tie, the first of held,
         // cached, attached. Attached pieces never push the verifier back.
         let mut best: Option<(C, Vec<u8>, Option<String>, Source)> = None;
-        for (body, chain, from) in self.on_hand::<C>(&url, id).await {
-            let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
+        for (piece, body, chain, from) in self.on_hand::<C>(&url, id).await? {
             if best
                 .as_ref()
                 .is_none_or(|(b, ..)| !b.dates().not_older_than(&piece.dates()))
@@ -318,14 +335,13 @@ impl Store {
         // the fallback may have better. A held-only store lists the URL as
         // missing, so the caller can fetch it.
         if best.as_ref().is_none_or(|(p, ..)| !acceptable(p)) {
-            match self.load::<C>(url.clone(), id, now).await {
+            match self.load::<C>(url.clone(), id, now, floor).await {
                 Ok((entry, from)) => {
                     if best
                         .as_ref()
                         .is_none_or(|(b, ..)| !b.dates().not_older_than(&entry.dates))
                     {
-                        let piece = C::verify(&entry.body, entry.issuer_chain.as_deref(), id)
-                            .map_err(Failure::refused)?;
+                        let piece = piece::<C>(&entry, id)?;
                         best = Some((piece, entry.body, entry.issuer_chain, from));
                     }
                 }
@@ -341,28 +357,42 @@ impl Store {
         Ok((piece, used))
     }
 
-    /// The copies of `url` this store has without asking anyone: held,
-    /// cached in memory or on disk, attached.
+    /// The copies of `url` this store has without asking anyone, verified:
+    /// held, cached in memory or on disk, attached. Held and attached copies
+    /// are verified on every use.
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     async fn on_hand<C: Collateral>(
         &self,
         url: &str,
         id: &C::Id,
-    ) -> Vec<(Vec<u8>, Option<String>, Source)> {
+    ) -> std::result::Result<Vec<(C, Vec<u8>, Option<String>, Source)>, Failure> {
+        let verify = |body: &Vec<u8>, chain: &Option<String>| {
+            C::verify(body, chain.as_deref(), id).map_err(Failure::refused)
+        };
         let mut copies = Vec::new();
         if let Some((body, chain)) = self.held.get(url) {
-            copies.push((body.clone(), chain.clone(), Source::Held));
+            copies.push((
+                verify(body, chain)?,
+                body.clone(),
+                chain.clone(),
+                Source::Held,
+            ));
         }
         if let Some((body, chain)) = self.attached.get(url) {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(native) = &self.native {
                 if let Some(e) = native.cached::<C>(url, id).await {
-                    copies.push((e.body, e.issuer_chain, e.origin));
+                    copies.push((piece::<C>(&e, id)?, e.body, e.issuer_chain, e.origin));
                 }
             }
-            copies.push((body.clone(), chain.clone(), Source::Attached));
+            copies.push((
+                verify(body, chain)?,
+                body.clone(),
+                chain.clone(),
+                Source::Attached,
+            ));
         }
-        copies
+        Ok(copies)
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
@@ -371,10 +401,11 @@ impl Store {
         url: String,
         id: &C::Id,
         now: i64,
+        floor: Option<u64>,
     ) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            return native.entry::<C>(url, id, now).await;
+            return native.entry::<C>(url, id, now, floor, self.offline).await;
         }
         let mut missing = self.missing.lock().unwrap_or_else(|e| e.into_inner());
         if !missing.contains(&url) {
@@ -403,7 +434,7 @@ impl Store {
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     pub async fn refresh<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(native) = &self.native {
+        if let Some(native) = self.native.as_ref().filter(|_| !self.offline) {
             let url = C::url(id);
             if native.mem.contains_key(&url) {
                 let (_, _, failure) = native.refresh::<C>(&url, id, true, now).await;
@@ -434,6 +465,25 @@ impl Store {
     #[cfg(feature = "nvidia-gpu")]
     pub(crate) fn vendor(&self) -> Option<&crate::collateral::vendor::Vendor> {
         self.native.as_ref()?.vendor.as_ref()
+    }
+
+    /// A request slot for `url`'s vendor host (an NRAS POST).
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) fn slot(&self, url: &str) -> Result<Option<tokio::sync::OwnedSemaphorePermit>> {
+        self.native
+            .as_ref()
+            .map(|n| n.slot(url).map_err(|e| e.into_error("NRAS attestation")))
+            .transpose()
+    }
+
+    /// Keep `response` in memory as the vendor's answer for `id`.
+    #[cfg(all(test, feature = "tdx"))]
+    pub(crate) async fn keep<C: Collateral>(&self, id: &C::Id, response: HeldResponse) {
+        let (url, body, chain) = response;
+        let entry = check::<C>(id, body, chain, Source::Vendor)
+            .ok()
+            .expect("a valid piece");
+        self.native.as_ref().unwrap().mem.insert(url, entry).await;
     }
 
     /// Whether the piece at vendor `url` is in memory.
@@ -470,14 +520,18 @@ mod native {
     /// At most this many pieces not held anywhere are fetched from one
     /// vendor host per second.
     pub(crate) const COLD_PER_SECOND: u32 = 10;
+    /// At most this many requests (fetches and NRAS POSTs) are in flight to
+    /// one vendor host.
+    pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
 
-    /// One vendor host: until when it asked to be left alone, and the cold
-    /// fetches started in the current second.
+    /// One vendor host: until when it asked to be left alone, the cold
+    /// fetches started in the current second, and its requests in flight.
     #[derive(Default)]
     struct Host {
         paused_until: Option<Instant>,
         second: Option<Instant>,
         cold: u32,
+        in_flight: Option<Arc<tokio::sync::Semaphore>>,
     }
 
     /// The vendor host of `url`.
@@ -505,6 +559,8 @@ mod native {
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
         hosts: Mutex<HashMap<String, Host>>,
+        /// URLs with a refresh running in the background.
+        refreshing: Mutex<std::collections::HashSet<String>>,
     }
 
     impl Native {
@@ -516,6 +572,7 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
+                refreshing: Mutex::default(),
             }
         }
 
@@ -532,14 +589,28 @@ mod native {
                     })
         }
 
+        /// The copy in memory, else a fetched one. A copy that is due for
+        /// refresh but still acceptable is served while the refresh runs in
+        /// the background. `offline` never waits for an upstream.
         pub(super) async fn entry<C: Collateral>(
-            &self,
+            self: &Arc<Self>,
             url: String,
             id: &C::Id,
             now: i64,
+            floor: Option<u64>,
+            offline: bool,
         ) -> std::result::Result<(Entry, Source), Failure> {
+            let acceptable = |e: &Entry| {
+                CollateralUsed::new(String::new(), Source::Memory, e.dates, floor, now).acceptable()
+            };
             match self.mem.get(&url).await {
                 Some(entry) if self.due(&entry, now, false) => {
+                    if acceptable(&entry) && self.refresh_later::<C>(&url, id, now) {
+                        return Ok((entry, Source::Memory));
+                    }
+                    if offline {
+                        return Err(Failure::Unavailable(Unavailable::offline()));
+                    }
                     let (held, replaced, _) = self.refresh::<C>(&url, id, false, now).await;
                     let held = held.unwrap_or(entry);
                     let source = if replaced {
@@ -550,6 +621,7 @@ mod native {
                     Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
+                None if offline => Err(Failure::Unavailable(Unavailable::offline())),
                 None => self
                     .mem
                     .try_get_with(url.clone(), self.load::<C>(&url, id, now))
@@ -560,6 +632,27 @@ mod native {
                     })
                     .map_err(|e| (*e).clone()),
             }
+        }
+
+        /// Refresh `url` in the background, once at a time, unless there is
+        /// no runtime to run it on. True when it is running.
+        fn refresh_later<C: Collateral>(self: &Arc<Self>, url: &str, id: &C::Id, now: i64) -> bool {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                return false;
+            };
+            let lock = || self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
+            if lock().insert(url.to_string()) {
+                let (native, url, id) = (self.clone(), url.to_string(), id.clone());
+                runtime.spawn(async move {
+                    native.refresh::<C>(&url, &id, false, now).await;
+                    native
+                        .refreshing
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&url);
+                });
+            }
+            true
         }
 
         /// The copy in memory, else a valid copy on disk; nothing fetched.
@@ -606,6 +699,7 @@ mod native {
             if cold {
                 self.admit_cold(url)?;
             }
+            let _slot = self.slot(url)?;
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             if let Err(e) = &mut fetched {
                 if direct && matches!(e.status, Some(429 | 503)) {
@@ -662,6 +756,22 @@ mod native {
 
         fn lock_hosts(&self) -> std::sync::MutexGuard<'_, HashMap<String, Host>> {
             self.hosts.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// One of the [`IN_FLIGHT_PER_HOST`] request slots of `url`'s host.
+        pub(super) fn slot(
+            &self,
+            url: &str,
+        ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, Failure> {
+            let mut hosts = self.lock_hosts();
+            let host = hosts.entry(host(url).to_string()).or_default();
+            let slots = host
+                .in_flight
+                .get_or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(IN_FLIGHT_PER_HOST)));
+            slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| wait(1, "too many requests in flight to this vendor"))
         }
 
         /// Count a fetch of a piece held nowhere against its vendor host's
@@ -1357,10 +1467,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callers_of_a_piece_due_for_refresh_wait_for_one_fetch() {
+    async fn a_piece_due_for_refresh_is_served_while_one_refresh_runs() {
         let v = vendor(
-            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
-            Duration::from_millis(200),
+            vec![
+                pcs("2026-10-14/tcb_info_70a06d070000.json"),
+                pcs("2026-10-14/tcb_info_70a06d070000_early.json"),
+            ],
+            Duration::from_millis(500),
         )
         .await;
         let ctx = Context::new()
@@ -1368,14 +1481,56 @@ mod tests {
             .with_recheck(Duration::from_secs(2));
         tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        // A day before nextUpdate: due for refresh.
+        // A day before nextUpdate: due for refresh, still current.
         let (info, _) = ctx.store().get::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         let ending = info.next_update - 3600;
+        let start = Instant::now();
         let gets = (0..20).map(|_| tcb_info(&ctx, ending));
         for doc in futures_util::future::join_all(gets).await {
-            doc.unwrap();
+            assert_eq!(doc.unwrap(), (Some(20), Source::Memory));
         }
+        assert!(start.elapsed() < Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(tcb_info(&ctx, ending).await.unwrap().0, Some(22));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A piece whose `verify` counts its calls and accepts only `[id]`.
+    #[derive(Clone)]
+    struct Fake;
+    static FAKE_VERIFIED: AtomicUsize = AtomicUsize::new(0);
+
+    impl Collateral for Fake {
+        type Id = u8;
+        fn name(_: &u8) -> String {
+            "fake".into()
+        }
+        fn url(_: &u8) -> String {
+            "https://fake.example/one".into()
+        }
+        fn verify(body: &[u8], _: Option<&str>, id: &u8) -> Result<Self> {
+            FAKE_VERIFIED.fetch_add(1, Ordering::SeqCst);
+            (body == [*id])
+                .then_some(Fake)
+                .ok_or_else(|| crate::collateral::refused("id"))
+        }
+        fn dates(&self) -> Dates {
+            Dates::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_piece_in_memory_is_reused_only_for_the_id_it_was_verified_for() {
+        let ctx = Context::offline();
+        ctx.store()
+            .keep::<Fake>(&1, (Fake::url(&1), vec![1], None))
+            .await;
+        let verified = FAKE_VERIFIED.load(Ordering::SeqCst);
+        ctx.store().get::<Fake>(&1, NOW).await.unwrap();
+        assert_eq!(FAKE_VERIFIED.load(Ordering::SeqCst), verified);
+        // The same URL for another id: verified again, and refused.
+        assert!(ctx.store().get::<Fake>(&2, NOW).await.is_err());
+        assert_eq!(FAKE_VERIFIED.load(Ordering::SeqCst), verified + 1);
     }
 
     #[tokio::test]

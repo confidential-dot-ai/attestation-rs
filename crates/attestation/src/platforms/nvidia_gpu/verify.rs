@@ -29,7 +29,7 @@ pub async fn gather_bundle(
 ) -> Result<(GpuCollateralSet, CollateralUsed)> {
     let user_nonce = check_preconditions(bundle, params)?;
     let jwks_url = store.nras_jwks_url()?;
-    let mut nras = std::collections::BTreeMap::new();
+    let mut requests = Vec::new();
     for (arch, devices) in group_by_arch(bundle) {
         let request = NrasRequest {
             nonce: hex::encode(arch_nonce(arch, user_nonce, bundle)),
@@ -43,8 +43,14 @@ pub async fn gather_bundle(
             arch,
             claims_version: "2.0".into(),
         };
-        nras.insert(arch, nras_attest(store, &request, now).await?);
+        requests.push(request);
     }
+    let answers = requests
+        .iter()
+        .map(|request| nras_attest(store, request, now));
+    let answers = futures_util::future::try_join_all(answers).await?;
+    let nras: std::collections::BTreeMap<_, _> =
+        requests.iter().map(|r| r.arch).zip(answers).collect();
     let mut jwks = store.get::<NrasJwks>(&jwks_url, now).await?;
     let known = |jwks: &NrasJwks| {
         nras.values().all(|response| {
@@ -135,8 +141,11 @@ fn nras_answer_url(request: &NrasRequest) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn ask_nras(store: &Store, request: &NrasRequest) -> Result<Vec<u8>> {
-    match store.vendor() {
-        Some(vendor) => vendor.nras_attest(request).await,
+    match store.vendor().filter(|_| !store.offline) {
+        Some(vendor) => {
+            let _slot = store.slot(&vendor.nras.gpu_url)?;
+            vendor.nras_attest(request).await
+        }
         None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
     }
 }

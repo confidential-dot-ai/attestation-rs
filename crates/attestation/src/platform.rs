@@ -67,6 +67,21 @@ pub trait Platform {
         collateral: &Self::CollateralSet,
         now: i64,
     ) -> Result<Self::Result>;
+
+    /// [`Self::gather`], then [`Self::verify`]: what [`crate::Verifier`]
+    /// runs. A platform may override it to check the evidence's signature
+    /// once for both.
+    fn gather_and_verify(
+        evidence: &Self::Evidence,
+        params: &Self::Params,
+        store: &Store,
+        now: i64,
+    ) -> impl Future<Output = Result<(Self::Result, Vec<CollateralUsed>)>> + Send {
+        async move {
+            let (collateral, used) = Self::gather(evidence, store, now).await?;
+            Ok((Self::verify(evidence, params, &collateral, now)?, used))
+        }
+    }
 }
 
 /// The platforms a caller accepts, each with its params. Evidence for a

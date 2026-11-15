@@ -156,7 +156,7 @@ fn verify_evidence(
     let pcrs_match = tpm_common::check_pcrs(&tpm_msg, &tpm_pcrs, pcrs)?;
 
     // TDX DCAP layer: signature, chain, and the quote rules
-    let (tdx_quote, mut tdx) = tdx_verify::verify_quote(&td_quote_bytes, params, now)?;
+    let (tdx_quote, mut tdx) = tdx_verify::verify_quote(&td_quote_bytes, params, now, None)?;
 
     // Bindings
     tpm_common::verify_hcl_var_data_binding(&tdx_quote.body.report_data, &hcl.var_data)?;
