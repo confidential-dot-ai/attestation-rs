@@ -6,6 +6,7 @@
 //! by the vendor URL. In memory a piece is kept until a newer valid copy
 //! replaces it; a failed refetch keeps the old copy.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +98,9 @@ impl CollateralUsed {
 struct Entry {
     body: Vec<u8>,
     issuer_chain: Option<String>,
+    /// The id and piece `body` verified as, so a lookup need not verify it
+    /// again.
+    checked: Checked,
     dates: Dates,
     origin: Source,
     /// When to ask the upstream for a newer copy (Unix seconds).
@@ -160,18 +164,35 @@ fn check<C: Collateral>(
     issuer_chain: Option<String>,
     origin: Source,
 ) -> std::result::Result<Entry, Failure> {
-    let dates = C::verify(&body, issuer_chain.as_deref(), id)
-        .map_err(Failure::refused)?
-        .dates();
+    let piece = C::verify(&body, issuer_chain.as_deref(), id).map_err(Failure::refused)?;
+    let dates = piece.dates();
     Ok(Entry {
         body,
         issuer_chain,
+        checked: Arc::new((id.clone(), piece)),
         refresh_at: refresh_at(&dates),
         dates,
         origin,
         #[cfg(not(target_arch = "wasm32"))]
         checked_at: std::time::Instant::now(),
     })
+}
+
+/// A verified piece with the id it was verified for: `(C::Id, C)`.
+type Checked = Arc<dyn Any + Send + Sync>;
+
+/// `body` as the piece `id` names: the copy `checked` holds when it was
+/// verified for `id`, else verified now.
+fn piece<C: Collateral>(
+    checked: Option<&Checked>,
+    body: &[u8],
+    chain: Option<&str>,
+    id: &C::Id,
+) -> std::result::Result<C, Failure> {
+    match checked.and_then(|c| c.downcast_ref::<(C::Id, C)>()) {
+        Some((for_id, piece)) if for_id == id => Ok(piece.clone()),
+        _ => C::verify(body, chain, id).map_err(Failure::refused),
+    }
 }
 
 /// Vendor responses by URL: body and issuer chain.
@@ -302,8 +323,8 @@ impl Store {
         // The newest of the copies on hand; on a tie, the first of held,
         // cached, attached. Attached pieces never push the verifier back.
         let mut best: Option<(C, Vec<u8>, Option<String>, Source)> = None;
-        for (body, chain, from) in self.on_hand::<C>(&url, id).await {
-            let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
+        for (body, chain, from, checked) in self.on_hand::<C>(&url, id).await {
+            let piece = piece::<C>(checked.as_ref(), &body, chain.as_deref(), id)?;
             if best
                 .as_ref()
                 .is_none_or(|(b, ..)| !b.dates().not_older_than(&piece.dates()))
@@ -324,8 +345,12 @@ impl Store {
                         .as_ref()
                         .is_none_or(|(b, ..)| !b.dates().not_older_than(&entry.dates))
                     {
-                        let piece = C::verify(&entry.body, entry.issuer_chain.as_deref(), id)
-                            .map_err(Failure::refused)?;
+                        let piece = piece::<C>(
+                            Some(&entry.checked),
+                            &entry.body,
+                            entry.issuer_chain.as_deref(),
+                            id,
+                        )?;
                         best = Some((piece, entry.body, entry.issuer_chain, from));
                     }
                 }
@@ -348,19 +373,19 @@ impl Store {
         &self,
         url: &str,
         id: &C::Id,
-    ) -> Vec<(Vec<u8>, Option<String>, Source)> {
+    ) -> Vec<(Vec<u8>, Option<String>, Source, Option<Checked>)> {
         let mut copies = Vec::new();
         if let Some((body, chain)) = self.held.get(url) {
-            copies.push((body.clone(), chain.clone(), Source::Held));
+            copies.push((body.clone(), chain.clone(), Source::Held, None));
         }
         if let Some((body, chain)) = self.attached.get(url) {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(native) = &self.native {
                 if let Some(e) = native.cached::<C>(url, id).await {
-                    copies.push((e.body, e.issuer_chain, e.origin));
+                    copies.push((e.body, e.issuer_chain, e.origin, Some(e.checked)));
                 }
             }
-            copies.push((body.clone(), chain.clone(), Source::Attached));
+            copies.push((body.clone(), chain.clone(), Source::Attached, None));
         }
         copies
     }
@@ -1502,5 +1527,56 @@ mod tests {
         let native = Context::offline();
         let _ = tcb_info(&native, NOW).await;
         assert!(native.store().missing().is_empty());
+    }
+
+    /// Verifications of [`Counted`] so far.
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
+
+    /// A piece that counts its verifications. Its URL names only the first
+    /// half of its id, as a Turin VCEK's URL names only part of CHIP_ID.
+    #[derive(Clone)]
+    struct Counted;
+
+    impl Collateral for Counted {
+        type Id = (u8, u8);
+        fn name(_: &(u8, u8)) -> String {
+            "counted".into()
+        }
+        fn url(id: &(u8, u8)) -> String {
+            format!("https://counted.example/{}", id.0)
+        }
+        fn verify(body: &[u8], _: Option<&str>, id: &(u8, u8)) -> Result<Self> {
+            COUNTED.fetch_add(1, Ordering::SeqCst);
+            if body != [id.0, id.1] {
+                return Err(AttestationError::CertChainError("not this piece".into()));
+            }
+            Ok(Counted)
+        }
+        fn dates(&self) -> Dates {
+            Dates::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_piece_in_memory_is_verified_once_and_only_for_its_own_id() {
+        let v = vendor(vec![(200, vec![], vec![1, 2])], Duration::ZERO).await;
+        let ctx = Context::new().with_test_vendor(&v.base);
+        let mut from = Vec::new();
+        for _ in 0..3 {
+            let (_, used) = ctx.store().get::<Counted>(&(1, 2), NOW).await.unwrap();
+            from.push(used.from);
+        }
+        assert_eq!(from, [Source::Vendor, Source::Memory, Source::Memory]);
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(COUNTED.load(Ordering::SeqCst), 1);
+        // Another id at the same URL: the copy is verified for it, and refused.
+        let err = ctx
+            .store()
+            .get::<Counted>(&(1, 3), NOW)
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("not this piece"), "{err}");
+        assert_eq!(COUNTED.load(Ordering::SeqCst), 2);
     }
 }

@@ -994,14 +994,14 @@ struct EnclaveIdentityFields {
     tcb_levels: Vec<QeIdentityTcbLevel>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QeIdentityTcbLevel {
     tcb: QeIdentityTcb,
     tcb_status: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct QeIdentityTcb {
     isvsvn: u16,
 }
@@ -1015,7 +1015,7 @@ const QE_ISVPRODID_OFFSET: usize = 256;
 const QE_ISVSVN_OFFSET: usize = 258;
 
 /// Intel's published QE Identity, signature-checked and decoded.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QeIdentity {
     mrsigner: Vec<u8>,
     isvprodid: u16,

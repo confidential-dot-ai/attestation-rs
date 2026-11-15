@@ -54,10 +54,10 @@ use crate::error::Result;
 /// One piece of vendor-signed collateral: something we download, check
 /// against the vendor's compiled-in roots, and that carries its own validity
 /// dates.
-pub trait Collateral: Sized {
+pub trait Collateral: Sized + Clone + Send + Sync + 'static {
     /// What picks the right piece: the FMSPC for TCB Info, the PCK CA for a
     /// PCK CRL, chip and TCB for a VCEK, `()` when there is only one.
-    type Id;
+    type Id: Clone + PartialEq + Send + Sync + 'static;
     /// A vendor 404 for this piece means the evidence names something the
     /// vendor never issued, so the evidence is refused rather than retried.
     const NAMED_BY_EVIDENCE: bool = false;
