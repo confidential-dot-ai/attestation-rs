@@ -341,10 +341,22 @@ impl Fetch {
     /// Make every request at once (a collateral piece is fetched, checked
     /// and kept in memory; concurrent fetches of one piece share one
     /// request), and add what each gave, failures included, to `fetched`
-    /// for the next [`Verifier::verify_cached`].
+    /// for the next [`Verifier::verify_cached`]. Each request runs on a task
+    /// of its own: a caller that stops waiting does not cancel it, and what
+    /// it fetches is kept for the next verification.
     pub async fn run(self, fetched: &mut Fetched) {
         let (urls, fetches): (Vec<_>, Vec<_>) = self.0.into_iter().unzip();
-        let outcomes = futures_util::future::join_all(fetches).await;
+        let tasks = fetches.into_iter().map(tokio::spawn);
+        let outcomes = futures_util::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(|done| {
+                done.unwrap_or_else(|e| {
+                    collateral::Outcome::Failed(collateral::Failure::Unavailable(
+                        error::Unavailable::detail(format!("the fetch did not finish: {e}")),
+                    ))
+                })
+            });
         std::sync::Arc::make_mut(&mut fetched.0).extend(urls.into_iter().zip(outcomes));
     }
 }

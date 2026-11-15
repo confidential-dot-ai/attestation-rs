@@ -539,6 +539,21 @@ impl Store {
                     (_, Some(entry)) if !native.due(&entry, now, false) => {
                         return Ok((entry, Source::Memory))
                     }
+                    // Due, but it still passes: served as a failed refresh
+                    // would leave it, while the refresh runs on its own.
+                    (_, Some(entry))
+                        if CollateralUsed::new(
+                            String::new(),
+                            Source::Memory,
+                            entry.dates,
+                            C::floor(id, &self.floors),
+                            now,
+                        )
+                        .acceptable() =>
+                    {
+                        native.refresh_detached::<C>(&url, id, now);
+                        return Ok((entry, Source::Memory));
+                    }
                     _ => {}
                 }
                 let (native, id) = (native.clone(), id.clone());
@@ -727,6 +742,8 @@ mod native {
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
         hosts: Mutex<HashMap<String, Host>>,
+        /// The URLs a [`Self::refresh_detached`] is running for.
+        refreshing: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl Native {
@@ -738,7 +755,42 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
+                refreshing: Arc::default(),
             }
+        }
+
+        /// [`Self::refresh`] the piece at `url` on a task of its own, unless
+        /// one is running for it.
+        pub(super) fn refresh_detached<C: Collateral>(
+            self: &Arc<Self>,
+            url: &str,
+            id: &C::Id,
+            now: i64,
+        ) {
+            /// Removes the URL when the task ends, however it ends.
+            struct Running(Arc<Mutex<std::collections::HashSet<String>>>, String);
+            impl Drop for Running {
+                fn drop(&mut self) {
+                    self.0
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&self.1);
+                }
+            }
+            if !self
+                .refreshing
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(url.to_string())
+            {
+                return;
+            }
+            let running = Running(self.refreshing.clone(), url.to_string());
+            let (native, id) = (self.clone(), id.clone());
+            tokio::spawn(async move {
+                native.refresh::<C>(&running.1, &id, false, now).await;
+                drop(running);
+            });
         }
 
         /// POST `request` to NRAS.
@@ -1884,5 +1936,104 @@ mod tests {
             .unwrap();
         assert!(err.to_string().contains("not this piece"), "{err}");
         assert_eq!(COUNTED.load(Ordering::SeqCst), 2);
+    }
+
+    /// A vendor that answers the first request with `reply` and leaves every
+    /// later one hanging.
+    async fn answers_once(reply: Reply) -> Vendor {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let (counter, (status, headers, body)) = (counter.clone(), reply.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    if counter.fetch_add(1, Ordering::SeqCst) > 0 {
+                        return std::future::pending::<()>().await;
+                    }
+                    let mut head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        body.len()
+                    );
+                    for (k, v) in headers {
+                        head.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    head.push_str("\r\n");
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                });
+            }
+        });
+        Vendor { base, hits }
+    }
+
+    /// A piece due for refresh that still passes is served from memory by a
+    /// cached view at once, while one refresh asks a hung vendor on a task of
+    /// its own: the verification puts nothing off and waits for nothing.
+    #[tokio::test]
+    async fn a_cached_view_serves_a_due_piece_while_its_vendor_hangs() {
+        let v = answers_once(pcs("2026-10-14/tcb_info_70a06d070000.json")).await;
+        let ctx = ctx(&v);
+        let (info, _) = ctx.store().get::<TcbInfo>(&FMSPC, NOW).await.unwrap();
+        let ending = info.next_update - 3600;
+        let floors = VersionFloors::default();
+        for _ in 0..3 {
+            let view = ctx
+                .store()
+                .view_cached(vec![], &floors, &Fetched::default());
+            let started = Instant::now();
+            let (_, used) = view.get::<TcbInfo>(&FMSPC, ending).await.unwrap();
+            assert_eq!(used.from, Source::Memory);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(view.take_deferred().is_empty());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A piece due that no longer passes is not served: the view puts its
+    /// fetch off, as before.
+    #[tokio::test]
+    async fn a_cached_view_puts_off_a_due_piece_that_no_longer_passes() {
+        let v = vendor(
+            vec![pcs(
+                "2026-10-14/td_qe_identity_2026-03-16_eval18_expired.json",
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = ctx(&v);
+        assert_eq!(qe_identity(&ctx).await.unwrap().0, Some(18));
+        let view = ctx
+            .store()
+            .view_cached(vec![], &VersionFloors::default(), &Fetched::default());
+        assert!(view.get::<QeIdentity>(&(), NOW).await.is_err());
+        assert_eq!(view.take_deferred().len(), 1);
+    }
+
+    /// A put-off fetch its caller stopped waiting for still runs to the end:
+    /// the piece is in memory for the next verification.
+    #[tokio::test]
+    async fn a_fetch_its_caller_stopped_waiting_for_still_fills_memory() {
+        let v = vendor(
+            vec![pcs("2026-10-14/td_qe_identity.json")],
+            Duration::from_millis(300),
+        )
+        .await;
+        let ctx = ctx(&v);
+        let view = ctx
+            .store()
+            .view_cached(vec![], &VersionFloors::default(), &Fetched::default());
+        assert!(view.get::<QeIdentity>(&(), NOW).await.is_err());
+        let fetch = crate::Fetch(view.take_deferred());
+        let mut fetched = Fetched::default();
+        let cut = tokio::time::timeout(Duration::from_millis(50), fetch.run(&mut fetched)).await;
+        assert!(cut.is_err());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(ctx.store().holds(&QeIdentity::url(&())));
     }
 }
