@@ -423,17 +423,22 @@ impl Nras {
 
 #[cfg(feature = "nvidia-gpu")]
 impl Vendor {
-    /// POST evidence to NRAS. 429 and 5xx are `CollateralUnavailable`; any
-    /// other failure status is final.
+    /// The NRAS endpoint for `arch`.
+    pub(crate) fn nras_url(&self, arch: crate::types::NvidiaGpuArch) -> &str {
+        match arch {
+            crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
+            _ => &self.nras.gpu_url,
+        }
+    }
+
+    /// POST evidence to NRAS. 429 and 5xx are unavailable; any other failure
+    /// status is a refusal.
     pub(crate) async fn nras_attest(
         &self,
         request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
-    ) -> crate::error::Result<Vec<u8>> {
-        use crate::error::AttestationError;
-        let url = match request.arch {
-            crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
-            _ => &self.nras.gpu_url,
-        };
+    ) -> Result<Vec<u8>, super::store::Failure> {
+        use super::store::Failure;
+        let url = self.nras_url(request.arch);
         let mut req = self.client_for(url).post(url).json(request);
         if self.nras.allow_hold_cert {
             req = req.header(
@@ -444,26 +449,23 @@ impl Vendor {
         if let Some(key) = &self.nras.service_key {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
-        let unavailable = |e: Unavailable| e.into_error("NRAS attestation");
         let response = req
             .send()
             .await
-            .map_err(|e| unavailable(Unavailable::detail(format!("unreachable ({e})"))))?;
+            .map_err(|e| Failure::Unavailable(Unavailable::detail(format!("unreachable ({e})"))))?;
         let status = response.status();
         match check_status(status.as_u16(), response.headers()) {
             Ok(()) => {}
             Err(e) if status.is_server_error() || status.as_u16() == 429 => {
-                return Err(unavailable(e))
+                return Err(Failure::Unavailable(e))
             }
             Err(_) => {
                 let body = read_body(response).await.unwrap_or_default();
                 let preview = String::from_utf8_lossy(&body[..body.len().min(512)]).into_owned();
-                return Err(AttestationError::NrasRequestFailed(format!(
-                    "status {status}: {preview}"
-                )));
+                return Err(Failure::Refused(format!("status {status}: {preview}")));
             }
         }
-        read_body(response).await.map_err(unavailable)
+        read_body(response).await.map_err(Failure::Unavailable)
     }
 }
 

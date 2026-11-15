@@ -704,7 +704,7 @@ mod native {
     pub(crate) const MAX_IN_FLIGHT: u32 = 16;
 
     /// A request in flight to `host`, counted until dropped.
-    struct InFlight<'a> {
+    pub(super) struct InFlight<'a> {
         native: &'a Native,
         host: String,
     }
@@ -793,15 +793,32 @@ mod native {
             });
         }
 
-        /// POST `request` to NRAS.
+        /// POST `request` to NRAS, within the limits of its host as for
+        /// collateral: [`MAX_IN_FLIGHT`] and a pause after a 429 or 503.
         #[cfg(feature = "nvidia-gpu")]
         pub(crate) async fn nras_attest(
             &self,
             request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
         ) -> Result<Vec<u8>> {
-            match &self.vendor {
-                Some(vendor) => vendor.nras_attest(request).await,
-                None => Err(Unavailable::offline().into_error("NRAS attestation")),
+            const NAME: &str = "NRAS attestation";
+            let vendor = self
+                .vendor
+                .as_ref()
+                .ok_or_else(|| Unavailable::offline().into_error(NAME))?;
+            let url = vendor.nras_url(request.arch);
+            self.check_pause(url).map_err(|f| f.into_error(NAME))?;
+            let in_flight = self.in_flight(url).map_err(|f| f.into_error(NAME))?;
+            let answer = vendor.nras_attest(request).await;
+            drop(in_flight);
+            match answer {
+                Ok(body) => Ok(body),
+                Err(Failure::Unavailable(mut e)) => {
+                    self.pause_after(url, &mut e);
+                    Err(e.into_error(NAME))
+                }
+                Err(Failure::Refused(why) | Failure::NotPublished(why)) => {
+                    Err(AttestationError::NrasRequestFailed(why))
+                }
             }
         }
 
@@ -864,10 +881,17 @@ mod native {
             id: &C::Id,
             cold: bool,
         ) -> std::result::Result<Entry, Failure> {
-            let vendor = self
-                .vendor
-                .as_ref()
-                .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
+            let in_flight = self.admit(url, cold).await?;
+            self.ask::<C>(url, id, in_flight).await
+        }
+
+        /// Whether `url` may be asked now: no outage or refusal on record,
+        /// its host not paused, under [`MAX_IN_FLIGHT`] and, when `cold`,
+        /// [`COLD_PER_SECOND`]. A refusal here asks no one.
+        async fn admit(&self, url: &str, cold: bool) -> std::result::Result<InFlight<'_>, Failure> {
+            if self.vendor.is_none() {
+                return Err(Failure::Unavailable(Unavailable::offline()));
+            }
             if let Some((at, failure)) = self.failed.get(url).await {
                 let stands = match &failure {
                     Failure::Unavailable(e) => self.recheck.min(
@@ -880,32 +904,30 @@ mod native {
                     return Err(failure);
                 }
             }
-            if let Some(until) = self
-                .lock_hosts()
-                .get(host(url))
-                .and_then(|h| h.paused_until)
-            {
-                if let Some(left) = until.checked_duration_since(Instant::now()) {
-                    return Err(wait(left.as_secs(), "the vendor asked to wait"));
-                }
-            }
+            self.check_pause(url)?;
             let in_flight = self.in_flight(url)?;
             if cold {
                 self.admit_cold(url)?;
             }
+            Ok(in_flight)
+        }
+
+        /// Ask the vendor for `url`, admitted with `in_flight`.
+        async fn ask<C: Collateral>(
+            &self,
+            url: &str,
+            id: &C::Id,
+            in_flight: InFlight<'_>,
+        ) -> std::result::Result<Entry, Failure> {
+            let vendor = self
+                .vendor
+                .as_ref()
+                .ok_or_else(|| Failure::Unavailable(Unavailable::offline()))?;
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             drop(in_flight);
             if let Err(e) = &mut fetched {
-                if direct && matches!(e.status, Some(429 | 503)) {
-                    let pause = self.recheck.min(
-                        e.retry_after
-                            .map_or(HOST_PAUSE, |s| Duration::from_secs(s.max(1))),
-                    );
-                    self.lock_hosts()
-                        .entry(host(url).to_string())
-                        .or_default()
-                        .paused_until = Some(Instant::now() + pause);
-                    e.retry_after.get_or_insert(pause.as_secs().max(1));
+                if direct {
+                    self.pause_after(url, e);
                 }
             }
             let (body, chain) = match fetched {
@@ -948,12 +970,43 @@ mod native {
             check::<C>(id, body, chain, from)
         }
 
+        /// Refuse `url` while its host asked to be left alone.
+        fn check_pause(&self, url: &str) -> std::result::Result<(), Failure> {
+            if let Some(until) = self
+                .lock_hosts()
+                .get(host(url))
+                .and_then(|h| h.paused_until)
+            {
+                if let Some(left) = until.checked_duration_since(Instant::now()) {
+                    return Err(wait(left.as_secs(), "the vendor asked to wait"));
+                }
+            }
+            Ok(())
+        }
+
+        /// After a 429 or 503 from `url`'s host itself, leave the host alone
+        /// for its Retry-After (else [`HOST_PAUSE`], at most `recheck`), and
+        /// tell the caller.
+        fn pause_after(&self, url: &str, e: &mut Unavailable) {
+            if matches!(e.status, Some(429 | 503)) {
+                let pause = self.recheck.min(
+                    e.retry_after
+                        .map_or(HOST_PAUSE, |s| Duration::from_secs(s.max(1))),
+                );
+                self.lock_hosts()
+                    .entry(host(url).to_string())
+                    .or_default()
+                    .paused_until = Some(Instant::now() + pause);
+                e.retry_after.get_or_insert(pause.as_secs().max(1));
+            }
+        }
+
         fn lock_hosts(&self) -> std::sync::MutexGuard<'_, HashMap<String, Host>> {
             self.hosts.lock().unwrap_or_else(|e| e.into_inner())
         }
 
         /// Count a request to `url`'s host against [`MAX_IN_FLIGHT`].
-        fn in_flight(&self, url: &str) -> std::result::Result<InFlight<'_>, Failure> {
+        pub(super) fn in_flight(&self, url: &str) -> std::result::Result<InFlight<'_>, Failure> {
             let host = host(url).to_string();
             let mut hosts = self.lock_hosts();
             let h = hosts.entry(host.clone()).or_default();
@@ -1050,7 +1103,17 @@ mod native {
                     if current.as_ref().is_some_and(|c| !self.due(c, now, force)) {
                         return Op::Nop;
                     }
-                    match self.fetch::<C>(url, id, false).await {
+                    // Refused here without asking (outage on record, host
+                    // paused or busy): the vendor was not asked, so the
+                    // copy stays due rather than waiting out `recheck`.
+                    let in_flight = match self.admit(url, false).await {
+                        Ok(in_flight) => in_flight,
+                        Err(e) => {
+                            *failure.lock().unwrap() = Some(e);
+                            return Op::Nop;
+                        }
+                    };
+                    match self.ask::<C>(url, id, in_flight).await {
                         Ok(new)
                             if current
                                 .as_ref()
@@ -2035,5 +2098,65 @@ mod tests {
         assert!(cut.is_err());
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(ctx.store().holds(&QeIdentity::url(&())));
+    }
+
+    /// A refresh refused here, without asking the vendor (as many requests
+    /// to its host as allowed are in flight), leaves the piece due: the next
+    /// lookup asks, rather than one `recheck` later.
+    #[tokio::test]
+    async fn a_refresh_refused_here_does_not_put_off_the_next() {
+        let v = vendor(
+            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
+            Duration::ZERO,
+        )
+        .await;
+        let ctx = Context::new()
+            .with_test_vendor(&v.base)
+            .with_recheck(Duration::from_secs(1));
+        let (info, _) = ctx.store().get::<TcbInfo>(&FMSPC, NOW).await.unwrap();
+        let ending = info.next_update - 3600;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let native = ctx.store().native.clone().unwrap();
+        let url = tcb_info_url();
+        let busy: Vec<_> = (0..native::MAX_IN_FLIGHT)
+            .map(|_| native.in_flight(&url).ok().unwrap())
+            .collect();
+        assert_eq!(tcb_info(&ctx, ending).await.unwrap().1, Source::Memory);
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+        drop(busy);
+        tcb_info(&ctx, ending).await.unwrap();
+        assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// NRAS POSTs count against their host's requests in flight, and a 429
+    /// leaves the host alone for a while.
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn nras_requests_keep_to_the_host_limits() {
+        use crate::platforms::nvidia_gpu::provider::NrasRequest;
+        let v = vendor(vec![status(429, vec![])], Duration::ZERO).await;
+        let nras = format!("{}/v3/attest/gpu", v.base);
+        let ctx = Context::new()
+            .with_nras_urls(nras.clone(), nras.clone())
+            .unwrap();
+        let native = ctx.store().native.clone().unwrap();
+        let request = NrasRequest {
+            nonce: String::new(),
+            evidence_list: vec![],
+            arch: crate::types::NvidiaGpuArch::Hopper,
+            claims_version: "2.0".into(),
+        };
+        let busy: Vec<_> = (0..native::MAX_IN_FLIGHT)
+            .map(|_| native.in_flight(&nras).ok().unwrap())
+            .collect();
+        let err = native.nras_attest(&request).await.unwrap_err();
+        assert!(err.is_retryable(), "{err}");
+        assert_eq!(v.hits.load(Ordering::SeqCst), 0);
+        drop(busy);
+        for _ in 0..3 {
+            let err = native.nras_attest(&request).await.unwrap_err();
+            assert!(err.is_retryable(), "{err}");
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 }
