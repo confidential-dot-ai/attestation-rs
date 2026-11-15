@@ -530,7 +530,8 @@ pub struct NvidiaGpuResult {
     pub claims: NvidiaGpuClaims,
     /// Every device's arch is in `expected_archs` (`None` if no allowlist).
     pub archs_allowed: Option<bool>,
-    /// NRAS returned one device claim per device in the bundle.
+    /// For each arch group, NRAS returned one device claim per device in the
+    /// group, none of another arch.
     pub device_count_match: bool,
     /// Every device satisfied the [`NvidiaGpuDevicePolicy`].
     pub device_policy_met: bool,
