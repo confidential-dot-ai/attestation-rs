@@ -56,10 +56,18 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
-    /// `/verify` requests handled at once; more are refused at once with
-    /// 503 and `Retry-After`, rather than queued until they time out.
-    /// Default: 32 per CPU.
-    pub max_concurrent_verifications: usize,
+    /// Threads that run verifications, one at a time each. 0: one per CPU.
+    pub verify_threads: usize,
+    /// Threads that read requests and write responses. 0: one per four
+    /// CPUs, at least one.
+    pub io_threads: usize,
+    /// A `/verify` request is queued only while the verifications ahead of
+    /// it take at most this long; past that it is refused at once with 503
+    /// and `Retry-After`.
+    pub max_queue_wait_ms: u64,
+    /// A queued verification that has waited this long is dropped before
+    /// it starts, with 503.
+    pub queue_deadline_ms: u64,
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -137,8 +145,30 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
-            max_concurrent_verifications: 32
-                * std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            verify_threads: 0,
+            io_threads: 0,
+            max_queue_wait_ms: 30,
+            queue_deadline_ms: 200,
+        }
+    }
+}
+
+fn cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+impl ServerConfig {
+    pub fn verify_threads(&self) -> usize {
+        match self.verify_threads {
+            0 => cpus(),
+            n => n,
+        }
+    }
+
+    pub fn io_threads(&self) -> usize {
+        match self.io_threads {
+            0 => cpus().div_ceil(4),
+            n => n,
         }
     }
 }
@@ -212,8 +242,10 @@ impl Config {
                 .to_string());
         }
 
-        if self.server.max_concurrent_verifications == 0 {
-            return Err("server.max_concurrent_verifications must be > 0".to_string());
+        if self.server.max_queue_wait_ms == 0 || self.server.queue_deadline_ms == 0 {
+            return Err(
+                "server.max_queue_wait_ms and server.queue_deadline_ms must be > 0".to_string(),
+            );
         }
 
         // Validate token duration when token is enabled

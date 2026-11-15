@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
+use crate::pool::Refused;
 use crate::token::issuer::PassedVerification;
 use crate::AppState;
 
@@ -110,33 +111,30 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    // Past the limit, refuse at once rather than queue until clients time
-    // out. Verification is CPU-bound: run it off the async workers, so that
-    // they keep accepting and reading requests.
-    let Ok(_slot) = state.verifications.clone().try_acquire_owned() else {
-        return Err(ApiError::Overloaded);
-    };
+    // Verification is CPU-bound: the pool runs it, with the token signing,
+    // off the async workers, and refuses at once what it cannot start soon.
     let verifier = state.verifier.clone();
-    let policies = req.policies.clone();
-    let runtime = tokio::runtime::Handle::current();
-    let result = tokio::task::spawn_blocking(move || {
-        runtime.block_on(verifier.verify(&evidence_json, &policies))
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("verification task: {e}")))??;
-    let passed = PassedVerification::new(&result);
-
-    let token = match &passed {
-        Some(passed) if req.issue_token => {
-            let issuer = state
-                .token_issuer
-                .as_ref()
-                .ok_or(ApiError::TokenNotConfigured)?;
-            Some(issuer.issue(passed, &req.policies)?)
-        }
-        _ => None,
-    };
-    let passed = passed.is_some();
+    let issuer = req.issue_token.then(|| state.token_issuer.clone());
+    let (result, token) = state
+        .verify_pool
+        .run(async move {
+            let result = verifier.verify(&evidence_json, &req.policies).await?;
+            let token = match (PassedVerification::new(&result), issuer) {
+                (Some(passed), Some(issuer)) => Some(
+                    issuer
+                        .ok_or(ApiError::TokenNotConfigured)?
+                        .issue(&passed, &req.policies)?,
+                ),
+                _ => None,
+            };
+            Ok::<_, ApiError>((result, token))
+        })
+        .await
+        .map_err(|refused| match refused {
+            Refused::Full | Refused::Expired => ApiError::Overloaded,
+            Refused::Panicked => ApiError::Internal("verification panicked".to_string()),
+        })??;
+    let passed = result.passed();
 
     Ok(Json(VerifyResponse {
         result,

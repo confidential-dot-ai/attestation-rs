@@ -1,11 +1,11 @@
 use std::sync::Arc;
-
-use tokio::sync::Semaphore;
+use std::time::Duration;
 
 pub mod api;
 pub mod config;
 pub mod error;
 pub mod middleware;
+pub mod pool;
 pub mod server;
 pub mod token;
 
@@ -18,9 +18,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub token_issuer: Option<Arc<TokenIssuer>>,
     pub verifier: Arc<Verifier>,
-    /// One permit per verification in progress
-    /// (`server.max_concurrent_verifications`).
-    pub verifications: Arc<Semaphore>,
+    /// Runs `/verify`'s verifications.
+    pub verify_pool: Arc<pool::Pool>,
 }
 
 impl AppState {
@@ -29,12 +28,17 @@ impl AppState {
         token_issuer: Option<Arc<TokenIssuer>>,
         verifier: Arc<Verifier>,
     ) -> Self {
-        let verifications = Arc::new(Semaphore::new(config.server.max_concurrent_verifications));
+        let server = &config.server;
+        let verify_pool = Arc::new(pool::Pool::new(
+            server.verify_threads(),
+            Duration::from_millis(server.max_queue_wait_ms),
+            Duration::from_millis(server.queue_deadline_ms),
+        ));
         Self {
             config,
             token_issuer,
             verifier,
-            verifications,
+            verify_pool,
         }
     }
 }

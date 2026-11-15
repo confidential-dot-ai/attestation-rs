@@ -186,6 +186,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "crossbeam-channel",
  "hex",
  "p256",
  "rand 0.8.6",

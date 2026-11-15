@@ -573,46 +573,43 @@ fn snp_body(with_vcek: bool) -> serde_json::Value {
     })
 }
 
-/// Beyond `max_concurrent_verifications` at once, `/verify` answers 503
-/// with `Retry-After` at once; a slot is free again when a request ends.
-#[tokio::test]
-async fn verifications_beyond_the_limit_are_refused_at_once() {
-    // A vendor that takes the connection and never answers, so a
-    // verification that fetches its VCEK stays in progress.
+/// A vendor that takes connections and never answers, so a verification
+/// that fetches its VCEK stays in progress. `vcek_fetches` gets a message
+/// per VCEK request: one per verification that starts.
+async fn silent_vendor() -> (String, tokio::sync::mpsc::UnboundedReceiver<()>) {
+    use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let (accepted, mut fetching) = tokio::sync::mpsc::unbounded_channel();
+    let (vcek, vcek_fetches) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((sock, _)) = listener.accept().await {
-            held.push(sock);
-            let _ = accepted.send(());
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let vcek = vcek.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                if head.lines().next().is_some_and(|l| !l.contains("/crl")) {
+                    let _ = vcek.send(());
+                }
+                std::future::pending::<()>().await;
+            });
         }
     });
-    let mut state = test_state_with(|c| c.server.max_concurrent_verifications = 1);
-    state.verifier = online_state(&base).verifier;
-    let app = build_api_router(state);
-    let send = |app: axum::Router| {
-        app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/verify")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&snp_body(false)).unwrap()))
-                .unwrap(),
-        )
-    };
-    let wait = std::time::Duration::from_millis(300);
+    (base, vcek_fetches)
+}
 
-    let first = tokio::spawn(send(app.clone()));
-    fetching
-        .recv()
-        .await
-        .expect("the first verification fetches");
-    let resp = tokio::time::timeout(wait, send(app.clone()))
-        .await
-        .expect("refused at once")
+fn send_snp(app: &axum::Router) -> tokio::task::JoinHandle<axum::response::Response> {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/verify")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&snp_body(false)).unwrap()))
         .unwrap();
+    let app = app.clone();
+    tokio::spawn(async move { app.oneshot(request).await.unwrap() })
+}
+
+async fn assert_overloaded(resp: axum::response::Response) {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.headers()["retry-after"], "1");
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -620,16 +617,74 @@ async fn verifications_beyond_the_limit_are_refused_at_once() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "overloaded");
+}
 
-    // The slot is free once the first request is gone: the next one is
-    // admitted and waits on the vendor like the first.
-    first.abort();
-    let _ = first.await;
-    assert!(tokio::time::timeout(wait, send(app.clone())).await.is_err());
-    fetching
+const SOON: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// With the one verification thread busy and a request already queued,
+/// `/verify` answers 503 with `Retry-After` at once. When the client of the
+/// busy request goes away, its verification stops and the queued one starts.
+#[tokio::test]
+async fn verifications_beyond_the_queue_are_refused_at_once() {
+    let (base, mut vcek_fetches) = silent_vendor().await;
+    let mut state = test_state_with(|c| {
+        c.server.verify_threads = 1;
+        c.server.max_queue_wait_ms = 1;
+        c.server.queue_deadline_ms = 60_000;
+    });
+    state.verifier = online_state(&base).verifier;
+    let app = build_api_router(state);
+
+    let first = send_snp(&app);
+    vcek_fetches
         .recv()
         .await
-        .expect("the next verification fetches");
+        .expect("the first verification starts");
+    let queued = send_snp(&app);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let refused = tokio::time::timeout(std::time::Duration::from_millis(300), send_snp(&app))
+        .await
+        .expect("refused at once")
+        .unwrap();
+    assert_overloaded(refused).await;
+
+    first.abort();
+    tokio::time::timeout(SOON, vcek_fetches.recv())
+        .await
+        .expect("the queued verification starts")
+        .unwrap();
+    assert!(!queued.is_finished());
+}
+
+/// A request still queued at `queue_deadline_ms` is dropped unstarted with
+/// 503 when it reaches a thread.
+#[tokio::test]
+async fn a_request_queued_past_its_deadline_is_dropped() {
+    let (base, mut vcek_fetches) = silent_vendor().await;
+    let mut state = test_state_with(|c| {
+        c.server.verify_threads = 1;
+        c.server.queue_deadline_ms = 100;
+    });
+    state.verifier = online_state(&base).verifier;
+    let app = build_api_router(state);
+
+    let first = send_snp(&app);
+    vcek_fetches
+        .recv()
+        .await
+        .expect("the first verification starts");
+    let late = send_snp(&app);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    first.abort();
+    let resp = tokio::time::timeout(SOON, late)
+        .await
+        .expect("answered once the thread is free")
+        .unwrap();
+    assert_overloaded(resp).await;
+    assert!(
+        vcek_fetches.try_recv().is_err(),
+        "the late request did not start"
+    );
 }
 
 /// The kernel guest's full measurement-register log (4096 events) through

@@ -41,6 +41,9 @@ subtle = { workspace = true }
 # redundant with rustls. Matches the `attestation` crate's reqwest line.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
+# Verification pool queue
+crossbeam-channel = "0.5"
+
 # CLI & logging
 clap = { workspace = true }
 tracing = { workspace = true }

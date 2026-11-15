@@ -18,8 +18,7 @@ struct Cli {
     config: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -45,8 +44,15 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!(e)
     })?;
 
-    let config = Arc::new(config);
+    // Verifications run on their own threads; these only serve connections.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.server.io_threads())
+        .enable_all()
+        .build()?
+        .block_on(serve(Arc::new(config)))
+}
 
+async fn serve(config: Arc<Config>) -> anyhow::Result<()> {
     if config.auth.api_keys.is_empty() {
         tracing::warn!(
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
@@ -93,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
     let _ = attestation::detect();
 
     let state = AppState::new(config, token_issuer, verifier);
+    tracing::info!(
+        verify_threads = state.verify_pool.threads(),
+        io_threads = state.config.server.io_threads(),
+        "verification pool"
+    );
+    tokio::spawn(state.verify_pool.clone().report(Duration::from_secs(10)));
 
     attestation_api::server::run(state).await
 }
