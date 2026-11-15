@@ -1386,7 +1386,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod perf_review_negative {
     //! Review tests: the remembered-signature cache and the gather/verify
@@ -1398,14 +1397,24 @@ mod perf_review_negative {
     const NOW: i64 = crate::testing::NOW;
 
     fn ev(q: &[u8]) -> TdxEvidence {
-        TdxEvidence { quote: BASE64.encode(q), cc_eventlog: None }
+        TdxEvidence {
+            quote: BASE64.encode(q),
+            cc_eventlog: None,
+        }
     }
 
     fn offset(whole: &[u8], part: &[u8]) -> usize {
         part.as_ptr() as usize - whole.as_ptr() as usize
     }
 
-    struct Offsets { qe_body: usize, qe_sig: usize, att_key: usize, pem: usize, pem_len: usize, sig: usize }
+    struct Offsets {
+        qe_body: usize,
+        qe_sig: usize,
+        att_key: usize,
+        pem: usize,
+        pem_len: usize,
+        sig: usize,
+    }
 
     fn offsets() -> Offsets {
         let quote = parse_tdx_quote(Q).unwrap();
@@ -1450,10 +1459,19 @@ mod perf_review_negative {
         ];
         for (what, at) in cases {
             let q = flipped(at);
-            assert!(verify_quote(&q, &TdxParams::default(), NOW).is_err(), "{what}: verify_quote");
-            assert!(Tdx::verify(&ev(&q), &TdxParams::default(), &set, NOW).is_err(), "{what}: Tdx::verify");
+            assert!(
+                verify_quote(&q, &TdxParams::default(), NOW).is_err(),
+                "{what}: verify_quote"
+            );
+            assert!(
+                Tdx::verify(&ev(&q), &TdxParams::default(), &set, NOW).is_err(),
+                "{what}: Tdx::verify"
+            );
             let ctx = crate::testing::context(crate::testing::intel());
-            assert!(Tdx::gather(&ev(&q), ctx.store(), NOW).await.is_err(), "{what}: gather");
+            assert!(
+                Tdx::gather(&ev(&q), ctx.store(), NOW).await.is_err(),
+                "{what}: gather"
+            );
         }
     }
 
@@ -1464,14 +1482,20 @@ mod perf_review_negative {
         let pem = std::str::from_utf8(&Q[o.pem..o.pem + o.pem_len]).unwrap();
         let mut der = dcap::parse_pem_to_der(pem.as_bytes()).unwrap();
         assert!(dcap::verify_pck_cert_chain(pem.as_bytes(), NOW).is_ok());
-        let enc = |der: &[Vec<u8>]| der.iter()
-            .map(|d| pem::encode(&pem::Pem::new("CERTIFICATE", d.clone()))).collect::<String>();
+        let enc = |der: &[Vec<u8>]| {
+            der.iter()
+                .map(|d| pem::encode(&pem::Pem::new("CERTIFICATE", d.clone())))
+                .collect::<String>()
+        };
         // Leaf signature byte, intermediate signature byte, leaf TBS byte.
         for (i, from_end) in [(0usize, 1usize), (1, 1), (0, 200)] {
             let mut d = der.clone();
             let n = d[i].len();
             d[i][n - from_end] ^= 1;
-            assert!(dcap::verify_pck_cert_chain(enc(&d).as_bytes(), NOW).is_err(), "cert {i} -{from_end}");
+            assert!(
+                dcap::verify_pck_cert_chain(enc(&d).as_bytes(), NOW).is_err(),
+                "cert {i} -{from_end}"
+            );
         }
         // Leaf presented as its own issuer (same message+sig, other key).
         der[1] = der[0].clone();
@@ -1490,7 +1514,10 @@ mod perf_review_negative {
 
     fn crl_revoking(serial: &[u8]) -> Vec<u8> {
         let key = rcgen::KeyPair::generate().unwrap();
-        let ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap().self_signed(&key).unwrap();
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
         rcgen::CertificateRevocationListParams {
             this_update: rcgen::date_time_ymd(2026, 1, 1),
             next_update: rcgen::date_time_ymd(2027, 1, 1),
@@ -1504,7 +1531,10 @@ mod perf_review_negative {
             }],
             key_identifier_method: rcgen::KeyIdMethod::Sha256,
         }
-        .signed_by(&ca, &key).unwrap().der().to_vec()
+        .signed_by(&ca, &key)
+        .unwrap()
+        .der()
+        .to_vec()
     }
 
     #[tokio::test]
@@ -1515,7 +1545,13 @@ mod perf_review_negative {
         assert_eq!(ok.crl_ok, Some(true));
         let o = offsets();
         let der = dcap::parse_pem_to_der(&Q[o.pem..o.pem + o.pem_len]).unwrap();
-        let serial = |d: &[u8]| X509Certificate::from_der(d).unwrap().1.raw_serial().to_vec();
+        let serial = |d: &[u8]| {
+            X509Certificate::from_der(d)
+                .unwrap()
+                .1
+                .raw_serial()
+                .to_vec()
+        };
         let pck_crl = set.pck_crl.der.clone();
         set.pck_crl.der = crl_revoking(&serial(&der[0]));
         let r = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap();
@@ -1531,9 +1567,20 @@ mod perf_review_negative {
     #[tokio::test]
     async fn warm_cache_then_unaccepted_tcb_status_fails() {
         let set = warm().await;
-        let actual = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW).unwrap().tcb_status.unwrap().tcb_status;
-        let other = if actual == TdxTcbStatus::Revoked { TdxTcbStatus::UpToDate } else { TdxTcbStatus::Revoked };
-        let params = TdxParams { accepted_tcb_statuses: vec![other], ..TdxParams::default() };
+        let actual = Tdx::verify(&ev(Q), &TdxParams::default(), &set, NOW)
+            .unwrap()
+            .tcb_status
+            .unwrap()
+            .tcb_status;
+        let other = if actual == TdxTcbStatus::Revoked {
+            TdxTcbStatus::UpToDate
+        } else {
+            TdxTcbStatus::Revoked
+        };
+        let params = TdxParams {
+            accepted_tcb_statuses: vec![other],
+            ..TdxParams::default()
+        };
         let r = Tdx::verify(&ev(Q), &params, &set, NOW).unwrap();
         assert_eq!(r.tcb_status_accepted, Some(false));
         assert!(!r.passed());
@@ -1543,7 +1590,9 @@ mod perf_review_negative {
     fn concurrent_genuine_and_tampered_quotes() {
         let o = offsets();
         let bad: Vec<Vec<u8>> = [o.qe_body + 10, o.qe_sig + 5, o.sig + 7, o.att_key + 3]
-            .iter().map(|&at| flipped(at)).collect();
+            .iter()
+            .map(|&at| flipped(at))
+            .collect();
         std::thread::scope(|s| {
             for t in 0..8 {
                 let bad = &bad;

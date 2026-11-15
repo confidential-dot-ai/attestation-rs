@@ -211,7 +211,19 @@ pub struct Store {
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
+    /// When set, a lookup that would ask a vendor adds the request here
+    /// instead and fails as unavailable (see [`Self::view_cached`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    deferred: Option<Arc<Mutex<Vec<Deferred>>>>,
 }
+
+/// A vendor request a cached-only view put off: the URL, and the fetch
+/// (and check) that stores the piece in memory.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Deferred = (
+    String,
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
+);
 
 impl Store {
     /// Holds only what the caller supplies: no memory, disk or network.
@@ -224,6 +236,8 @@ impl Store {
             used: None,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred: None,
         }
     }
 
@@ -246,7 +260,48 @@ impl Store {
             used: record.then(Arc::default),
             #[cfg(not(target_arch = "wasm32"))]
             native: self.native.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred: None,
         }
+    }
+
+    /// As [`Self::view`], but it never waits on a vendor: a piece not in
+    /// memory (or due for a refresh) is unavailable, and its fetch is put off
+    /// for [`Self::take_deferred`]. CPU-bound callers verify with this view
+    /// and fetch outside their threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn view_cached(&self, attached: Vec<HeldResponse>, floors: &VersionFloors) -> Self {
+        Self {
+            deferred: self
+                .native
+                .as_ref()
+                .is_some_and(|n| n.vendor.is_some())
+                .then(Arc::default),
+            ..self.view(attached, floors, false)
+        }
+    }
+
+    /// The vendor requests a cached-only view put off, each URL once.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_deferred(&self) -> Vec<Deferred> {
+        self.deferred.as_ref().map_or_else(Vec::new, |d| {
+            std::mem::take(&mut *d.lock().unwrap_or_else(|e| e.into_inner()))
+        })
+    }
+
+    /// Put off `fetch` of `url`, unless already put off.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn defer(
+        &self,
+        deferred: &Mutex<Vec<Deferred>>,
+        url: String,
+        fetch: impl std::future::Future<Output = Result<()>> + Send + 'static,
+    ) -> Failure {
+        let mut deferred = deferred.lock().unwrap_or_else(|e| e.into_inner());
+        if !deferred.iter().any(|(u, _)| *u == url) {
+            deferred.push((url, Box::pin(fetch)));
+        }
+        Failure::Unavailable(Unavailable::detail("not in memory yet"))
     }
 
     /// Keep `url`'s response in what a recording view used.
@@ -399,6 +454,25 @@ impl Store {
     ) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
+            if let Some(deferred) = &self.deferred {
+                if let Some(entry) = native.mem.get(&url).await {
+                    if !native.due(&entry, now, false) {
+                        return Ok((entry, Source::Memory));
+                    }
+                }
+                let (native, id) = (native.clone(), id.clone());
+                let fetch = {
+                    let url = url.clone();
+                    async move {
+                        native
+                            .entry::<C>(url, &id, now)
+                            .await
+                            .map(drop)
+                            .map_err(|e| e.into_error(&C::name(&id)))
+                    }
+                };
+                return Err(self.defer(deferred, url, fetch));
+            }
             return native.entry::<C>(url, id, now).await;
         }
         let mut missing = self.missing.lock().unwrap_or_else(|e| e.into_inner());
@@ -430,6 +504,17 @@ impl Store {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
             let url = C::url(id);
+            if let (Some(deferred), true) = (&self.deferred, native.mem.contains_key(&url)) {
+                let (native, piece) = (native.clone(), id.clone());
+                let fetch = {
+                    let url = url.clone();
+                    async move {
+                        let (_, _, failure) = native.refresh::<C>(&url, &piece, true, now).await;
+                        failure.map_or(Ok(()), |e| Err(e.into_error(&C::name(&piece))))
+                    }
+                };
+                return Err(self.defer(deferred, url, fetch).into_error(&C::name(id)));
+            }
             if native.mem.contains_key(&url) {
                 let (_, _, failure) = native.refresh::<C>(&url, id, true, now).await;
                 return failure.map_or(Ok(()), |e| Err(e.into_error(&C::name(id))));
@@ -503,6 +588,24 @@ mod native {
         paused_until: Option<Instant>,
         second: Option<Instant>,
         cold: u32,
+        in_flight: u32,
+    }
+
+    /// At most this many requests to one vendor host at once.
+    pub(crate) const MAX_IN_FLIGHT: u32 = 16;
+
+    /// A request in flight to `host`, counted until dropped.
+    struct InFlight<'a> {
+        native: &'a Native,
+        host: String,
+    }
+
+    impl Drop for InFlight<'_> {
+        fn drop(&mut self) {
+            if let Some(h) = self.native.lock_hosts().get_mut(&self.host) {
+                h.in_flight -= 1;
+            }
+        }
     }
 
     /// The vendor host of `url`.
@@ -547,7 +650,7 @@ mod native {
         /// Whether to ask the upstream about `entry` again: never within
         /// `recheck` of the last time; otherwise from its refresh time (or,
         /// for the key set, when old), or always when `force`d.
-        fn due(&self, entry: &Entry, now: i64, force: bool) -> bool {
+        pub(super) fn due(&self, entry: &Entry, now: i64, force: bool) -> bool {
             let age = entry.checked_at.elapsed();
             age >= self.recheck
                 && (force
@@ -628,10 +731,12 @@ mod native {
                     return Err(wait(left.as_secs(), "the vendor asked to wait"));
                 }
             }
+            let in_flight = self.in_flight(url)?;
             if cold {
                 self.admit_cold(url)?;
             }
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
+            drop(in_flight);
             if let Err(e) = &mut fetched {
                 if direct && matches!(e.status, Some(429 | 503)) {
                     let pause = self.recheck.min(
@@ -687,6 +792,18 @@ mod native {
 
         fn lock_hosts(&self) -> std::sync::MutexGuard<'_, HashMap<String, Host>> {
             self.hosts.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// Count a request to `url`'s host against [`MAX_IN_FLIGHT`].
+        fn in_flight(&self, url: &str) -> std::result::Result<InFlight<'_>, Failure> {
+            let host = host(url).to_string();
+            let mut hosts = self.lock_hosts();
+            let h = hosts.entry(host.clone()).or_default();
+            if h.in_flight >= MAX_IN_FLIGHT {
+                return Err(wait(1, "too many requests to this vendor at once"));
+            }
+            h.in_flight += 1;
+            Ok(InFlight { native: self, host })
         }
 
         /// Count a fetch of a piece held nowhere against its vendor host's
@@ -806,6 +923,26 @@ mod native {
                 replaced.into_inner().unwrap(),
                 failure.into_inner().unwrap(),
             )
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn requests_to_one_vendor_host_are_bounded() {
+            let native = Native::new(None);
+            let url = "https://kdsintf.amd.com/vcek/v1/Genoa/crl";
+            let held: Vec<_> = (0..MAX_IN_FLIGHT)
+                .map(|_| native.in_flight(url).ok().unwrap())
+                .collect();
+            assert!(native.in_flight(url).is_err());
+            assert!(native
+                .in_flight("https://api.trustedservices.intel.com/x")
+                .is_ok());
+            drop(held);
+            assert!(native.in_flight(url).is_ok());
         }
     }
 }
@@ -1072,6 +1209,30 @@ mod tests {
         // Memory now serves the new piece, not the one verified before.
         let held = qe_identity(&ctx).await.unwrap();
         assert_eq!((held.0, held.1), (Some(20), Source::Memory));
+    }
+
+    #[tokio::test]
+    async fn a_cached_view_puts_off_vendor_requests_until_fetched() {
+        let v = vendor(vec![pcs("2026-10-14/td_qe_identity.json")], Duration::ZERO).await;
+        let ctx = ctx(&v);
+        let floors = VersionFloors::default();
+        let view = ctx.store().view_cached(vec![], &floors);
+        assert!(view
+            .get::<QeIdentity>(&(), NOW)
+            .await
+            .unwrap_err()
+            .is_retryable());
+        let deferred = view.take_deferred();
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(v.hits.load(Ordering::SeqCst), 0);
+        for (_, fetch) in deferred {
+            fetch.await.unwrap();
+        }
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+        let view = ctx.store().view_cached(vec![], &floors);
+        let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
+        assert_eq!((used.version, used.from), (Some(20), Source::Memory));
+        assert!(view.take_deferred().is_empty());
     }
 
     #[tokio::test]
