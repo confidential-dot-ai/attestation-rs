@@ -120,14 +120,17 @@ fn expired(answer: &[u8], now: i64) -> bool {
 }
 
 /// Where an NRAS answer is held: NVIDIA's NRAS endpoint for the request's
-/// architecture and the request nonce, whichever NRAS URL either side uses.
+/// architecture, the architecture and the request nonce, whichever NRAS URL
+/// either side uses. Hopper and Blackwell groups share the GPU endpoint and
+/// nonce, so without the architecture one group's answer would be found for
+/// the other.
 fn nras_answer_url(request: &NrasRequest) -> String {
     use crate::platforms::nvidia_gpu::provider::{NRAS_GPU_URL, NRAS_SWITCH_URL};
     let url = match request.arch {
         NvidiaGpuArch::Ls10 => NRAS_SWITCH_URL,
         _ => NRAS_GPU_URL,
     };
-    format!("{url}#nonce={}", request.nonce)
+    format!("{url}#arch={}&nonce={}", request.arch, request.nonce)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -205,8 +208,9 @@ pub fn verify_bundle(
         overall_raw: serde_json::Value::Null,
     };
     let mut device_policy_met = true;
+    let mut device_count_match = true;
 
-    for (arch, _) in group_by_arch(bundle) {
+    for (arch, devices) in group_by_arch(bundle) {
         let response = collateral.nras.get(&arch).ok_or_else(|| {
             AttestationError::NrasResponseParse(format!("no NRAS answer for {arch:?}"))
         })?;
@@ -218,19 +222,12 @@ pub fn verify_bundle(
             now,
         )?;
         device_policy_met &= group.device_policy_met;
+        device_count_match &= attests_group(arch, devices.len(), &group.devices);
         fold_arch_group(&mut claims, group);
     }
 
     if !claims.overall_ok {
         log::warn!("NVIDIA GPU attestation: NRAS overall result is false");
-    }
-    let device_count_match = claims.devices.len() == bundle.devices.len();
-    if !device_count_match {
-        log::warn!(
-            "NVIDIA GPU attestation: device count mismatch (expected {}, got {})",
-            bundle.devices.len(),
-            claims.devices.len()
-        );
     }
     let archs_allowed = params
         .expected_archs
@@ -243,6 +240,26 @@ pub fn verify_bundle(
         device_count_match,
         device_policy_met,
     })
+}
+
+/// Whether NRAS's answer for the `arch` group attests that group: one
+/// submodule per device, none signed as another architecture. Hopper and
+/// Blackwell answers carry the same nonce, so without this an answer for one
+/// group could be counted for the other's devices.
+fn attests_group(arch: NvidiaGpuArch, devices: usize, claims: &[NvidiaGpuDeviceClaims]) -> bool {
+    let other_arch = claims
+        .iter()
+        .filter(|c| c.arch.is_some_and(|a| a != arch))
+        .count();
+    let attests = claims.len() == devices && other_arch == 0;
+    if !attests {
+        log::warn!(
+            "NVIDIA GPU attestation: device count mismatch for {arch} \
+             (expected {devices}, got {} with {other_arch} of another arch)",
+            claims.len()
+        );
+    }
+    attests
 }
 
 fn archs_match(claims: &NvidiaGpuClaims, allowed: &[NvidiaGpuArch]) -> bool {
@@ -1060,6 +1077,86 @@ mod tests {
             }
             other => panic!("expected NvidiaGpuNonceTooShort, got {other:?}"),
         }
+    }
+
+    /// A Hopper and a Blackwell group share the GPU nonce. With only the
+    /// Hopper group's NRAS answer held, the Blackwell group must still be
+    /// sent to NRAS (offline here), not answered with the Hopper answer.
+    #[tokio::test]
+    async fn a_held_nras_answer_is_used_only_for_its_own_arch_group() {
+        const NOW: i64 = 1_792_022_400;
+        let user_nonce = vec![7u8; MIN_GPU_USER_NONCE_LEN];
+        let device = |arch, uuid: &str| NvidiaGpuDeviceEvidence {
+            arch,
+            uuid: uuid.into(),
+            evidence_b64: uuid.into(),
+            cert_chain_b64: String::new(),
+        };
+        let bundle = NvidiaGpuEvidenceBundle {
+            devices: vec![
+                device(NvidiaGpuArch::Hopper, "GPU-H"),
+                device(NvidiaGpuArch::Blackwell, "GPU-B"),
+            ],
+            binding: NvidiaGpuBinding::default(),
+        };
+        let jwks = include_bytes!("../../../test_data/collateral/2026-10-14/nras_jwks.json");
+        let kid = serde_json::from_slice::<Jwks>(jwks).unwrap().keys[0]
+            .kid
+            .clone();
+        let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
+        let token = format!(
+            "{}.{}.c2ln",
+            part(serde_json::json!({ "alg": "ES384", "kid": kid })),
+            part(serde_json::json!({ "exp": NOW + 3600 })),
+        );
+        let answer = serde_json::json!([["JWT", token], { "GPU-H": token }]);
+        let hopper = NrasRequest {
+            nonce: hex::encode(gpu_nonce(&user_nonce, &bundle.binding)),
+            evidence_list: vec![NrasEvidenceEntry {
+                evidence: "GPU-H".into(),
+                certificate: String::new(),
+            }],
+            arch: NvidiaGpuArch::Hopper,
+            claims_version: "2.0".into(),
+        };
+        let jwks_url = crate::context::Context::held([])
+            .store()
+            .nras_jwks_url()
+            .unwrap();
+        let ctx = crate::context::Context::held([
+            (
+                nras_answer_url(&hopper),
+                serde_json::to_vec(&answer).unwrap(),
+                None,
+            ),
+            (jwks_url, jwks.to_vec(), None),
+        ]);
+        let params = NvidiaGpuParams {
+            user_nonce: Some(user_nonce),
+            ..Default::default()
+        };
+        let err = gather_bundle(&bundle, &params, ctx.store(), NOW)
+            .await
+            .map(|(set, _)| set.nras.into_keys().collect::<Vec<_>>())
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err}");
+    }
+
+    #[test]
+    fn an_nras_answer_attests_only_its_own_arch_group() {
+        let device = |arch| NvidiaGpuDeviceClaims {
+            arch,
+            ..Default::default()
+        };
+        let hopper = [
+            device(Some(NvidiaGpuArch::Hopper)),
+            device(Some(NvidiaGpuArch::Hopper)),
+        ];
+        assert!(attests_group(NvidiaGpuArch::Hopper, 2, &hopper));
+        assert!(attests_group(NvidiaGpuArch::Hopper, 1, &[device(None)]));
+        assert!(!attests_group(NvidiaGpuArch::Hopper, 3, &hopper));
+        assert!(!attests_group(NvidiaGpuArch::Hopper, 1, &hopper));
+        assert!(!attests_group(NvidiaGpuArch::Blackwell, 2, &hopper));
     }
 
     #[test]

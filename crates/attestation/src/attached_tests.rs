@@ -394,7 +394,7 @@ async fn gpu_collateral_is_attached_and_used_without_network() {
     let jwks_url = crate::platforms::nvidia_gpu::jwks_url_for_endpoint(nras).unwrap();
     let mut held = vendor_for(&tdx()).await;
     held.push((
-        format!("{nras}#nonce={nonce}"),
+        format!("{nras}#arch=HOPPER&nonce={nonce}"),
         serde_json::to_vec(&answer).unwrap(),
         None,
     ));
@@ -515,7 +515,7 @@ async fn an_expired_attached_nras_answer_is_not_used() {
     envelope.nvidia_gpu = Some(bundle);
     let mut held = envelope.held_collateral();
     held.push((
-        format!("{nras}#nonce={nonce}"),
+        format!("{nras}#arch=HOPPER&nonce={nonce}"),
         serde_json::to_vec(&answer).unwrap(),
         None,
     ));
