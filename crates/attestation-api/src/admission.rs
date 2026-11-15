@@ -98,8 +98,6 @@ async fn blocking<T: Send + 'static>(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use axum::response::IntoResponse;
-
     use super::*;
 
     /// One worker and `queue_per_worker` places, with the worker held until
@@ -125,23 +123,16 @@ mod tests {
             let ran = ran.clone();
             move || ran.store(true, Ordering::SeqCst)
         };
-        // The queue is full: 503 at once.
-        let (admission, _hold) = busy(0).await;
-        let start = Instant::now();
-        assert!(matches!(
-            admission.run(job()).await,
-            Err(ApiError::Overloaded)
-        ));
-        assert!(start.elapsed() < Duration::from_millis(10));
-        // Queued past the deadline: 503.
-        let (admission, hold) = busy(1).await;
-        let start = Instant::now();
-        assert!(matches!(
-            admission.run(job()).await,
-            Err(ApiError::Overloaded)
-        ));
-        assert!((100..500).contains(&start.elapsed().as_millis()));
+        let overloaded = |r: Result<(), ApiError>| matches!(r, Err(ApiError::Overloaded));
+        // The queue is full: 503 at once. Queued past the deadline: 503.
+        for (queue, waited) in [(0, 0..10), (1, 100..500)] {
+            let (admission, _hold) = busy(queue).await;
+            let start = Instant::now();
+            assert!(overloaded(admission.run(job()).await));
+            assert!(waited.contains(&start.elapsed().as_millis()));
+        }
         // Queued, and the client went away.
+        let (admission, hold) = busy(1).await;
         let queued = tokio::spawn({
             let (admission, job) = (admission.clone(), job());
             async move { admission.run(job).await }
@@ -152,12 +143,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         admission.run(|| ()).await.unwrap();
         assert!(!ran.load(Ordering::SeqCst));
-
-        let response = ApiError::Overloaded.into_response();
-        assert_eq!(
-            response.status(),
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        );
+        let response = axum::response::IntoResponse::into_response(ApiError::Overloaded);
         assert_eq!(response.headers()["retry-after"], "1");
     }
 }

@@ -320,7 +320,8 @@ impl Store {
         // The newest of the copies on hand; on a tie, the first of held,
         // cached, attached. Attached pieces never push the verifier back.
         let mut best: Option<(C, Vec<u8>, Option<String>, Source)> = None;
-        for (piece, body, chain, from) in self.on_hand::<C>(&url, id).await? {
+        for (body, chain, from) in self.on_hand::<C>(&url, id).await {
+            let piece = C::verify(&body, chain.as_deref(), id).map_err(Failure::refused)?;
             if best
                 .as_ref()
                 .is_none_or(|(b, ..)| !b.dates().not_older_than(&piece.dates()))
@@ -357,42 +358,28 @@ impl Store {
         Ok((piece, used))
     }
 
-    /// The copies of `url` this store has without asking anyone, verified:
-    /// held, cached in memory or on disk, attached. Held and attached copies
-    /// are verified on every use.
+    /// The copies of `url` this store has without asking anyone: held,
+    /// cached in memory or on disk, attached.
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     async fn on_hand<C: Collateral>(
         &self,
         url: &str,
         id: &C::Id,
-    ) -> std::result::Result<Vec<(C, Vec<u8>, Option<String>, Source)>, Failure> {
-        let verify = |body: &Vec<u8>, chain: &Option<String>| {
-            C::verify(body, chain.as_deref(), id).map_err(Failure::refused)
-        };
+    ) -> Vec<(Vec<u8>, Option<String>, Source)> {
         let mut copies = Vec::new();
         if let Some((body, chain)) = self.held.get(url) {
-            copies.push((
-                verify(body, chain)?,
-                body.clone(),
-                chain.clone(),
-                Source::Held,
-            ));
+            copies.push((body.clone(), chain.clone(), Source::Held));
         }
         if let Some((body, chain)) = self.attached.get(url) {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(native) = &self.native {
                 if let Some(e) = native.cached::<C>(url, id).await {
-                    copies.push((piece::<C>(&e, id)?, e.body, e.issuer_chain, e.origin));
+                    copies.push((e.body, e.issuer_chain, e.origin));
                 }
             }
-            copies.push((
-                verify(body, chain)?,
-                body.clone(),
-                chain.clone(),
-                Source::Attached,
-            ));
+            copies.push((body.clone(), chain.clone(), Source::Attached));
         }
-        Ok(copies)
+        copies
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
@@ -1483,42 +1470,19 @@ mod tests {
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
     }
 
-    /// A piece whose `verify` counts its calls and accepts only `[id]`.
-    #[derive(Clone)]
-    struct Fake;
-    static FAKE_VERIFIED: AtomicUsize = AtomicUsize::new(0);
-
-    impl Collateral for Fake {
-        type Id = u8;
-        fn name(_: &u8) -> String {
-            "fake".into()
-        }
-        fn url(_: &u8) -> String {
-            "https://fake.example/one".into()
-        }
-        fn verify(body: &[u8], _: Option<&str>, id: &u8) -> Result<Self> {
-            FAKE_VERIFIED.fetch_add(1, Ordering::SeqCst);
-            (body == [*id])
-                .then_some(Fake)
-                .ok_or_else(|| crate::collateral::refused("id"))
-        }
-        fn dates(&self) -> Dates {
-            Dates::default()
-        }
-    }
-
     #[tokio::test]
     async fn a_piece_in_memory_is_reused_only_for_the_id_it_was_verified_for() {
+        let other = [0, 0xa0, 0x6d, 0x08, 0, 0];
         let ctx = Context::offline();
-        ctx.store()
-            .keep::<Fake>(&1, (Fake::url(&1), vec![1], None))
-            .await;
-        let verified = FAKE_VERIFIED.load(Ordering::SeqCst);
-        ctx.store().get::<Fake>(&1, NOW).await.unwrap();
-        assert_eq!(FAKE_VERIFIED.load(Ordering::SeqCst), verified);
-        // The same URL for another id: verified again, and refused.
-        assert!(ctx.store().get::<Fake>(&2, NOW).await.is_err());
-        assert_eq!(FAKE_VERIFIED.load(Ordering::SeqCst), verified + 1);
+        // The piece for FMSPC at its own URL, and at the URL of `other`.
+        for url in [tcb_info_url(), TcbInfo::url(&other)] {
+            let (body, chain) = raw("2026-10-14/tcb_info_70a06d070000.json", Some(CHAIN));
+            ctx.store()
+                .keep::<TcbInfo>(&FMSPC, (url, body, chain))
+                .await;
+        }
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().1, Source::Memory);
+        assert!(ctx.store().get::<TcbInfo>(&other, NOW).await.is_err());
     }
 
     #[tokio::test]

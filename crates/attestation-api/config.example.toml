@@ -3,7 +3,7 @@
 # front of the service: loopback for a sidecar, or an address only the
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
-max_connections = 4096
+max_connections = 4096            # More wait in the listen backlog
 max_open_files = 65536            # Soft limit to raise to, at most the hard limit
 
 [verify]

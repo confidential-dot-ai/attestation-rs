@@ -57,17 +57,11 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
-    /// Connections served at once; more wait in the listen backlog.
     pub max_connections: usize,
-    /// Raise the soft open-files limit to this (at most the hard limit).
     pub max_open_files: u64,
 }
 
-/// Bounded verification: `workers` jobs at once (0: two per vCPU), and
-/// `queue_per_worker` waiting per worker for at most `queue_deadline_ms`.
-/// Evidence that needs a fetch is verified by one of `cold_workers` (0: half
-/// the vCPUs), with as long a queue, within `fetch_deadline_ms`, after
-/// `warm` (collateral URLs) was fetched at start.
+/// Limits on verification work; see `config.example.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VerifyConfig {
@@ -290,8 +284,7 @@ impl Config {
         }
 
         // A queued request must be able to wait for the queue ahead of it
-        // (about a millisecond per verification); the open-files limit is
-        // safe only with the connection cap below it.
+        // (about 1 ms a job); more files than connections.
         let (v, s) = (&self.verify, &self.server);
         if v.queue_deadline_ms < v.queue_per_worker.max(1) as u64
             || v.fetch_deadline_ms == 0

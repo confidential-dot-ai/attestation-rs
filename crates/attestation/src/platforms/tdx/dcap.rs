@@ -335,11 +335,7 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Res
 
     // Verify Root CA self-signature (a test checks the bundled one)
     if der_certs[1] != INTEL_SGX_ROOT_CA {
-        verify_cert_signature(
-            &root_cert,
-            &root_pub_key,
-            "signing chain Root CA self-signature",
-        )?;
+        verify_cert_signature(&root_cert, &root_pub_key, "signing chain Root CA")?;
     }
 
     // Verify signing cert is signed by Root CA

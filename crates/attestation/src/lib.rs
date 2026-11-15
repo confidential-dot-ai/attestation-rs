@@ -674,17 +674,20 @@ mod tests {
         .unwrap()
     }
 
-    /// The fixture quote with one byte changed in each signed or signing
-    /// part: body, quote signature, attestation key, QE report and its
-    /// signature, the PCK leaf's TBS and signature (a base64 character).
-    fn tampered_quotes() -> Vec<Vec<u8>> {
+    /// Warm: the fixture quote with one byte changed in the body, quote
+    /// signature, attestation key, QE report, its signature, or the PCK
+    /// leaf's TBS or signature (a base64 character) fails, from 8 threads at
+    /// once, while the genuine quote passes; so does the genuine quote after
+    /// the PCK leaf's notAfter or before its notBefore.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn warm_a_changed_byte_or_another_time_still_fails() {
         let body_end = 54 + u32::from_le_bytes(V5_QUOTE[50..54].try_into().unwrap()) as usize;
         let find = |marker: &[u8]| V5_QUOTE.windows(marker.len()).position(|w| w == marker);
         let leaf = find(b"-----BEGIN CERTIFICATE-----").unwrap() + 28;
         let leaf_end = find(b"-----END CERTIFICATE-----").unwrap();
-        let qe = body_end + 138;
+        let (qe, body) = (body_end + 138, 100);
         let changed = [
-            100,
+            body,
             body_end + 4,
             body_end + 70,
             qe + 10,
@@ -692,44 +695,13 @@ mod tests {
             leaf + 300,
             leaf_end - 8,
         ];
-        changed
-            .map(|at| {
-                let mut quote = V5_QUOTE.to_vec();
-                quote[at] ^= if quote[at] == b'A' { 3 } else { 1 };
-                quote
-            })
-            .to_vec()
-    }
-
-    #[tokio::test]
-    async fn warm_a_changed_byte_or_another_time_still_fails() {
+        let tampered = Arc::new(changed.map(|at| {
+            let mut quote = V5_QUOTE.to_vec();
+            quote[at] ^= if quote[at] == b'A' { 3 } else { 1 };
+            envelope(&quote)
+        }));
         let now = crate::testing::NOW;
-        let verifier = Verifier::new(crate::testing::warm_tdx(now).await);
-        let all = Policies::all();
-        let verified = verifier.verify_offline(&envelope(V5_QUOTE), &all).await;
-        assert!(verified.unwrap().passed());
-        for quote in tampered_quotes() {
-            assert!(verifier
-                .verify_offline(&envelope(&quote), &all)
-                .await
-                .is_err());
-        }
-        // After the PCK leaf's notAfter, and before its notBefore.
-        for at in [4_102_444_800, 1_000_000_000] {
-            let other_time = Verifier::new(crate::testing::warm_tdx(at).await);
-            assert!(other_time
-                .verify_offline(&tdx_envelope(), &all)
-                .await
-                .is_err());
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn warm_verdicts_hold_under_concurrency() {
-        let verifier = Arc::new(Verifier::new(
-            crate::testing::warm_tdx(crate::testing::NOW).await,
-        ));
-        let tampered = Arc::new(tampered_quotes());
+        let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now).await));
         let tasks = (0..8).map(|t| {
             let (verifier, tampered) = (verifier.clone(), tampered.clone());
             tokio::spawn(async move {
@@ -737,13 +709,20 @@ mod tests {
                 for round in 0..50 {
                     let genuine = verifier.verify_offline(&tdx_envelope(), &all).await;
                     assert!(genuine.unwrap().passed());
-                    let quote = envelope(&tampered[(t + round) % tampered.len()]);
-                    assert!(verifier.verify_offline(&quote, &all).await.is_err());
+                    let quote = &tampered[(t + round) % tampered.len()];
+                    assert!(verifier.verify_offline(quote, &all).await.is_err());
                 }
             })
         });
         for task in futures_util::future::join_all(tasks).await {
             task.unwrap();
+        }
+        for at in [4_102_444_800, 1_000_000_000] {
+            let other_time = Verifier::new(crate::testing::warm_tdx(at).await);
+            let verified = other_time
+                .verify_offline(&tdx_envelope(), &Policies::all())
+                .await;
+            assert!(verified.is_err());
         }
     }
 

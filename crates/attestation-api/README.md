@@ -120,15 +120,8 @@ where `<platform>` is the token's platform claim.
 message text. A request for tokens without token configuration also fails;
 turn on token configuration before requesting them.
 
-Verification runs on `[verify] workers` threads (default: two per vCPU), at
-most `queue_per_worker` more requests waiting per worker. Evidence whose
-collateral is not in memory, or that needs NRAS, is verified in a separate
-lane of `cold_workers` (default: half the vCPUs) with as long a queue, so
-vendor time never holds a worker. Before serving, the API fetches the `warm`
-collateral URLs (default: Intel's QE Identity and CRLs, AMD's VCEK CRLs); add
-the TCB Info URL of each FMSPC in your fleet. `[server] max_connections` caps open connections (more wait in the
-listen backlog); headers and the body must each arrive within 10 s. At start
-the soft open-files limit is raised to `max_open_files`, at most the hard limit.
+`config.example.toml` describes the limits on verification work, queues,
+fetches and connections (`[verify]`, `[server]`).
 
 One in-memory verifier/store is reused for the process. The API has no disk
 cache or explicit collateral-upstream configuration. It uses native
