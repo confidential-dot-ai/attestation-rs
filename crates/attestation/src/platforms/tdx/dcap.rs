@@ -208,13 +208,11 @@ pub fn verify_qe_report_signature(
         AttestationError::SignatureVerificationFailed(format!("QE report signature parse: {e}"))
     })?;
 
-    pck_pub_key
-        .verify(auth_data.qe_report_body, &sig)
-        .map_err(|e| {
-            AttestationError::SignatureVerificationFailed(format!(
-                "QE report signature verification: {e}"
-            ))
-        })
+    verify_p256(pck_pub_key, auth_data.qe_report_body, &sig).map_err(|e| {
+        AttestationError::SignatureVerificationFailed(format!(
+            "QE report signature verification: {e}"
+        ))
+    })
 }
 
 /// Validate the PCK certificate chain and return the PCK leaf's public key.
@@ -437,9 +435,39 @@ fn verify_cert_signature(cert: &CertData, issuer_key: &VerifyingKey, label: &str
     let sig = Signature::from_der(&cert.signature_bytes)
         .map_err(|e| AttestationError::CertChainError(format!("{label} signature parse: {e}")))?;
 
-    issuer_key.verify(&cert.tbs_bytes, &sig).map_err(|e| {
+    verify_p256(issuer_key, &cert.tbs_bytes, &sig).map_err(|e| {
         AttestationError::CertChainError(format!("{label} signature verification: {e}"))
     })
+}
+
+/// `key`'s signature `sig` over `msg`. The PCK chain and the QE report are
+/// the same in every quote of a platform, so a check that passed is
+/// remembered, by a SHA-256 of key, message and signature, and not done
+/// again (two of the four P-256 checks per quote, ~40% of its cost).
+fn verify_p256(
+    key: &VerifyingKey,
+    msg: &[u8],
+    sig: &Signature,
+) -> std::result::Result<(), p256::ecdsa::Error> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static PASSED: std::sync::LazyLock<moka::sync::Cache<[u8; 32], ()>> =
+            std::sync::LazyLock::new(|| moka::sync::Cache::new(4096));
+        let mut id = Sha256::new();
+        for part in [key.to_encoded_point(false).as_bytes(), msg, &sig.to_bytes()] {
+            id.update((part.len() as u64).to_le_bytes());
+            id.update(part);
+        }
+        let id: [u8; 32] = id.finalize().into();
+        if PASSED.contains_key(&id) {
+            return Ok(());
+        }
+        key.verify(msg, sig)?;
+        PASSED.insert(id, ());
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    key.verify(msg, sig)
 }
 
 /// Verify a certificate's validity period (NotBefore/NotAfter) at `now` (Unix seconds).
@@ -1441,6 +1469,30 @@ mod tests {
             verify_qe_report_binding(&auth).is_err(),
             "tampered attestation key should fail QE binding"
         );
+    }
+
+    #[test]
+    fn a_remembered_signature_check_covers_only_its_own_message_and_signature() {
+        let auth = parse_auth_data(V4_QUOTE, body_end_v4()).unwrap();
+        let pck_key = verify_pck_cert_chain(auth.pck_cert_chain_pem, now()).unwrap();
+        for _ in 0..2 {
+            assert!(verify_qe_report_signature(&auth, &pck_key).is_ok());
+        }
+        let mut body = auth.qe_report_body.to_vec();
+        body[0] ^= 1;
+        let mut sig = auth.qe_report_signature.to_vec();
+        sig[63] ^= 1;
+        for (body, sig) in [
+            (&body, auth.qe_report_signature),
+            (&auth.qe_report_body.to_vec(), &sig[..]),
+        ] {
+            let tampered = QuoteAuthData {
+                qe_report_body: body,
+                qe_report_signature: sig,
+                ..auth
+            };
+            assert!(verify_qe_report_signature(&tampered, &pck_key).is_err());
+        }
     }
 
     #[test]
