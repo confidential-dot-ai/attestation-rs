@@ -262,8 +262,11 @@ pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> 
         ));
     }
 
-    // Step 2: Verify Root CA self-signature
-    verify_cert_signature(&root_cert, &root_pub_key, "Root CA self-signature")?;
+    // Step 2: Verify Root CA self-signature (the bundled root's is checked
+    // by test `the_bundled_root_ca_is_self_signed`)
+    if der_certs[2] != INTEL_SGX_ROOT_CA {
+        verify_cert_signature(&root_cert, &root_pub_key, "Root CA self-signature")?;
+    }
 
     // Step 3: Verify Intermediate is signed by Root CA
     let intermediate_pub_key =
@@ -1320,6 +1323,33 @@ mod tests {
 
     const V4_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_4.dat");
     const V5_QUOTE: &[u8] = include_bytes!("../../../test_data/tdx_quote_5.dat");
+
+    #[test]
+    fn a_root_other_than_the_bundled_one_has_its_self_signature_checked() {
+        let auth = parse_auth_data(V4_QUOTE, body_end_v4()).unwrap();
+        let mut der =
+            split_pem_to_der(std::str::from_utf8(auth.pck_cert_chain_pem).unwrap()).unwrap();
+        assert_eq!(der[2], INTEL_SGX_ROOT_CA);
+        let pem = |der: &[Vec<u8>]| {
+            der.iter()
+                .map(|d| pem::encode(&pem::Pem::new("CERTIFICATE", d.clone())))
+                .collect::<String>()
+        };
+        assert!(verify_pck_cert_chain(pem(&der).as_bytes(), now()).is_ok());
+        // The same root with its signature's last byte changed: same key.
+        *der[2].last_mut().unwrap() ^= 1;
+        let err = verify_pck_cert_chain(pem(&der).as_bytes(), now()).unwrap_err();
+        assert!(err.to_string().contains("Root CA self-signature"), "{err}");
+    }
+
+    #[test]
+    fn the_bundled_root_ca_is_self_signed() {
+        let root = parse_x509_cert(INTEL_SGX_ROOT_CA, "root").unwrap();
+        let key = extract_p256_pub_key(&root.pub_key_bytes, "root").unwrap();
+        assert!(verify_cert_signature(&root, &key, "root").is_ok());
+        let other = VerifyingKey::from(&p256::ecdsa::SigningKey::from_slice(&[7; 32]).unwrap());
+        assert!(verify_cert_signature(&root, &other, "root").is_err());
+    }
 
     fn body_end_v4() -> usize {
         QUOTE_HEADER_SIZE + REPORT_BODY_SIZE
