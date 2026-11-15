@@ -220,31 +220,62 @@ pub struct SnpCollateralSet {
     /// VCEK or VLEK), or the VCEK fetched from AMD KDS.
     pub vek: Vec<u8>,
     pub crl: AmdCrl,
-    /// The report [`Snp::gather`] verified, the VEK it verified against, and
-    /// when: [`Snp::verify`] of that report with that VEK at that time need
-    /// not again.
-    verified_report: Option<(Vec<u8>, Vec<u8>, i64)>,
+    /// The report gathering verified against `vek`: [`Snp::verify`] of that
+    /// report with that VEK at that time need not again.
+    verified_report: Option<ReportCheck>,
+}
+
+/// A report that verified against a VEK at a time. Only [`ReportCheck::run`]
+/// makes one, after [`check_report`] passed.
+#[derive(Clone)]
+pub(crate) struct ReportCheck {
+    report: Vec<u8>,
+    vek: Vec<u8>,
+    at: i64,
+}
+
+impl ReportCheck {
+    fn run(
+        report_bytes: &[u8],
+        report: &AttestationReport,
+        vek: Vec<u8>,
+        gen: ProcessorGeneration,
+        now: i64,
+    ) -> Result<Self> {
+        check_report(report, &vek, gen, now)?;
+        Ok(Self {
+            report: report_bytes.to_vec(),
+            vek,
+            at: now,
+        })
+    }
+
+    /// Whether this check was of `report` against `vek` at `now`.
+    fn covers(&self, report: &[u8], vek: &[u8], now: i64) -> bool {
+        self.report == report && self.vek == vek && self.at == now
+    }
 }
 
 impl SnpCollateralSet {
-    /// The collateral for `report`, which has verified against `inline`
-    /// when the evidence carries its VEK; a fetched VCEK is checked against
-    /// the report here.
+    /// The collateral for `report` (`report_bytes` parsed): `inline` is its
+    /// check against the VEK the evidence carries; a fetched VCEK is checked
+    /// against the report here.
     pub(crate) async fn gather(
+        report_bytes: &[u8],
         report: &AttestationReport,
         gen: ProcessorGeneration,
-        inline: Option<Vec<u8>>,
+        inline: Option<ReportCheck>,
         store: &Store,
         now: i64,
     ) -> Result<(Self, Vec<CollateralUsed>)> {
-        if let Some(vek) = inline {
+        if let Some(check) = inline {
             let (crl, used) = store
-                .get::<AmdCrl>(&(gen, AmdKey::of_vek(&vek)?), now)
+                .get::<AmdCrl>(&(gen, AmdKey::of_vek(&check.vek)?), now)
                 .await?;
             let collateral = Self {
-                vek,
+                vek: check.vek.clone(),
                 crl,
-                verified_report: None,
+                verified_report: Some(check),
             };
             return Ok((collateral, vec![used]));
         }
@@ -265,12 +296,12 @@ impl SnpCollateralSet {
             store.get::<AmdCrl>(&crl_id, now)
         );
         let (vcek, vcek_used) = vcek?;
-        check_report(report, &vcek.der, gen, now)?;
+        let check = ReportCheck::run(report_bytes, report, vcek.der, gen, now)?;
         let (crl, crl_used) = crl?;
         let collateral = Self {
-            vek: vcek.der,
+            vek: check.vek.clone(),
             crl,
-            verified_report: None,
+            verified_report: Some(check),
         };
         Ok((collateral, vec![vcek_used, crl_used]))
     }
@@ -299,11 +330,8 @@ impl Platform for Snp {
         store: &Store,
         now: i64,
     ) -> Result<(SnpCollateralSet, Vec<CollateralUsed>)> {
-        let (report, gen, inline) = genuine_report(evidence, now)?;
-        let (mut set, used) = SnpCollateralSet::gather(&report, gen, inline, store, now).await?;
-        let (report_bytes, ..) = parse_evidence(evidence)?;
-        set.verified_report = Some((report_bytes, set.vek.clone(), now));
-        Ok((set, used))
+        let (report_bytes, report, gen, inline) = genuine_report(evidence, now)?;
+        SnpCollateralSet::gather(&report_bytes, &report, gen, inline, store, now).await
     }
 
     fn verify(
@@ -315,8 +343,10 @@ impl Platform for Snp {
         params.validate()?;
         let (report_bytes, report, gen) = parse_evidence(evidence)?;
         let vek = &collateral.vek;
-        let verified = matches!(&collateral.verified_report,
-            Some((r, v, at)) if *r == report_bytes && v == vek && *at == now);
+        let verified = collateral
+            .verified_report
+            .as_ref()
+            .is_some_and(|c| c.covers(&report_bytes, vek, now));
         if !verified {
             check_report(&report, vek, gen, now)?;
         }
@@ -372,18 +402,23 @@ fn parse_evidence(
     Ok((report_bytes, report, gen))
 }
 
-/// The report, its generation and the VEK it carries (if any), once the
-/// report has verified against that VEK: the checks that need no collateral.
+/// The report (raw and parsed), its generation and, when the evidence
+/// carries its VEK, the report's check against it: the checks that need no
+/// collateral.
 pub(crate) fn genuine_report(
     evidence: &SnpEvidence,
     now: i64,
-) -> Result<(AttestationReport, ProcessorGeneration, Option<Vec<u8>>)> {
-    let (_, report, gen) = parse_evidence(evidence)?;
-    let inline = inline_vek(evidence)?;
-    if let Some(vek) = &inline {
-        check_report(&report, vek, gen, now)?;
-    }
-    Ok((report, gen, inline))
+) -> Result<(
+    Vec<u8>,
+    AttestationReport,
+    ProcessorGeneration,
+    Option<ReportCheck>,
+)> {
+    let (report_bytes, report, gen) = parse_evidence(evidence)?;
+    let inline = inline_vek(evidence)?
+        .map(|vek| ReportCheck::run(&report_bytes, &report, vek, gen, now))
+        .transpose()?;
+    Ok((report_bytes, report, gen, inline))
 }
 
 /// The VEK chains to the bundled AMD roots (VLEK auto-detected), is valid at
