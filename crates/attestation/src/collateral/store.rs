@@ -559,8 +559,6 @@ mod native {
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
         hosts: Mutex<HashMap<String, Host>>,
-        /// URLs with a refresh running in the background.
-        refreshing: Mutex<std::collections::HashSet<String>>,
     }
 
     impl Native {
@@ -572,7 +570,6 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
-                refreshing: Mutex::default(),
             }
         }
 
@@ -634,24 +631,15 @@ mod native {
             }
         }
 
-        /// Refresh `url` in the background, once at a time, unless there is
-        /// no runtime to run it on. True when it is running.
+        /// Refresh `url` in the background, unless there is no runtime to run
+        /// it on. Refreshes of one piece run one at a time, and those after a
+        /// fetch find it no longer due. True when it is running.
         fn refresh_later<C: Collateral>(self: &Arc<Self>, url: &str, id: &C::Id, now: i64) -> bool {
             let Ok(runtime) = tokio::runtime::Handle::try_current() else {
                 return false;
             };
-            let lock = || self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
-            if lock().insert(url.to_string()) {
-                let (native, url, id) = (self.clone(), url.to_string(), id.clone());
-                runtime.spawn(async move {
-                    native.refresh::<C>(&url, &id, false, now).await;
-                    native
-                        .refreshing
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&url);
-                });
-            }
+            let (native, url, id) = (self.clone(), url.to_string(), id.clone());
+            runtime.spawn(async move { native.refresh::<C>(&url, &id, false, now).await });
             true
         }
 
