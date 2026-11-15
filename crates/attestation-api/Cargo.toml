@@ -57,6 +57,9 @@ uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
 hex = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [dev-dependencies]
 attestation = { workspace = true, features = ["test-vendor"] }
 tempfile = { workspace = true }

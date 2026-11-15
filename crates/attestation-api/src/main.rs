@@ -28,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    #[cfg(unix)]
+    raise_open_files_limit();
 
     // Load config (use defaults if file not found)
     let config = if cli.config.exists() {
@@ -93,4 +95,20 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(config, token_issuer, verifier);
 
     attestation_api::server::run(state).await
+}
+
+/// Raise the soft limit on open files to the hard limit, so that a
+/// launcher's low default (Docker's 1024) does not cap connections.
+#[cfg(unix)]
+fn raise_open_files_limit() {
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+    let limit = getrlimit(Resource::Nofile);
+    let raised = Rlimit {
+        current: limit.maximum,
+        ..limit
+    };
+    match setrlimit(Resource::Nofile, raised) {
+        Ok(()) => tracing::info!(limit = ?limit.maximum, "open files limit"),
+        Err(e) => tracing::warn!(%e, current = ?limit.current, "cannot raise the open files limit"),
+    }
 }

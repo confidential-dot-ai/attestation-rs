@@ -18,6 +18,9 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7"
 
