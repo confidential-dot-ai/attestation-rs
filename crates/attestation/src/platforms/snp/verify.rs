@@ -220,6 +220,10 @@ pub struct SnpCollateralSet {
     /// VCEK or VLEK), or the VCEK fetched from AMD KDS.
     pub vek: Vec<u8>,
     pub crl: AmdCrl,
+    /// The report [`Snp::gather`] verified, the VEK it verified against, and
+    /// when: [`Snp::verify`] of that report with that VEK at that time need
+    /// not again.
+    verified_report: Option<(Vec<u8>, Vec<u8>, i64)>,
 }
 
 impl SnpCollateralSet {
@@ -237,7 +241,12 @@ impl SnpCollateralSet {
             let (crl, used) = store
                 .get::<AmdCrl>(&(gen, AmdKey::of_vek(&vek)?), now)
                 .await?;
-            return Ok((Self { vek, crl }, vec![used]));
+            let collateral = Self {
+                vek,
+                crl,
+                verified_report: None,
+            };
+            return Ok((collateral, vec![used]));
         }
         if report.chip_id.iter().all(|&b| b == 0) {
             return Err(AttestationError::CertChainError(
@@ -258,7 +267,11 @@ impl SnpCollateralSet {
         let (vcek, vcek_used) = vcek?;
         check_report(report, &vcek.der, gen, now)?;
         let (crl, crl_used) = crl?;
-        let collateral = Self { vek: vcek.der, crl };
+        let collateral = Self {
+            vek: vcek.der,
+            crl,
+            verified_report: None,
+        };
         Ok((collateral, vec![vcek_used, crl_used]))
     }
 }
@@ -287,7 +300,10 @@ impl Platform for Snp {
         now: i64,
     ) -> Result<(SnpCollateralSet, Vec<CollateralUsed>)> {
         let (report, gen, inline) = genuine_report(evidence, now)?;
-        SnpCollateralSet::gather(&report, gen, inline, store, now).await
+        let (mut set, used) = SnpCollateralSet::gather(&report, gen, inline, store, now).await?;
+        let (report_bytes, ..) = parse_evidence(evidence)?;
+        set.verified_report = Some((report_bytes, set.vek.clone(), now));
+        Ok((set, used))
     }
 
     fn verify(
@@ -297,9 +313,13 @@ impl Platform for Snp {
         now: i64,
     ) -> Result<SnpResult> {
         params.validate()?;
-        let (_, report, gen) = parse_evidence(evidence)?;
+        let (report_bytes, report, gen) = parse_evidence(evidence)?;
         let vek = &collateral.vek;
-        check_report(&report, vek, gen, now)?;
+        let verified = matches!(&collateral.verified_report,
+            Some((r, v, at)) if *r == report_bytes && v == vek && *at == now);
+        if !verified {
+            check_report(&report, vek, gen, now)?;
+        }
 
         let revoked = vek_revoked(vek, &collateral.crl, gen)?;
         let mut result = evaluate_report(&report, params, Some(!revoked));
@@ -1198,6 +1218,40 @@ mod tests {
         assert!(err.is_retryable());
     }
 
+    /// `Snp::verify` skips the report check `Snp::gather` did only for that
+    /// report, VEK and time; anything else is checked again.
+    #[tokio::test]
+    async fn verify_checks_a_report_the_set_was_not_gathered_for() {
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let ctx = testing::context(vec![testing::amd_crl(ProcessorGeneration::Genoa)]);
+        let (now, params) = (testing::NOW, SnpParams::default());
+        let (set, _) = Snp::gather(&evidence, ctx.store(), now).await.unwrap();
+        assert!(Snp::verify(&evidence, &params, &set, now).is_ok());
+
+        // Another report (REPORT_DATA changed under the signature).
+        let mut forged = LIVE_REPORT_V5.to_vec();
+        forged[0x50] ^= 1;
+        let forged = make_snp_evidence_with_vcek(&forged, LIVE_VCEK_GENOA);
+        let err = Snp::verify(&forged, &params, &set, now).unwrap_err();
+        assert!(
+            matches!(err, AttestationError::SignatureVerificationFailed(_)),
+            "{err}"
+        );
+
+        // The same report with another VEK in the set.
+        let other = SnpCollateralSet {
+            vek: TEST_VCEK.to_vec(),
+            crl: set.crl.clone(),
+            verified_report: set.verified_report.clone(),
+        };
+        assert!(Snp::verify(&evidence, &params, &other, now).is_err());
+
+        // The same report and VEK at a time the VEK has expired.
+        let year_2100 = 4_102_444_800;
+        let err = Snp::verify(&evidence, &params, &set, year_2100).unwrap_err();
+        assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+    }
+
     async fn verify(params: &SnpParams) -> Result<SnpResult> {
         let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
         testing::verify::<Snp>(
@@ -1485,6 +1539,7 @@ mod tests {
             let collateral = SnpCollateralSet {
                 vek: LIVE_VCEK_GENOA.to_vec(),
                 crl: genoa_crl(crl),
+                verified_report: None,
             };
             Snp::verify(&evidence, &SnpParams::default(), &collateral, now_secs()).unwrap()
         };

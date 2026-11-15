@@ -483,6 +483,9 @@ pub struct TdxCollateralSet {
     pub qe_identity: QeIdentity,
     pub pck_crl: PckCrl,
     pub root_crl: RootCrl,
+    /// The quote [`Tdx::gather`] verified (signature and PCK chain), and
+    /// when: [`Tdx::verify`] of that quote at that time need not again.
+    verified_quote: Option<(Vec<u8>, i64)>,
 }
 
 impl TdxCollateralSet {
@@ -508,6 +511,7 @@ impl TdxCollateralSet {
             qe_identity,
             pck_crl,
             root_crl,
+            verified_quote: None,
         };
         Ok((collateral, vec![u1, u2, u3, u4]))
     }
@@ -555,7 +559,9 @@ impl Platform for Tdx {
         now: i64,
     ) -> Result<(TdxCollateralSet, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
-        TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await
+        let (mut set, used) = TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await?;
+        set.verified_quote = Some((quote_bytes, now));
+        Ok((set, used))
     }
 
     fn verify(
@@ -566,7 +572,12 @@ impl Platform for Tdx {
     ) -> Result<TdxResult> {
         params.validate()?;
         let quote_bytes = decode_quote(evidence)?;
-        let (quote, mut result) = verify_quote(&quote_bytes, params, now)?;
+        let (quote, mut result) = match &collateral.verified_quote {
+            Some((verified, at)) if *verified == quote_bytes && *at == now => {
+                evaluate_quote(parse_tdx_quote(&quote_bytes)?, params)
+            }
+            _ => verify_quote(&quote_bytes, params, now)?,
+        };
 
         result.report_data_match = params
             .report_data
@@ -640,7 +651,11 @@ pub(crate) fn verify_quote(
     let quote = parse_tdx_quote(quote_bytes)?;
     verify_quote_signature(quote_bytes, &quote)?;
     super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, now)?;
+    Ok(evaluate_quote(quote, params))
+}
 
+/// The quote rules of `params` (MRTD, RTMRs, debug) for a verified quote.
+fn evaluate_quote(quote: TdxQuote, params: &TdxParams) -> (TdxQuote, TdxResult) {
     let body = &quote.body;
     let compare = |allowed: &Option<Vec<[u8; 48]>>, actual: &[u8; 48]| {
         crate::utils::match_any(actual, allowed.as_deref())
@@ -663,7 +678,7 @@ pub(crate) fn verify_quote(
         tcb_status_accepted: None,
     };
 
-    Ok((quote, result))
+    (quote, result)
 }
 
 /// Evaluate Intel's collateral for a genuine quote into `result`: PCK
@@ -774,6 +789,38 @@ mod tests {
             check(&set),
             Err(AttestationError::CertChainError(_))
         ));
+    }
+
+    /// `Tdx::verify` skips the quote check `Tdx::gather` did only for that
+    /// quote at that time; any other quote or time is checked again.
+    #[tokio::test]
+    async fn verify_checks_a_quote_the_set_was_not_gathered_for() {
+        let quote_bytes = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+        let evidence = |quote: &[u8]| TdxEvidence {
+            quote: BASE64.encode(quote),
+            cc_eventlog: None,
+        };
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let params = TdxParams::default();
+        let (set, _) = Tdx::gather(&evidence(quote_bytes), ctx.store(), now)
+            .await
+            .unwrap();
+        assert!(Tdx::verify(&evidence(quote_bytes), &params, &set, now).is_ok());
+
+        // Another quote (one byte of the signed body changed) with that set.
+        let mut forged = quote_bytes.to_vec();
+        forged[600] ^= 1;
+        let err = Tdx::verify(&evidence(&forged), &params, &set, now).unwrap_err();
+        assert!(
+            matches!(err, AttestationError::SignatureVerificationFailed(_)),
+            "{err}"
+        );
+
+        // The same quote at a time its PCK certificate has expired.
+        let year_2100 = 4_102_444_800;
+        let err = Tdx::verify(&evidence(quote_bytes), &params, &set, year_2100).unwrap_err();
+        assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
     }
 
     // Load real test fixtures at compile time
