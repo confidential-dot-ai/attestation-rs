@@ -1,21 +1,24 @@
 use axum::body::Body;
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-use axum::http::{Request, StatusCode};
+use axum::http::Request;
 use axum::routing::{get, post};
 use axum::{middleware, Router};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
-use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
+use tower_http::timeout::RequestBodyTimeoutLayer;
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
 use tracing::Level;
 use uuid::Uuid;
 
 use crate::api;
+use crate::error::ApiError;
 use crate::middleware as mw;
 use crate::AppState;
 
@@ -109,30 +112,41 @@ pub fn build_router(state: AppState) -> Router {
 
 pub async fn run(state: AppState) -> anyhow::Result<()> {
     let addr: SocketAddr = state.config.server.bind.parse()?;
-    // 503 once the body, queue and fetch time and 10 s of verification are spent.
-    let (verify, unavailable) = (&state.config.verify, StatusCode::SERVICE_UNAVAILABLE);
+    // 503 overloaded once the body, queue and fetch time and 10 s of
+    // verification are spent.
+    let verify = &state.config.verify;
     let deadline = Duration::from_millis(verify.queue_deadline_ms + verify.fetch_deadline_ms);
+    let overloaded = HandleErrorLayer::new(|_: tower::BoxError| async { ApiError::Overloaded });
     let app = build_router(state.clone())
-        .layer(TimeoutLayer::with_status_code(
-            unavailable,
-            deadline + 2 * BODY_TIMEOUT,
-        ))
+        .layer(
+            ServiceBuilder::new()
+                .layer(overloaded)
+                .timeout(deadline + 2 * BODY_TIMEOUT),
+        )
         .layer(RequestBodyTimeoutLayer::new(BODY_TIMEOUT));
 
     tracing::info!(%addr, "starting attestation service");
 
     let listener = TcpListener::bind(addr).await?;
     let connections = state.config.server.max_connections;
-    serve(listener, app, connections, shutdown_signal()).await;
+    serve(
+        listener,
+        app,
+        connections,
+        HEADER_TIMEOUT,
+        shutdown_signal(),
+    )
+    .await;
     Ok(())
 }
 
-/// Serve `router` with at most `max_connections` open (the rest wait in the
-/// backlog) and a header timeout; after `shutdown`, finish within 5 s.
+/// Serve `router` over HTTP/1 with at most `max_connections` open (the rest
+/// wait in the backlog) and `header_timeout`; after `shutdown`, finish within 5 s.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
     max_connections: usize,
+    header_timeout: Duration,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
     use hyper_util::rt::{TokioIo, TokioTimer};
@@ -152,7 +166,7 @@ pub async fn serve(
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
         let connection = hyper::server::conn::http1::Builder::new()
             .timer(TokioTimer::new())
-            .header_read_timeout(HEADER_TIMEOUT)
+            .header_read_timeout(header_timeout)
             .serve_connection(TokioIo::new(io), service);
         let connection = graceful.watch(connection);
         tokio::spawn(async move {

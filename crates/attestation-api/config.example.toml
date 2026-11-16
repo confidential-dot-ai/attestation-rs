@@ -3,14 +3,14 @@
 # front of the service: loopback for a sidecar, or an address only the
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
-max_connections = 4096            # More wait in the listen backlog
+max_connections = 1024            # More wait in the backlog; bodies: at most 1 MiB each
 max_open_files = 65536            # Soft limit to raise to, at most the hard limit
 
 [verify]
 workers = 0                       # 0 = two per vCPU
 queue_per_worker = 8
 queue_deadline_ms = 50            # Waiting longer for a worker: 503
-cold_workers = 0                  # Verifications that fetch (0 = half the vCPUs)
+cold_workers = 0                  # Verifications waiting on vendors (0 = max(8, 4 per vCPU))
 fetch_deadline_ms = 10000         # Fetching longer: 502
 # Collateral URLs fetched before serving (default: Intel's QE Identity and
 # CRLs, AMD's CRLs); add each fleet FMSPC's TCB Info URL. warm = [...]

@@ -188,7 +188,7 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
-            max_connections: 4096,
+            max_connections: 1024,
             max_open_files: 65_536,
         }
     }

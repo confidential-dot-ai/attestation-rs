@@ -90,10 +90,11 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let _ = attestation::detect();
 
-    // Safe only with the connection cap: server.max_connections < max_open_files.
-    if let Err(e) = rlimit::increase_nofile_limit(config.server.max_open_files) {
-        tracing::warn!(%e, "could not raise the open files limit");
-    }
+    let files = rlimit::increase_nofile_limit(config.server.max_open_files)?;
+    anyhow::ensure!(
+        (config.server.max_connections as u64) < files,
+        "server.max_connections must be below the open-files limit ({files})"
+    );
     // Fetch the collateral every request needs before serving, for at most 10 s.
     let (mut warming, now) = (tokio::task::JoinSet::new(), verifier.context().now());
     for url in config.verify.warm.clone() {

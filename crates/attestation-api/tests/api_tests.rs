@@ -1321,9 +1321,9 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
 
 // --- Admission, the cold lane, and parity with the library ---
 
-/// A fake vendor and NRAS answering after `delay`: the fixture key set, or a
-/// token naming `kid` (not validly signed). Also the POST bodies it got.
-async fn nras(delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+/// A fake vendor (answering after `kds`) and NRAS (after `delay`): the fixture
+/// key set, or a token naming `kid` (not validly signed). Also the POST bodies.
+async fn nras(kds: Duration, delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
     let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
     let (header, claims) = (
         json!({ "alg": "ES384", "kid": kid }),
@@ -1336,10 +1336,10 @@ async fn nras(delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
     let app = axum::Router::new().fallback(move |uri: axum::http::Uri, body: String| {
         let (log, answer) = (log.clone(), answer.clone());
         async move {
-            tokio::time::sleep(delay).await;
             if uri.path().ends_with("jwks.json") {
                 return NRAS_JWKS.to_vec();
             }
+            tokio::time::sleep(if body.is_empty() { kds } else { delay }).await;
             log.lock().unwrap().push(body);
             answer.into_bytes()
         }
@@ -1352,6 +1352,20 @@ async fn nras(delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
 
 const NRAS_JWKS: &[u8] =
     include_bytes!("../../attestation/test_data/collateral/2026-10-14/nras_jwks.json");
+
+fn nras_kid() -> String {
+    let jwks: serde_json::Value = serde_json::from_slice(NRAS_JWKS).unwrap();
+    jwks["keys"][0]["kid"].as_str().unwrap().into()
+}
+
+/// SNP evidence for a chip whose VCEK no one holds.
+fn forged_snp(chip: u8) -> serde_json::Value {
+    let mut report = SNP_REPORT.to_vec();
+    report[0x1A0] = chip; // CHIP_ID
+    let mut body = snp_body(false);
+    body["evidence"]["attestation_report"] = BASE64.encode(report).into();
+    body
+}
 
 /// A state that holds the TDX collateral and asks the vendors and NRAS at `base`.
 fn online_held_state(base: &str, f: impl FnOnce(&mut Config)) -> AppState {
@@ -1390,9 +1404,7 @@ fn gpu_body(archs: &[&str]) -> serde_json::Value {
 /// the fake tokens are refused; an unknown kid is a 502 after one POST.
 #[tokio::test]
 async fn gpu_groups_go_to_nras_once_each_and_the_answer_is_the_librarys() {
-    let kid =
-        serde_json::from_slice::<serde_json::Value>(NRAS_JWKS).unwrap()["keys"][0]["kid"].clone();
-    let (base, seen) = nras(Duration::from_millis(400), kid.as_str().unwrap()).await;
+    let (base, seen) = nras(Duration::ZERO, Duration::from_millis(400), &nras_kid()).await;
     let body = gpu_body(&["HOPPER", "BLACKWELL", "LS10"]);
     let (status, json) = post_verify(online_held_state(&base, |_| {}), body.clone()).await;
     assert_eq!(
@@ -1412,7 +1424,7 @@ async fn gpu_groups_go_to_nras_once_each_and_the_answer_is_the_librarys() {
         assert!(post.contains(&format!("EVIDENCE-{i}")) && post.matches("EVIDENCE-").count() == 1);
     }
 
-    let (base, seen) = nras(Duration::ZERO, "next").await;
+    let (base, seen) = nras(Duration::ZERO, Duration::ZERO, "next").await;
     let (status, _) = post_verify(online_held_state(&base, |_| {}), gpu_body(&["HOPPER"])).await;
     assert_eq!(
         (status, seen.lock().unwrap().len()),
@@ -1435,10 +1447,11 @@ async fn an_endorsement_google_does_not_publish_is_a_verdict() {
 }
 
 /// Cold lane on a silent vendor: 1 runs, 4 queue, 3 get 503; warm evidence
-/// is not held up; a queued one gets 502 at the fetch deadline.
+/// is not held up; the running and the queued ones get 502 at the fetch
+/// deadline.
 #[tokio::test]
 async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
-    let (silent, _) = nras(Duration::from_secs(60), "").await;
+    let (silent, _) = nras(Duration::from_secs(60), Duration::from_secs(60), "").await;
     let state = online_held_state(&silent, |c| {
         let v = &mut c.verify;
         (v.workers, v.cold_workers, v.queue_per_worker) = (2, 1, 4);
@@ -1446,17 +1459,11 @@ async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
     });
     let start = std::time::Instant::now();
     let cold: Vec<_> = (0..8)
-        .map(|chip| {
-            let mut report = SNP_REPORT.to_vec();
-            report[0x1A0] = chip; // CHIP_ID: a VCEK no one holds
-            let mut body = snp_body(false);
-            body["evidence"]["attestation_report"] = BASE64.encode(report).into();
-            tokio::spawn(post_verify(state.clone(), body))
-        })
+        .map(|chip| tokio::spawn(post_verify(state.clone(), forged_snp(chip))))
         .collect();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(cold.iter().filter(|c| c.is_finished()).count(), 3);
-    let queued = cold.into_iter().find(|c| !c.is_finished()).unwrap();
+    let pending: Vec<_> = cold.into_iter().filter(|c| !c.is_finished()).collect();
+    assert_eq!(pending.len(), 5);
     let tdx = json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
     let tasks: Vec<_> = (0..6)
         .map(|_| tokio::spawn(post_verify(state.clone(), tdx.clone())))
@@ -1468,10 +1475,70 @@ async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
             .unwrap();
         assert_eq!(status, StatusCode::OK, "{json}");
     }
-    let (status, json) = queued.await.unwrap();
-    assert_eq!(
-        (status, &json["error"]),
-        (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
-    );
+    for task in pending {
+        let (status, json) = task.await.unwrap();
+        assert_eq!(
+            (status, &json["error"]),
+            (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
+        );
+    }
     assert!((1500..3000).contains(&start.elapsed().as_millis()));
+}
+
+/// With the default cold lane, misses waiting on a silent KDS and junk GPU
+/// bundles leave GPU evidence its NRAS verdict.
+#[tokio::test]
+async fn gpu_evidence_gets_its_verdict_while_misses_wait_on_a_silent_vendor() {
+    let (base, _) = nras(
+        Duration::from_secs(60),
+        Duration::from_millis(300),
+        &nras_kid(),
+    )
+    .await;
+    let state = online_held_state(&base, |_| {});
+    for i in 0..8 {
+        let flood = if i % 2 == 0 {
+            forged_snp(i)
+        } else {
+            gpu_body(&["HOPPER"])
+        };
+        tokio::spawn(post_verify(state.clone(), flood));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, json) = post_verify(state, gpu_body(&["HOPPER", "BLACKWELL"])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+}
+
+/// Connections past the cap wait in the backlog until a slow client is cut off.
+#[tokio::test]
+async fn slow_headers_are_cut_off_and_connections_past_the_cap_wait() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_api_router(test_state());
+    let timeout = Duration::from_millis(500);
+    tokio::spawn(attestation_api::server::serve(
+        listener,
+        router,
+        1,
+        timeout,
+        std::future::pending(),
+    ));
+    let start = std::time::Instant::now();
+    let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut next = tokio::net::TcpStream::connect(addr).await.unwrap();
+    next.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    next.read_to_end(&mut answer).await.unwrap();
+    assert!((450..2000).contains(&start.elapsed().as_millis()));
+    assert!(String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200"));
+    assert_eq!(
+        slow.read(&mut [0; 64]).await.unwrap_or(0),
+        0,
+        "the slow client is cut off"
+    );
 }
