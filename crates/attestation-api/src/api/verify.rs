@@ -113,11 +113,7 @@ pub async fn handler(
 
     // Verify offline on a worker. If collateral (or an NRAS answer) is
     // missing, fetch all of it once, then verify again offline.
-    let nonce = req
-        .policies
-        .report_data(platform)
-        .unwrap_or_default()
-        .to_vec();
+    let nonce = Vec::from(req.policies.report_data(platform).unwrap_or_default());
     let (policies, token) = (Arc::new(req.policies), req.issue_token);
     let job = |evidence: Arc<Vec<u8>>, fetched: bool| {
         let (state, policies) = (state.clone(), policies.clone());
@@ -142,11 +138,8 @@ async fn verify(
     issue_token: bool,
     fetched: bool,
 ) -> Result<VerifyResponse, ApiError> {
-    let result = if fetched {
-        state.verifier.verify_attached(evidence, policies).await?
-    } else {
-        state.verifier.verify_offline(evidence, policies).await?
-    };
+    let result = state.verifier.verify_offline(evidence, policies, fetched);
+    let result = result.await?;
     let passed = PassedVerification::new(&result);
 
     let token = match &passed {

@@ -362,39 +362,22 @@ impl Verifier {
     }
 
     /// As [`Self::verify`] with only attached, held or in-memory collateral;
-    /// anything else, or a copy that does not pass, is
-    /// [`AttestationError::CollateralUnavailable`].
+    /// anything else is [`AttestationError::CollateralUnavailable`]. So is a
+    /// copy that does not pass, unless `keep_failing` (for evidence from
+    /// [`Self::attach_all_collateral`]: as [`Self::verify`] when a refetch
+    /// found nothing better).
     pub async fn verify_offline(
         &self,
         evidence_json: &[u8],
         policies: &Policies,
-    ) -> Result<Verified> {
-        self.offline(evidence_json, policies, false).await
-    }
-
-    /// As [`Self::verify_offline`] on evidence from
-    /// [`Self::attach_all_collateral`]: a copy that does not pass is the
-    /// verdict, as in [`Self::verify`] when a refetch found nothing better.
-    pub async fn verify_attached(
-        &self,
-        evidence_json: &[u8],
-        policies: &Policies,
-    ) -> Result<Verified> {
-        self.offline(evidence_json, policies, true).await
-    }
-
-    async fn offline(
-        &self,
-        evidence_json: &[u8],
-        policies: &Policies,
-        keep: bool,
+        keep_failing: bool,
     ) -> Result<Verified> {
         let envelope = parse_envelope(evidence_json)?;
         let mut store = self
             .ctx
             .store()
             .view(envelope.held_collateral(), &policies.floors, false);
-        (store.offline, store.keep_failing) = (true, keep);
+        (store.offline, store.keep_failing) = (true, keep_failing);
         self.verify_envelope(envelope, policies, &store).await
     }
 
@@ -704,14 +687,6 @@ mod tests {
         Verifier::new(crate::testing::context(crate::testing::intel()))
     }
 
-    fn envelope(quote: &[u8]) -> Vec<u8> {
-        let quote = base64::engine::general_purpose::STANDARD.encode(quote);
-        serde_json::to_vec(
-            &serde_json::json!({ "platform": "tdx", "evidence": { "quote": quote } }),
-        )
-        .unwrap()
-    }
-
     /// Warm, 8 threads: a byte changed in the body, quote signature, key, QE report
     /// or signature, or PCK leaf fails; so does the quote outside the leaf's dates.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -733,7 +708,9 @@ mod tests {
         let tampered = Arc::new(changed.map(|at| {
             let mut quote = V5_QUOTE.to_vec();
             quote[at] ^= if quote[at] == b'A' { 3 } else { 1 };
-            envelope(&quote)
+            let quote = base64::engine::general_purpose::STANDARD.encode(quote);
+            let evidence = serde_json::json!({ "platform": "tdx", "evidence": { "quote": quote } });
+            serde_json::to_vec(&evidence).unwrap()
         }));
         let now = crate::testing::NOW;
         let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now)));
@@ -742,10 +719,10 @@ mod tests {
             tokio::spawn(async move {
                 let all = Policies::all();
                 for round in 0..50 {
-                    let genuine = verifier.verify_offline(&tdx_envelope(), &all).await;
+                    let genuine = verifier.verify_offline(&tdx_envelope(), &all, false).await;
                     assert!(genuine.unwrap().passed());
                     let quote = &tampered[(t + round) % tampered.len()];
-                    assert!(verifier.verify_offline(quote, &all).await.is_err());
+                    assert!(verifier.verify_offline(quote, &all, false).await.is_err());
                 }
             })
         });
@@ -754,11 +731,10 @@ mod tests {
         }
         for at in [4_102_444_800, 1_000_000_000] {
             let other_time = Verifier::new(crate::testing::warm_tdx(at));
-            let verified = other_time
-                .verify_offline(&tdx_envelope(), &Policies::all())
+            let err = other_time
+                .verify_offline(&tdx_envelope(), &Policies::all(), false)
                 .await;
-            let err = verified.err().unwrap();
-            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
+            assert!(matches!(err, Err(AttestationError::CertChainError(_))));
         }
     }
 
