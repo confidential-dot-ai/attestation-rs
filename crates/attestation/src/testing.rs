@@ -82,7 +82,7 @@ pub(crate) fn intel() -> Vec<HeldResponse> {
     pieces
 }
 
-/// Intel's collateral on disk, at `now`; the first verification moves it to memory.
+/// Intel's collateral on disk, at `now`; the first lookup moves it to memory.
 #[cfg(all(feature = "tdx", not(target_arch = "wasm32")))]
 pub(crate) fn warm_tdx(now: i64) -> Context {
     let dir = tempfile::tempdir().unwrap().keep();

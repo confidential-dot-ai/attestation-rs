@@ -697,10 +697,6 @@ mod tests {
         }));
         let now = crate::testing::NOW;
         let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now)));
-        assert!(verifier
-            .verify(&tdx_envelope(), &Policies::all())
-            .await
-            .is_ok());
         let tasks = (0..8).map(|t| {
             let (verifier, tampered) = (verifier.clone(), tampered.clone());
             tokio::spawn(async move {
@@ -721,7 +717,8 @@ mod tests {
             let verified = other_time
                 .verify_offline(&tdx_envelope(), &Policies::all())
                 .await;
-            assert!(verified.is_err());
+            let err = verified.err().unwrap();
+            assert!(matches!(err, AttestationError::CertChainError(_)), "{err}");
         }
     }
 

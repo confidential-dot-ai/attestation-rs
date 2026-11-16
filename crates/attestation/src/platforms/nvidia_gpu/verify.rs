@@ -141,13 +141,7 @@ fn nras_answer_url(request: &NrasRequest) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn ask_nras(store: &Store, request: &NrasRequest) -> Result<Vec<u8>> {
-    match store.vendor().filter(|_| !store.offline) {
-        Some(vendor) => {
-            let _slot = store.slot(&vendor.nras.gpu_url)?;
-            vendor.nras_attest(request).await
-        }
-        None => Err(crate::error::Unavailable::offline().into_error("NRAS attestation")),
-    }
+    store.nras_attest(request).await
 }
 
 #[cfg(target_arch = "wasm32")]
