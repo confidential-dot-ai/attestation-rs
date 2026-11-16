@@ -142,6 +142,8 @@ pub struct NrasConfig {
     /// NVIDIA's switch attestation endpoint. Empty: `NV_NRAS_SWITCH_URL`, else
     /// `https://nras.attestation.nvidia.com/v3/attest/switch`.
     pub switch_url: String,
+    /// POSTs per second to one NRAS host; 0: 100.
+    pub per_second: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

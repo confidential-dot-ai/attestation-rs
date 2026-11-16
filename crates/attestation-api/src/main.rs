@@ -80,8 +80,13 @@ async fn main() -> anyhow::Result<()> {
     let gpu_url = resolve_nras_gpu_url(&config.nras);
     let switch_url = resolve_nras_switch_url(&config.nras);
     tracing::info!(gpu = %gpu_url, switch = %switch_url, "configured NRAS endpoints");
+    let nras_per_second = Some(config.nras.per_second)
+        .filter(|n| *n > 0)
+        .unwrap_or(100);
     let verifier = Arc::new(attestation::Verifier::new(
-        attestation::Context::new().with_nras_urls(gpu_url, switch_url)?,
+        attestation::Context::new()
+            .with_nras_urls(gpu_url, switch_url)?
+            .with_nras_per_second(nras_per_second),
     ));
 
     // Warm attestation::detect()'s process-lifetime cache before serving, so the

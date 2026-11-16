@@ -123,7 +123,8 @@ turn on token configuration before requesting them.
 The listener speaks HTTP/1.1 only. Collateral is kept in memory only (no disk
 cache): list the pieces every request needs in `[verify] warm`. Missing collateral and NRAS
 answers are fetched outside the workers, at most 32 requests in flight per vendor
-host; NRAS POSTs have no per-second budget, and a 429 or 503 from NRAS pauses it. Request bodies take at most
+host; NRAS POSTs are also limited per second (`[nras] per_second`), and a 429 or
+503 from NRAS pauses it. Request bodies take at most
 `server.max_connections` × 1 MiB; cap connections per client at the TLS terminator.
 
 One in-memory verifier/store is reused for the process. The API has no disk

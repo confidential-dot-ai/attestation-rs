@@ -14,8 +14,12 @@ pub struct Admission {
     workers: Arc<Semaphore>,
     places: Arc<Semaphore>,
     queue_deadline: Duration,
+    fetches: Arc<Semaphore>,
     fetch_deadline: Duration,
 }
+
+/// At most this many fetch tasks run at once, late ones included.
+const FETCHES: usize = 1024;
 
 impl Admission {
     pub fn new(config: &VerifyConfig) -> Self {
@@ -24,6 +28,7 @@ impl Admission {
             workers: Arc::new(Semaphore::new(workers)),
             places: Arc::new(Semaphore::new(workers * (1 + config.queue_per_worker))),
             queue_deadline: Duration::from_millis(config.queue_deadline_ms),
+            fetches: Arc::new(Semaphore::new(FETCHES)),
             fetch_deadline: Duration::from_millis(config.fetch_deadline_ms),
         }
     }
@@ -47,22 +52,28 @@ impl Admission {
         .await
     }
 
-    /// `evidence` with the collateral and NRAS answers it needs attached,
-    /// gathered as [`attestation::Verifier::attach_collateral`] does: 502 after
-    /// the fetch deadline. The fetches run in their own task, so a late
-    /// request leaves them to finish in the store; per-host caps bound them.
+    /// `evidence` with all the collateral and NRAS answers it needs attached
+    /// ([`attestation::Verifier::attach_all_collateral`]): 503 when [`FETCHES`]
+    /// are running, 502 when collateral stays unavailable or after the fetch
+    /// deadline. The fetch runs in its own task, so a late request leaves it
+    /// to finish in the store.
     pub async fn fetch(
         &self,
         verifier: &Arc<attestation::Verifier>,
         evidence: &Arc<Vec<u8>>,
         nonce: Vec<u8>,
     ) -> Result<Vec<u8>, ApiError> {
+        let permit = self.fetches.clone().try_acquire_owned();
+        let permit = permit.map_err(|_| ApiError::Overloaded)?;
         let (verifier, evidence) = (verifier.clone(), evidence.clone());
-        let fetch =
-            tokio::spawn(async move { verifier.attach_collateral(&evidence, &nonce).await });
+        let fetch = tokio::spawn(async move {
+            let _permit = permit;
+            verifier.attach_all_collateral(&evidence, &nonce).await
+        });
         match tokio::time::timeout(self.fetch_deadline, fetch).await {
             Ok(Ok(attached)) => Ok(attached?),
-            _ => Err(ApiError::Verification(
+            Ok(Err(e)) => Err(ApiError::Internal(e.to_string())),
+            Err(_) => Err(ApiError::Verification(
                 attestation::AttestationError::CollateralUnavailable {
                     collateral: "collateral".into(),
                     retry_after: Some(1),

@@ -104,7 +104,6 @@ pub async fn handler(
             "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
-    let needs_nras = req.nvidia_gpu.is_some() && req.collateral.is_none();
     let evidence_json = build_evidence_envelope(
         &platform.to_string(),
         req.evidence,
@@ -112,31 +111,27 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    // Verify offline on a worker. If collateral (or, for a GPU bundle without
-    // attached answers, NRAS) is missing, fetch it once, then verify again.
+    // Verify offline on a worker. If collateral (or an NRAS answer) is
+    // missing, fetch all of it once, then verify again offline.
     let nonce = req
         .policies
         .report_data(platform)
         .unwrap_or_default()
         .to_vec();
     let (policies, token) = (Arc::new(req.policies), req.issue_token);
-    let job = |evidence: Arc<Vec<u8>>, offline: bool| {
+    let job = |evidence: Arc<Vec<u8>>, fetched: bool| {
         let (state, policies) = (state.clone(), policies.clone());
         let runtime = tokio::runtime::Handle::current();
-        move || runtime.block_on(verify(&state, &evidence, &policies, token, offline))
+        move || runtime.block_on(verify(&state, &evidence, &policies, token, fetched))
     };
     let evidence = Arc::new(evidence_json);
-    if !needs_nras {
-        match state.admission.run(job(evidence.clone(), true)).await? {
-            Err(ApiError::Verification(e)) if e.is_retryable() => {}
-            answer => return answer.map(Json),
-        }
+    match state.admission.run(job(evidence.clone(), false)).await? {
+        Err(ApiError::Verification(e)) if e.is_retryable() => {}
+        answer => return answer.map(Json),
     }
-    // The second verification finds what the fetch got, or its failure, in
-    // memory, and gives the library's answer.
     let fetch = state.admission.fetch(&state.verifier, &evidence, nonce);
     let attached = Arc::new(fetch.await?);
-    state.admission.run(job(attached, false)).await?.map(Json)
+    state.admission.run(job(attached, true)).await?.map(Json)
 }
 
 /// Verify, and sign a token for a passing result when asked.
@@ -145,12 +140,12 @@ async fn verify(
     evidence: &[u8],
     policies: &attestation::Policies,
     issue_token: bool,
-    offline: bool,
+    fetched: bool,
 ) -> Result<VerifyResponse, ApiError> {
-    let result = if offline {
-        state.verifier.verify_offline(evidence, policies).await?
+    let result = if fetched {
+        state.verifier.verify_attached(evidence, policies).await?
     } else {
-        state.verifier.verify(evidence, policies).await?
+        state.verifier.verify_offline(evidence, policies).await?
     };
     let passed = PassedVerification::new(&result);
 

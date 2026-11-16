@@ -1322,8 +1322,18 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
 // --- Admission, the fetch phase, and parity with the library ---
 
 /// A fake vendor (answering after `kds`) and NRAS (after `delay`): the fixture
-/// key set, or a token naming `kid` (not validly signed). Also the POST bodies.
+/// key set, or a token naming `kid` (not validly signed). Also the bodies it got.
 async fn nras(kds: Duration, delay: Duration, kid: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+    nras_answering(StatusCode::OK, kds, delay, kid).await
+}
+
+/// As [`nras`], answering everything but the key set with `status`.
+async fn nras_answering(
+    status: StatusCode,
+    kds: Duration,
+    delay: Duration,
+    kid: &str,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     let part = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
     let (header, claims) = (
         json!({ "alg": "ES384", "kid": kid }),
@@ -1337,11 +1347,11 @@ async fn nras(kds: Duration, delay: Duration, kid: &str) -> (String, Arc<Mutex<V
         let (log, answer) = (log.clone(), answer.clone());
         async move {
             if uri.path().ends_with("jwks.json") {
-                return NRAS_JWKS.to_vec();
+                return (StatusCode::OK, NRAS_JWKS.to_vec());
             }
             tokio::time::sleep(if body.is_empty() { kds } else { delay }).await;
             log.lock().unwrap().push(body);
-            answer.into_bytes()
+            (status, answer.into_bytes())
         }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1482,6 +1492,54 @@ async fn a_forged_flood_on_a_silent_vendor_holds_up_neither_warm_nor_gpu_evidenc
         );
     }
     assert!((1500..5000).contains(&start.elapsed().as_millis()));
+}
+
+/// Vendor and NRAS answering 500: each GPU request and forged SNP report gets
+/// 502 after at most one vendor round, and warm evidence still gets 200.
+#[tokio::test]
+async fn a_failing_vendor_costs_one_round_per_request_and_spares_warm_evidence() {
+    let (base, seen) = nras_answering(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Duration::ZERO,
+        Duration::ZERO,
+        "",
+    )
+    .await;
+    let state = online_held_state(&base, |_| {});
+    let tdx = json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
+    for i in 0..10 {
+        let (status, json) = post_verify(state.clone(), gpu_body(&["HOPPER"])).await;
+        assert_eq!(
+            (status, &json["error"]),
+            (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
+        );
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|b| !b.is_empty())
+                .count(),
+            i + 1
+        );
+        let (status, _) = post_verify(state.clone(), forged_snp(i as u8)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            post_verify(state.clone(), tdx.clone()).await.0,
+            StatusCode::OK
+        );
+    }
+    // A request its policies refuse is refused before any vendor call.
+    let mut body = gpu_body(&["HOPPER"]);
+    body["policies"]["nvidia_gpu"]["user_nonce"] = json!(BASE64.encode([7; 32]));
+    assert_eq!(post_verify(state, body).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|b| !b.is_empty())
+            .count(),
+        10
+    );
 }
 
 /// Connections past the cap wait in the backlog until a slow client is cut off.
