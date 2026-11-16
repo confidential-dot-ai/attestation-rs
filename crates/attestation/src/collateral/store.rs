@@ -521,6 +521,7 @@ mod native {
     /// At most this many pieces not held anywhere are fetched from one
     /// vendor host per second.
     pub(crate) const COLD_PER_SECOND: u32 = 10;
+    const NEW_PIECES: &str = "too many new pieces from this vendor at once";
     /// At most this many fetches and NRAS POSTs in flight to one vendor host.
     pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
 
@@ -635,15 +636,17 @@ mod native {
                         None => Err(Failure::Unavailable(Unavailable::offline())),
                     }
                 }
-                None => self
-                    .mem
-                    .try_get_with(url.clone(), self.load::<C>(&url, id, now))
-                    .await
-                    .map(|e| {
-                        let origin = e.origin;
-                        (e, origin)
-                    })
-                    .map_err(|e| (*e).clone()),
+                None => {
+                    // Callers waiting for one fetch hold a host slot each.
+                    let _slot = self.slot(&url)?;
+                    let loaded = self
+                        .mem
+                        .try_get_with(url.clone(), self.load::<C>(&url, id, now));
+                    loaded
+                        .await
+                        .map(|e| (e.clone(), e.origin))
+                        .map_err(|e| (*e).clone())
+                }
             }
         }
 
@@ -714,7 +717,7 @@ mod native {
             }
             let _slot = self.admit(url)?;
             if cold {
-                self.admit_cold(url, COLD_PER_SECOND)?;
+                self.admit_cold(host(url), COLD_PER_SECOND, NEW_PIECES)?;
             }
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             if let Err(e) = &mut fetched {
@@ -767,18 +770,24 @@ mod native {
             self.hosts.lock().unwrap_or_else(|e| e.into_inner())
         }
 
-        /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] request slots, unless
-        /// the host asked to be left alone.
+        /// A request slot for `url`'s host ([`Self::slot`]), unless the host
+        /// asked to be left alone.
         fn admit(&self, url: &str) -> std::result::Result<Permit, Failure> {
-            let mut hosts = self.lock_hosts();
-            let host = hosts.entry(host(url).to_string()).or_default();
-            let now = Instant::now();
-            if let Some(left) = host
-                .paused_until
-                .and_then(|u| u.checked_duration_since(now))
-            {
+            let paused = self
+                .lock_hosts()
+                .get(host(url))
+                .and_then(|h| h.paused_until);
+            if let Some(left) = paused.and_then(|u| u.checked_duration_since(Instant::now())) {
                 return Err(wait(left.as_secs(), "the vendor asked to wait"));
             }
+            self.slot(url)
+        }
+
+        /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] slots, taken by each
+        /// fetch and each caller waiting for one.
+        fn slot(&self, url: &str) -> std::result::Result<Permit, Failure> {
+            let mut hosts = self.lock_hosts();
+            let host = hosts.entry(host(url).to_string()).or_default();
             let slots = host
                 .in_flight
                 .get_or_insert_with(|| Semaphore::new(IN_FLIGHT_PER_HOST).into());
@@ -808,7 +817,11 @@ mod native {
             let vendor = vendor.map_err(refused)?;
             let url = vendor.nras_url(request.arch);
             let _slot = self.admit(url).map_err(refused)?;
-            self.admit_cold(url, self.nras_per_second)
+            let (key, why) = (
+                format!("{} NRAS", host(url)),
+                "too many NRAS requests this second",
+            );
+            self.admit_cold(&key, self.nras_per_second, why)
                 .map_err(refused)?;
             let answer = vendor.nras_attest(request).await;
             if let Err(AttestationError::CollateralUnavailable {
@@ -821,11 +834,11 @@ mod native {
             answer
         }
 
-        /// Count a fetch of a piece held nowhere (or an NRAS POST) against
-        /// its vendor host's `limit` per second.
-        fn admit_cold(&self, url: &str, limit: u32) -> std::result::Result<(), Failure> {
+        /// Count a fetch of a piece held nowhere, or an NRAS POST, against
+        /// the `limit` per second of its counter `key`; `why` refuses it.
+        fn admit_cold(&self, key: &str, limit: u32, why: &str) -> std::result::Result<(), Failure> {
             let mut hosts = self.lock_hosts();
-            let h = hosts.entry(host(url).to_string()).or_default();
+            let h = hosts.entry(key.to_string()).or_default();
             if h.second
                 .is_none_or(|s| s.elapsed() >= Duration::from_secs(1))
             {
@@ -833,7 +846,7 @@ mod native {
                 h.cold = 0;
             }
             if h.cold >= limit {
-                return Err(wait(1, "too many new pieces from this vendor at once"));
+                return Err(wait(1, why));
             }
             h.cold += 1;
             Ok(())
@@ -1356,6 +1369,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callers_waiting_for_one_hung_piece_take_at_most_the_host_slots() {
+        let v = vendor(
+            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
+            Duration::from_secs(60),
+        )
+        .await;
+        let ctx = Arc::new(ctx(&v));
+        let gets: Vec<_> = (0..100)
+            .map(|_| {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { tcb_info(&ctx, NOW).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // One fetch and 32 waiters hold the host's slots; the rest fail at once.
+        let refused = gets.iter().filter(|g| g.is_finished()).count();
+        assert_eq!(refused, 100 - native::IN_FLIGHT_PER_HOST + 1);
+        for get in gets.into_iter().filter(|g| g.is_finished()) {
+            assert!(get.await.unwrap().unwrap_err().is_retryable());
+        }
+    }
+
+    #[tokio::test]
     async fn attaching_keeps_partial_collateral_after_the_vendor_retry() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let quote = std::fs::read(concat!(
@@ -1557,6 +1593,23 @@ mod tests {
             }
             assert_eq!(v.hits.load(Ordering::SeqCst), posts, "{code}");
         }
+        // 20 POSTs count against NRAS's own budget, not the 10 new pieces a
+        // second: the key set is still fetched.
+        let (jwks, _) = raw("2026-10-14/nras_jwks.json", None);
+        let mut replies = vec![(200, vec![], b"[]".to_vec()); 20];
+        replies.push((200, vec![], jwks));
+        let v = vendor(replies, Duration::ZERO).await;
+        let nras = format!("{}/v3/attest/gpu", v.base);
+        let ctx = Context::new().with_nras_urls(nras.clone(), nras).unwrap();
+        for _ in 0..20 {
+            ctx.store().nras_attest(&request).await.unwrap();
+        }
+        let url = ctx.store().nras_jwks_url().unwrap();
+        let jwks = ctx
+            .store()
+            .get::<crate::collateral::NrasJwks>(&url, NOW)
+            .await;
+        assert!(jwks.is_ok(), "{:?}", jwks.err());
     }
 
     #[tokio::test]
