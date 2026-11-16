@@ -68,7 +68,6 @@ pub struct VerifyConfig {
     pub workers: usize,
     pub queue_per_worker: usize,
     pub queue_deadline_ms: u64,
-    pub cold_workers: usize,
     pub fetch_deadline_ms: u64,
     pub warm: Vec<String>,
 }
@@ -79,7 +78,6 @@ impl Default for VerifyConfig {
             workers: 0,
             queue_per_worker: 8,
             queue_deadline_ms: 50,
-            cold_workers: 0,
             fetch_deadline_ms: 10_000,
             warm: default_warm(),
         }
@@ -100,12 +98,6 @@ impl VerifyConfig {
     /// Two per vCPU by default, so no vCPU idles between jobs.
     pub fn workers(&self) -> usize {
         Some(self.workers).filter(|n| *n > 0).unwrap_or(2 * vcpus())
-    }
-
-    pub fn cold_workers(&self) -> usize {
-        Some(self.cold_workers)
-            .filter(|n| *n > 0)
-            .unwrap_or((vcpus() / 2).max(1))
     }
 }
 
@@ -281,6 +273,9 @@ impl Config {
         // A queued request must be able to wait out the queue (about 1 ms a job).
         if self.verify.queue_deadline_ms < self.verify.queue_per_worker.max(1) as u64 {
             return Err("verify.queue_deadline_ms must be at least queue_per_worker".into());
+        }
+        if self.server.max_connections == 0 {
+            return Err("server.max_connections must be > 0".into());
         }
 
         for platform in &self.attestation.platforms {

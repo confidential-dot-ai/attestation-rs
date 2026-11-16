@@ -112,28 +112,31 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    // Verify offline on a worker; if collateral (or, for a GPU bundle without
-    // attached answers, NRAS) is missing, verify in the cold lane.
-    let (evidence, policies, token) = (
-        Arc::new(evidence_json),
-        Arc::new(req.policies),
-        req.issue_token,
-    );
-    let job = |offline: bool| {
-        let (state, evidence, policies) = (state.clone(), evidence.clone(), policies.clone());
+    // Verify offline on a worker. If collateral (or, for a GPU bundle without
+    // attached answers, NRAS) is missing, fetch it once, then verify again.
+    let nonce = req
+        .policies
+        .report_data(platform)
+        .unwrap_or_default()
+        .to_vec();
+    let (policies, token) = (Arc::new(req.policies), req.issue_token);
+    let job = |evidence: Arc<Vec<u8>>, offline: bool| {
+        let (state, policies) = (state.clone(), policies.clone());
         let runtime = tokio::runtime::Handle::current();
         move || runtime.block_on(verify(&state, &evidence, &policies, token, offline))
     };
-    let missing =
-        |a: &Result<_, _>| matches!(a, Err(ApiError::Verification(e)) if e.is_retryable());
-    match needs_nras {
-        false => match state.admission.run(job(true)).await? {
-            answer if !missing(&answer) => answer,
-            _ => state.admission.cold(job(false)).await?,
-        },
-        true => state.admission.cold(job(false)).await?,
+    let evidence = Arc::new(evidence_json);
+    if !needs_nras {
+        match state.admission.run(job(evidence.clone(), true)).await? {
+            Err(ApiError::Verification(e)) if e.is_retryable() => {}
+            answer => return answer.map(Json),
+        }
     }
-    .map(Json)
+    // The second verification finds what the fetch got, or its failure, in
+    // memory, and gives the library's answer.
+    let fetch = state.admission.fetch(&state.verifier, &evidence, nonce);
+    let attached = Arc::new(fetch.await?);
+    state.admission.run(job(attached, false)).await?.map(Json)
 }
 
 /// Verify, and sign a token for a passing result when asked.

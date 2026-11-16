@@ -1,5 +1,5 @@
-//! Bounded verification on the blocking pool, and a separate cold lane for
-//! evidence that waits for vendors, so vendor time never holds a worker.
+//! Bounded verification on the blocking pool. Missing collateral is fetched
+//! on the I/O runtime, so vendor time never holds a worker.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,20 +14,16 @@ pub struct Admission {
     workers: Arc<Semaphore>,
     places: Arc<Semaphore>,
     queue_deadline: Duration,
-    cold: Arc<Semaphore>,
-    cold_places: Arc<Semaphore>,
     fetch_deadline: Duration,
 }
 
 impl Admission {
     pub fn new(config: &VerifyConfig) -> Self {
-        let (workers, cold) = (config.workers(), config.cold_workers());
+        let workers = config.workers();
         Self {
             workers: Arc::new(Semaphore::new(workers)),
             places: Arc::new(Semaphore::new(workers * (1 + config.queue_per_worker))),
             queue_deadline: Duration::from_millis(config.queue_deadline_ms),
-            cold: Arc::new(Semaphore::new(cold)),
-            cold_places: Arc::new(Semaphore::new(cold * (1 + config.queue_per_worker))),
             fetch_deadline: Duration::from_millis(config.fetch_deadline_ms),
         }
     }
@@ -51,29 +47,29 @@ impl Admission {
         .await
     }
 
-    /// Run `job` in the cold lane: 503 when its queue is full, 502 after the
-    /// fetch deadline. A started job runs to its end, finishing its fetches.
-    pub async fn cold<T: Send + 'static>(
+    /// `evidence` with the collateral and NRAS answers it needs attached,
+    /// gathered as [`attestation::Verifier::attach_collateral`] does: 502 after
+    /// the fetch deadline. The fetches run in their own task, so a late
+    /// request leaves them to finish in the store; per-host caps bound them.
+    pub async fn fetch(
         &self,
-        job: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<T, ApiError> {
-        let place = self.cold_places.clone().try_acquire_owned();
-        let _place = place.map_err(|_| ApiError::Overloaded)?;
-        let deadline = Instant::now() + self.fetch_deadline;
-        let late = || {
-            ApiError::Verification(attestation::AttestationError::CollateralUnavailable {
-                collateral: "collateral".into(),
-                retry_after: Some(1),
-                detail: "not fetched within the fetch deadline".into(),
-            })
-        };
-        let lane = timeout_at(deadline, self.cold.clone().acquire_owned()).await;
-        let lane = lane.map_err(|_| late())?.expect("never closed");
-        let job = blocking(move || {
-            let _lane = lane;
-            job()
-        });
-        timeout_at(deadline, job).await.map_err(|_| late())?
+        verifier: &Arc<attestation::Verifier>,
+        evidence: &Arc<Vec<u8>>,
+        nonce: Vec<u8>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let (verifier, evidence) = (verifier.clone(), evidence.clone());
+        let fetch =
+            tokio::spawn(async move { verifier.attach_collateral(&evidence, &nonce).await });
+        match tokio::time::timeout(self.fetch_deadline, fetch).await {
+            Ok(Ok(attached)) => Ok(attached?),
+            _ => Err(ApiError::Verification(
+                attestation::AttestationError::CollateralUnavailable {
+                    collateral: "collateral".into(),
+                    retry_after: Some(1),
+                    detail: "not fetched within the fetch deadline".into(),
+                },
+            )),
+        }
     }
 }
 

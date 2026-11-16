@@ -1319,7 +1319,7 @@ async fn verify_requires_a_gpu_bundle_when_policy_requires_it() {
     assert_eq!(json["error"], "verification_failed");
 }
 
-// --- Admission, the cold lane, and parity with the library ---
+// --- Admission, the fetch phase, and parity with the library ---
 
 /// A fake vendor (answering after `kds`) and NRAS (after `delay`): the fixture
 /// key set, or a token naming `kid` (not validly signed). Also the POST bodies.
@@ -1446,67 +1446,42 @@ async fn an_endorsement_google_does_not_publish_is_a_verdict() {
     );
 }
 
-/// Cold lane on a silent vendor: 1 runs, 4 queue, 3 get 503; warm evidence
-/// is not held up; the running and the queued ones get 502 at the fetch
-/// deadline.
+/// A flood of 40 forged SNP reports on a silent KDS and 20 junk GPU bundles
+/// (default config): warm evidence gets 200 and GPU evidence NRAS's verdict;
+/// the forged reports get 502 by the fetch deadline, the hung fetches too.
 #[tokio::test]
-async fn a_cold_flood_on_a_silent_vendor_does_not_hold_up_warm_evidence() {
-    let (silent, _) = nras(Duration::from_secs(60), Duration::from_secs(60), "").await;
-    let state = online_held_state(&silent, |c| {
-        let v = &mut c.verify;
-        (v.workers, v.cold_workers, v.queue_per_worker) = (2, 1, 4);
-        (v.queue_deadline_ms, v.fetch_deadline_ms) = (5000, 1500); // debug builds are slow
-    });
-    let start = std::time::Instant::now();
-    let cold: Vec<_> = (0..8)
-        .map(|chip| tokio::spawn(post_verify(state.clone(), forged_snp(chip))))
-        .collect();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let pending: Vec<_> = cold.into_iter().filter(|c| !c.is_finished()).collect();
-    assert_eq!(pending.len(), 5);
-    let tdx = json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
-    let tasks: Vec<_> = (0..6)
-        .map(|_| tokio::spawn(post_verify(state.clone(), tdx.clone())))
-        .collect();
-    for task in tasks {
-        let (status, json) = tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(status, StatusCode::OK, "{json}");
-    }
-    for task in pending {
-        let (status, json) = task.await.unwrap();
-        assert_eq!(
-            (status, &json["error"]),
-            (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
-        );
-    }
-    assert!((1500..3000).contains(&start.elapsed().as_millis()));
-}
-
-/// With the default cold lane, misses waiting on a silent KDS and junk GPU
-/// bundles leave GPU evidence its NRAS verdict.
-#[tokio::test]
-async fn gpu_evidence_gets_its_verdict_while_misses_wait_on_a_silent_vendor() {
+async fn a_forged_flood_on_a_silent_vendor_holds_up_neither_warm_nor_gpu_evidence() {
     let (base, _) = nras(
         Duration::from_secs(60),
         Duration::from_millis(300),
         &nras_kid(),
     )
     .await;
-    let state = online_held_state(&base, |_| {});
-    for i in 0..8 {
-        let flood = if i % 2 == 0 {
-            forged_snp(i)
-        } else {
-            gpu_body(&["HOPPER"])
-        };
-        tokio::spawn(post_verify(state.clone(), flood));
+    let state = online_held_state(&base, |c| {
+        (c.verify.queue_deadline_ms, c.verify.fetch_deadline_ms) = (5000, 1500);
+        // debug builds are slow
+    });
+    let start = std::time::Instant::now();
+    let forged: Vec<_> = (0..40)
+        .map(|chip| tokio::spawn(post_verify(state.clone(), forged_snp(chip))))
+        .collect();
+    for _ in 0..20 {
+        tokio::spawn(post_verify(state.clone(), gpu_body(&["HOPPER"])));
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
+    let tdx = json!({ "platform": "tdx", "evidence": tdx_v4_evidence(), "policies": { "tdx": { "allow_debug": true } } });
+    let (status, json) = post_verify(state.clone(), tdx).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
     let (status, json) = post_verify(state, gpu_body(&["HOPPER", "BLACKWELL"])).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+    for task in forged {
+        let (status, json) = task.await.unwrap();
+        assert_eq!(
+            (status, &json["error"]),
+            (StatusCode::BAD_GATEWAY, &json!("collateral_unavailable"))
+        );
+    }
+    assert!((1500..5000).contains(&start.elapsed().as_millis()));
 }
 
 /// Connections past the cap wait in the backlog until a slow client is cut off.
