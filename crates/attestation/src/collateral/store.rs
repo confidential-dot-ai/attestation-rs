@@ -630,21 +630,15 @@ mod native {
                         }
                     }
                     // A disk copy that passes (offline) or is current needs no fetch.
-                    let usable = |e: &Entry| {
-                        if offline {
-                            acceptable(e)
-                        } else {
-                            e.dates.current(now)
-                        }
-                    };
-                    if let Some(on_disk) = self.cached::<C>(&url, id).await.filter(usable) {
+                    let fits =
+                        |e: &Entry| offline && acceptable(e) || !offline && e.dates.current(now);
+                    if let Some(on_disk) = self.cached::<C>(&url, id).await.filter(fits) {
                         self.mem.insert(url, on_disk.clone()).await;
                         return Ok((on_disk, Source::Disk));
                     }
                     if offline {
                         return Err(Failure::Unavailable(Unavailable::offline()));
                     }
-                    // Callers waiting for a fetch hold a waiter slot each.
                     let _waiting = self.slot(&url, true)?;
                     let loaded = self
                         .mem
