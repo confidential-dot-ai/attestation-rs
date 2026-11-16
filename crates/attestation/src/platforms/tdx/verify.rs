@@ -564,7 +564,9 @@ impl Platform for Tdx {
         collateral: &TdxCollateralSet,
         now: i64,
     ) -> Result<TdxResult> {
-        Self::verify_checked(evidence, params, collateral, now, None)
+        params.validate()?;
+        let genuine = genuine_quote(evidence, now)?;
+        Self::verify_genuine(evidence, params, collateral, now, genuine)
     }
 
     /// The quote's signature and PCK chain are checked once.
@@ -576,33 +578,22 @@ impl Platform for Tdx {
     ) -> Result<(TdxResult, Vec<CollateralUsed>)> {
         let (quote_bytes, quote) = genuine_quote(evidence, now)?;
         let (collateral, used) = TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await?;
-        let checked = Some((quote_bytes, quote));
-        let result = Self::verify_checked(evidence, params, &collateral, now, checked)?;
-        Ok((result, used))
+        let result = Self::verify_genuine(evidence, params, &collateral, now, (quote_bytes, quote));
+        Ok((result?, used))
     }
 }
 
 impl Tdx {
-    /// [`Platform::verify`]; `checked` is what [`genuine_quote`] returned.
-    fn verify_checked(
+    /// [`Platform::verify`] of what [`genuine_quote`] returned.
+    fn verify_genuine(
         evidence: &TdxEvidence,
         params: &TdxParams,
         collateral: &TdxCollateralSet,
         now: i64,
-        checked: Option<(Vec<u8>, TdxQuote)>,
+        (quote_bytes, quote): (Vec<u8>, TdxQuote),
     ) -> Result<TdxResult> {
         params.validate()?;
-        let (quote_bytes, quote, mut result) = match checked {
-            Some((bytes, quote)) => {
-                let result = quote_rules(&quote, params);
-                (bytes, quote, result)
-            }
-            None => {
-                let bytes = decode_quote(evidence)?;
-                let (quote, result) = verify_quote(&bytes, params, now)?;
-                (bytes, quote, result)
-            }
-        };
+        let mut result = quote_rules(&quote, params);
 
         result.report_data_match = params
             .report_data
