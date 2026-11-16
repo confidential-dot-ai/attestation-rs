@@ -128,15 +128,8 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     tracing::info!(%addr, "starting attestation service");
 
     let listener = TcpListener::bind(addr).await?;
-    let connections = state.config.server.max_connections;
-    serve(
-        listener,
-        app,
-        connections,
-        HEADER_TIMEOUT,
-        shutdown_signal(),
-    )
-    .await;
+    let max = state.config.server.max_connections;
+    serve(listener, app, max, HEADER_TIMEOUT, shutdown_signal()).await;
     Ok(())
 }
 

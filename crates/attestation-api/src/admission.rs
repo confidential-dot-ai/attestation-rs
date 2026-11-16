@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::timeout;
 
 use crate::config::VerifyConfig;
 use crate::error::ApiError;
@@ -40,16 +40,15 @@ impl Admission {
     ) -> Result<T, ApiError> {
         let place = self.places.clone().try_acquire_owned();
         let _place = place.map_err(|_| ApiError::Overloaded)?;
-        let deadline = Instant::now() + self.queue_deadline;
-        let worker = timeout_at(deadline, self.workers.clone().acquire_owned()).await;
-        let worker = worker
-            .map_err(|_| ApiError::Overloaded)?
-            .expect("never closed");
-        blocking(move || {
+        let worker = timeout(self.queue_deadline, self.workers.clone().acquire_owned()).await;
+        let Ok(Ok(worker)) = worker else {
+            return Err(ApiError::Overloaded);
+        };
+        let job = tokio::task::spawn_blocking(move || {
             let _worker = worker;
             job()
-        })
-        .await
+        });
+        job.await.map_err(|e| ApiError::Internal(e.to_string()))
     }
 
     /// `evidence` with all the collateral and NRAS answers it needs attached
@@ -70,7 +69,7 @@ impl Admission {
             let _permit = permit;
             verifier.attach_all_collateral(&evidence, &nonce).await
         });
-        match tokio::time::timeout(self.fetch_deadline, fetch).await {
+        match timeout(self.fetch_deadline, fetch).await {
             Ok(Ok(attached)) => Ok(attached?),
             Ok(Err(e)) => Err(ApiError::Internal(e.to_string())),
             Err(_) => Err(ApiError::Verification(
@@ -84,16 +83,10 @@ impl Admission {
     }
 }
 
-async fn blocking<T: Send + 'static>(
-    job: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, ApiError> {
-    let job = tokio::task::spawn_blocking(job);
-    job.await.map_err(|e| ApiError::Internal(e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
     use super::*;
 
@@ -136,5 +129,16 @@ mod tests {
         assert!(!ran.load(Ordering::SeqCst));
         let response = axum::response::IntoResponse::into_response(ApiError::Overloaded);
         assert_eq!(response.headers()["retry-after"], "1");
+        // Every fetch task is running: 503 at once.
+        let _all = admission
+            .fetches
+            .clone()
+            .acquire_many_owned(FETCHES as u32)
+            .await;
+        let verifier = Arc::new(attestation::Verifier::new(attestation::Context::offline()));
+        let fetch = admission
+            .fetch(&verifier, &Arc::default(), Vec::new())
+            .await;
+        assert!(matches!(fetch, Err(ApiError::Overloaded)));
     }
 }
