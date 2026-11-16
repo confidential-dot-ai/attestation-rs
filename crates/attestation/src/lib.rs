@@ -362,18 +362,39 @@ impl Verifier {
     }
 
     /// As [`Self::verify`] with only attached, held or in-memory collateral;
-    /// anything else is [`AttestationError::CollateralUnavailable`].
+    /// anything else, or a copy that does not pass, is
+    /// [`AttestationError::CollateralUnavailable`].
     pub async fn verify_offline(
         &self,
         evidence_json: &[u8],
         policies: &Policies,
+    ) -> Result<Verified> {
+        self.offline(evidence_json, policies, false).await
+    }
+
+    /// As [`Self::verify_offline`] on evidence from
+    /// [`Self::attach_all_collateral`]: a copy that does not pass is the
+    /// verdict, as in [`Self::verify`] when a refetch found nothing better.
+    pub async fn verify_attached(
+        &self,
+        evidence_json: &[u8],
+        policies: &Policies,
+    ) -> Result<Verified> {
+        self.offline(evidence_json, policies, true).await
+    }
+
+    async fn offline(
+        &self,
+        evidence_json: &[u8],
+        policies: &Policies,
+        keep: bool,
     ) -> Result<Verified> {
         let envelope = parse_envelope(evidence_json)?;
         let mut store = self
             .ctx
             .store()
             .view(envelope.held_collateral(), &policies.floors, false);
-        store.offline = true;
+        (store.offline, store.keep_failing) = (true, keep);
         self.verify_envelope(envelope, policies, &store).await
     }
 
@@ -395,6 +416,25 @@ impl Verifier {
         evidence_json: &[u8],
         report_data: &[u8],
     ) -> Result<Vec<u8>> {
+        self.attach(evidence_json, report_data, true).await
+    }
+
+    /// As [`Self::attach_collateral`], but collateral that stays unavailable
+    /// is an error: everything is attached or nothing.
+    pub async fn attach_all_collateral(
+        &self,
+        evidence_json: &[u8],
+        report_data: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.attach(evidence_json, report_data, false).await
+    }
+
+    async fn attach(
+        &self,
+        evidence_json: &[u8],
+        report_data: &[u8],
+        partial: bool,
+    ) -> Result<Vec<u8>> {
         let mut envelope = parse_envelope(evidence_json)?;
         let policies = Policies::all();
         let store = self
@@ -404,7 +444,7 @@ impl Verifier {
         let gathered = self.gather(&envelope, report_data, &policies, &store).await;
         let used = match gathered {
             Ok(used) => used,
-            Err(e) if e.is_retryable() => {
+            Err(e) if partial && e.is_retryable() => {
                 log::warn!("attaching the collateral it got: {e}");
                 #[allow(unused_mut)]
                 let mut used = store.used();

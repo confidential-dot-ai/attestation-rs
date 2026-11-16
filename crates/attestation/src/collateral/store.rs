@@ -205,6 +205,8 @@ pub struct Store {
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
     /// Use only held, attached or in-memory pieces; never wait for a vendor.
     pub(crate) offline: bool,
+    /// Offline, a copy that does not pass is kept rather than a miss.
+    pub(crate) keep_failing: bool,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
 }
@@ -219,6 +221,7 @@ impl Store {
             floors: VersionFloors::default(),
             used: None,
             offline: false,
+            keep_failing: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
         }
@@ -242,6 +245,7 @@ impl Store {
             floors: floors.clone(),
             used: record.then(Arc::default),
             offline: false,
+            keep_failing: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: self.native.clone(),
         }
@@ -307,6 +311,7 @@ impl Store {
         match self.lookup(id, now).await {
             Ok(got) => Ok(Some(got)),
             Err(Failure::Unavailable(e)) if e.not_found() => Ok(None),
+            Err(Failure::NotPublished(_)) => Ok(None),
             Err(e) => Err(e.into_error(&C::name(id))),
         }
     }
@@ -348,7 +353,7 @@ impl Store {
                     }
                 }
                 // Offline, a copy that does not pass is a miss, as online it is refetched.
-                Err(e) if best.is_none() || self.offline => return Err(e),
+                Err(e) if best.is_none() || (self.offline && !self.keep_failing) => return Err(e),
                 // The kept copy already verified; it just does not pass.
                 Err(_) => {}
             }
@@ -554,6 +559,8 @@ mod native {
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
         hosts: Mutex<HashMap<String, Host>>,
+        /// NRAS POSTs per second to one NRAS host.
+        pub(crate) nras_per_second: u32,
     }
 
     impl Native {
@@ -565,6 +572,7 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
+                nras_per_second: 100,
             }
         }
 
@@ -612,14 +620,21 @@ mod native {
                     Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
-                None if offline => match self.cached::<C>(&url, id).await.filter(|e| acceptable(e))
-                {
-                    Some(on_disk) => {
-                        self.mem.insert(url, on_disk.clone()).await;
-                        Ok((on_disk, Source::Disk))
+                None if offline => {
+                    // What the vendor answered "not published" for stays so offline.
+                    if let Some((at, f @ Failure::NotPublished(_))) = self.failed.get(&url).await {
+                        if at.elapsed() < self.recheck {
+                            return Err(f);
+                        }
                     }
-                    None => Err(Failure::Unavailable(Unavailable::offline())),
-                },
+                    match self.cached::<C>(&url, id).await.filter(|e| acceptable(e)) {
+                        Some(on_disk) => {
+                            self.mem.insert(url, on_disk.clone()).await;
+                            Ok((on_disk, Source::Disk))
+                        }
+                        None => Err(Failure::Unavailable(Unavailable::offline())),
+                    }
+                }
                 None => self
                     .mem
                     .try_get_with(url.clone(), self.load::<C>(&url, id, now))
@@ -699,7 +714,7 @@ mod native {
             }
             let _slot = self.admit(url)?;
             if cold {
-                self.admit_cold(url)?;
+                self.admit_cold(url, COLD_PER_SECOND)?;
             }
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             if let Err(e) = &mut fetched {
@@ -793,6 +808,8 @@ mod native {
             let vendor = vendor.map_err(refused)?;
             let url = vendor.nras_url(request.arch);
             let _slot = self.admit(url).map_err(refused)?;
+            self.admit_cold(url, self.nras_per_second)
+                .map_err(refused)?;
             let answer = vendor.nras_attest(request).await;
             if let Err(AttestationError::CollateralUnavailable {
                 retry_after: Some(s),
@@ -804,9 +821,9 @@ mod native {
             answer
         }
 
-        /// Count a fetch of a piece held nowhere against its vendor host's
-        /// [`COLD_PER_SECOND`].
-        fn admit_cold(&self, url: &str) -> std::result::Result<(), Failure> {
+        /// Count a fetch of a piece held nowhere (or an NRAS POST) against
+        /// its vendor host's `limit` per second.
+        fn admit_cold(&self, url: &str, limit: u32) -> std::result::Result<(), Failure> {
             let mut hosts = self.lock_hosts();
             let h = hosts.entry(host(url).to_string()).or_default();
             if h.second
@@ -815,7 +832,7 @@ mod native {
                 h.second = Some(Instant::now());
                 h.cold = 0;
             }
-            if h.cold >= COLD_PER_SECOND {
+            if h.cold >= limit {
                 return Err(wait(1, "too many new pieces from this vendor at once"));
             }
             h.cold += 1;
@@ -1511,17 +1528,25 @@ mod tests {
 
     #[cfg(feature = "nvidia-gpu")]
     #[tokio::test]
-    async fn only_a_429_or_503_from_nras_pauses_it() {
+    async fn only_a_429_or_503_pauses_nras_and_posts_per_second_are_capped() {
         let request = crate::platforms::nvidia_gpu::NrasRequest {
             nonce: String::new(),
             evidence_list: Vec::new(),
             arch: crate::types::NvidiaGpuArch::Hopper,
             claims_version: "2.0".into(),
         };
-        for (code, posts) in [(500, 2), (502, 2), (429, 1), (503, 1)] {
+        // Two POSTs each; at 1 a second allowed, the second is not sent.
+        for (code, per_second, posts) in [
+            (500, 100, 2),
+            (502, 100, 2),
+            (429, 100, 1),
+            (503, 100, 1),
+            (500, 1, 1),
+        ] {
             let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
             let nras = format!("{}/v3/attest/gpu", v.base);
             let ctx = Context::new().with_nras_urls(nras.clone(), nras).unwrap();
+            let ctx = ctx.with_nras_per_second(per_second);
             for _ in 0..2 {
                 assert!(ctx
                     .store()

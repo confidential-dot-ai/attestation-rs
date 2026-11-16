@@ -160,6 +160,16 @@ impl Context {
         Ok(self)
     }
 
+    /// Send at most `per_second` POSTs a second to one NRAS host (default 100).
+    #[cfg(all(feature = "nvidia-gpu", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn with_nras_per_second(mut self, per_second: u32) -> Self {
+        if let Some(native) = self.store.native_mut() {
+            native.nras_per_second = per_second;
+        }
+        self
+    }
+
     /// Evaluate certificate, CRL and token validity at a fixed time (Unix
     /// seconds) instead of the current time. A time outside years 1-9999 is
     /// [`AttestationError::InvalidParams`].
