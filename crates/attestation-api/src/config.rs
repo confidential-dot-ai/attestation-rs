@@ -58,7 +58,6 @@ pub struct ServerConfig {
     pub bind: String,
     pub tls: TlsConfig,
     pub max_connections: usize,
-    pub max_open_files: u64,
 }
 
 /// Limits on verification work; see `config.example.toml`.
@@ -97,12 +96,9 @@ fn default_warm() -> Vec<String> {
 impl VerifyConfig {
     /// Two per vCPU by default, so no vCPU idles between jobs.
     pub fn workers(&self) -> usize {
-        Some(self.workers).filter(|n| *n > 0).unwrap_or(2 * vcpus())
+        let vcpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Some(self.workers).filter(|n| *n > 0).unwrap_or(2 * vcpus)
     }
-}
-
-fn vcpus() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 /// Deprecated: the API does not terminate TLS. The section still parses so
@@ -142,8 +138,6 @@ pub struct NrasConfig {
     /// NVIDIA's switch attestation endpoint. Empty: `NV_NRAS_SWITCH_URL`, else
     /// `https://nras.attestation.nvidia.com/v3/attest/switch`.
     pub switch_url: String,
-    /// POSTs per second to one NRAS host; 0: 100.
-    pub per_second: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,7 +177,6 @@ impl Default for ServerConfig {
             bind: "0.0.0.0:8400".to_string(),
             tls: TlsConfig::default(),
             max_connections: 1024,
-            max_open_files: 65_536,
         }
     }
 }

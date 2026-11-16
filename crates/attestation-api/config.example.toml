@@ -4,7 +4,6 @@
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
 max_connections = 1024            # More wait in the backlog; bodies: at most 1 MiB each
-max_open_files = 65536            # Soft limit to raise to, at most the hard limit
 
 [verify]
 workers = 0                       # 0 = two per vCPU
@@ -23,7 +22,6 @@ api_keys = []
 [nras]
 gpu_url = ""                      # Empty = NV_NRAS_GPU_URL, else NVIDIA's endpoint
 switch_url = ""                   # Empty = NV_NRAS_SWITCH_URL, else NVIDIA's endpoint
-per_second = 100                  # POSTs per second to one NRAS host
 
 [token]
 enabled = false

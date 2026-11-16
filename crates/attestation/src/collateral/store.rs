@@ -8,6 +8,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -107,7 +108,7 @@ struct Entry {
     #[cfg(not(target_arch = "wasm32"))]
     checked_at: std::time::Instant,
     /// A background refresh of this copy is running.
-    refreshing: Arc<std::sync::atomic::AtomicBool>,
+    refreshing: Arc<AtomicBool>,
 }
 
 /// A random time in the last quarter of the window of a piece, and at least
@@ -477,9 +478,7 @@ impl Store {
     #[cfg(all(test, feature = "tdx"))]
     pub(crate) async fn keep<C: Collateral>(&self, id: &C::Id, response: HeldResponse) {
         let (url, body, chain) = response;
-        let entry = check::<C>(id, body, chain, Source::Vendor)
-            .ok()
-            .expect("a valid piece");
+        let entry = check::<C>(id, body, chain, Source::Vendor).ok().unwrap();
         self.native.as_ref().unwrap().mem.insert(url, entry).await;
     }
 
@@ -498,6 +497,7 @@ impl Store {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     use moka::ops::compute::Op;
@@ -521,11 +521,12 @@ mod native {
     /// At most this many pieces not held anywhere are fetched from one
     /// vendor host per second.
     pub(crate) const COLD_PER_SECOND: u32 = 10;
-    const NEW_PIECES: &str = "too many new pieces from this vendor at once";
     /// At most this many fetches and NRAS POSTs in flight to one vendor host.
     pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
     /// At most this many callers wait for fetches from one vendor host.
     pub(crate) const WAITERS_PER_HOST: usize = 256;
+    /// At most this many NRAS POSTs a second to one NRAS host.
+    pub(crate) const NRAS_PER_SECOND: u32 = 100;
 
     /// One vendor host: until when it asked to be left alone, the cold
     /// fetches started in the current second, and its requests in flight.
@@ -563,8 +564,6 @@ mod native {
         /// Do not ask the vendor about one piece more often than this.
         pub(crate) recheck: Duration,
         hosts: Mutex<HashMap<String, Host>>,
-        /// NRAS POSTs per second to one NRAS host.
-        pub(crate) nras_per_second: u32,
     }
 
     impl Native {
@@ -576,7 +575,6 @@ mod native {
                 vendor,
                 recheck: Duration::from_secs(300),
                 hosts: Mutex::default(),
-                nras_per_second: 100,
             }
         }
 
@@ -624,32 +622,29 @@ mod native {
                     Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
-                None if offline => {
+                None => {
                     // What the vendor answered "not published" for stays so offline.
                     if let Some((at, f @ Failure::NotPublished(_))) = self.failed.get(&url).await {
-                        if at.elapsed() < self.recheck {
+                        if offline && at.elapsed() < self.recheck {
                             return Err(f);
                         }
                     }
-                    match self.cached::<C>(&url, id).await.filter(|e| acceptable(e)) {
-                        Some(on_disk) => {
-                            self.mem.insert(url, on_disk.clone()).await;
-                            Ok((on_disk, Source::Disk))
+                    // A disk copy that passes (offline) or is current needs no fetch.
+                    let usable = |e: &Entry| {
+                        if offline {
+                            acceptable(e)
+                        } else {
+                            e.dates.current(now)
                         }
-                        None => Err(Failure::Unavailable(Unavailable::offline())),
-                    }
-                }
-                None => {
-                    // A current disk copy needs no fetch; callers waiting for
-                    // one hold a waiter slot each.
-                    let on_disk = self
-                        .cached::<C>(&url, id)
-                        .await
-                        .filter(|e| e.dates.current(now));
-                    if let Some(on_disk) = on_disk {
+                    };
+                    if let Some(on_disk) = self.cached::<C>(&url, id).await.filter(usable) {
                         self.mem.insert(url, on_disk.clone()).await;
                         return Ok((on_disk, Source::Disk));
                     }
+                    if offline {
+                        return Err(Failure::Unavailable(Unavailable::offline()));
+                    }
+                    // Callers waiting for a fetch hold a waiter slot each.
                     let _waiting = self.slot(&url, true)?;
                     let loaded = self
                         .mem
@@ -675,16 +670,13 @@ mod native {
                 return false;
             };
             /// Clears the flag when the refresh ends, even by a panic.
-            struct Done(Arc<std::sync::atomic::AtomicBool>);
+            struct Done(Arc<AtomicBool>);
             impl Drop for Done {
                 fn drop(&mut self) {
-                    self.0.store(false, std::sync::atomic::Ordering::Release);
+                    self.0.store(false, Ordering::Release);
                 }
             }
-            if !entry
-                .refreshing
-                .swap(true, std::sync::atomic::Ordering::AcqRel)
-            {
+            if !entry.refreshing.swap(true, Ordering::AcqRel) {
                 let done = Done(entry.refreshing.clone());
                 let (native, url, id) = (self.clone(), url.to_string(), id.clone());
                 runtime.spawn(async move {
@@ -729,7 +721,8 @@ mod native {
             }
             let _slot = self.admit(url)?;
             if cold {
-                self.admit_cold(host(url), COLD_PER_SECOND, NEW_PIECES)?;
+                let why = "too many new pieces from this vendor at once";
+                self.admit_cold(host(url), COLD_PER_SECOND, why)?;
             }
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             if let Err(e) = &mut fetched {
@@ -797,23 +790,16 @@ mod native {
 
         /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] fetch slots, or of its
         /// [`WAITERS_PER_HOST`] slots for callers waiting for a fetch.
-        fn slot(&self, url: &str, waiter: bool) -> std::result::Result<Permit, Failure> {
+        pub(super) fn slot(&self, url: &str, waiter: bool) -> std::result::Result<Permit, Failure> {
             let mut hosts = self.lock_hosts();
-            let host = hosts.entry(host(url).to_string()).or_default();
+            let h = hosts.entry(host(url).to_string()).or_default();
             let (slots, n, why) = match waiter {
-                true => (
-                    &mut host.waiting,
-                    WAITERS_PER_HOST,
-                    "too many requests waiting for this vendor",
-                ),
-                false => (
-                    &mut host.in_flight,
-                    IN_FLIGHT_PER_HOST,
-                    "too many requests in flight to this vendor",
-                ),
+                true => (&mut h.waiting, WAITERS_PER_HOST, "waiting for"),
+                false => (&mut h.in_flight, IN_FLIGHT_PER_HOST, "in flight to"),
             };
             let slots = slots.get_or_insert_with(|| Semaphore::new(n).into());
-            slots.clone().try_acquire_owned().map_err(|_| wait(1, why))
+            let refused = |_| wait(1, &format!("too many requests {why} this vendor"));
+            slots.clone().try_acquire_owned().map_err(refused)
         }
 
         /// Leave `url`'s host alone for `retry_after` seconds (else
@@ -831,18 +817,13 @@ mod native {
         #[cfg(feature = "nvidia-gpu")]
         pub(super) async fn nras(&self, request: &NrasRequest) -> Result<Vec<u8>> {
             let refused = |f: Failure| f.into_error("NRAS attestation");
-            let vendor = self
-                .vendor
-                .as_ref()
-                .ok_or(Failure::Unavailable(Unavailable::offline()));
-            let vendor = vendor.map_err(refused)?;
+            let offline = Failure::Unavailable(Unavailable::offline());
+            let vendor = self.vendor.as_ref().ok_or(offline).map_err(refused)?;
             let url = vendor.nras_url(request.arch);
             let _slot = self.admit(url).map_err(refused)?;
-            let (key, why) = (
-                format!("{} NRAS", host(url)),
-                "too many NRAS requests this second",
-            );
-            self.admit_cold(&key, self.nras_per_second, why)
+            let key = format!("{} NRAS", host(url));
+            let why = "too many NRAS requests this second";
+            self.admit_cold(&key, NRAS_PER_SECOND, why)
                 .map_err(refused)?;
             let answer = vendor.nras_attest(request).await;
             if let Err(AttestationError::CollateralUnavailable {
@@ -1396,14 +1377,9 @@ mod tests {
             Duration::from_secs(60),
         )
         .await;
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, url) = (tempfile::tempdir().unwrap(), QeIdentity::url(&()));
         let (body, chain) = raw("2026-10-14/td_qe_identity.json", Some(CHAIN));
-        crate::collateral::save_to_cache_dir(
-            dir.path(),
-            &QeIdentity::url(&()),
-            &body,
-            chain.as_deref(),
-        );
+        crate::collateral::save_to_cache_dir(dir.path(), &url, &body, chain.as_deref());
         let ctx = Arc::new(ctx(&v).with_cache_dir(dir.path()));
         let n = native::WAITERS_PER_HOST + 44;
         let gets: Vec<_> = (0..n)
@@ -1421,6 +1397,14 @@ mod tests {
         }
         // A current disk copy of a piece from the same host is still served.
         assert_eq!(qe_identity(&ctx).await.unwrap().1, Source::Disk);
+        // With the host's request slots taken, a fetch is refused unsent.
+        let (native, url) = (ctx.store().native.clone().unwrap(), tcb_info_url());
+        let _taken: Vec<_> = (1..native::IN_FLIGHT_PER_HOST)
+            .map(|_| native.slot(&url, false).ok().unwrap())
+            .collect();
+        let crl = ctx.store().get::<PckCrl>(&PckCa::Platform, NOW).await;
+        assert!(crl.unwrap_err().is_retryable());
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1581,17 +1565,11 @@ mod tests {
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
         // Offline, an expired disk copy is a miss, and memory keeps nothing.
         let disk = ctx(&v).with_cache_dir(dir.path());
-        let mut view = disk
-            .store()
-            .view(Vec::new(), &VersionFloors::default(), false);
+        let store = disk.store();
+        let mut view = store.view(Vec::new(), &VersionFloors::default(), false);
         view.offline = true;
-        assert!(view
-            .get::<QeIdentity>(&(), NOW)
-            .await
-            .err()
-            .unwrap()
-            .is_retryable());
-        assert!(!disk.store().holds(&url));
+        let missed = view.get::<QeIdentity>(&(), NOW).await.err().unwrap();
+        assert!(missed.is_retryable() && !store.holds(&url));
     }
 
     #[cfg(feature = "nvidia-gpu")]
@@ -1603,45 +1581,36 @@ mod tests {
             arch: crate::types::NvidiaGpuArch::Hopper,
             claims_version: "2.0".into(),
         };
-        // Two POSTs each; at 1 a second allowed, the second is not sent.
-        for (code, per_second, posts) in [
-            (500, 100, 2),
-            (502, 100, 2),
-            (429, 100, 1),
-            (503, 100, 1),
-            (500, 1, 1),
-        ] {
+        let nras = |v: &Vendor| {
+            let url = format!("{}/v3/attest/gpu", v.base);
+            Context::new().with_nras_urls(url.clone(), url).unwrap()
+        };
+        // Two POSTs each: a pause stops the second.
+        for (code, posts) in [(500, 2), (502, 2), (429, 1), (503, 1)] {
             let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
-            let nras = format!("{}/v3/attest/gpu", v.base);
-            let ctx = Context::new().with_nras_urls(nras.clone(), nras).unwrap();
-            let ctx = ctx.with_nras_per_second(per_second);
+            let ctx = nras(&v);
             for _ in 0..2 {
-                assert!(ctx
-                    .store()
-                    .nras_attest(&request)
-                    .await
-                    .unwrap_err()
-                    .is_retryable());
+                let refused = ctx.store().nras_attest(&request).await.unwrap_err();
+                assert!(refused.is_retryable());
             }
             assert_eq!(v.hits.load(Ordering::SeqCst), posts, "{code}");
         }
-        // 20 POSTs count against NRAS's own budget, not the 10 new pieces a
-        // second: the key set is still fetched.
+        // POSTs past NRAS_PER_SECOND are not sent. They count against NRAS's
+        // own budget, not the new pieces a second: the key set is still fetched.
         let (jwks, _) = raw("2026-10-14/nras_jwks.json", None);
-        let mut replies = vec![(200, vec![], b"[]".to_vec()); 20];
+        let per_second = native::NRAS_PER_SECOND as usize;
+        let mut replies = vec![(200, vec![], b"[]".to_vec()); per_second];
         replies.push((200, vec![], jwks));
         let v = vendor(replies, Duration::ZERO).await;
-        let nras = format!("{}/v3/attest/gpu", v.base);
-        let ctx = Context::new().with_nras_urls(nras.clone(), nras).unwrap();
-        for _ in 0..20 {
+        let ctx = nras(&v);
+        for _ in 0..per_second {
             ctx.store().nras_attest(&request).await.unwrap();
         }
+        assert!(ctx.store().nras_attest(&request).await.is_err());
+        assert_eq!(v.hits.load(Ordering::SeqCst), per_second);
         let url = ctx.store().nras_jwks_url().unwrap();
-        let jwks = ctx
-            .store()
-            .get::<crate::collateral::NrasJwks>(&url, NOW)
-            .await;
-        assert!(jwks.is_ok(), "{:?}", jwks.err());
+        let jwks = ctx.store().get::<crate::collateral::NrasJwks>(&url, NOW);
+        assert!(jwks.await.is_ok());
     }
 
     #[tokio::test]
@@ -1669,10 +1638,7 @@ mod tests {
         }
         assert!(start.elapsed() < Duration::from_millis(200));
         let metrics = tokio::runtime::Handle::current().metrics();
-        assert!(
-            metrics.num_alive_tasks() < 10,
-            "one refresh task, not one per request"
-        );
+        assert!(metrics.num_alive_tasks() < 10, "one refresh task");
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(tcb_info(&ctx, ending).await.unwrap().0, Some(22));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
@@ -1682,15 +1648,14 @@ mod tests {
     async fn a_piece_in_memory_is_reused_only_for_the_id_it_was_verified_for() {
         let other = [0, 0xa0, 0x6d, 0x08, 0, 0];
         let ctx = Context::offline();
+        let store = ctx.store();
         // The piece for FMSPC at its own URL, and at the URL of `other`.
         for url in [tcb_info_url(), TcbInfo::url(&other)] {
             let (body, chain) = raw("2026-10-14/tcb_info_70a06d070000.json", Some(CHAIN));
-            ctx.store()
-                .keep::<TcbInfo>(&FMSPC, (url, body, chain))
-                .await;
+            store.keep::<TcbInfo>(&FMSPC, (url, body, chain)).await;
         }
         assert_eq!(tcb_info(&ctx, NOW).await.unwrap().1, Source::Memory);
-        assert!(ctx.store().get::<TcbInfo>(&other, NOW).await.is_err());
+        assert!(store.get::<TcbInfo>(&other, NOW).await.is_err());
     }
 
     #[tokio::test]

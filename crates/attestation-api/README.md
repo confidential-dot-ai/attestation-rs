@@ -120,11 +120,10 @@ where `<platform>` is the token's platform claim.
 message text. A request for tokens without token configuration also fails;
 turn on token configuration before requesting them.
 
-The listener speaks HTTP/1.1 only. Collateral is kept in memory only (no disk
-cache): list the pieces every request needs in `[verify] warm`. Missing collateral and NRAS
-answers are fetched outside the workers, at most 32 requests in flight per vendor
-host; NRAS POSTs are also limited per second (`[nras] per_second`), and a 429 or
-503 from NRAS pauses it. Request bodies take at most
+The listener speaks HTTP/1.1 only. List the collateral every request needs in
+`[verify] warm`. Missing collateral and NRAS answers are fetched outside the
+workers: at most 32 requests in flight per vendor host, 100 NRAS POSTs a second,
+and a 429 or 503 from NRAS pauses it. Request bodies take at most
 `server.max_connections` × 1 MiB; cap connections per client at the TLS terminator.
 
 One in-memory verifier/store is reused for the process. The API has no disk

@@ -6,6 +6,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use attestation::collateral::NrasJwks;
 use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Config};
 use attestation_api::token::{issuer::TokenIssuer, keys};
 use attestation_api::AppState;
@@ -81,13 +82,8 @@ async fn main() -> anyhow::Result<()> {
     let switch_url = resolve_nras_switch_url(&config.nras);
     tracing::info!(gpu = %gpu_url, switch = %switch_url, "configured NRAS endpoints");
     let jwks = attestation::platforms::nvidia_gpu::jwks_url_for_endpoint(&gpu_url)?;
-    let nras_per_second = Some(config.nras.per_second)
-        .filter(|n| *n > 0)
-        .unwrap_or(100);
     let verifier = Arc::new(attestation::Verifier::new(
-        attestation::Context::new()
-            .with_nras_urls(gpu_url, switch_url)?
-            .with_nras_per_second(nras_per_second),
+        attestation::Context::new().with_nras_urls(gpu_url, switch_url)?,
     ));
 
     // Warm attestation::detect()'s process-lifetime cache before serving, so the
@@ -97,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = attestation::detect();
 
     // Connections, plus vendor sockets, files and stdio, fit the open-files limit.
-    let files = rlimit::increase_nofile_limit(config.server.max_open_files)?;
+    let files = rlimit::increase_nofile_limit(65_536)?;
     anyhow::ensure!(
         config.server.max_connections as u64 + 256 <= files,
         "server.max_connections must be at least 256 below the open-files limit ({files}): \
@@ -108,18 +104,10 @@ async fn main() -> anyhow::Result<()> {
     let (mut warming, now) = (tokio::task::JoinSet::new(), verifier.context().now());
     for url in config.verify.warm.clone() {
         let verifier = verifier.clone();
-        warming.spawn(async move {
-            let _ = verifier.context().store().serve(&url, now).await;
-        });
+        warming.spawn(async move { drop(verifier.context().store().serve(&url, now).await) });
     }
     let nras = verifier.clone();
-    warming.spawn(async move {
-        let _ = nras
-            .context()
-            .store()
-            .get::<attestation::collateral::NrasJwks>(&jwks, now)
-            .await;
-    });
+    warming.spawn(async move { drop(nras.context().store().get::<NrasJwks>(&jwks, now).await) });
     let _ = tokio::time::timeout(Duration::from_secs(10), warming.join_all()).await;
     let admission = Arc::new(attestation_api::admission::Admission::new(&config.verify));
     let state = AppState {
