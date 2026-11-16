@@ -524,6 +524,8 @@ mod native {
     const NEW_PIECES: &str = "too many new pieces from this vendor at once";
     /// At most this many fetches and NRAS POSTs in flight to one vendor host.
     pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
+    /// At most this many callers wait for fetches from one vendor host.
+    pub(crate) const WAITERS_PER_HOST: usize = 256;
 
     /// One vendor host: until when it asked to be left alone, the cold
     /// fetches started in the current second, and its requests in flight.
@@ -533,6 +535,7 @@ mod native {
         second: Option<Instant>,
         cold: u32,
         in_flight: Option<Arc<Semaphore>>,
+        waiting: Option<Arc<Semaphore>>,
     }
 
     /// The vendor host of `url`.
@@ -637,8 +640,17 @@ mod native {
                     }
                 }
                 None => {
-                    // Callers waiting for one fetch hold a host slot each.
-                    let _slot = self.slot(&url)?;
+                    // A current disk copy needs no fetch; callers waiting for
+                    // one hold a waiter slot each.
+                    let on_disk = self
+                        .cached::<C>(&url, id)
+                        .await
+                        .filter(|e| e.dates.current(now));
+                    if let Some(on_disk) = on_disk {
+                        self.mem.insert(url, on_disk.clone()).await;
+                        return Ok((on_disk, Source::Disk));
+                    }
+                    let _waiting = self.slot(&url, true)?;
                     let loaded = self
                         .mem
                         .try_get_with(url.clone(), self.load::<C>(&url, id, now));
@@ -780,19 +792,28 @@ mod native {
             if let Some(left) = paused.and_then(|u| u.checked_duration_since(Instant::now())) {
                 return Err(wait(left.as_secs(), "the vendor asked to wait"));
             }
-            self.slot(url)
+            self.slot(url, false)
         }
 
-        /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] slots, taken by each
-        /// fetch and each caller waiting for one.
-        fn slot(&self, url: &str) -> std::result::Result<Permit, Failure> {
+        /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] fetch slots, or of its
+        /// [`WAITERS_PER_HOST`] slots for callers waiting for a fetch.
+        fn slot(&self, url: &str, waiter: bool) -> std::result::Result<Permit, Failure> {
             let mut hosts = self.lock_hosts();
             let host = hosts.entry(host(url).to_string()).or_default();
-            let slots = host
-                .in_flight
-                .get_or_insert_with(|| Semaphore::new(IN_FLIGHT_PER_HOST).into());
-            let busy = |_| wait(1, "too many requests in flight to this vendor");
-            slots.clone().try_acquire_owned().map_err(busy)
+            let (slots, n, why) = match waiter {
+                true => (
+                    &mut host.waiting,
+                    WAITERS_PER_HOST,
+                    "too many requests waiting for this vendor",
+                ),
+                false => (
+                    &mut host.in_flight,
+                    IN_FLIGHT_PER_HOST,
+                    "too many requests in flight to this vendor",
+                ),
+            };
+            let slots = slots.get_or_insert_with(|| Semaphore::new(n).into());
+            slots.clone().try_acquire_owned().map_err(|_| wait(1, why))
         }
 
         /// Leave `url`'s host alone for `retry_after` seconds (else
@@ -1182,7 +1203,7 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        let gets = (0..20).map(|_| tcb_info(&ctx, NOW));
+        let gets = (0..100).map(|_| tcb_info(&ctx, NOW));
         for doc in futures_util::future::join_all(gets).await {
             assert_eq!(doc.unwrap().0, Some(20));
         }
@@ -1369,26 +1390,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callers_waiting_for_one_hung_piece_take_at_most_the_host_slots() {
+    async fn callers_waiting_for_one_hung_piece_are_bounded_and_a_current_disk_copy_is_served() {
         let v = vendor(
             vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
             Duration::from_secs(60),
         )
         .await;
-        let ctx = Arc::new(ctx(&v));
-        let gets: Vec<_> = (0..100)
+        let dir = tempfile::tempdir().unwrap();
+        let (body, chain) = raw("2026-10-14/td_qe_identity.json", Some(CHAIN));
+        crate::collateral::save_to_cache_dir(
+            dir.path(),
+            &QeIdentity::url(&()),
+            &body,
+            chain.as_deref(),
+        );
+        let ctx = Arc::new(ctx(&v).with_cache_dir(dir.path()));
+        let n = native::WAITERS_PER_HOST + 44;
+        let gets: Vec<_> = (0..n)
             .map(|_| {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { tcb_info(&ctx, NOW).await })
             })
             .collect();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        // One fetch and 32 waiters hold the host's slots; the rest fail at once.
+        // The host's waiter slots are taken; the rest fail at once.
         let refused = gets.iter().filter(|g| g.is_finished()).count();
-        assert_eq!(refused, 100 - native::IN_FLIGHT_PER_HOST + 1);
+        assert_eq!(refused, 44);
         for get in gets.into_iter().filter(|g| g.is_finished()) {
             assert!(get.await.unwrap().unwrap_err().is_retryable());
         }
+        // A current disk copy of a piece from the same host is still served.
+        assert_eq!(qe_identity(&ctx).await.unwrap().1, Source::Disk);
     }
 
     #[tokio::test]

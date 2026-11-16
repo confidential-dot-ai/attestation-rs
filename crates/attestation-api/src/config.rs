@@ -84,18 +84,13 @@ impl Default for VerifyConfig {
     }
 }
 
-/// The collateral every TDX and SNP verification needs, whatever the chip,
-/// and NVIDIA's NRAS key set.
+/// The collateral every TDX and SNP verification needs, whatever the chip.
 fn default_warm() -> Vec<String> {
     use attestation::collateral::{AmdCrl, AmdKey, Collateral, PckCa, PckCrl, QeIdentity, RootCrl};
     use attestation::ProcessorGeneration::{Genoa, Milan, Turin};
     let mut urls = vec![QeIdentity::url(&()), RootCrl::url(&())];
     urls.extend([PckCa::Platform, PckCa::Processor].map(|ca| PckCrl::url(&ca)));
     urls.extend([Milan, Genoa, Turin].map(|g| AmdCrl::url(&(g, AmdKey::Vcek))));
-    let nras = attestation::platforms::nvidia_gpu::provider::NRAS_GPU_URL;
-    urls.extend(attestation::platforms::nvidia_gpu::jwks_url_for_endpoint(
-        nras,
-    ));
     urls
 }
 
