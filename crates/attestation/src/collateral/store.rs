@@ -612,7 +612,8 @@ mod native {
                     Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
-                None if offline => match self.cached::<C>(&url, id).await {
+                None if offline => match self.cached::<C>(&url, id).await.filter(|e| acceptable(e))
+                {
                     Some(on_disk) => {
                         self.mem.insert(url, on_disk.clone()).await;
                         Ok((on_disk, Source::Disk))
@@ -643,12 +644,22 @@ mod native {
             let Ok(runtime) = tokio::runtime::Handle::try_current() else {
                 return false;
             };
-            let flag = entry.refreshing.clone();
-            if !flag.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            /// Clears the flag when the refresh ends, even by a panic.
+            struct Done(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+            if !entry
+                .refreshing
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                let done = Done(entry.refreshing.clone());
                 let (native, url, id) = (self.clone(), url.to_string(), id.clone());
                 runtime.spawn(async move {
-                    native.refresh::<C>(&url, &id, false, now).await;
-                    flag.store(false, std::sync::atomic::Ordering::Release);
+                    let _done = done;
+                    native.refresh::<C>(&url, &id, false, now).await
                 });
             }
             true
@@ -771,7 +782,7 @@ mod native {
             pause.as_secs().max(1)
         }
 
-        /// POST to NRAS within its host's slots; a 429 or 5xx pauses the host.
+        /// POST to NRAS within its host's slots; a 429 or 503 pauses the host.
         #[cfg(feature = "nvidia-gpu")]
         pub(super) async fn nras(&self, request: &NrasRequest) -> Result<Vec<u8>> {
             let refused = |f: Failure| f.into_error("NRAS attestation");
@@ -1483,6 +1494,44 @@ mod tests {
             .unwrap();
         assert_eq!((doc.0, doc.1), (Some(18), Source::Disk));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+        // Offline, an expired disk copy is a miss, and memory keeps nothing.
+        let disk = ctx(&v).with_cache_dir(dir.path());
+        let mut view = disk
+            .store()
+            .view(Vec::new(), &VersionFloors::default(), false);
+        view.offline = true;
+        assert!(view
+            .get::<QeIdentity>(&(), NOW)
+            .await
+            .err()
+            .unwrap()
+            .is_retryable());
+        assert!(!disk.store().holds(&url));
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn only_a_429_or_503_from_nras_pauses_it() {
+        let request = crate::platforms::nvidia_gpu::NrasRequest {
+            nonce: String::new(),
+            evidence_list: Vec::new(),
+            arch: crate::types::NvidiaGpuArch::Hopper,
+            claims_version: "2.0".into(),
+        };
+        for (code, posts) in [(500, 2), (502, 2), (429, 1), (503, 1)] {
+            let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
+            let nras = format!("{}/v3/attest/gpu", v.base);
+            let ctx = Context::new().with_nras_urls(nras.clone(), nras).unwrap();
+            for _ in 0..2 {
+                assert!(ctx
+                    .store()
+                    .nras_attest(&request)
+                    .await
+                    .unwrap_err()
+                    .is_retryable());
+            }
+            assert_eq!(v.hits.load(Ordering::SeqCst), posts, "{code}");
+        }
     }
 
     #[tokio::test]

@@ -458,7 +458,10 @@ impl Vendor {
         match check_status(status.as_u16(), response.headers()) {
             Ok(()) => {}
             Err(mut e) if status.is_server_error() || status.as_u16() == 429 => {
-                e.retry_after.get_or_insert(10);
+                // Only a 429 or 503 pauses NRAS (see `Native::nras`): a 500
+                // can be caused by the evidence.
+                e.retry_after =
+                    matches!(status.as_u16(), 429 | 503).then(|| e.retry_after.unwrap_or(10));
                 return Err(unavailable(e));
             }
             Err(_) => {
