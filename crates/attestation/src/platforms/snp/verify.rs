@@ -1156,7 +1156,9 @@ mod tests {
 
     #[test]
     fn test_asvk_chain_validates() {
-        // The bundled ARK signs itself, its ASK and ASVK: not checked per report.
+        // ARK → ASVK chain should verify for all generations
+        // (We can't do full chain verify without a real VLEK cert, but we can
+        // verify the ARK → ASVK link)
         for gen in [
             ProcessorGeneration::Milan,
             ProcessorGeneration::Genoa,
@@ -1173,6 +1175,7 @@ mod tests {
             (&ark, &asvk)
                 .verify()
                 .unwrap_or_else(|e| panic!("{gen:?} ARK->ASVK verify failed: {e}"));
+            // The bundled ARK and ASK links are not checked per report.
             let ask = Certificate::from_der(super::super::certs::get_ask(gen)).unwrap();
             (&ark, &ark).verify().unwrap();
             (&ark, &ask).verify().unwrap();
