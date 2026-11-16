@@ -1350,6 +1350,14 @@ mod tests {
         *other_root.last_mut().unwrap() ^= 1;
         assert!(chain([&der[0], &der[1], &other_root]).is_err());
         assert!(chain([&der[0], &der[0], &der[2]]).is_err());
+        // The same in a TCB signing chain.
+        let file = include_bytes!("../../../test_data/collateral/2026-10-14/tcb_signing_chain.pem");
+        let signing = parse_pem_to_der(file).unwrap();
+        let signed = |root: &Vec<u8>| {
+            let pems = [&signing[0], root].map(|c| pem::Pem::new("CERTIFICATE", c.clone()));
+            verify_signing_cert_chain(pem::encode_many(&pems).as_bytes(), now(), TCB_SIGNING)
+        };
+        assert!(signed(&signing[1]).is_ok() && signed(&other_root).is_err());
     }
 
     #[test]

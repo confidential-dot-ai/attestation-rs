@@ -1392,12 +1392,12 @@ mod tests {
         // A current disk copy of a piece from the same host is still served.
         assert_eq!(qe_identity(&ctx).await.unwrap().1, Source::Disk);
         // With the host's request slots taken, a fetch is refused unsent.
-        let (native, url) = (ctx.store().native.clone().unwrap(), tcb_info_url());
-        let _taken: Vec<_> = (1..native::IN_FLIGHT_PER_HOST)
+        let (ctx, url) = (self::ctx(&v), tcb_info_url());
+        let native = ctx.store().native.clone().unwrap();
+        let _taken: Vec<_> = (0..native::IN_FLIGHT_PER_HOST)
             .map(|_| native.slot(&url, false).ok().unwrap())
             .collect();
-        let crl = ctx.store().get::<PckCrl>(&PckCa::Platform, NOW).await;
-        assert!(crl.unwrap_err().is_retryable());
+        assert!(tcb_info(&ctx, NOW).await.err().unwrap().is_retryable());
         assert_eq!(v.hits.load(Ordering::SeqCst), 1);
     }
 
