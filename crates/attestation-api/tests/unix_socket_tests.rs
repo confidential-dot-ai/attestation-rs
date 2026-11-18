@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use attestation_api::config::{Config, ServerConfig};
-use attestation_api::server::{bind, build_router, serve};
+use attestation_api::server::{bind, build_router};
 use attestation_api::AppState;
 
 #[tokio::test]
@@ -39,14 +39,20 @@ async fn unix_socket_lifecycle() {
     assert_eq!(mode, 0o660, "socket mode = {mode:o}, want 660");
 
     let state = AppState {
+        admission: Arc::new(attestation_api::admission::Admission::new(&config.verify)),
         config: Arc::new(config),
         token_issuer: None,
         verifier: Arc::new(attestation::Verifier::new(attestation::Context::new())),
     };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve(listener, build_router(state), async {
-        let _ = stopped.await;
-    }));
+    let server = tokio::spawn(listener.serve(
+        build_router(state),
+        16,
+        std::time::Duration::from_secs(10),
+        async {
+            let _ = stopped.await;
+        },
+    ));
 
     let mut stream = UnixStream::connect(&path).await.unwrap();
     stream
@@ -61,7 +67,7 @@ async fn unix_socket_lifecycle() {
     );
 
     stop.send(()).unwrap();
-    server.await.unwrap().unwrap();
+    server.await.unwrap();
     assert!(!path.exists(), "socket file remains after shutdown");
     let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
     assert!(leftovers.is_empty(), "leftover files: {leftovers:?}");

@@ -509,7 +509,7 @@ pub fn verify_vek_validity_period(vek_der: &[u8], now: i64) -> Result<()> {
 }
 
 /// Verify the full endorsement-key policy for an inline VEK against the
-/// bundled AMD roots: the ARK → ASK/ASVK → VEK chain (VLEK auto-detected from
+/// bundled AMD roots: the ASK/ASVK → VEK link (VLEK auto-detected from
 /// the certificate CN), the VEK validity period, and the VEK's chip-id/TCB OID
 /// cross-validation against the report. This is step 6 of
 /// [`Snp::verify`] as one unit, for callers that resolve the VEK
@@ -521,11 +521,15 @@ pub fn verify_vek_endorsement(
     processor_gen: ProcessorGeneration,
     now: i64,
 ) -> Result<()> {
-    verify_cert_chain(
-        super::certs::get_ark(processor_gen),
-        vek_issuer(vek_der, processor_gen)?,
-        vek_der,
-    )?;
+    // The bundled ARK and its ASK/ASVK links are checked by a test, not here.
+    let parse = |der, what| {
+        Certificate::from_der(der)
+            .map_err(|e| AttestationError::CertChainError(format!("{what} parse: {e}")))
+    };
+    let issuer = parse(vek_issuer(vek_der, processor_gen)?, "VEK issuer")?;
+    (&issuer, &parse(vek_der, "VEK")?)
+        .verify()
+        .map_err(|e| AttestationError::CertChainError(format!("VEK signature: {e}")))?;
     verify_vek_validity_period(vek_der, now)?;
     verify_vcek_tcb(report, vek_der, processor_gen)?;
     Ok(())
@@ -1171,6 +1175,10 @@ mod tests {
             (&ark, &asvk)
                 .verify()
                 .unwrap_or_else(|e| panic!("{gen:?} ARK->ASVK verify failed: {e}"));
+            // The bundled ARK and ASK links are not checked per report.
+            let ask = Certificate::from_der(super::super::certs::get_ask(gen)).unwrap();
+            (&ark, &ark).verify().unwrap();
+            (&ark, &ask).verify().unwrap();
         }
     }
 
@@ -1196,6 +1204,28 @@ mod tests {
             .await
             .expect_err("the CRL was needed and is held nowhere");
         assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn an_inline_vek_amd_did_not_sign_or_another_report_is_refused() {
+        let crl = || vec![testing::amd_crl(ProcessorGeneration::Genoa)];
+        let mut forged = LIVE_VCEK_GENOA.to_vec();
+        *forged.last_mut().unwrap() ^= 1;
+        let evidence = make_snp_evidence_with_vcek(LIVE_REPORT_V5, &forged);
+        let params = SnpParams::default();
+        assert!(testing::verify::<Snp>(&evidence, &params, crl())
+            .await
+            .is_err());
+        // Collateral gathered for one report does not vouch for another.
+        let ctx = testing::context(crl());
+        let genuine = make_snp_evidence_with_vcek(LIVE_REPORT_V5, LIVE_VCEK_GENOA);
+        let (set, _) = Snp::gather(&genuine, ctx.store(), testing::NOW)
+            .await
+            .unwrap();
+        let mut other = LIVE_REPORT_V5.to_vec();
+        other[0x50] ^= 1;
+        let other = make_snp_evidence_with_vcek(&other, LIVE_VCEK_GENOA);
+        assert!(Snp::verify(&other, &params, &set, testing::NOW).is_err());
     }
 
     async fn verify(params: &SnpParams) -> Result<SnpResult> {

@@ -49,6 +49,7 @@ pub struct Config {
     pub nras: NrasConfig,
     pub token: TokenConfig,
     pub attestation: AttestationConfig,
+    pub verify: VerifyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +62,48 @@ pub struct ServerConfig {
     /// Group (name or gid) the Unix socket is chgrp'd to; Unix binds only.
     pub socket_group: Option<GroupSpec>,
     pub tls: TlsConfig,
+    pub max_connections: usize,
+}
+
+/// Limits on verification work; see `config.example.toml`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    pub workers: usize,
+    pub queue_per_worker: usize,
+    pub queue_deadline_ms: u64,
+    pub fetch_deadline_ms: u64,
+    pub warm: Vec<String>,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            workers: 0,
+            queue_per_worker: 8,
+            queue_deadline_ms: 50,
+            fetch_deadline_ms: 10_000,
+            warm: default_warm(),
+        }
+    }
+}
+
+/// The collateral every TDX and SNP verification needs, whatever the chip.
+fn default_warm() -> Vec<String> {
+    use attestation::collateral::{AmdCrl, AmdKey, Collateral, PckCa, PckCrl, QeIdentity, RootCrl};
+    use attestation::ProcessorGeneration::{Genoa, Milan, Turin};
+    let mut urls = vec![QeIdentity::url(&()), RootCrl::url(&())];
+    urls.extend([PckCa::Platform, PckCa::Processor].map(|ca| PckCrl::url(&ca)));
+    urls.extend([Milan, Genoa, Turin].map(|g| AmdCrl::url(&(g, AmdKey::Vcek))));
+    urls
+}
+
+impl VerifyConfig {
+    /// Two per vCPU by default, so no vCPU idles between jobs.
+    pub fn workers(&self) -> usize {
+        let vcpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Some(self.workers).filter(|n| *n > 0).unwrap_or(2 * vcpus)
+    }
 }
 
 /// A group given by name or numeric gid.
@@ -305,6 +348,7 @@ impl Default for ServerConfig {
             socket_mode: None,
             socket_group: None,
             tls: TlsConfig::default(),
+            max_connections: 1024,
         }
     }
 }
@@ -390,6 +434,14 @@ impl Config {
             }
         }
 
+        // A queued request must be able to wait out the queue (about 1 ms a job).
+        if self.verify.queue_deadline_ms < self.verify.queue_per_worker.max(1) as u64 {
+            return Err("verify.queue_deadline_ms must be at least queue_per_worker".into());
+        }
+        if self.server.max_connections == 0 {
+            return Err("server.max_connections must be > 0".into());
+        }
+
         for platform in &self.attestation.platforms {
             if normalize_platform(platform).is_none() {
                 return Err(format!(
@@ -451,7 +503,7 @@ mod tests {
             bind: bind.to_string(),
             socket_mode: mode.map(str::to_string),
             socket_group: group,
-            tls: TlsConfig::default(),
+            ..ServerConfig::default()
         };
         let unix = |path: &str, mode: u32, group: Option<u32>| {
             Ok(Bind::Unix {

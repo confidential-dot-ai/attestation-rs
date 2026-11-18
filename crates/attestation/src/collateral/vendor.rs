@@ -423,6 +423,14 @@ impl Nras {
 
 #[cfg(feature = "nvidia-gpu")]
 impl Vendor {
+    /// The NRAS endpoint for `arch`.
+    pub(crate) fn nras_url(&self, arch: crate::types::NvidiaGpuArch) -> &str {
+        match arch {
+            crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
+            _ => &self.nras.gpu_url,
+        }
+    }
+
     /// POST evidence to NRAS. 429 and 5xx are `CollateralUnavailable`; any
     /// other failure status is final.
     pub(crate) async fn nras_attest(
@@ -430,10 +438,7 @@ impl Vendor {
         request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
     ) -> crate::error::Result<Vec<u8>> {
         use crate::error::AttestationError;
-        let url = match request.arch {
-            crate::types::NvidiaGpuArch::Ls10 => &self.nras.switch_url,
-            _ => &self.nras.gpu_url,
-        };
+        let url = self.nras_url(request.arch);
         let mut req = self.client_for(url).post(url).json(request);
         if self.nras.allow_hold_cert {
             req = req.header(
@@ -452,8 +457,12 @@ impl Vendor {
         let status = response.status();
         match check_status(status.as_u16(), response.headers()) {
             Ok(()) => {}
-            Err(e) if status.is_server_error() || status.as_u16() == 429 => {
-                return Err(unavailable(e))
+            Err(mut e) if status.is_server_error() || status.as_u16() == 429 => {
+                // Only a 429 or 503 pauses NRAS (see `Native::nras`): a 500
+                // can be caused by the evidence.
+                e.retry_after =
+                    matches!(status.as_u16(), 429 | 503).then(|| e.retry_after.unwrap_or(10));
+                return Err(unavailable(e));
             }
             Err(_) => {
                 let body = read_body(response).await.unwrap_or_default();

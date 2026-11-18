@@ -16,6 +16,7 @@ complete examples rather than copying obsolete parameter names.
 | `CertProvider`, `DefaultCertProvider`, `TdxCollateralProvider`, static providers | Reusable `Verifier::new(Context)` |
 | `CertFetchError` | `CollateralUnavailable { collateral, retry_after, detail }` |
 | Single digest pins | Nonempty sets: `Vec<[u8; 48]>` |
+| `Collateral` with any bounds | `Collateral: Clone + Send + Sync + 'static`; `Collateral::Id` the same plus `PartialEq` |
 
 Choose platforms explicitly; omitted policies refuse evidence. Use
 [the Rust example](../crates/attestation/README.md#rust-verification) and handle

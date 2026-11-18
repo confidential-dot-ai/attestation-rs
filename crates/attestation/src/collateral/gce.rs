@@ -29,6 +29,9 @@ fn dir(platform: PlatformType) -> &'static str {
 impl Collateral for GceEndorsement {
     /// `GcpTdx` or `GcpSnp`, and the launch measurement.
     type Id = (PlatformType, Vec<u8>);
+    /// Google publishes no endorsement for a measurement it never built: a
+    /// verdict (`endorsement_match: false`), remembered like a refusal.
+    const NAMED_BY_EVIDENCE: bool = true;
 
     fn name((platform, m): &Self::Id) -> String {
         let m = &m[..m.len().min(8)];

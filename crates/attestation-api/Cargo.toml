@@ -23,8 +23,11 @@ attestation = { workspace = true, features = ["attest", "snp", "tdx", "az-snp", 
 # Web framework
 axum = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tower = { workspace = true, features = ["util"] }
-tower-http = { workspace = true, features = ["cors", "trace", "limit", "request-id"] }
+tower = { workspace = true, features = ["util", "timeout"] }
+tower-http = { workspace = true, features = ["cors", "trace", "limit", "request-id", "timeout"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service", "server-graceful", "http1"] }
+rlimit = "0.11"
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
