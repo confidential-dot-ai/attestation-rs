@@ -12,6 +12,7 @@ axum = { workspace = true }
 clap = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+rlimit = "0.11"
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }

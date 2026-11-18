@@ -82,6 +82,16 @@ pub(crate) fn intel() -> Vec<HeldResponse> {
     pieces
 }
 
+/// Intel's collateral on disk, at `now`; the first lookup moves it to memory.
+#[cfg(all(feature = "tdx", not(target_arch = "wasm32")))]
+pub(crate) fn warm_tdx(now: i64) -> Context {
+    let dir = tempfile::tempdir().unwrap().keep();
+    for (url, body, chain) in intel() {
+        crate::collateral::save_to_cache_dir(&dir, &url, &body, chain.as_deref());
+    }
+    Context::offline().with_cache_dir(dir).at(now).unwrap()
+}
+
 /// A context that holds `responses` and nothing else, at [`NOW`].
 pub(crate) fn context(responses: Vec<HeldResponse>) -> Context {
     Context::held(responses).at(NOW).unwrap()

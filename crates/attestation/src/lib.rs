@@ -361,6 +361,26 @@ impl Verifier {
         self.verify_envelope(envelope, policies, &store).await
     }
 
+    /// As [`Self::verify`] with only attached, held or in-memory collateral;
+    /// anything else is [`AttestationError::CollateralUnavailable`]. So is a
+    /// copy that does not pass, unless `keep_failing` (for evidence from
+    /// [`Self::attach_all_collateral`]: as [`Self::verify`] when a refetch
+    /// found nothing better).
+    pub async fn verify_offline(
+        &self,
+        evidence_json: &[u8],
+        policies: &Policies,
+        keep_failing: bool,
+    ) -> Result<Verified> {
+        let envelope = parse_envelope(evidence_json)?;
+        let mut store = self
+            .ctx
+            .store()
+            .view(envelope.held_collateral(), &policies.floors, false);
+        (store.offline, store.keep_failing) = (true, keep_failing);
+        self.verify_envelope(envelope, policies, &store).await
+    }
+
     /// Evidence made here, with the collateral its verifier needs attached:
     /// every piece is gathered through this verifier's store (and checked)
     /// as a verification would. `report_data` is what the evidence was made
@@ -379,6 +399,25 @@ impl Verifier {
         evidence_json: &[u8],
         report_data: &[u8],
     ) -> Result<Vec<u8>> {
+        self.attach(evidence_json, report_data, true).await
+    }
+
+    /// As [`Self::attach_collateral`], but collateral that stays unavailable
+    /// is an error: everything is attached or nothing.
+    pub async fn attach_all_collateral(
+        &self,
+        evidence_json: &[u8],
+        report_data: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.attach(evidence_json, report_data, false).await
+    }
+
+    async fn attach(
+        &self,
+        evidence_json: &[u8],
+        report_data: &[u8],
+        partial: bool,
+    ) -> Result<Vec<u8>> {
         let mut envelope = parse_envelope(evidence_json)?;
         let policies = Policies::all();
         let store = self
@@ -388,7 +427,7 @@ impl Verifier {
         let gathered = self.gather(&envelope, report_data, &policies, &store).await;
         let used = match gathered {
             Ok(used) => used,
-            Err(e) if e.is_retryable() => {
+            Err(e) if partial && e.is_retryable() => {
                 log::warn!("attaching the collateral it got: {e}");
                 #[allow(unused_mut)]
                 let mut used = store.used();
@@ -592,9 +631,7 @@ async fn run<P: Platform>(
     let evidence: P::Evidence = serde_json::from_value(evidence)
         .map_err(|e| AttestationError::EvidenceDeserialize(e.to_string()))?;
     P::validate(params)?;
-    let (collateral, used) = P::gather(&evidence, store, now).await?;
-    let result = P::verify(&evidence, params, &collateral, now)?;
-    Ok((result, used))
+    P::gather_and_verify(&evidence, params, store, now).await
 }
 
 impl Default for Verifier {
@@ -623,6 +660,7 @@ pub async fn verify(evidence_json: &[u8], policies: &Policies) -> Result<Verifie
 mod tests {
     use super::*;
     use base64::Engine;
+    use std::sync::Arc;
 
     const V5_QUOTE: &[u8] = include_bytes!("../test_data/tdx_quote_00a06d080000.dat");
 
@@ -647,6 +685,57 @@ mod tests {
 
     fn verifier() -> Verifier {
         Verifier::new(crate::testing::context(crate::testing::intel()))
+    }
+
+    /// Warm, 8 threads: a byte changed in the body, quote signature, key, QE report
+    /// or signature, or PCK leaf fails; so does the quote outside the leaf's dates.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn warm_a_changed_byte_or_another_time_still_fails() {
+        let body_end = 54 + u32::from_le_bytes(V5_QUOTE[50..54].try_into().unwrap()) as usize;
+        let find = |marker: &[u8]| V5_QUOTE.windows(marker.len()).position(|w| w == marker);
+        let leaf = find(b"-----BEGIN CERTIFICATE-----").unwrap() + 28;
+        let leaf_end = find(b"-----END CERTIFICATE-----").unwrap();
+        let (qe, body) = (body_end + 138, 100);
+        let changed = [
+            body,
+            body_end + 4,
+            body_end + 70,
+            qe + 10,
+            qe + 390,
+            leaf + 300,
+            leaf_end - 8,
+        ];
+        let tampered = Arc::new(changed.map(|at| {
+            let mut quote = V5_QUOTE.to_vec();
+            quote[at] ^= if quote[at] == b'A' { 3 } else { 1 };
+            let quote = base64::engine::general_purpose::STANDARD.encode(quote);
+            let evidence = serde_json::json!({ "platform": "tdx", "evidence": { "quote": quote } });
+            serde_json::to_vec(&evidence).unwrap()
+        }));
+        let now = crate::testing::NOW;
+        let verifier = Arc::new(Verifier::new(crate::testing::warm_tdx(now)));
+        let tasks = (0..8).map(|t| {
+            let (verifier, tampered) = (verifier.clone(), tampered.clone());
+            tokio::spawn(async move {
+                let all = Policies::all();
+                for round in 0..50 {
+                    let genuine = verifier.verify_offline(&tdx_envelope(), &all, false).await;
+                    assert!(genuine.unwrap().passed());
+                    let quote = &tampered[(t + round) % tampered.len()];
+                    assert!(verifier.verify_offline(quote, &all, false).await.is_err());
+                }
+            })
+        });
+        for task in futures_util::future::join_all(tasks).await {
+            task.unwrap();
+        }
+        for at in [4_102_444_800, 1_000_000_000] {
+            let other_time = Verifier::new(crate::testing::warm_tdx(at));
+            let err = other_time
+                .verify_offline(&tdx_envelope(), &Policies::all(), false)
+                .await;
+            assert!(matches!(err, Err(AttestationError::CertChainError(_))));
+        }
     }
 
     #[tokio::test]

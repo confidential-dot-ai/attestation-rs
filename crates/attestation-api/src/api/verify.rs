@@ -3,6 +3,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::config::{normalize_platform, AttestationConfig};
 use crate::error::ApiError;
@@ -110,26 +111,54 @@ pub async fn handler(
         req.collateral,
     )?;
 
-    let result = state.verifier.verify(&evidence_json, &req.policies).await?;
+    // Verify offline on a worker. If collateral (or an NRAS answer) is
+    // missing, fetch all of it once, then verify again offline.
+    let nonce = Vec::from(req.policies.report_data(platform).unwrap_or_default());
+    let (policies, token) = (Arc::new(req.policies), req.issue_token);
+    let job = |evidence: Arc<Vec<u8>>, fetched: bool| {
+        let (state, policies) = (state.clone(), policies.clone());
+        let runtime = tokio::runtime::Handle::current();
+        move || runtime.block_on(verify(&state, &evidence, &policies, token, fetched))
+    };
+    let evidence = Arc::new(evidence_json);
+    match state.admission.run(job(evidence.clone(), false)).await? {
+        Err(ApiError::Verification(e)) if e.is_retryable() => {}
+        answer => return answer.map(Json),
+    }
+    let fetch = state.admission.fetch(&state.verifier, &evidence, nonce);
+    let attached = Arc::new(fetch.await?);
+    state.admission.run(job(attached, true)).await?.map(Json)
+}
+
+/// Verify, and sign a token for a passing result when asked.
+async fn verify(
+    state: &AppState,
+    evidence: &[u8],
+    policies: &attestation::Policies,
+    issue_token: bool,
+    fetched: bool,
+) -> Result<VerifyResponse, ApiError> {
+    let result = state.verifier.verify_offline(evidence, policies, fetched);
+    let result = result.await?;
     let passed = PassedVerification::new(&result);
 
     let token = match &passed {
-        Some(passed) if req.issue_token => {
+        Some(passed) if issue_token => {
             let issuer = state
                 .token_issuer
                 .as_ref()
                 .ok_or(ApiError::TokenNotConfigured)?;
-            Some(issuer.issue(passed, &req.policies)?)
+            Some(issuer.issue(passed, policies)?)
         }
         _ => None,
     };
     let passed = passed.is_some();
 
-    Ok(Json(VerifyResponse {
+    Ok(VerifyResponse {
         result,
         passed,
         token,
-    }))
+    })
 }
 
 /// Params below the server's floors are refused unless its config allows

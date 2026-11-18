@@ -262,8 +262,10 @@ pub fn verify_pck_cert_chain(pem_data: &[u8], now: i64) -> Result<VerifyingKey> 
         ));
     }
 
-    // Step 2: Verify Root CA self-signature
-    verify_cert_signature(&root_cert, &root_pub_key, "Root CA self-signature")?;
+    // Step 2: Verify Root CA self-signature (a test checks the bundled one)
+    if der_certs[2] != INTEL_SGX_ROOT_CA {
+        verify_cert_signature(&root_cert, &root_pub_key, "Root CA self-signature")?;
+    }
 
     // Step 3: Verify Intermediate is signed by Root CA
     let intermediate_pub_key =
@@ -331,12 +333,10 @@ pub fn verify_signing_cert_chain(pem_data: &[u8], now: i64, signer: &str) -> Res
         ));
     }
 
-    // Verify Root CA self-signature
-    verify_cert_signature(
-        &root_cert,
-        &root_pub_key,
-        "signing chain Root CA self-signature",
-    )?;
+    // Verify Root CA self-signature (a test checks the bundled one)
+    if der_certs[1] != INTEL_SGX_ROOT_CA {
+        verify_cert_signature(&root_cert, &root_pub_key, "signing chain Root CA")?;
+    }
 
     // Verify signing cert is signed by Root CA
     verify_cert_signature(&signing_cert, &root_pub_key, "TCB Signing cert")?;
@@ -994,14 +994,14 @@ struct EnclaveIdentityFields {
     tcb_levels: Vec<QeIdentityTcbLevel>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QeIdentityTcbLevel {
     tcb: QeIdentityTcb,
     tcb_status: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct QeIdentityTcb {
     isvsvn: u16,
 }
@@ -1015,7 +1015,7 @@ const QE_ISVPRODID_OFFSET: usize = 256;
 const QE_ISVSVN_OFFSET: usize = 258;
 
 /// Intel's published QE Identity, signature-checked and decoded.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QeIdentity {
     mrsigner: Vec<u8>,
     isvprodid: u16,
@@ -1330,6 +1330,34 @@ mod tests {
             .pread_with::<u32>(QUOTE_HEADER_SIZE + 2, scroll::LE)
             .unwrap() as usize;
         QUOTE_HEADER_SIZE + 6 + body_size
+    }
+
+    #[test]
+    fn the_bundled_root_signs_itself_and_any_other_root_is_checked() {
+        let root = parse_x509_cert(INTEL_SGX_ROOT_CA, "root").unwrap();
+        let key = extract_p256_pub_key(&root.pub_key_bytes, "root").unwrap();
+        verify_cert_signature(&root, &key, "root").unwrap();
+        let auth = parse_auth_data(V5_QUOTE, body_end_v5()).unwrap();
+        let der = parse_pem_to_der(auth.pck_cert_chain_pem).unwrap();
+        assert_eq!(der[2], INTEL_SGX_ROOT_CA);
+        let chain = |certs: [&Vec<u8>; 3]| {
+            let pems = certs.map(|c| pem::Pem::new("CERTIFICATE", c.clone()));
+            verify_pck_cert_chain(pem::encode_many(&pems).as_bytes(), now())
+        };
+        assert!(chain([&der[0], &der[1], &der[2]]).is_ok());
+        // The root's key with another signature; a leaf as its own issuer.
+        let mut other_root = der[2].clone();
+        *other_root.last_mut().unwrap() ^= 1;
+        assert!(chain([&der[0], &der[1], &other_root]).is_err());
+        assert!(chain([&der[0], &der[0], &der[2]]).is_err());
+        // The same in a TCB signing chain.
+        let file = include_bytes!("../../../test_data/collateral/2026-10-14/tcb_signing_chain.pem");
+        let signing = parse_pem_to_der(file).unwrap();
+        let signed = |root: &Vec<u8>| {
+            let pems = [&signing[0], root].map(|c| pem::Pem::new("CERTIFICATE", c.clone()));
+            verify_signing_cert_chain(pem::encode_many(&pems).as_bytes(), now(), TCB_SIGNING)
+        };
+        assert!(signed(&signing[1]).is_ok() && signed(&other_root).is_err());
     }
 
     #[test]

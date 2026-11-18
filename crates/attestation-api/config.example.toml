@@ -3,6 +3,16 @@
 # front of the service: loopback for a sidecar, or an address only the
 # terminator can reach for an ingress. Never expose this listener directly.
 bind = "127.0.0.1:8400"
+max_connections = 1024            # More wait in the backlog; bodies: at most 1 MiB each
+
+[verify]
+workers = 0                       # 0 = two per vCPU
+queue_per_worker = 8
+queue_deadline_ms = 50            # Waiting longer for a worker: 503
+fetch_deadline_ms = 10000         # Fetching missing collateral longer: 502
+# Collateral URLs fetched before serving, with the [nras] key set (default:
+# Intel's QE Identity and CRLs, AMD's CRLs); add each fleet FMSPC's TCB Info URL.
+# warm = [...]
 
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.

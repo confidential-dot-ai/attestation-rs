@@ -26,6 +26,9 @@ pub enum ApiError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("overloaded, retry later")]
+    Overloaded,
 }
 
 /// The longest wait passed on to callers, whatever the vendor asked for.
@@ -66,6 +69,7 @@ impl IntoResponse for ApiError {
             },
             ApiError::TokenNotConfigured => (StatusCode::BAD_REQUEST, "token_not_configured"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            ApiError::Overloaded => (StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
         };
 
         let message = match &self {
@@ -82,7 +86,10 @@ impl IntoResponse for ApiError {
         };
 
         let retry_after = match &self {
-            ApiError::Verification(inner) => inner.retry_after().map(|s| s.min(MAX_RETRY_AFTER)),
+            ApiError::Verification(inner) if inner.is_retryable() => {
+                Some(inner.retry_after().unwrap_or(1).min(MAX_RETRY_AFTER))
+            }
+            ApiError::Overloaded => Some(1),
             _ => None,
         };
         let body = ErrorBody {
@@ -121,7 +128,7 @@ mod tests {
         .into_response();
 
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        assert!(resp.headers().get("retry-after").is_none());
+        assert_eq!(resp.headers()["retry-after"], "1");
         assert_eq!(error_key(resp).await, "collateral_unavailable");
     }
 

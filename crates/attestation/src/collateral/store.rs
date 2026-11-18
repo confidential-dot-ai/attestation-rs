@@ -6,7 +6,9 @@
 //! by the vendor URL. In memory a piece is kept until a newer valid copy
 //! replaces it; a failed refetch keeps the old copy.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -99,10 +101,14 @@ struct Entry {
     issuer_chain: Option<String>,
     dates: Dates,
     origin: Source,
+    /// `(id, piece)`: what `body` verified as, and for which id.
+    parsed: Arc<dyn Any + Send + Sync>,
     /// When to ask the upstream for a newer copy (Unix seconds).
     refresh_at: i64,
     #[cfg(not(target_arch = "wasm32"))]
     checked_at: std::time::Instant,
+    /// A background refresh of this copy is running.
+    refreshing: Arc<AtomicBool>,
 }
 
 /// A random time in the last quarter of the window of a piece, and at least
@@ -160,18 +166,28 @@ fn check<C: Collateral>(
     issuer_chain: Option<String>,
     origin: Source,
 ) -> std::result::Result<Entry, Failure> {
-    let dates = C::verify(&body, issuer_chain.as_deref(), id)
-        .map_err(Failure::refused)?
-        .dates();
+    let piece = C::verify(&body, issuer_chain.as_deref(), id).map_err(Failure::refused)?;
+    let dates = piece.dates();
     Ok(Entry {
         body,
         issuer_chain,
         refresh_at: refresh_at(&dates),
         dates,
         origin,
+        parsed: Arc::new((id.clone(), piece)),
+        refreshing: Arc::default(),
         #[cfg(not(target_arch = "wasm32"))]
         checked_at: std::time::Instant::now(),
     })
+}
+
+/// The piece `entry` holds: as verified when stored if for this type and id,
+/// else verified now (`Collateral::verify` is pure in body, chain and id).
+fn piece<C: Collateral>(entry: &Entry, id: &C::Id) -> std::result::Result<C, Failure> {
+    match entry.parsed.downcast_ref::<(C::Id, C)>() {
+        Some((verified_for, piece)) if verified_for == id => Ok(piece.clone()),
+        _ => C::verify(&entry.body, entry.issuer_chain.as_deref(), id).map_err(Failure::refused),
+    }
 }
 
 /// Vendor responses by URL: body and issuer chain.
@@ -188,6 +204,10 @@ pub struct Store {
     floors: VersionFloors,
     /// When set, every response a lookup used, each once.
     used: Option<Arc<Mutex<Vec<HeldResponse>>>>,
+    /// Use only held, attached or in-memory pieces; never wait for a vendor.
+    pub(crate) offline: bool,
+    /// Offline, a copy that does not pass is kept rather than a miss.
+    pub(crate) keep_failing: bool,
     #[cfg(not(target_arch = "wasm32"))]
     native: Option<Arc<native::Native>>,
 }
@@ -201,6 +221,8 @@ impl Store {
             missing: Arc::default(),
             floors: VersionFloors::default(),
             used: None,
+            offline: false,
+            keep_failing: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: None,
         }
@@ -223,6 +245,8 @@ impl Store {
             missing: self.missing.clone(),
             floors: floors.clone(),
             used: record.then(Arc::default),
+            offline: false,
+            keep_failing: false,
             #[cfg(not(target_arch = "wasm32"))]
             native: self.native.clone(),
         }
@@ -288,6 +312,7 @@ impl Store {
         match self.lookup(id, now).await {
             Ok(got) => Ok(Some(got)),
             Err(Failure::Unavailable(e)) if e.not_found() => Ok(None),
+            Err(Failure::NotPublished(_)) => Ok(None),
             Err(e) => Err(e.into_error(&C::name(id))),
         }
     }
@@ -318,18 +343,18 @@ impl Store {
         // the fallback may have better. A held-only store lists the URL as
         // missing, so the caller can fetch it.
         if best.as_ref().is_none_or(|(p, ..)| !acceptable(p)) {
-            match self.load::<C>(url.clone(), id, now).await {
+            match self.load::<C>(url.clone(), id, now, floor).await {
                 Ok((entry, from)) => {
                     if best
                         .as_ref()
                         .is_none_or(|(b, ..)| !b.dates().not_older_than(&entry.dates))
                     {
-                        let piece = C::verify(&entry.body, entry.issuer_chain.as_deref(), id)
-                            .map_err(Failure::refused)?;
+                        let piece = piece::<C>(&entry, id)?;
                         best = Some((piece, entry.body, entry.issuer_chain, from));
                     }
                 }
-                Err(e) if best.is_none() => return Err(e),
+                // Offline, a copy that does not pass is a miss, as online it is refetched.
+                Err(e) if best.is_none() || (self.offline && !self.keep_failing) => return Err(e),
                 // The kept copy already verified; it just does not pass.
                 Err(_) => {}
             }
@@ -371,10 +396,11 @@ impl Store {
         url: String,
         id: &C::Id,
         now: i64,
+        floor: Option<u64>,
     ) -> std::result::Result<(Entry, Source), Failure> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(native) = &self.native {
-            return native.entry::<C>(url, id, now).await;
+            return native.entry::<C>(url, id, now, floor, self.offline).await;
         }
         let mut missing = self.missing.lock().unwrap_or_else(|e| e.into_inner());
         if !missing.contains(&url) {
@@ -403,7 +429,7 @@ impl Store {
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     pub async fn refresh<C: Collateral>(&self, id: &C::Id, now: i64) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(native) = &self.native {
+        if let Some(native) = self.native.as_ref().filter(|_| !self.offline) {
             let url = C::url(id);
             if native.mem.contains_key(&url) {
                 let (_, _, failure) = native.refresh::<C>(&url, id, true, now).await;
@@ -436,6 +462,26 @@ impl Store {
         self.native.as_ref()?.vendor.as_ref()
     }
 
+    /// NRAS's answer for `request`, asked now unless offline.
+    #[cfg(feature = "nvidia-gpu")]
+    pub(crate) async fn nras_attest(
+        &self,
+        request: &crate::platforms::nvidia_gpu::provider::NrasRequest,
+    ) -> Result<Vec<u8>> {
+        match self.native.as_ref().filter(|_| !self.offline) {
+            Some(native) => native.nras(request).await,
+            None => Err(Unavailable::offline().into_error("NRAS attestation")),
+        }
+    }
+
+    /// Keep `response` in memory as the vendor's answer for `id`.
+    #[cfg(all(test, feature = "tdx"))]
+    pub(crate) async fn keep<C: Collateral>(&self, id: &C::Id, response: HeldResponse) {
+        let (url, body, chain) = response;
+        let entry = check::<C>(id, body, chain, Source::Vendor).ok().unwrap();
+        self.native.as_ref().unwrap().mem.insert(url, entry).await;
+    }
+
     /// Whether the piece at vendor `url` is in memory.
     pub fn holds(&self, url: &str) -> bool {
         self.native
@@ -451,9 +497,14 @@ impl Store {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     use moka::ops::compute::Op;
+    use tokio::sync::{OwnedSemaphorePermit as Permit, Semaphore};
+
+    #[cfg(feature = "nvidia-gpu")]
+    use crate::platforms::nvidia_gpu::provider::NrasRequest;
 
     use super::*;
     use crate::collateral::disk::Disk;
@@ -470,14 +521,22 @@ mod native {
     /// At most this many pieces not held anywhere are fetched from one
     /// vendor host per second.
     pub(crate) const COLD_PER_SECOND: u32 = 10;
+    /// At most this many fetches and NRAS POSTs in flight to one vendor host.
+    pub(crate) const IN_FLIGHT_PER_HOST: usize = 32;
+    /// At most this many callers wait for fetches from one vendor host.
+    pub(crate) const WAITERS_PER_HOST: usize = 256;
+    /// At most this many NRAS POSTs a second to one NRAS host.
+    pub(crate) const NRAS_PER_SECOND: u32 = 100;
 
-    /// One vendor host: until when it asked to be left alone, and the cold
-    /// fetches started in the current second.
+    /// One vendor host: until when it asked to be left alone, the cold
+    /// fetches started in the current second, and its requests in flight.
     #[derive(Default)]
     struct Host {
         paused_until: Option<Instant>,
         second: Option<Instant>,
         cold: u32,
+        in_flight: Option<Arc<Semaphore>>,
+        waiting: Option<Arc<Semaphore>>,
     }
 
     /// The vendor host of `url`.
@@ -532,14 +591,27 @@ mod native {
                     })
         }
 
+        /// The copy in memory (an acceptable one even when due, refreshing it in
+        /// the background), else a fetched one unless `offline`.
         pub(super) async fn entry<C: Collateral>(
-            &self,
+            self: &Arc<Self>,
             url: String,
             id: &C::Id,
             now: i64,
+            floor: Option<u64>,
+            offline: bool,
         ) -> std::result::Result<(Entry, Source), Failure> {
+            let acceptable = |e: &Entry| {
+                CollateralUsed::new(String::new(), Source::Memory, e.dates, floor, now).acceptable()
+            };
             match self.mem.get(&url).await {
                 Some(entry) if self.due(&entry, now, false) => {
+                    if acceptable(&entry) && self.refresh_later::<C>(&entry, &url, id, now) {
+                        return Ok((entry, Source::Memory));
+                    }
+                    if offline {
+                        return Err(Failure::Unavailable(Unavailable::offline()));
+                    }
                     let (held, replaced, _) = self.refresh::<C>(&url, id, false, now).await;
                     let held = held.unwrap_or(entry);
                     let source = if replaced {
@@ -550,16 +622,63 @@ mod native {
                     Ok((held, source))
                 }
                 Some(entry) => Ok((entry, Source::Memory)),
-                None => self
-                    .mem
-                    .try_get_with(url.clone(), self.load::<C>(&url, id, now))
-                    .await
-                    .map(|e| {
-                        let origin = e.origin;
-                        (e, origin)
-                    })
-                    .map_err(|e| (*e).clone()),
+                None => {
+                    // What the vendor answered "not published" for stays so offline.
+                    if let Some((at, f @ Failure::NotPublished(_))) = self.failed.get(&url).await {
+                        if offline && at.elapsed() < self.recheck {
+                            return Err(f);
+                        }
+                    }
+                    // A disk copy that passes (offline) or is current needs no fetch.
+                    let fits =
+                        |e: &Entry| offline && acceptable(e) || !offline && e.dates.current(now);
+                    if let Some(on_disk) = self.cached::<C>(&url, id).await.filter(fits) {
+                        self.mem.insert(url, on_disk.clone()).await;
+                        return Ok((on_disk, Source::Disk));
+                    }
+                    if offline {
+                        return Err(Failure::Unavailable(Unavailable::offline()));
+                    }
+                    let _waiting = self.slot(&url, true)?;
+                    let loaded = self
+                        .mem
+                        .try_get_with(url.clone(), self.load::<C>(&url, id, now));
+                    loaded
+                        .await
+                        .map(|e| (e.clone(), e.origin))
+                        .map_err(|e| (*e).clone())
+                }
             }
+        }
+
+        /// Refresh `entry` at `url` in the background, once at a time, if
+        /// there is a runtime. True when a refresh is running.
+        fn refresh_later<C: Collateral>(
+            self: &Arc<Self>,
+            entry: &Entry,
+            url: &str,
+            id: &C::Id,
+            now: i64,
+        ) -> bool {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                return false;
+            };
+            /// Clears the flag when the refresh ends, even by a panic.
+            struct Done(Arc<AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            if !entry.refreshing.swap(true, Ordering::AcqRel) {
+                let done = Done(entry.refreshing.clone());
+                let (native, url, id) = (self.clone(), url.to_string(), id.clone());
+                runtime.spawn(async move {
+                    let _done = done;
+                    native.refresh::<C>(&url, &id, false, now).await
+                });
+            }
+            true
         }
 
         /// The copy in memory, else a valid copy on disk; nothing fetched.
@@ -594,30 +713,16 @@ mod native {
                     return Err(failure);
                 }
             }
-            if let Some(until) = self
-                .lock_hosts()
-                .get(host(url))
-                .and_then(|h| h.paused_until)
-            {
-                if let Some(left) = until.checked_duration_since(Instant::now()) {
-                    return Err(wait(left.as_secs(), "the vendor asked to wait"));
-                }
-            }
+            let _slot = self.admit(url)?;
             if cold {
-                self.admit_cold(url)?;
+                let why = "too many new pieces from this vendor at once";
+                self.admit_cold(host(url), COLD_PER_SECOND, why)?;
             }
             let (direct, mut fetched) = Box::pin(vendor.fetch(url)).await;
             if let Err(e) = &mut fetched {
                 if direct && matches!(e.status, Some(429 | 503)) {
-                    let pause = self.recheck.min(
-                        e.retry_after
-                            .map_or(HOST_PAUSE, |s| Duration::from_secs(s.max(1))),
-                    );
-                    self.lock_hosts()
-                        .entry(host(url).to_string())
-                        .or_default()
-                        .paused_until = Some(Instant::now() + pause);
-                    e.retry_after.get_or_insert(pause.as_secs().max(1));
+                    let pause = self.pause(url, e.retry_after);
+                    e.retry_after.get_or_insert(pause);
                 }
             }
             let (body, chain) = match fetched {
@@ -664,19 +769,80 @@ mod native {
             self.hosts.lock().unwrap_or_else(|e| e.into_inner())
         }
 
-        /// Count a fetch of a piece held nowhere against its vendor host's
-        /// [`COLD_PER_SECOND`].
-        fn admit_cold(&self, url: &str) -> std::result::Result<(), Failure> {
+        /// A request slot for `url`'s host ([`Self::slot`]), unless the host
+        /// asked to be left alone.
+        fn admit(&self, url: &str) -> std::result::Result<Permit, Failure> {
+            let paused = self
+                .lock_hosts()
+                .get(host(url))
+                .and_then(|h| h.paused_until);
+            if let Some(left) = paused.and_then(|u| u.checked_duration_since(Instant::now())) {
+                return Err(wait(left.as_secs(), "the vendor asked to wait"));
+            }
+            self.slot(url, false)
+        }
+
+        /// One of `url`'s host's [`IN_FLIGHT_PER_HOST`] fetch slots, or of its
+        /// [`WAITERS_PER_HOST`] slots for callers waiting for a fetch.
+        pub(super) fn slot(&self, url: &str, waiter: bool) -> std::result::Result<Permit, Failure> {
             let mut hosts = self.lock_hosts();
             let h = hosts.entry(host(url).to_string()).or_default();
+            let (slots, n, why) = match waiter {
+                true => (&mut h.waiting, WAITERS_PER_HOST, "waiting for"),
+                false => (&mut h.in_flight, IN_FLIGHT_PER_HOST, "in flight to"),
+            };
+            let slots = slots.get_or_insert_with(|| Semaphore::new(n).into());
+            let refused = |_| wait(1, &format!("too many requests {why} this vendor"));
+            slots.clone().try_acquire_owned().map_err(refused)
+        }
+
+        /// Leave `url`'s host alone for `retry_after` seconds (else
+        /// [`HOST_PAUSE`]), at most `recheck`. Returns the seconds.
+        fn pause(&self, url: &str, retry_after: Option<u64>) -> u64 {
+            let pause = retry_after.map_or(HOST_PAUSE, |s| Duration::from_secs(s.max(1)));
+            let pause = self.recheck.min(pause);
+            let mut hosts = self.lock_hosts();
+            hosts.entry(host(url).to_string()).or_default().paused_until =
+                Some(Instant::now() + pause);
+            pause.as_secs().max(1)
+        }
+
+        /// POST to NRAS within its host's slots; a 429 or 503 pauses the host.
+        #[cfg(feature = "nvidia-gpu")]
+        pub(super) async fn nras(&self, request: &NrasRequest) -> Result<Vec<u8>> {
+            let refused = |f: Failure| f.into_error("NRAS attestation");
+            let offline = Failure::Unavailable(Unavailable::offline());
+            let vendor = self.vendor.as_ref().ok_or(offline).map_err(refused)?;
+            let url = vendor.nras_url(request.arch);
+            let _slot = self.admit(url).map_err(refused)?;
+            let key = format!("{} NRAS", host(url));
+            let why = "too many NRAS requests this second";
+            self.admit_cold(&key, NRAS_PER_SECOND, why)
+                .map_err(refused)?;
+            let answer = vendor.nras_attest(request).await;
+            if let Err(AttestationError::CollateralUnavailable {
+                retry_after: Some(s),
+                ..
+            }) = &answer
+            {
+                self.pause(url, Some(*s));
+            }
+            answer
+        }
+
+        /// Count a fetch of a piece held nowhere, or an NRAS POST, against
+        /// the `limit` per second of its counter `key`; `why` refuses it.
+        fn admit_cold(&self, key: &str, limit: u32, why: &str) -> std::result::Result<(), Failure> {
+            let mut hosts = self.lock_hosts();
+            let h = hosts.entry(key.to_string()).or_default();
             if h.second
                 .is_none_or(|s| s.elapsed() >= Duration::from_secs(1))
             {
                 h.second = Some(Instant::now());
                 h.cold = 0;
             }
-            if h.cold >= COLD_PER_SECOND {
-                return Err(wait(1, "too many new pieces from this vendor at once"));
+            if h.cold >= limit {
+                return Err(wait(1, why));
             }
             h.cold += 1;
             Ok(())
@@ -1012,7 +1178,7 @@ mod tests {
         )
         .await;
         let ctx = ctx(&v);
-        let gets = (0..20).map(|_| tcb_info(&ctx, NOW));
+        let gets = (0..100).map(|_| tcb_info(&ctx, NOW));
         for doc in futures_util::future::join_all(gets).await {
             assert_eq!(doc.unwrap().0, Some(20));
         }
@@ -1199,6 +1365,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callers_waiting_for_one_hung_piece_are_bounded_and_a_current_disk_copy_is_served() {
+        let v = vendor(
+            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
+            Duration::from_secs(60),
+        )
+        .await;
+        let (dir, url) = (tempfile::tempdir().unwrap(), QeIdentity::url(&()));
+        let (body, chain) = raw("2026-10-14/td_qe_identity.json", Some(CHAIN));
+        crate::collateral::save_to_cache_dir(dir.path(), &url, &body, chain.as_deref());
+        let ctx = Arc::new(ctx(&v).with_cache_dir(dir.path()));
+        let n = native::WAITERS_PER_HOST + 44;
+        let gets: Vec<_> = (0..n)
+            .map(|_| {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { tcb_info(&ctx, NOW).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The host's waiter slots are taken; the rest fail at once.
+        let refused = gets.iter().filter(|g| g.is_finished()).count();
+        assert_eq!(refused, 44);
+        for get in gets.into_iter().filter(|g| g.is_finished()) {
+            assert!(get.await.unwrap().unwrap_err().is_retryable());
+        }
+        // A current disk copy of a piece from the same host is still served.
+        assert_eq!(qe_identity(&ctx).await.unwrap().1, Source::Disk);
+        // With the host's request slots taken, a fetch is refused unsent.
+        let (ctx, url) = (self::ctx(&v), tcb_info_url());
+        let native = ctx.store().native.clone().unwrap();
+        let _taken: Vec<_> = (0..native::IN_FLIGHT_PER_HOST)
+            .map(|_| native.slot(&url, false).ok().unwrap())
+            .collect();
+        assert!(tcb_info(&ctx, NOW).await.err().unwrap().is_retryable());
+        assert_eq!(v.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn attaching_keeps_partial_collateral_after_the_vendor_retry() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let quote = std::fs::read(concat!(
@@ -1354,13 +1557,64 @@ mod tests {
             .unwrap();
         assert_eq!((doc.0, doc.1), (Some(18), Source::Disk));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+        // Offline, an expired disk copy is a miss, and memory keeps nothing.
+        let disk = ctx(&v).with_cache_dir(dir.path());
+        let store = disk.store();
+        let mut view = store.view(Vec::new(), &VersionFloors::default(), false);
+        view.offline = true;
+        let missed = view.get::<QeIdentity>(&(), NOW).await.err().unwrap();
+        assert!(missed.is_retryable() && !store.holds(&url));
+    }
+
+    #[cfg(feature = "nvidia-gpu")]
+    #[tokio::test]
+    async fn only_a_429_or_503_pauses_nras_and_posts_per_second_are_capped() {
+        let request = crate::platforms::nvidia_gpu::NrasRequest {
+            nonce: String::new(),
+            evidence_list: Vec::new(),
+            arch: crate::types::NvidiaGpuArch::Hopper,
+            claims_version: "2.0".into(),
+        };
+        let nras = |v: &Vendor| {
+            let url = format!("{}/v3/attest/gpu", v.base);
+            Context::new().with_nras_urls(url.clone(), url).unwrap()
+        };
+        // Two POSTs each: a pause stops the second.
+        for (code, posts) in [(500, 2), (502, 2), (429, 1), (503, 1)] {
+            let v = vendor(vec![status(code, vec![])], Duration::ZERO).await;
+            let ctx = nras(&v);
+            for _ in 0..2 {
+                let refused = ctx.store().nras_attest(&request).await.unwrap_err();
+                assert!(refused.is_retryable());
+            }
+            assert_eq!(v.hits.load(Ordering::SeqCst), posts, "{code}");
+        }
+        // POSTs past NRAS_PER_SECOND are not sent. They count against NRAS's
+        // own budget, not the new pieces a second: the key set is still fetched.
+        let (jwks, _) = raw("2026-10-14/nras_jwks.json", None);
+        let per_second = native::NRAS_PER_SECOND as usize;
+        let mut replies = vec![(200, vec![], b"[]".to_vec()); per_second];
+        replies.push((200, vec![], jwks));
+        let v = vendor(replies, Duration::ZERO).await;
+        let ctx = nras(&v);
+        for _ in 0..per_second {
+            ctx.store().nras_attest(&request).await.unwrap();
+        }
+        assert!(ctx.store().nras_attest(&request).await.is_err());
+        assert_eq!(v.hits.load(Ordering::SeqCst), per_second);
+        let url = ctx.store().nras_jwks_url().unwrap();
+        let jwks = ctx.store().get::<crate::collateral::NrasJwks>(&url, NOW);
+        assert!(jwks.await.is_ok());
     }
 
     #[tokio::test]
-    async fn callers_of_a_piece_due_for_refresh_wait_for_one_fetch() {
+    async fn a_piece_due_for_refresh_is_served_while_one_refresh_runs() {
         let v = vendor(
-            vec![pcs("2026-10-14/tcb_info_70a06d070000.json")],
-            Duration::from_millis(200),
+            vec![
+                pcs("2026-10-14/tcb_info_70a06d070000.json"),
+                pcs("2026-10-14/tcb_info_70a06d070000_early.json"),
+            ],
+            Duration::from_millis(500),
         )
         .await;
         let ctx = Context::new()
@@ -1368,14 +1622,34 @@ mod tests {
             .with_recheck(Duration::from_secs(2));
         tcb_info(&ctx, NOW).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        // A day before nextUpdate: due for refresh.
+        // A day before nextUpdate: due for refresh, still current.
         let (info, _) = ctx.store().get::<TcbInfo>(&FMSPC, NOW).await.unwrap();
         let ending = info.next_update - 3600;
+        let start = Instant::now();
         let gets = (0..20).map(|_| tcb_info(&ctx, ending));
         for doc in futures_util::future::join_all(gets).await {
-            doc.unwrap();
+            assert_eq!(doc.unwrap(), (Some(20), Source::Memory));
         }
+        assert!(start.elapsed() < Duration::from_millis(200));
+        let metrics = tokio::runtime::Handle::current().metrics();
+        assert!(metrics.num_alive_tasks() < 10, "one refresh task");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(tcb_info(&ctx, ending).await.unwrap().0, Some(22));
         assert_eq!(v.hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_piece_in_memory_is_reused_only_for_the_id_it_was_verified_for() {
+        let other = [0, 0xa0, 0x6d, 0x08, 0, 0];
+        let ctx = Context::offline();
+        let store = ctx.store();
+        // The piece for FMSPC at its own URL, and at the URL of `other`.
+        for url in [tcb_info_url(), TcbInfo::url(&other)] {
+            let (body, chain) = raw("2026-10-14/tcb_info_70a06d070000.json", Some(CHAIN));
+            store.keep::<TcbInfo>(&FMSPC, (url, body, chain)).await;
+        }
+        assert_eq!(tcb_info(&ctx, NOW).await.unwrap().1, Source::Memory);
+        assert!(store.get::<TcbInfo>(&other, NOW).await.is_err());
     }
 
     #[tokio::test]
@@ -1478,6 +1752,11 @@ mod tests {
         let (_, used) = view.get::<QeIdentity>(&(), NOW).await.unwrap();
         assert_eq!((used.version, used.from), (Some(18), Source::Attached));
         assert!(!used.acceptable());
+        // Offline, it is a miss, which online is refetched.
+        let mut view = ctx(&v).store().view(attached(), &floors, false);
+        view.offline = true;
+        let missed = view.get::<QeIdentity>(&(), NOW).await.err().unwrap();
+        assert!(missed.is_retryable());
     }
 
     #[tokio::test]

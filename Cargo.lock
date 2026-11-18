@@ -187,9 +187,12 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "hex",
+ "hyper",
+ "hyper-util",
  "p256",
  "rand 0.8.6",
  "reqwest",
+ "rlimit",
  "serde",
  "serde_json",
  "sha2",
@@ -216,6 +219,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "reqwest",
+ "rlimit",
  "serde",
  "tempfile",
  "tokio",
@@ -2311,6 +2315,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2997,6 +3010,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

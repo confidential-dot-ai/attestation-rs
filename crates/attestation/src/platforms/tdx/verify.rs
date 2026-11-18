@@ -565,8 +565,35 @@ impl Platform for Tdx {
         now: i64,
     ) -> Result<TdxResult> {
         params.validate()?;
-        let quote_bytes = decode_quote(evidence)?;
-        let (quote, mut result) = verify_quote(&quote_bytes, params, now)?;
+        let genuine = genuine_quote(evidence, now)?;
+        Self::verify_genuine(evidence, params, collateral, now, genuine)
+    }
+
+    /// The quote's signature and PCK chain are checked once.
+    async fn gather_and_verify(
+        evidence: &TdxEvidence,
+        params: &TdxParams,
+        store: &Store,
+        now: i64,
+    ) -> Result<(TdxResult, Vec<CollateralUsed>)> {
+        let (quote_bytes, quote) = genuine_quote(evidence, now)?;
+        let (collateral, used) = TdxCollateralSet::gather(&quote_bytes, &quote, store, now).await?;
+        let result = Self::verify_genuine(evidence, params, &collateral, now, (quote_bytes, quote));
+        Ok((result?, used))
+    }
+}
+
+impl Tdx {
+    /// [`Platform::verify`] of what [`genuine_quote`] returned.
+    fn verify_genuine(
+        evidence: &TdxEvidence,
+        params: &TdxParams,
+        collateral: &TdxCollateralSet,
+        now: i64,
+        (quote_bytes, quote): (Vec<u8>, TdxQuote),
+    ) -> Result<TdxResult> {
+        params.validate()?;
+        let mut result = quote_rules(&quote, params);
 
         result.report_data_match = params
             .report_data
@@ -640,13 +667,18 @@ pub(crate) fn verify_quote(
     let quote = parse_tdx_quote(quote_bytes)?;
     verify_quote_signature(quote_bytes, &quote)?;
     super::dcap::verify_dcap_chain(quote_bytes, quote.quote_version, now)?;
+    let result = quote_rules(&quote, params);
+    Ok((quote, result))
+}
 
+/// The params' quote rules on a quote whose signature and chain verified.
+fn quote_rules(quote: &TdxQuote, params: &TdxParams) -> TdxResult {
     let body = &quote.body;
     let compare = |allowed: &Option<Vec<[u8; 48]>>, actual: &[u8; 48]| {
         crate::utils::match_any(actual, allowed.as_deref())
     };
-    let result = TdxResult {
-        claims: extract_claims(&quote),
+    TdxResult {
+        claims: extract_claims(quote),
         report_data_match: None,
         init_data_match: None,
         mrtd_match: compare(&params.mrtd, &body.mr_td),
@@ -661,9 +693,7 @@ pub(crate) fn verify_quote(
         crl_ok: None,
         tcb_status: None,
         tcb_status_accepted: None,
-    };
-
-    Ok((quote, result))
+    }
 }
 
 /// Evaluate Intel's collateral for a genuine quote into `result`: PCK
@@ -774,6 +804,47 @@ mod tests {
             check(&set),
             Err(AttestationError::CertChainError(_))
         ));
+
+        // A CRL listing the PCK leaf and its Platform CA, as the PCK CRL, then
+        // as the Root CRL: crl_ok is false. An unaccepted TCB status fails.
+        let pck = PckChain::of(quote_bytes, &quote).unwrap();
+        let serial = |der: &[u8]| {
+            let (_, cert) = <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(der).unwrap();
+            rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from_slice(cert.raw_serial()),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }
+        };
+        let listing = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2027, 1, 1),
+            crl_number: rcgen::SerialNumber::from(2u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![serial(&pck.der[0]), serial(&pck.der[1])],
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&ca, &key)
+        .unwrap();
+        let result = |set: &TdxCollateralSet, params: &TdxParams| {
+            let mut result = verify_quote(quote_bytes, params, now).unwrap().1;
+            check_collateral(&mut result, quote_bytes, &quote, params, set, now).unwrap();
+            result
+        };
+        let (fresh, _) = TdxCollateralSet::gather(quote_bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
+        let mut params = TdxParams::default();
+        assert_eq!(result(&fresh, &params).crl_ok, Some(true));
+        set.root_crl.der = fresh.root_crl.der.clone();
+        set.pck_crl.der = listing.der().to_vec();
+        assert_eq!(result(&set, &params).crl_ok, Some(false));
+        (set.root_crl.der, set.pck_crl.der) = (listing.der().to_vec(), fresh.pck_crl.der.clone());
+        assert_eq!(result(&set, &params).crl_ok, Some(false));
+        let status = result(&fresh, &params).tcb_status.unwrap().tcb_status;
+        params.accepted_tcb_statuses.retain(|s| *s != status);
+        assert!(!result(&fresh, &params).passed());
     }
 
     // Load real test fixtures at compile time

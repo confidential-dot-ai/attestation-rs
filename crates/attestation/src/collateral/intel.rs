@@ -24,7 +24,7 @@ pub struct TcbInfo {
 }
 
 /// Intel's TD Quoting Enclave identity.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QeIdentity {
     pub identity: dcap::QeIdentity,
     pub issue_date: i64,
