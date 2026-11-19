@@ -107,12 +107,15 @@ jobs:
           [ -e "${{ matrix.tee_dev }}" ] && echo "TEE confirmed: ${{ matrix.tee_dev }} present" \
             || { echo "::error::${{ matrix.tee_dev }} absent — this runner is not the expected ${{ matrix.platform }} TEE"; exit 1; }
 
-      - name: "build deps (root runner pod: libtss2 + tpm2-tools for --features attest)"
+      # The SNP runner pod is root; the bare-metal TDX one runs as the image's
+      # `runner` user with passwordless sudo (confidential-ci #160).
+      - name: "build deps (libtss2 + tpm2-tools for --features attest)"
         run: |
           set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends libtss2-dev tpm2-tools pkg-config build-essential curl ca-certificates git
+          SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo
+          echo "SUDO=$SUDO" >> "$GITHUB_ENV"
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends libtss2-dev tpm2-tools pkg-config build-essential curl ca-certificates git
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -121,8 +124,8 @@ jobs:
       - name: install cargo-nextest
         run: |
           set -euo pipefail
-          mkdir -p /usr/local/bin
-          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors https://get.nexte.st/0.9/linux | tar -xz -C /usr/local/bin cargo-nextest
+          $SUDO mkdir -p /usr/local/bin
+          curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors https://get.nexte.st/0.9/linux | $SUDO tar -xz -C /usr/local/bin cargo-nextest
           cargo-nextest --version
 
       - name: "nextest --features ${{ matrix.features }} (TEE-gated tests run for real, in the guest)"
@@ -134,9 +137,14 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_INCREMENTAL: "0"
         run: |
-          cargo nextest run --workspace --features ${{ matrix.features }} \
-            --run-ignored all -E '${{ matrix.filter }}' \
-            --no-fail-fast --test-threads ${{ matrix.test_threads }}
+          set -euo pipefail
+          suite=(cargo nextest run --workspace --features '${{ matrix.features }}'
+            --run-ignored all -E '${{ matrix.filter }}'
+            --no-fail-fast --test-threads '${{ matrix.test_threads }}')
+          # A non-root runner cannot reach /dev/tdx_guest or the configfs TSM
+          # report dir, so the suite runs as root there.
+          if [ -n "$SUDO" ]; then exec sudo -E env "PATH=$PATH" "${suite[@]}"; fi
+          "${suite[@]}"
 
       - name: Live vendor API attest/verify (SNP; failure blocks this gate)
         if: matrix.platform == 'snp-metal'
