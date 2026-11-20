@@ -4,8 +4,10 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::Request;
 use axum::routing::{get, post};
 use axum::{middleware, Router};
-use std::net::SocketAddr;
+use std::future::Future;
+use std::io;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
@@ -18,9 +20,13 @@ use tracing::Level;
 use uuid::Uuid;
 
 use crate::api;
+use crate::config::Bind;
 use crate::error::ApiError;
 use crate::middleware as mw;
 use crate::AppState;
+
+#[cfg(unix)]
+mod unix;
 
 /// Maximum request body size (1 MiB).
 const MAX_BODY_SIZE: usize = 1024 * 1024;
@@ -110,8 +116,80 @@ pub fn build_router(state: AppState) -> Router {
     }
 }
 
-pub async fn run(state: AppState) -> anyhow::Result<()> {
-    let addr: SocketAddr = state.config.server.bind.parse()?;
+/// A bound listener, ready for [`Listener::serve`].
+pub enum Listener {
+    Tcp(TcpListener),
+    /// Removes its socket file when dropped.
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener, unix::SocketFile),
+}
+
+/// Bind the listener for `target`. Unix sockets carry their final mode and
+/// group before they become reachable at their path.
+pub async fn bind(target: &Bind) -> anyhow::Result<Listener> {
+    match target {
+        Bind::Tcp(addr) => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
+        #[cfg(unix)]
+        Bind::Unix { path, mode, group } => {
+            let (listener, file) = unix::bind(path, *mode, *group).await?;
+            Ok(Listener::Unix(listener, file))
+        }
+        #[cfg(not(unix))]
+        Bind::Unix { .. } => anyhow::bail!("unix: binds need a Unix platform"),
+    }
+}
+
+impl Listener {
+    /// Serve `router` as [`serve`] does. A Unix socket file is removed on
+    /// return.
+    pub async fn serve(
+        self,
+        router: Router,
+        max_connections: usize,
+        header_timeout: Duration,
+        shutdown: impl Future<Output = ()>,
+    ) {
+        match self {
+            Listener::Tcp(listener) => {
+                serve(listener, router, max_connections, header_timeout, shutdown).await
+            }
+            #[cfg(unix)]
+            Listener::Unix(listener, _file) => {
+                serve(listener, router, max_connections, header_timeout, shutdown).await
+            }
+        }
+    }
+}
+
+/// A listening socket [`serve`] accepts connections from.
+pub trait Accept {
+    type Io: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    fn accept(&self) -> impl Future<Output = io::Result<Self::Io>> + Send;
+}
+
+impl Accept for TcpListener {
+    type Io = tokio::net::TcpStream;
+
+    async fn accept(&self) -> io::Result<Self::Io> {
+        TcpListener::accept(self).await.map(|(io, _)| io)
+    }
+}
+
+#[cfg(unix)]
+impl Accept for tokio::net::UnixListener {
+    type Io = tokio::net::UnixStream;
+
+    async fn accept(&self) -> io::Result<Self::Io> {
+        tokio::net::UnixListener::accept(self)
+            .await
+            .map(|(io, _)| io)
+    }
+}
+
+/// Serve `state` on `target`, which the caller resolved from the config,
+/// until SIGINT or SIGTERM.
+pub async fn run(state: AppState, target: Bind) -> anyhow::Result<()> {
     // 503 overloaded once the body, queue and fetch time and 10 s of
     // verification are spent.
     let verify = &state.config.verify;
@@ -125,22 +203,24 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
         )
         .layer(RequestBodyTimeoutLayer::new(BODY_TIMEOUT));
 
-    tracing::info!(%addr, "starting attestation service");
+    tracing::info!(bind = %target, "starting attestation service");
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = bind(&target).await?;
     let max = state.config.server.max_connections;
-    serve(listener, app, max, HEADER_TIMEOUT, shutdown_signal()).await;
+    listener
+        .serve(app, max, HEADER_TIMEOUT, shutdown_signal())
+        .await;
     Ok(())
 }
 
 /// Serve `router` over HTTP/1 with at most `max_connections` open (the rest
 /// wait in the backlog) and `header_timeout`; after `shutdown`, finish within 5 s.
-pub async fn serve(
-    listener: TcpListener,
+pub async fn serve<L: Accept>(
+    listener: L,
     router: Router,
     max_connections: usize,
     header_timeout: Duration,
-    shutdown: impl std::future::Future<Output = ()>,
+    shutdown: impl Future<Output = ()>,
 ) {
     use hyper_util::rt::{TokioIo, TokioTimer};
     let open = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
@@ -152,7 +232,7 @@ pub async fn serve(
             next = next => next,
             _ = &mut shutdown => break,
         };
-        let (permit, Ok((io, _))) = next else {
+        let (permit, Ok(io)) = next else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };

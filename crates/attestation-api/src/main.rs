@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +6,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use attestation::collateral::NrasJwks;
-use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Config};
+use attestation_api::config::{resolve_nras_gpu_url, resolve_nras_switch_url, Bind, Config};
 use attestation_api::token::{issuer::TokenIssuer, keys};
 use attestation_api::AppState;
 
@@ -39,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
         Config::default()
     };
 
-    config.validate().map_err(|e| {
+    let bind = config.validate().map_err(|e| {
         tracing::error!(%e, "invalid configuration");
         anyhow::anyhow!(e)
     })?;
@@ -51,14 +50,9 @@ async fn main() -> anyhow::Result<()> {
             "no API keys configured in [auth].api_keys — all endpoints are unauthenticated"
         );
     }
-    if !config
-        .server
-        .bind
-        .parse::<SocketAddr>()
-        .is_ok_and(|a| a.ip().is_loopback())
-    {
+    if matches!(bind, Bind::Tcp(addr) if !addr.ip().is_loopback()) {
         tracing::warn!(
-            bind = %config.server.bind,
+            %bind,
             "listener is plain HTTP on a non-loopback address; keep it behind a TLS terminator on a private network"
         );
     }
@@ -117,5 +111,5 @@ async fn main() -> anyhow::Result<()> {
         admission,
     };
 
-    attestation_api::server::run(state).await
+    attestation_api::server::run(state, bind).await
 }
