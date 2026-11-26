@@ -4,8 +4,9 @@
 //!
 //! A report is one directory under [`REPORT_PATH`]. The kernel fills it with
 //! attribute files when it is created: `provider` names the driver, `inblob`
-//! takes the report data, `outblob` returns the report, and `generation`
-//! counts writes so a reader can tell its request was the one answered.
+//! takes the report data, `outblob` returns the report, `auxblob` returns
+//! what the driver supplies beside it, and `generation` counts writes so a
+//! reader can tell its request was the one answered.
 
 use std::fs;
 use std::path::Path;
@@ -39,9 +40,18 @@ pub fn has_provider(base: &Path, provider: &str) -> bool {
     found.trim() == provider
 }
 
+/// A report and the supplemental data its driver returned with it, empty
+/// when the driver has none. For `sev_guest` that data is the certificate
+/// table of an extended guest request.
+#[derive(Debug)]
+pub struct Report {
+    pub report: Vec<u8>,
+    pub aux: Vec<u8>,
+}
+
 /// Request a report over `report_data` from the TSM driver under `base`,
 /// which must be `provider`.
-pub fn report(base: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Vec<u8>> {
+pub fn report(base: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Report> {
     let entry = tempfile::tempdir_in(base).map_err(|e| hardware("create TSM report dir", e))?;
     let result = read_entry(entry.path(), provider, report_data);
     remove_entry(entry);
@@ -49,7 +59,7 @@ pub fn report(base: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Vec
 }
 
 /// Fill one report directory and read the report back.
-fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Vec<u8>> {
+fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Report> {
     let found =
         fs::read_to_string(entry.join("provider")).map_err(|e| hardware("read TSM provider", e))?;
     if found.trim() != provider {
@@ -77,7 +87,9 @@ fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Ve
             "inblob write race detected: generation={generation}"
         )));
     }
-    Ok(report)
+    // Absent for drivers that supply nothing beside the report.
+    let aux = fs::read(entry.join("auxblob")).unwrap_or_default();
+    Ok(Report { report, aux })
 }
 
 /// Mount configfs at `/sys/kernel/config` when nothing is mounted there, and
@@ -89,7 +101,11 @@ fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Ve
 pub fn mount_configfs() -> std::io::Result<bool> {
     const CONFIGFS: &std::ffi::CStr = c"configfs";
     const TARGET: &std::ffi::CStr = c"/sys/kernel/config";
-    if Path::new("/sys/kernel/config/tsm").exists() {
+    // Leave whatever is mounted there alone, a configfs without TSM included.
+    if is_mount_point(
+        &fs::read_to_string("/proc/self/mounts")?,
+        "/sys/kernel/config",
+    ) {
         return Ok(false);
     }
     // SAFETY: both arguments are NUL-terminated constants, and the data
@@ -109,6 +125,14 @@ pub fn mount_configfs() -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Whether the mount table `mounts`, in `/proc/self/mounts` form, has a
+/// filesystem mounted at `target`.
+fn is_mount_point(mounts: &str, target: &str) -> bool {
+    mounts
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(target))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,8 +149,12 @@ mod tests {
     #[test]
     fn a_report_is_read_from_the_named_provider() {
         let dir = entry("sev_guest\n", &[7; 1184], "1\n");
-        let report = read_entry(dir.path(), "sev_guest", &[9; 64]).unwrap();
-        assert_eq!(report, vec![7; 1184]);
+        let got = read_entry(dir.path(), "sev_guest", &[9; 64]).unwrap();
+        assert_eq!(got.report, vec![7; 1184]);
+        assert!(got.aux.is_empty());
+        fs::write(dir.path().join("auxblob"), [5; 16]).unwrap();
+        let got = read_entry(dir.path(), "sev_guest", &[9; 64]).unwrap();
+        assert_eq!(got.aux, vec![5; 16]);
         assert_eq!(fs::read(dir.path().join("inblob")).unwrap(), vec![9; 64]);
     }
 
@@ -145,6 +173,17 @@ mod tests {
         let raced = entry("sev_guest", &[7; 8], "2");
         let err = read_entry(raced.path(), "sev_guest", &[0; 64]).unwrap_err();
         assert!(err.to_string().contains("race"), "{err}");
+    }
+
+    #[test]
+    fn only_a_filesystem_mounted_at_the_target_is_a_mount_point() {
+        let mounts = "sysfs /sys sysfs ro 0 0\nconfigfs /sys/kernel/config configfs rw 0 0\n";
+        assert!(is_mount_point(mounts, "/sys/kernel/config"));
+        assert!(!is_mount_point(
+            "sysfs /sys sysfs ro 0 0\n",
+            "/sys/kernel/config"
+        ));
+        assert!(!is_mount_point(mounts, "/sys/kernel"));
     }
 
     #[test]

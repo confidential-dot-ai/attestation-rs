@@ -60,6 +60,57 @@ fn read_event_log(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Certificate GUIDs of a certificate table, in the byte order the `sev`
+/// crate reads them from the device.
+const GUID_VCEK: [u8; 16] = [
+    0x63, 0xda, 0x75, 0x8d, 0xe6, 0x64, 0x45, 0x64, 0xad, 0xc5, 0xf4, 0xb9, 0x3b, 0xe8, 0xac, 0xcd,
+];
+const GUID_VLEK: [u8; 16] = [
+    0xa8, 0x07, 0x4b, 0xc2, 0xa2, 0x5a, 0x48, 0x3e, 0xaa, 0xe6, 0x39, 0xc0, 0x45, 0xa0, 0xb8, 0xa1,
+];
+const GUID_ASK: [u8; 16] = [
+    0x4a, 0xb7, 0xb3, 0x79, 0xbb, 0xac, 0x4f, 0xe4, 0xa0, 0x2f, 0x05, 0xae, 0xf3, 0x27, 0xc7, 0x82,
+];
+const GUID_ARK: [u8; 16] = [
+    0xc0, 0xb4, 0x06, 0xa4, 0xa8, 0x03, 0x49, 0x52, 0x97, 0x43, 0x3f, 0xb6, 0x01, 0x4c, 0xd0, 0xae,
+];
+
+/// The certificate chain in the table a TSM report carries beside it: entries
+/// of a GUID, an offset and a length, ended by an all-zero entry, then the
+/// certificates. The host writes the table, so every offset is checked
+/// against it. A host that supplied none leaves it empty, and a verifier then
+/// fetches the chain; a table that does not parse is treated the same way.
+fn aux_chain(table: &[u8]) -> Option<SnpCertChain> {
+    const ENTRY: usize = 24;
+    let (mut vcek, mut ask, mut ark) = (None, None, None);
+    for entry in table.as_chunks::<ENTRY>().0 {
+        let guid: [u8; 16] = entry[..16].try_into().ok()?;
+        if guid == [0; 16] {
+            return vcek.map(|v| SnpCertChain { vcek: v, ask, ark });
+        }
+        let offset = u32::from_le_bytes(entry[16..20].try_into().ok()?) as usize;
+        let length = u32::from_le_bytes(entry[20..24].try_into().ok()?) as usize;
+        let Some(cert) = offset
+            .checked_add(length)
+            .and_then(|end| table.get(offset..end))
+        else {
+            log::warn!("ignoring an SNP certificate table whose entry leaves the table");
+            return None;
+        };
+        let encoded = Some(BASE64.encode(cert));
+        match guid {
+            GUID_VCEK | GUID_VLEK => vcek = encoded,
+            GUID_ASK => ask = encoded,
+            GUID_ARK => ark = encoded,
+            _ => {}
+        }
+    }
+    if !table.is_empty() {
+        log::warn!("ignoring an SNP certificate table with no end entry");
+    }
+    None
+}
+
 /// The extended report from `/dev/sev-guest`: the attestation report and the
 /// certificate table the host supplied.
 fn device_report(data: [u8; 64]) -> Result<(Vec<u8>, Option<SnpCertChain>)> {
@@ -85,11 +136,10 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
     let (report_bytes, cert_chain) = if Path::new(SEV_GUEST_DEVICE_PATH).exists() {
         device_report(data)?
     } else {
-        // The report alone: a verifier fetches the certificate chain the
-        // device would have returned beside it.
-        let report = tsm::report(Path::new(tsm::REPORT_PATH), TSM_PROVIDER, &data)?;
+        let tsm::Report { report, aux } =
+            tsm::report(Path::new(tsm::REPORT_PATH), TSM_PROVIDER, &data)?;
         log::info!("SNP report generated via ConfigFS TSM");
-        (report, None)
+        (report, aux_chain(&aux))
     };
     // Read after the report: the log then holds the prefix the report commits to.
     let event_log = read_event_log(Path::new(EVENT_LOG_PATH))?;
@@ -104,6 +154,46 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A certificate table of the given entries, laid out as a host writes it.
+    fn cert_table(certs: &[([u8; 16], &[u8])]) -> Vec<u8> {
+        let mut offset = (certs.len() + 1) * 24;
+        let (mut head, mut body) = (Vec::new(), Vec::new());
+        for (guid, cert) in certs {
+            head.extend_from_slice(guid);
+            head.extend_from_slice(&(offset as u32).to_le_bytes());
+            head.extend_from_slice(&(cert.len() as u32).to_le_bytes());
+            body.extend_from_slice(cert);
+            offset += cert.len();
+        }
+        head.extend_from_slice(&[0; 24]);
+        head.extend_from_slice(&body);
+        head
+    }
+
+    #[test]
+    fn a_tsm_certificate_table_becomes_the_chain() {
+        let table = cert_table(&[(GUID_ARK, b"ark"), (GUID_VCEK, b"vcek"), (GUID_ASK, b"ask")]);
+        let chain = aux_chain(&table).unwrap();
+        assert_eq!(chain.vcek, BASE64.encode("vcek"));
+        assert_eq!(chain.ask, Some(BASE64.encode("ask")));
+        assert_eq!(chain.ark, Some(BASE64.encode("ark")));
+        assert!(aux_chain(&cert_table(&[(GUID_ASK, b"ask")])).is_none());
+    }
+
+    #[test]
+    fn an_empty_or_malformed_certificate_table_yields_no_chain() {
+        assert!(aux_chain(&[]).is_none());
+        let table = cert_table(&[(GUID_VCEK, b"vcek")]);
+        // No end entry, and an entry that points past the table.
+        assert!(aux_chain(&table[..24]).is_none());
+        let mut past = table.clone();
+        past[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(aux_chain(&past).is_none());
+        let mut wrapped = table;
+        wrapped[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(aux_chain(&wrapped).is_none());
+    }
 
     #[test]
     fn only_a_missing_event_log_means_no_log() {
