@@ -80,8 +80,11 @@ const GUID_ARK: [u8; 16] = [
 /// certificates. The host writes the table, so every offset is checked
 /// against it. A host that supplied none leaves it empty, and a verifier then
 /// fetches the chain; a table that does not parse is treated the same way.
-fn aux_chain(table: &[u8]) -> Option<SnpCertChain> {
+/// `vlek` says which key signed the report, and so which entry is its
+/// certificate: a table may carry both.
+fn aux_chain(table: &[u8], vlek: bool) -> Option<SnpCertChain> {
     const ENTRY: usize = 24;
+    let signer = if vlek { GUID_VLEK } else { GUID_VCEK };
     let (mut vcek, mut ask, mut ark) = (None, None, None);
     for entry in table.as_chunks::<ENTRY>().0 {
         let guid: [u8; 16] = entry[..16].try_into().ok()?;
@@ -99,7 +102,7 @@ fn aux_chain(table: &[u8]) -> Option<SnpCertChain> {
         };
         let encoded = Some(BASE64.encode(cert));
         match guid {
-            GUID_VCEK | GUID_VLEK => vcek = encoded,
+            g if g == signer => vcek = encoded,
             GUID_ASK => ask = encoded,
             GUID_ARK => ark = encoded,
             _ => {}
@@ -109,6 +112,36 @@ fn aux_chain(table: &[u8]) -> Option<SnpCertChain> {
         log::warn!("ignoring an SNP certificate table with no end entry");
     }
     None
+}
+
+/// Whether a VLEK signed `report`: SIGNING_KEY, bits 4:2 of the key
+/// information word at offset 0x48, is 1.
+fn signed_by_vlek(report: &[u8]) -> Result<bool> {
+    let word: [u8; 4] = report
+        .get(0x48..0x4c)
+        .and_then(|w| w.try_into().ok())
+        .ok_or_else(|| {
+            AttestationError::HardwareAccessFailed(format!(
+                "ConfigFS TSM returned a {}-byte SNP report",
+                report.len()
+            ))
+        })?;
+    Ok((u32::from_le_bytes(word) >> 2) & 0b111 == 1)
+}
+
+/// The certificate chain for a TSM report. A VCEK is derived from the chip
+/// and a verifier can fetch it; a VLEK is not, so a VLEK-signed report with
+/// no certificate beside it is evidence nobody can verify, and an error here.
+fn tsm_chain(report: &[u8], aux: &[u8]) -> Result<Option<SnpCertChain>> {
+    let vlek = signed_by_vlek(report)?;
+    let chain = aux_chain(aux, vlek);
+    if vlek && chain.is_none() {
+        return Err(AttestationError::HardwareAccessFailed(
+            "the SNP report is signed with a VLEK and the host supplied no VLEK certificate with it"
+                .to_string(),
+        ));
+    }
+    Ok(chain)
 }
 
 /// The extended report from `/dev/sev-guest`: the attestation report and the
@@ -139,7 +172,8 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
         let tsm::Report { report, aux } =
             tsm::report(Path::new(tsm::REPORT_PATH), TSM_PROVIDER, &data)?;
         log::info!("SNP report generated via ConfigFS TSM");
-        (report, aux_chain(&aux))
+        let chain = tsm_chain(&report, &aux)?;
+        (report, chain)
     };
     // Read after the report: the log then holds the prefix the report commits to.
     let event_log = read_event_log(Path::new(EVENT_LOG_PATH))?;
@@ -174,25 +208,55 @@ mod tests {
     #[test]
     fn a_tsm_certificate_table_becomes_the_chain() {
         let table = cert_table(&[(GUID_ARK, b"ark"), (GUID_VCEK, b"vcek"), (GUID_ASK, b"ask")]);
-        let chain = aux_chain(&table).unwrap();
+        let chain = aux_chain(&table, false).unwrap();
         assert_eq!(chain.vcek, BASE64.encode("vcek"));
         assert_eq!(chain.ask, Some(BASE64.encode("ask")));
         assert_eq!(chain.ark, Some(BASE64.encode("ark")));
-        assert!(aux_chain(&cert_table(&[(GUID_ASK, b"ask")])).is_none());
+        assert!(aux_chain(&cert_table(&[(GUID_ASK, b"ask")]), false).is_none());
     }
 
     #[test]
     fn an_empty_or_malformed_certificate_table_yields_no_chain() {
-        assert!(aux_chain(&[]).is_none());
+        assert!(aux_chain(&[], false).is_none());
         let table = cert_table(&[(GUID_VCEK, b"vcek")]);
         // No end entry, and an entry that points past the table.
-        assert!(aux_chain(&table[..24]).is_none());
+        assert!(aux_chain(&table[..24], false).is_none());
         let mut past = table.clone();
         past[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(aux_chain(&past).is_none());
+        assert!(aux_chain(&past, false).is_none());
         let mut wrapped = table;
         wrapped[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(aux_chain(&wrapped).is_none());
+        assert!(aux_chain(&wrapped, false).is_none());
+    }
+
+    /// An SNP report whose key information word names `signing_key`.
+    fn report_signed_by(signing_key: u32) -> Vec<u8> {
+        let mut report = vec![0u8; 1184];
+        report[0x48..0x4c].copy_from_slice(&(signing_key << 2 | 0b11).to_le_bytes());
+        report
+    }
+
+    #[test]
+    fn the_signing_key_picks_the_certificate_in_either_table_order() {
+        for table in [
+            cert_table(&[(GUID_VCEK, b"vcek"), (GUID_VLEK, b"vlek")]),
+            cert_table(&[(GUID_VLEK, b"vlek"), (GUID_VCEK, b"vcek")]),
+        ] {
+            let by_vcek = tsm_chain(&report_signed_by(0), &table).unwrap().unwrap();
+            assert_eq!(by_vcek.vcek, BASE64.encode("vcek"));
+            let by_vlek = tsm_chain(&report_signed_by(1), &table).unwrap().unwrap();
+            assert_eq!(by_vlek.vcek, BASE64.encode("vlek"));
+        }
+    }
+
+    #[test]
+    fn a_vlek_report_without_its_certificate_is_an_error() {
+        let vcek_only = cert_table(&[(GUID_VCEK, b"vcek")]);
+        assert!(tsm_chain(&report_signed_by(1), &[]).is_err());
+        assert!(tsm_chain(&report_signed_by(1), &vcek_only).is_err());
+        // A VCEK-signed report leaves the chain to the verifier.
+        assert!(tsm_chain(&report_signed_by(0), &[]).unwrap().is_none());
+        assert!(tsm_chain(&[0; 16], &[]).is_err());
     }
 
     #[test]
