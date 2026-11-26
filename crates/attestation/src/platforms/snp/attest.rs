@@ -6,6 +6,7 @@ use sev::firmware::guest::Firmware;
 use sev::firmware::host::{CertTableEntry, CertType};
 
 use crate::error::{AttestationError, Result};
+use crate::platforms::tsm;
 use crate::utils::pad_report_data;
 
 use super::evidence::{SnpCertChain, SnpEvidence};
@@ -17,9 +18,14 @@ const SEV_GUEST_DEVICE_PATH: &str = "/dev/sev-guest";
 /// the provider).
 const EVENT_LOG_PATH: &str = "/sys/class/misc/sev-guest/event_log";
 
-/// Check if SNP hardware is available on this machine.
+/// The name the SNP guest driver registers with the kernel's TSM interface.
+const TSM_PROVIDER: &str = "sev_guest";
+
+/// Check if SNP hardware is available on this machine: through the device
+/// node, or through ConfigFS TSM where a container runtime passed no node.
 pub fn is_available() -> bool {
     Path::new(SEV_GUEST_DEVICE_PATH).exists()
+        || tsm::has_provider(Path::new(tsm::REPORT_PATH), TSM_PROVIDER)
 }
 
 /// Extract certificates from the sev crate's cert table entries.
@@ -54,6 +60,21 @@ fn read_event_log(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// The extended report from `/dev/sev-guest`: the attestation report and the
+/// certificate table the host supplied.
+fn device_report(data: [u8; 64]) -> Result<(Vec<u8>, Option<SnpCertChain>)> {
+    let mut firmware = Firmware::open().map_err(|e| {
+        AttestationError::HardwareAccessFailed(format!("Firmware::open failed: {}", e))
+    })?;
+    let (report_bytes, certs) =
+        firmware
+            .get_ext_report(None, Some(data), Some(0))
+            .map_err(|e| {
+                AttestationError::HardwareAccessFailed(format!("get_ext_report failed: {}", e))
+            })?;
+    Ok((report_bytes, certs.and_then(certs_to_chain)))
+}
+
 /// Generate SNP attestation evidence.
 pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
     let padded = pad_report_data(report_data, 64)?;
@@ -61,20 +82,15 @@ pub async fn generate_evidence(report_data: &[u8]) -> Result<SnpEvidence> {
         .try_into()
         .map_err(|_| AttestationError::ReportDataTooLarge { max: 64 })?;
 
-    // Open the /dev/sev-guest device via the sev crate
-    let mut firmware = Firmware::open().map_err(|e| {
-        AttestationError::HardwareAccessFailed(format!("Firmware::open failed: {}", e))
-    })?;
-
-    // Get the extended report (attestation report + certificate table)
-    let (report_bytes, certs) =
-        firmware
-            .get_ext_report(None, Some(data), Some(0))
-            .map_err(|e| {
-                AttestationError::HardwareAccessFailed(format!("get_ext_report failed: {}", e))
-            })?;
-
-    let cert_chain = certs.and_then(certs_to_chain);
+    let (report_bytes, cert_chain) = if Path::new(SEV_GUEST_DEVICE_PATH).exists() {
+        device_report(data)?
+    } else {
+        // The report alone: a verifier fetches the certificate chain the
+        // device would have returned beside it.
+        let report = tsm::report(Path::new(tsm::REPORT_PATH), TSM_PROVIDER, &data)?;
+        log::info!("SNP report generated via ConfigFS TSM");
+        (report, None)
+    };
     // Read after the report: the log then holds the prefix the report commits to.
     let event_log = read_event_log(Path::new(EVENT_LOG_PATH))?;
 
