@@ -156,3 +156,24 @@ CPU/GPU co-location: an attester can relay another GPU's evidence. The verifier
 checks each NRAS submodule's signed nonce rather than re-deriving NVIDIA's
 detached submodule digest. No live GPU end-to-end validation is implied by
 these interfaces.
+
+## Site-selected TDX
+
+The service enables this mode with `[verify.selected_tdx]` in its measured
+configuration. Both `helper` and `profile` must be absolute paths on the
+trusted guest filesystem. The service invokes `helper collateral selected-tdx
+PROFILE` at startup and once for each CPU TDX verification. On success the
+helper writes one JSON object to stdout with RFC3339 fields `time` and
+`expiresAt` and an `objects` array. Each entry carries an exact Intel PCS
+`url`, a standard base64 `body`, and the literal PEM `issuer_chain` where
+Intel supplies one. The four objects are the FMSPC's TCB Info, TD QE
+Identity, the PCK CA's CRL (with `&encoding=der`), and the Root CA CRL.
+The helper owns site authentication, snapshot selection and the time source.
+Exit code 3 signals that the selection or time source is unavailable. Other
+nonzero exits reject the snapshot. The service limits the exchange to
+48 MiB and `verify.fetch_deadline_ms`. Malformed or oversized output and
+unexpected Intel URLs are rejected even if the helper exits successfully.
+
+Selected mode disables vendor warming and cache discovery. `/attest` emits
+bare CPU TDX evidence. `/verify` requires `issue_token=false` and returns
+its verdict directly. Requests for GPU verification are refused.

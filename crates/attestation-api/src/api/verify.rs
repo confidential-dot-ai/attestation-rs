@@ -104,12 +104,53 @@ pub async fn handler(
             "issue_token requires a non-empty policies.{platform}.report_data"
         )));
     }
+    if state.config.verify.selected_tdx.is_some() {
+        if platform != attestation::PlatformType::Tdx
+            || req.nvidia_gpu.is_some()
+            || req.policies.gpu.is_some()
+        {
+            return Err(attestation::AttestationError::PlatformNotAllowed(
+                "selected TDX accepts CPU-only bare-metal TDX".into(),
+            )
+            .into());
+        }
+        if req.issue_token || req.collateral.is_some() {
+            return Err(ApiError::BadRequest(
+                "selected TDX requires evidence without attachments and issue_token=false".into(),
+            ));
+        }
+    }
     let evidence_json = build_evidence_envelope(
         &platform.to_string(),
         req.evidence,
         req.nvidia_gpu,
         req.collateral,
     )?;
+
+    if let Some(source) = state.config.verify.selected_tdx.clone() {
+        let bytes = state.admission.selected_tdx(&source).await?;
+        let runtime = tokio::runtime::Handle::current();
+        return state
+            .admission
+            .run(move || {
+                runtime.block_on(async move {
+                    let snapshot = crate::selected_tdx::Snapshot::parse(&bytes)?;
+                    let result = attestation::verify_selected_tdx(
+                        &evidence_json,
+                        &req.policies,
+                        snapshot.responses,
+                        snapshot.time,
+                    )
+                    .await?;
+                    Ok(Json(VerifyResponse {
+                        passed: result.passed(),
+                        result,
+                        token: None,
+                    }))
+                })
+            })
+            .await?;
+    }
 
     // Verify offline on a worker. If collateral (or an NRAS answer) is
     // missing, fetch all of it once, then verify again offline.

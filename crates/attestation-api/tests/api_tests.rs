@@ -1520,3 +1520,82 @@ async fn slow_headers_are_cut_off_and_connections_past_the_cap_wait() {
     let cut_off = slow.read(&mut [0; 64]).await.unwrap_or(0) == 0;
     assert!(cut_off, "the slow client is cut off");
 }
+
+/// Each request to the measured helper supplies a new selection. An outage or
+/// rejection after the first verdict cannot reuse it or the server's warm store.
+#[cfg(unix)]
+#[tokio::test]
+async fn selected_tdx_verify_uses_one_fresh_snapshot_per_request() {
+    use attestation::collateral::{Collateral, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
+    use attestation_api::selected_tdx::SelectedTdx;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("profile");
+    let helper = dir.path().join("helper");
+    std::fs::write(&helper, "#!/bin/sh\n[ \"$PWD\" = / ] || exit 1\n[ \"$1 $2\" = 'collateral selected-tdx' ] || exit 1\n[ -e \"$3\" ] || exit 3\nexec /bin/cat \"$3\"\n").unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let state = test_state_with(|config| {
+        config.verify.selected_tdx = Some(SelectedTdx {
+            helper,
+            profile: profile.clone(),
+        });
+    });
+    let fixture = |name: &str| {
+        std::fs::read(format!(
+            "{}/../attestation/test_data/collateral/2026-10-14/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let object = |url: String, file: &str, chain: Option<&str>| json!({"url":url,"body":BASE64.encode(fixture(file)), "issuer_chain":chain.map(|name| String::from_utf8(fixture(name)).unwrap())});
+    let chain = Some("tcb_signing_chain.pem");
+    let objects = [
+        object(
+            TcbInfo::url(&[0x00, 0xa0, 0x6d, 0x08, 0x00, 0x00]),
+            "tcb_info_00a06d080000.json",
+            chain,
+        ),
+        object(QeIdentity::url(&()), "td_qe_identity.json", chain),
+        object(
+            format!("{}&encoding=der", PckCrl::url(&PckCa::Platform)),
+            "pck_crl_platform.der",
+            Some("pck_crl_platform_chain.pem"),
+        ),
+        object(RootCrl::url(&()), "root_ca_crl.der", None),
+    ];
+    let mut selection =
+        json!({"time":"2026-10-16T00:00:00Z","expiresAt":"2026-10-17T00:00:00Z","objects":objects});
+    std::fs::write(&profile, selection.to_string()).unwrap();
+    attestation_api::selected_tdx::check_startup(&state.config.verify)
+        .await
+        .unwrap();
+    let quote = include_bytes!("../../attestation/test_data/tdx_quote_00a06d080000.dat");
+    let request =
+        json!({"platform":"tdx","evidence":{"quote":BASE64.encode(quote)},"policies":{"tdx":{}}});
+    let (status, reply) = post_verify(state.clone(), request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["passed"], true, "{reply}");
+    assert!(reply.get("token").is_none());
+    selection["expiresAt"] = selection["time"].clone();
+    std::fs::write(&profile, selection.to_string()).unwrap();
+    assert_eq!(
+        post_verify(state.clone(), request.clone()).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    std::fs::remove_file(&profile).unwrap();
+    assert!(
+        attestation_api::selected_tdx::check_startup(&state.config.verify)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        post_verify(state.clone(), request.clone()).await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    let mut gpu = request;
+    gpu["nvidia_gpu"] = json!({"devices":[]});
+    assert_eq!(
+        post_verify(state, gpu).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}

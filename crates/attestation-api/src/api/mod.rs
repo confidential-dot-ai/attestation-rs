@@ -7,7 +7,16 @@ pub mod verify;
 /// Keep hardware discovery within the service's platform surface even when
 /// workspace feature unification enables dstack in the library.
 #[cfg(target_os = "linux")]
-fn detect_platform() -> Result<attestation::PlatformType, crate::error::ApiError> {
+fn detect_platform(
+    selected_tdx: bool,
+) -> Result<attestation::PlatformType, crate::error::ApiError> {
+    if selected_tdx {
+        static TDX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return TDX
+            .get_or_init(attestation::platforms::tdx::attest::is_available)
+            .then_some(attestation::PlatformType::Tdx)
+            .ok_or(crate::error::ApiError::NoPlatform);
+    }
     static DETECTED: std::sync::OnceLock<Option<attestation::PlatformType>> =
         std::sync::OnceLock::new();
     DETECTED

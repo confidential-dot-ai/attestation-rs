@@ -74,6 +74,7 @@ pub struct VerifyConfig {
     pub queue_deadline_ms: u64,
     pub fetch_deadline_ms: u64,
     pub warm: Vec<String>,
+    pub selected_tdx: Option<crate::selected_tdx::SelectedTdx>,
 }
 
 impl Default for VerifyConfig {
@@ -84,6 +85,7 @@ impl Default for VerifyConfig {
             queue_deadline_ms: 50,
             fetch_deadline_ms: 10_000,
             warm: default_warm(),
+            selected_tdx: None,
         }
     }
 }
@@ -410,6 +412,11 @@ impl Config {
     /// target. Returns an error for invalid combinations.
     pub fn validate(&self) -> Result<Bind, String> {
         let bind = self.server.bind()?;
+        if let Some(selected) = &self.verify.selected_tdx {
+            if !selected.helper.is_absolute() || !selected.profile.is_absolute() {
+                return Err("verify.selected_tdx helper and profile must be absolute paths".into());
+            }
+        }
 
         // The listener is plaintext; accepting this flag would hide that.
         if self.server.tls.enabled {

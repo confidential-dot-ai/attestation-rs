@@ -95,6 +95,16 @@ for workload identity. A non-SNP envelope is refused by this SNP-only policy.
 The result is `{ "result": ..., "passed": bool, "token": ... }`, with token
 omitted when not issued. **HTTP 200 does not mean passed.**
 
+With `[verify.selected_tdx]`, a TDX guest with attestation enabled can
+produce bare CPU evidence over `/attest`. A verifier can accept that
+evidence from a separate guest when its own attestation is disabled.
+`/verify` requires a TDX policy and `issue_token=false`, and rejects
+attached collateral and GPU evidence or policies. HTTP 502 also covers
+a helper that times out or cannot obtain the authenticated selection or
+site time. `/platform` reports local TDX availability and the `/health`
+cache count excludes per-request selections. See the
+[helper contract](../../docs/collateral.md#site-selected-tdx).
+
 The server additionally refuses these policies with 400:
 
 - `allow_debug: true` (including GPU device policy), unless

@@ -5,6 +5,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod middleware;
+pub mod selected_tdx;
 pub mod server;
 pub mod token;
 

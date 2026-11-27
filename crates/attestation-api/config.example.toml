@@ -22,6 +22,11 @@ fetch_deadline_ms = 10000         # Fetching missing collateral longer: 502
 # Intel's QE Identity and CRLs, AMD's CRLs); add each fleet FMSPC's TCB Info URL.
 # warm = [...]
 
+# Authenticate a site-selected Intel snapshot for every CPU-only TDX proof.
+# [verify.selected_tdx]
+# helper = "/usr/bin/c8s"
+# profile = "/etc/attestation/tdx-site.json"
+
 [auth]
 # If non-empty, all endpoints (except /health) require a Bearer token.
 # If empty or omitted, endpoints are unauthenticated (a warning is logged on startup).
