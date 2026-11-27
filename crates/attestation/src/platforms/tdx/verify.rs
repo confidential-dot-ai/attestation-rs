@@ -495,10 +495,19 @@ impl TdxCollateralSet {
         now: i64,
     ) -> Result<(Self, Vec<CollateralUsed>)> {
         let pck = PckChain::of(quote_bytes, quote)?;
+        Self::gather_for(pck.fmspc, pck.ca, store, now).await
+    }
+
+    async fn gather_for(
+        fmspc: Fmspc,
+        ca: PckCa,
+        store: &Store,
+        now: i64,
+    ) -> Result<(Self, Vec<CollateralUsed>)> {
         let (tcb_info, qe_identity, pck_crl, root_crl) = futures_util::join!(
-            store.get::<TcbInfo>(&pck.fmspc, now),
+            store.get::<TcbInfo>(&fmspc, now),
             store.get::<QeIdentity>(&(), now),
-            store.get::<PckCrl>(&pck.ca, now),
+            store.get::<PckCrl>(&ca, now),
             store.get::<RootCrl>(&(), now)
         );
         let ((tcb_info, u1), (qe_identity, u2), (pck_crl, u3), (root_crl, u4)) =
@@ -511,6 +520,96 @@ impl TdxCollateralSet {
         };
         Ok((collateral, vec![u1, u2, u3, u4]))
     }
+}
+
+/// Verify the site's selected Intel responses without a quote. The authenticated site
+/// selects the FMSPC and CA. A quote is required to grade a platform or admit a peer.
+pub async fn check_selected_tdx_collateral(
+    fmspc: Fmspc,
+    ca: PckCa,
+    responses: Vec<crate::HeldResponse>,
+    now: i64,
+) -> Result<()> {
+    if responses.len() != 4 {
+        return Err(AttestationError::CertChainError(
+            "expected four selected Intel responses".into(),
+        ));
+    }
+    // The store authenticates each supplied chain at its object's issue time.
+    // A fresh site check also requires the supplied issuer chain to be valid now.
+    use crate::collateral::Collateral;
+    let crl_url = PckCrl::url(&ca);
+    let root_url = RootCrl::url(&());
+    for (url, _, chain) in &responses {
+        if *url == root_url {
+            continue;
+        }
+        let signer = if *url == crl_url {
+            ca.signer()
+        } else {
+            super::dcap::TCB_SIGNING
+        };
+        let chain = chain.as_ref().ok_or_else(|| {
+            AttestationError::CertChainError("missing selected Intel issuer chain".into())
+        })?;
+        super::dcap::verify_signing_cert_chain(chain.as_bytes(), now, signer)?;
+    }
+    let context = crate::Context::held(responses).at(now)?;
+    let (set, used) = TdxCollateralSet::gather_for(fmspc, ca, context.store(), now)
+        .await
+        .map_err(|e| {
+            if e.is_retryable() {
+                AttestationError::CertChainError(
+                    "selected Intel collateral is missing or outside its validity or version floor"
+                        .into(),
+                )
+            } else {
+                e
+            }
+        })?;
+    for piece in used {
+        if !piece.current || !piece.acceptable() || piece.next_update.is_none_or(|end| now >= end) {
+            return Err(AttestationError::CertChainError(format!(
+                "{} is outside its validity or below the shipped version floor",
+                piece.name
+            )));
+        }
+    }
+    set.check_site_signers(now)
+}
+
+impl TdxCollateralSet {
+    fn check_site_signers(&self, now: i64) -> Result<()> {
+        super::dcap::verify_cert_validity_period(
+            super::dcap::INTEL_SGX_ROOT_CA,
+            "Intel SGX Root CA",
+            now,
+        )?;
+        self.check_tcb_signers(now)?;
+        check_selected_signer(
+            &self.pck_crl.signer,
+            self.pck_crl.ca.signer(),
+            &self.root_crl.der,
+            now,
+        )
+    }
+
+    fn check_tcb_signers(&self, now: i64) -> Result<()> {
+        for signer in [&self.tcb_info.signer, &self.qe_identity.signer] {
+            check_selected_signer(signer, super::dcap::TCB_SIGNING, &self.root_crl.der, now)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_selected_signer(signer: &[u8], label: &str, root_crl: &[u8], now: i64) -> Result<()> {
+    super::dcap::verify_cert_validity_period(signer, label, now)?;
+    if super::dcap::cert_revoked(signer, root_crl)? {
+        return Err(AttestationError::CertChainError(format!(
+            "Intel revoked the {label} certificate"
+        )));
+    }
+    Ok(())
 }
 
 /// What the quote's PCK chain says about which collateral applies.
@@ -714,17 +813,7 @@ pub(crate) fn check_collateral(
             "the collateral is not for this quote's platform".into(),
         ));
     }
-    for signer in [&collateral.tcb_info.signer, &collateral.qe_identity.signer] {
-        super::dcap::verify_cert_validity_period(signer, super::dcap::TCB_SIGNING, now)?;
-        if super::dcap::cert_revoked_from_der(
-            std::slice::from_ref(signer),
-            &collateral.root_crl.der,
-        )? {
-            return Err(AttestationError::CertChainError(
-                "Intel revoked the TCB Signing certificate".into(),
-            ));
-        }
-    }
+    collateral.check_tcb_signers(now)?;
     // A CA name alone cannot bind a CRL to the issuing key in this quote's PCK chain.
     if collateral.pck_crl.signer != pck.der[1] {
         return Err(AttestationError::CertChainError(
@@ -904,6 +993,23 @@ mod tests {
         assert_eq!(result(&set, &params).crl_ok, Some(false));
         (set.root_crl.der, set.pck_crl.der) = (listing.der().to_vec(), fresh.pck_crl.der.clone());
         assert_eq!(result(&set, &params).crl_ok, Some(false));
+        assert!(set
+            .check_site_signers(now)
+            .unwrap_err()
+            .to_string()
+            .contains("revoked the Intel SGX PCK Platform CA"));
+
+        // Isolate signer validity from object nextUpdate using the already-verified collateral.
+        let mut cert = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        cert.not_before = rcgen::date_time_ymd(2026, 10, 1);
+        cert.not_after = rcgen::date_time_ymd(2026, 10, 16);
+        set.root_crl.der = fresh.root_crl.der.clone();
+        set.tcb_info.signer = cert.self_signed(&key).unwrap().der().to_vec();
+        assert!(now < set.tcb_info.next_update);
+        assert!(set.check_site_signers(set.tcb_info.issue_date).is_ok());
+        let expired = set.check_site_signers(now).unwrap_err();
+        assert!(expired.to_string().contains("certificate has expired"));
+        assert!(!expired.is_retryable());
         let status = result(&fresh, &params).tcb_status.unwrap().tcb_status;
         params.accepted_tcb_statuses.retain(|s| *s != status);
         assert!(!result(&fresh, &params).passed());

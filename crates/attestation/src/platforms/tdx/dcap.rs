@@ -1289,14 +1289,14 @@ pub fn intermediate_ca_revoked_from_der(
 
 /// True when the PCK leaf certificate is listed in the PCK CRL.
 pub fn cert_revoked_from_der(der_certs: &[Vec<u8>], crl_der: &[u8]) -> Result<bool> {
-    if der_certs.is_empty() {
-        return Err(AttestationError::CertChainError(
-            "no certificates found".into(),
-        ));
-    }
+    let cert = der_certs
+        .first()
+        .ok_or_else(|| AttestationError::CertChainError("no certificates found".into()))?;
+    cert_revoked(cert, crl_der)
+}
 
-    // Parse the leaf cert to get its serial number
-    let (_, leaf_cert) = X509Certificate::from_der(&der_certs[0])
+pub(super) fn cert_revoked(cert: &[u8], crl_der: &[u8]) -> Result<bool> {
+    let (_, leaf_cert) = X509Certificate::from_der(cert)
         .map_err(|e| AttestationError::CertChainError(format!("certificate parse: {e}")))?;
     let leaf_serial = leaf_cert.raw_serial();
 

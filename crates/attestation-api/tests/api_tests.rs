@@ -1521,25 +1521,20 @@ async fn slow_headers_are_cut_off_and_connections_past_the_cap_wait() {
     assert!(cut_off, "the slow client is cut off");
 }
 
-/// Each request to the measured helper supplies a new selection. An outage or
-/// rejection after the first verdict cannot reuse it or the server's warm store.
 #[cfg(unix)]
-#[tokio::test]
-async fn selected_tdx_verify_uses_one_fresh_snapshot_per_request() {
+fn selected_fixture(
+    dir: &std::path::Path,
+) -> (
+    attestation_api::selected_tdx::SelectedTdx,
+    serde_json::Value,
+) {
     use attestation::collateral::{Collateral, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
     use attestation_api::selected_tdx::SelectedTdx;
     use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let profile = dir.path().join("profile");
-    let helper = dir.path().join("helper");
+    let profile = dir.join("profile");
+    let helper = dir.join("helper");
     std::fs::write(&helper, "#!/bin/sh\n[ \"$PWD\" = / ] || exit 1\n[ \"$1 $2\" = 'collateral selected-tdx' ] || exit 1\n[ -e \"$3\" ] || exit 3\nexec /bin/cat \"$3\"\n").unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let state = test_state_with(|config| {
-        config.verify.selected_tdx = Some(SelectedTdx {
-            helper,
-            profile: profile.clone(),
-        });
-    });
     let fixture = |name: &str| {
         std::fs::read(format!(
             "{}/../attestation/test_data/collateral/2026-10-14/{name}",
@@ -1563,8 +1558,19 @@ async fn selected_tdx_verify_uses_one_fresh_snapshot_per_request() {
         ),
         object(RootCrl::url(&()), "root_ca_crl.der", None),
     ];
-    let mut selection =
-        json!({"time":"2026-10-16T00:00:00Z","expiresAt":"2026-10-17T00:00:00Z","objects":objects});
+    let selection = json!({"generation":1,"sha256":"a".repeat(64),"time":"2026-10-16T00:00:00Z","expiresAt":"2026-10-17T00:00:00Z","objects":objects});
+    (SelectedTdx { helper, profile }, selection)
+}
+
+/// Each request to the measured helper supplies a new selection. An outage or
+/// rejection after the first verdict cannot reuse it or the server's warm store.
+#[cfg(unix)]
+#[tokio::test]
+async fn selected_tdx_verify_uses_one_fresh_snapshot_per_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, mut selection) = selected_fixture(dir.path());
+    let profile = source.profile.clone();
+    let state = test_state_with(|config| config.verify.selected_tdx = Some(source));
     std::fs::write(&profile, selection.to_string()).unwrap();
     attestation_api::selected_tdx::check_startup(&state.config.verify)
         .await
@@ -1598,4 +1604,119 @@ async fn selected_tdx_verify_uses_one_fresh_snapshot_per_request() {
         post_verify(state, gpu).await.0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_and_sighup_recheck_intel_collateral_and_identify_the_selection() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (source, mut selection) = selected_fixture(dir.path());
+    let config = dir.path().join("service.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[server]\nbind='unix:{}/api.sock'\n[verify.selected_tdx]\nhelper='{}'\nprofile='{}'\n",
+            dir.path().display(),
+            source.helper.display(),
+            source.profile.display()
+        ),
+    )
+    .unwrap();
+    let server = || {
+        Command::new(env!("CARGO_BIN_EXE_attestation-api"))
+            .arg("--config")
+            .arg(&config)
+            .env("RUST_LOG", "selected_tdx=info")
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let write = |s: &serde_json::Value| std::fs::write(&source.profile, s.to_string()).unwrap();
+    let mut changed = selection.clone();
+    changed["objects"][3]["body"] = BASE64.encode(b"unsigned CRL").into();
+    write(&changed);
+    let mut refused = server();
+    let status = tokio::time::timeout(Duration::from_secs(10), refused.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.success());
+    assert!(!dir.path().join("api.sock").exists());
+
+    write(&selection);
+    let mut service = server();
+    let pid = service.id().unwrap().to_string();
+    let mut lines = BufReader::new(service.stdout.take().unwrap()).lines();
+    let signal = || {
+        assert!(std::process::Command::new("kill")
+            .args(["-HUP", &pid])
+            .status()
+            .unwrap()
+            .success())
+    };
+    async fn event(
+        lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    ) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if let (Some(a), Some(b)) = (line.find('{'), line.rfind('}')) {
+                    let record: serde_json::Value = serde_json::from_str(&line[a..=b]).unwrap();
+                    if record["event"] == "selected_tdx_recheck" {
+                        return record;
+                    }
+                }
+            }
+            panic!("server stopped before reporting recheck");
+        })
+        .await
+        .unwrap()
+    }
+
+    let startup = event(&mut lines).await;
+    assert_eq!(startup["trigger"], "startup");
+    assert_eq!(startup["outcome"], "valid");
+    assert_eq!(startup["generation"], 1);
+    assert_eq!(startup["scope"], "intel_collateral");
+    selection["generation"] = 2.into();
+    selection["sha256"] = "b".repeat(64).into();
+    write(&selection);
+    signal();
+    let active = event(&mut lines).await;
+    assert_eq!(active["trigger"], "sighup");
+    assert_eq!(active["outcome"], "valid");
+    assert_eq!(active["generation"], 2);
+    assert_eq!(active["sha256"], selection["sha256"]);
+    assert_eq!(active["siteTime"], selection["time"]);
+
+    // The Platform PCK CRL reaches nextUpdate while the manifest and other three objects are current.
+    selection["time"] = "2026-11-13T22:31:40Z".into();
+    selection["expiresAt"] = "2026-11-16T00:00:00Z".into();
+    write(&selection);
+    signal();
+    let stale = event(&mut lines).await;
+    assert_eq!(stale["outcome"], "invalid");
+    assert_eq!(stale["generation"], 2);
+    assert!(stale["error"]
+        .as_str()
+        .unwrap()
+        .contains("pck-crl platform"));
+    selection["sha256"] = "B".repeat(64).into();
+    write(&selection);
+    signal();
+    let malformed = event(&mut lines).await;
+    assert_eq!(malformed["outcome"], "invalid");
+    assert!(malformed["sha256"].is_null());
+    std::fs::remove_file(&source.profile).unwrap();
+    signal();
+    let missing = event(&mut lines).await;
+    assert_eq!(missing["outcome"], "unavailable");
+    assert!(missing["generation"].is_null());
+    assert!(missing["sha256"].is_null());
+    assert!(missing["siteTime"].is_null());
+    service.kill().await.unwrap();
 }

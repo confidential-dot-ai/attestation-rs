@@ -74,6 +74,20 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    #[cfg(unix)]
+    let refresh = config
+        .verify
+        .selected_tdx
+        .clone()
+        .map(|source| {
+            let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+            Ok::<_, std::io::Error>((
+                source,
+                signal,
+                Duration::from_millis(config.verify.fetch_deadline_ms),
+            ))
+        })
+        .transpose()?;
     let verifier = if config.verify.selected_tdx.is_some() {
         attestation_api::selected_tdx::check_startup(&config.verify).await?;
         Arc::new(attestation::Verifier::new(attestation::Context::held([])))
@@ -123,5 +137,13 @@ async fn main() -> anyhow::Result<()> {
         admission,
     };
 
-    attestation_api::server::run(state, bind).await
+    let server = attestation_api::server::run(state, bind);
+    #[cfg(unix)]
+    if let Some((source, signal, deadline)) = refresh {
+        return tokio::select! {
+            result = server => result,
+            result = source.on_hangup(signal, deadline) => result,
+        };
+    }
+    server.await
 }
