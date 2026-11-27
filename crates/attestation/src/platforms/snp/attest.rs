@@ -142,10 +142,15 @@ fn names_its_chip(report: &[u8]) -> bool {
 }
 
 /// The certificate chain for a TSM report: the host's, when its certificate
-/// signed the report. Evidence nobody can verify is an error here.
+/// signed the report and is within its validity period, as a verifier
+/// requires. Evidence nobody can verify is an error here.
 fn tsm_chain(report: &[u8], aux: &[u8]) -> Result<Option<SnpCertChain>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
     chain_that(report, aux, |report, cert| {
         super::verify::verify_report_signature(report, cert).is_ok()
+            && super::verify::verify_vek_validity_period(cert, now).is_ok()
     })
 }
 
@@ -174,7 +179,7 @@ fn chain_that(
             .is_ok_and(|cert| signed(report, &cert));
         if !usable {
             log::warn!(
-                "ignoring an SNP certificate table whose certificate did not sign the report"
+                "ignoring an SNP certificate table whose certificate did not sign the report or is outside its validity period"
             );
         }
         usable
