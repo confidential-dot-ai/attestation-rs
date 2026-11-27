@@ -37,6 +37,8 @@ pub struct QeIdentity {
 /// The CRL of an Intel PCK CA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PckCrl {
+    /// The Intel PCK CA certificate that verified this CRL, DER.
+    pub signer: Vec<u8>,
     /// The CRL, DER.
     pub der: Vec<u8>,
     pub ca: PckCa,
@@ -218,6 +220,7 @@ impl Collateral for PckCrl {
         let (der, this_update, next_update, number) = dcap::check_crl(crl, issuer, "PCK CRL")?;
         dcap::verify_signing_cert_chain(pem, this_update, ca.signer())?;
         Ok(Self {
+            signer: issuer.clone(),
             der,
             ca,
             this_update,

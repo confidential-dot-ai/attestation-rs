@@ -440,7 +440,7 @@ fn verify_cert_signature(cert: &CertData, issuer_key: &VerifyingKey, label: &str
 }
 
 /// Verify a certificate's validity period (NotBefore/NotAfter) at `now` (Unix seconds).
-fn verify_cert_validity_period(der: &[u8], label: &str, now: i64) -> Result<()> {
+pub(super) fn verify_cert_validity_period(der: &[u8], label: &str, now: i64) -> Result<()> {
     let (_, cert) = X509Certificate::from_der(der).map_err(|e| {
         AttestationError::CertChainError(format!("{label} x509 parse for validity: {e}"))
     })?;
@@ -454,7 +454,7 @@ fn verify_cert_validity_period(der: &[u8], label: &str, now: i64) -> Result<()> 
             label, validity.not_before
         )));
     }
-    if now > validity.not_after {
+    if now >= validity.not_after {
         return Err(AttestationError::CertChainError(format!(
             "{} certificate has expired (notAfter: {})",
             label, validity.not_after
@@ -550,69 +550,48 @@ const FMSPC_OID: &[u64] = &[1, 2, 840, 113741, 1, 13, 1, 4];
 /// chain: a 6-byte value in the leaf's SGX extensions (OID
 /// 1.2.840.113741.1.13.1.4) that names the platform's TCB Info.
 pub fn extract_fmspc_from_pck_der(der_certs: &[Vec<u8>]) -> Result<crate::collateral::Fmspc> {
-    if der_certs.is_empty() {
-        return Err(AttestationError::CertChainError(
-            "no certificates found in PEM data".into(),
-        ));
-    }
-
-    let (_, cert) = X509Certificate::from_der(&der_certs[0])
-        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
-
-    // Find the SGX extensions OID in the cert extensions
-    let sgx_ext_oid = x509_parser::oid_registry::Oid::from(SGX_EXTENSIONS_OID).map_err(|e| {
-        AttestationError::CertChainError(format!("invalid SGX_EXTENSIONS_OID: {e:?}"))
-    })?;
-
-    for ext in cert.extensions() {
-        if ext.oid == sgx_ext_oid {
-            // The SGX extension value is an ASN.1 SEQUENCE of SEQUENCE { OID, value }
-            return extract_fmspc_from_sgx_extension(ext.value);
-        }
-    }
-
-    Err(AttestationError::CertChainError(
-        "SGX extensions OID not found in PCK certificate".into(),
-    ))
+    pck_id(der_certs, FMSPC_OID, "FMSPC")
 }
 
-/// Parse the SGX extension ASN.1 blob and extract the FMSPC value.
-fn extract_fmspc_from_sgx_extension(data: &[u8]) -> Result<crate::collateral::Fmspc> {
-    let fmspc_oid = x509_parser::oid_registry::Oid::from(FMSPC_OID)
-        .map_err(|e| AttestationError::CertChainError(format!("invalid FMSPC_OID: {e:?}")))?;
-
-    // Parse outer SEQUENCE
-    let (_, seq) = parse_der_sequence(data)
+/// Intel encodes FMSPC and PCE ID as fixed-width octet strings within the
+/// PCK leaf's SGX extension (a sequence of OID-value pairs).
+fn pck_id<const N: usize>(der_certs: &[Vec<u8>], id: &[u64], label: &str) -> Result<[u8; N]> {
+    let leaf = der_certs
+        .first()
+        .ok_or_else(|| AttestationError::CertChainError("empty PCK chain".into()))?;
+    let (_, cert) = X509Certificate::from_der(leaf)
+        .map_err(|e| AttestationError::CertChainError(format!("PCK leaf x509 parse: {e}")))?;
+    let oid = |arcs: &[u64]| {
+        x509_parser::oid_registry::Oid::from(arcs)
+            .map_err(|e| AttestationError::CertChainError(format!("invalid OID: {e:?}")))
+    };
+    let sgx = oid(SGX_EXTENSIONS_OID)?;
+    let id = oid(id)?;
+    let ext = cert
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid == sgx)
+        .ok_or_else(|| {
+            AttestationError::CertChainError("missing SGX extension in PCK leaf".into())
+        })?;
+    let (_, seq) = parse_der_sequence(ext.value)
         .map_err(|e| AttestationError::CertChainError(format!("SGX extension parse: {e}")))?;
-
-    // Each element is a SEQUENCE { OID, value }
     for item in seq.ref_iter() {
-        if let BerObjectContent::Sequence(ref inner) = item.content {
-            if inner.len() >= 2 {
-                if let BerObjectContent::OID(ref oid) = inner[0].content {
-                    if *oid == fmspc_oid {
-                        // The value is an OCTET STRING containing 6 bytes
-                        if let BerObjectContent::OctetString(fmspc_bytes) = &inner[1].content {
-                            if let Ok(fmspc) = <[u8; 6]>::try_from(*fmspc_bytes) {
-                                return Ok(fmspc);
-                            }
-                            return Err(AttestationError::CertChainError(format!(
-                                "FMSPC found but has unexpected length {} (expected 6)",
-                                fmspc_bytes.len()
-                            )));
-                        }
-                        return Err(AttestationError::CertChainError(
-                            "FMSPC OID found but value is not an OCTET STRING".into(),
-                        ));
-                    }
+        if let BerObjectContent::Sequence(inner) = &item.content {
+            if inner.len() == 2
+                && matches!(&inner[0].content, BerObjectContent::OID(oid) if *oid == id)
+            {
+                if let BerObjectContent::OctetString(bytes) = inner[1].content {
+                    return bytes.try_into().map_err(|_| {
+                        AttestationError::CertChainError(format!("invalid PCK {label} length"))
+                    });
                 }
             }
         }
     }
-
-    Err(AttestationError::CertChainError(
-        "FMSPC OID not found in SGX extension".into(),
-    ))
+    Err(AttestationError::CertChainError(format!(
+        "missing PCK {label}"
+    )))
 }
 
 /// Intel PCS v4 TCB Info JSON signed envelope.
@@ -637,11 +616,85 @@ struct TcbInfoWrapper {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TcbInfoJson {
+pub(super) struct TcbInfoJson {
+    version: u32,
+    tcb_type: u32,
+    pce_id: String,
+    tdx_module: TdxModule,
     tcb_levels: Vec<TcbLevelJson>,
+    #[serde(default)]
+    tdx_module_identities: Vec<TdxModuleIdentity>,
     /// ISO 8601 timestamp indicating when this TCB Info expires.
     #[serde(default)]
     next_update: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TdxModuleIdentity {
+    #[serde(flatten)]
+    module: TdxModule,
+    id: String,
+    tcb_levels: Vec<QeIdentityTcbLevel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TdxModule {
+    mrsigner: String,
+    attributes: String,
+}
+
+impl TdxModuleIdentity {
+    fn status(&self, svn: u8) -> Result<TdxTcbStatus> {
+        self.tcb_levels
+            .iter()
+            .find(|level| u16::from(svn) >= level.tcb.isvsvn)
+            .map_or(Ok(TdxTcbStatus::NoMatchingLevel), |level| {
+                parse_tcb_status(&level.tcb_status)
+            })
+    }
+}
+
+impl TcbInfoJson {
+    pub(super) fn parse(raw: &[u8]) -> Result<Self> {
+        serde_json::from_slice::<TcbInfoWrapper>(raw)
+            .map(|w| w.tcb_info)
+            .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))
+    }
+
+    fn module_identity(&self, version: u8) -> Result<Option<&TdxModuleIdentity>> {
+        if version == 0 {
+            return Ok(None);
+        }
+        let id = format!("TDX_{version:02X}");
+        self.tdx_module_identities
+            .iter()
+            .find(|m| m.id == id)
+            .map(Some)
+            .ok_or_else(|| {
+                AttestationError::CertChainError(format!("TCB Info lacks module identity {id}"))
+            })
+    }
+
+    pub(super) fn check_module_identity(&self, body: &super::verify::TdxReportBody) -> Result<()> {
+        let module = self
+            .module_identity(body.tee_tcb_svn[1])?
+            .map_or(&self.tdx_module, |id| &id.module);
+        if !module
+            .mrsigner
+            .eq_ignore_ascii_case(&hex::encode(body.mrsigner_seam))
+        {
+            return Err(AttestationError::CertChainError(
+                "TDX module MRSIGNER mismatch".into(),
+            ));
+        }
+        if body.seam_attributes != [0; 8] || module.attributes != "0000000000000000" {
+            return Err(AttestationError::CertChainError(
+                "unsupported TDX module SEAMATTRIBUTES".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -661,6 +714,27 @@ struct TcbComponentsJson {
     pcesvn: u16,
     #[serde(default)]
     tdxtcbcomponents: Option<Vec<SvnComponent>>,
+}
+
+impl TcbComponentsJson {
+    fn matches_platform(&self, sgx: &[u8; 16], pce: u16, tdx: &[u8; 16]) -> bool {
+        // Intel grades the first two TEE SVNs against a separate identity for versioned modules.
+        let first_tdx_svn = if tdx[1] == 0 { 0 } else { 2 };
+        let meets = |components: &[SvnComponent], svns: &[u8; 16], first: usize| {
+            components.len() == 16
+                && components
+                    .iter()
+                    .zip(svns)
+                    .skip(first)
+                    .all(|(c, svn)| *svn >= c.svn)
+        };
+        pce >= self.pcesvn
+            && meets(&self.sgxtcbcomponents, sgx, 0)
+            && self
+                .tdxtcbcomponents
+                .as_ref()
+                .is_some_and(|v| meets(v, tdx, first_tdx_svn))
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -822,88 +896,67 @@ pub fn evaluate_tcb_status(
     pck_der: &[Vec<u8>],
     now: i64,
 ) -> Result<DcapVerificationStatus> {
-    let wrapper: TcbInfoWrapper = serde_json::from_slice(tcb_info_json)
-        .map_err(|e| AttestationError::CertChainError(format!("TCB Info JSON parse: {e}")))?;
+    TcbInfoJson::parse(tcb_info_json)?.status(tee_tcb_svn, pck_der, now)
+}
 
-    // Check if collateral has expired (nextUpdate is in the past)
-    let collateral_expired = wrapper
-        .tcb_info
-        .next_update
-        .as_deref()
-        .and_then(|ts| {
-            // Intel PCS uses ISO 8601: "2024-03-07T00:00:00Z"
-            // Try common formats
-            chrono_parse_is_past(ts, now)
-        })
-        .unwrap_or(false);
-    if collateral_expired {
-        log::warn!("TCB Info collateral has expired (nextUpdate in the past)");
-    }
+impl TcbInfoJson {
+    pub(super) fn status(
+        &self,
+        tee_tcb_svn: &[u8; 16],
+        pck_der: &[Vec<u8>],
+        now: i64,
+    ) -> Result<DcapVerificationStatus> {
+        // Check if collateral has expired (nextUpdate is in the past)
+        let collateral_expired = self
+            .next_update
+            .as_deref()
+            .and_then(|ts| {
+                // Intel PCS uses ISO 8601: "2024-03-07T00:00:00Z"
+                // Try common formats
+                chrono_parse_is_past(ts, now)
+            })
+            .unwrap_or(false);
+        if collateral_expired {
+            log::warn!("TCB Info collateral has expired (nextUpdate in the past)");
+        }
 
-    let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components_from_der(pck_der)?;
-    let fmspc = hex::encode(extract_fmspc_from_pck_der(pck_der)?);
+        let (pck_compsvn, pck_pcesvn) = extract_pck_tcb_components_from_der(pck_der)?;
+        let fmspc = hex::encode(extract_fmspc_from_pck_der(pck_der)?);
+        let pce_id = pck_id::<2>(pck_der, &[1, 2, 840, 113741, 1, 13, 1, 3], "PCE ID")?;
+        if self.version != 3
+            || self.tcb_type != 0
+            || !self.pce_id.eq_ignore_ascii_case(&hex::encode(pce_id))
+        {
+            return Err(AttestationError::CertChainError(
+                "TCB Info format or PCE ID does not match the quote".into(),
+            ));
+        }
 
-    // TCB level matching (follows Intel DCAP QVL algorithm).
-    //
-    // Pass 1 — SGX match: find the first level where all PCK SGX component
-    //   SVNs >= level SVNs and PCESVN >= level PCESVN.
-    // Pass 2 — TDX match: starting from the SGX-matched level, find the first
-    //   level where all tee_tcb_svn values >= level TDX component SVNs.
-    //   When tdxtcbcomponents is absent from a level it is treated as a match
-    //   (the level applies to all TDX TCB values).
-
-    // Pass 1: find the first SGX-matching level index.
-    let Some(sgx_match_idx) = wrapper.tcb_info.tcb_levels.iter().position(|level| {
-        let sgx_comps: Vec<u8> = level.tcb.sgxtcbcomponents.iter().map(|c| c.svn).collect();
-        sgx_comps.len() >= 16
-            && pck_compsvn
-                .iter()
-                .zip(sgx_comps.iter())
-                .all(|(&pck, &lvl)| pck >= lvl)
-            && pck_pcesvn >= level.tcb.pcesvn
-    }) else {
-        return Ok(no_matching_level(fmspc, collateral_expired));
-    };
-
-    // Pass 2: find the first TDX-matching level at or after the SGX match.
-    let tee_tcb_svn_nonzero = tee_tcb_svn.iter().any(|&v| v != 0);
-    if !tee_tcb_svn_nonzero {
-        // All-zero tee_tcb_svn means the quote carries no TDX module TCB
-        // information (e.g. early TDX implementations or SGX-only paths).
-        // Skip TDX component matching and use the SGX-matched level directly.
-        let level = &wrapper.tcb_info.tcb_levels[sgx_match_idx];
-        let tcb_status = parse_tcb_status(&level.tcb_status)?;
-        return Ok(DcapVerificationStatus {
-            tcb_status,
+        let level = self.tcb_levels.iter().find(|level| {
+            level
+                .tcb
+                .matches_platform(&pck_compsvn, pck_pcesvn, tee_tcb_svn)
+        });
+        let Some(level) = level else {
+            return Ok(no_matching_level(fmspc, collateral_expired));
+        };
+        let platform_status = parse_tcb_status(&level.tcb_status)?;
+        let module_tcb_status = self
+            .module_identity(tee_tcb_svn[1])?
+            .map(|identity| identity.status(tee_tcb_svn[0]))
+            .transpose()?;
+        Ok(DcapVerificationStatus {
+            tcb_status: module_tcb_status.map_or(platform_status, |module| {
+                combine_tcb_status(platform_status, module)
+            }),
+            module_tcb_status,
             fmspc,
             advisory_ids: level.advisory_ids.clone(),
             collateral_expired,
+            current_tcb_status: None,
             qe_tcb_status: None,
-        });
+        })
     }
-
-    for level in &wrapper.tcb_info.tcb_levels[sgx_match_idx..] {
-        let tdx_ok = match level.tcb.tdxtcbcomponents.as_ref() {
-            Some(tdx_comps) => tdx_comps
-                .iter()
-                .zip(tee_tcb_svn.iter())
-                .all(|(comp, &svn)| svn >= comp.svn),
-            // When tdxtcbcomponents is absent the level applies universally
-            None => true,
-        };
-        if tdx_ok {
-            let tcb_status = parse_tcb_status(&level.tcb_status)?;
-            return Ok(DcapVerificationStatus {
-                tcb_status,
-                fmspc,
-                advisory_ids: level.advisory_ids.clone(),
-                collateral_expired,
-                qe_tcb_status: None,
-            });
-        }
-    }
-
-    Ok(no_matching_level(fmspc, collateral_expired))
 }
 
 /// The status of a TCB below every listed level: a genuine fact about the
@@ -912,6 +965,8 @@ fn no_matching_level(fmspc: String, collateral_expired: bool) -> DcapVerificatio
     log::warn!("TDX TCB is below every level in the TCB Info");
     DcapVerificationStatus {
         tcb_status: TdxTcbStatus::NoMatchingLevel,
+        module_tcb_status: None,
+        current_tcb_status: None,
         fmspc,
         advisory_ids: Vec::new(),
         collateral_expired,
@@ -985,6 +1040,7 @@ struct QeIdentityEnvelope<'a> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnclaveIdentityFields {
+    version: u32,
     mrsigner: String,
     isvprodid: u16,
     miscselect: String,
@@ -1065,6 +1121,11 @@ pub fn parse_qe_identity(qe_identity_json: &[u8]) -> Result<QeIdentity> {
 
     let identity: EnclaveIdentityFields = serde_json::from_str(envelope.enclave_identity.get())
         .map_err(|e| AttestationError::CertChainError(format!("QE Identity fields parse: {e}")))?;
+    if identity.version != 2 {
+        return Err(AttestationError::CertChainError(
+            "unsupported TD QE Identity version".into(),
+        ));
+    }
     fn bytes<const N: usize>(hex_value: &str, name: &str) -> Result<[u8; N]> {
         hex::decode(hex_value)
             .ok()
@@ -1644,6 +1705,31 @@ mod tests {
         json["enclaveIdentity"]["tcbLevels"] = levels;
         let identity = parse_qe_identity(&serde_json::to_vec(&json).unwrap()).unwrap();
         check_qe_report(auth.qe_report_body, &identity)
+    }
+
+    #[test]
+    fn authenticated_tcb_info_grades_the_module_named_by_the_quote() {
+        use TdxTcbStatus::*;
+        let info = TcbInfoJson::parse(include_bytes!(
+            "../../../test_data/collateral/2026-10-14/tcb_info_00a06d080000.json"
+        ))
+        .unwrap();
+        let mut body = super::super::verify::parse_tdx_quote(include_bytes!(
+            "../../../test_data/tdx_quote_00a06d080000.dat"
+        ))
+        .unwrap()
+        .body;
+        info.check_module_identity(&body).unwrap();
+        let module = info.module_identity(body.tee_tcb_svn[1]).unwrap().unwrap();
+        assert_eq!(module.status(5).unwrap(), UpToDate);
+        assert_eq!(module.status(4).unwrap(), OutOfDate);
+        assert_eq!(module.status(2).unwrap(), NoMatchingLevel);
+        body.seam_attributes[0] ^= 1;
+        assert!(info.check_module_identity(&body).is_err());
+        body.seam_attributes = [0; 8];
+        body.mrsigner_seam[0] ^= 1;
+        assert!(info.check_module_identity(&body).is_err());
+        assert!(info.module_identity(0xff).is_err());
     }
 
     #[test]
