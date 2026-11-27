@@ -76,6 +76,13 @@ fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Re
             "ConfigFS TSM returned an empty report".to_string(),
         ));
     }
+    // Read before the generation check, so that it covers both blobs. A
+    // driver that supplies nothing beside the report has no such attribute.
+    let aux = match fs::read(entry.join("auxblob")) {
+        Ok(aux) => aux,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(hardware("read auxblob", e)),
+    };
     let generation: u32 = fs::read_to_string(entry.join("generation"))
         .map_err(|e| hardware("read generation", e))?
         .trim()
@@ -87,8 +94,6 @@ fn read_entry(entry: &Path, provider: &str, report_data: &[u8; 64]) -> Result<Re
             "inblob write race detected: generation={generation}"
         )));
     }
-    // Absent for drivers that supply nothing beside the report.
-    let aux = fs::read(entry.join("auxblob")).unwrap_or_default();
     Ok(Report { report, aux })
 }
 

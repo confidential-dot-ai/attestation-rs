@@ -85,19 +85,26 @@ const GUID_ARK: [u8; 16] = [
 fn aux_chain(table: &[u8], vlek: bool) -> Option<SnpCertChain> {
     const ENTRY: usize = 24;
     let signer = if vlek { GUID_VLEK } else { GUID_VCEK };
-    let (mut vcek, mut ask, mut ark) = (None, None, None);
-    for entry in table.as_chunks::<ENTRY>().0 {
-        let guid: [u8; 16] = entry[..16].try_into().ok()?;
-        if guid == [0; 16] {
-            return vcek.map(|v| SnpCertChain { vcek: v, ask, ark });
+    let entries = table.as_chunks::<ENTRY>().0;
+    let Some(end_entry) = entries.iter().position(|entry| entry[..16] == [0; 16]) else {
+        if !table.is_empty() {
+            log::warn!("ignoring an SNP certificate table with no end entry");
         }
+        return None;
+    };
+    // Certificates follow the end entry; none may lie in the entries.
+    let certificates = (end_entry + 1) * ENTRY;
+    let (mut vcek, mut ask, mut ark) = (None, None, None);
+    for entry in &entries[..end_entry] {
+        let guid: [u8; 16] = entry[..16].try_into().ok()?;
         let offset = u32::from_le_bytes(entry[16..20].try_into().ok()?) as usize;
         let length = u32::from_le_bytes(entry[20..24].try_into().ok()?) as usize;
-        let Some(cert) = offset
+        let cert = offset
             .checked_add(length)
             .and_then(|end| table.get(offset..end))
-        else {
-            log::warn!("ignoring an SNP certificate table whose entry leaves the table");
+            .filter(|cert| offset >= certificates && !cert.is_empty());
+        let Some(cert) = cert else {
+            log::warn!("ignoring an SNP certificate table whose entry names no certificate");
             return None;
         };
         let encoded = Some(BASE64.encode(cert));
@@ -108,10 +115,7 @@ fn aux_chain(table: &[u8], vlek: bool) -> Option<SnpCertChain> {
             _ => {}
         }
     }
-    if !table.is_empty() {
-        log::warn!("ignoring an SNP certificate table with no end entry");
-    }
-    None
+    vcek.map(|v| SnpCertChain { vcek: v, ask, ark })
 }
 
 /// Whether a VLEK signed `report`: SIGNING_KEY, bits 4:2 of the key
@@ -129,15 +133,30 @@ fn signed_by_vlek(report: &[u8]) -> Result<bool> {
     Ok((u32::from_le_bytes(word) >> 2) & 0b111 == 1)
 }
 
-/// The certificate chain for a TSM report. A VCEK is derived from the chip
-/// and a verifier can fetch it; a VLEK is not, so a VLEK-signed report with
-/// no certificate beside it is evidence nobody can verify, and an error here.
+/// Whether `report` names its chip: CHIP_ID, the 64 bytes at offset 0x1a0,
+/// is all zero when the host masks it, and a verifier then has no VCEK to ask for.
+fn names_its_chip(report: &[u8]) -> bool {
+    report
+        .get(0x1a0..0x1e0)
+        .is_some_and(|id| id.iter().any(|b| *b != 0))
+}
+
+/// The certificate chain for a TSM report. A verifier can fetch the VCEK of a
+/// chip the report names, and no other certificate, so a report with no
+/// certificate beside it that is VLEK-signed or masks its chip is evidence
+/// nobody can verify, and an error here.
 fn tsm_chain(report: &[u8], aux: &[u8]) -> Result<Option<SnpCertChain>> {
     let vlek = signed_by_vlek(report)?;
     let chain = aux_chain(aux, vlek);
     if vlek && chain.is_none() {
         return Err(AttestationError::HardwareAccessFailed(
             "the SNP report is signed with a VLEK and the host supplied no VLEK certificate with it"
+                .to_string(),
+        ));
+    }
+    if !vlek && chain.is_none() && !names_its_chip(report) {
+        return Err(AttestationError::HardwareAccessFailed(
+            "the SNP report masks its chip ID and the host supplied no VCEK certificate with it"
                 .to_string(),
         ));
     }
@@ -232,6 +251,7 @@ mod tests {
     /// An SNP report whose key information word names `signing_key`.
     fn report_signed_by(signing_key: u32) -> Vec<u8> {
         let mut report = vec![0u8; 1184];
+        report[0x1a0] = 7;
         report[0x48..0x4c].copy_from_slice(&(signing_key << 2 | 0b11).to_le_bytes());
         report
     }
@@ -257,6 +277,22 @@ mod tests {
         // A VCEK-signed report leaves the chain to the verifier.
         assert!(tsm_chain(&report_signed_by(0), &[]).unwrap().is_none());
         assert!(tsm_chain(&[0; 16], &[]).is_err());
+        // Unless it masks the chip the verifier would ask about.
+        let mut masked = report_signed_by(0);
+        masked[0x1a0] = 0;
+        assert!(tsm_chain(&masked, &[]).is_err());
+        assert!(tsm_chain(&masked, &vcek_only).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_certificate_entry_must_name_bytes_after_the_entries() {
+        let table = cert_table(&[(GUID_VCEK, b"vcek")]);
+        let mut empty = table.clone();
+        empty[20..24].copy_from_slice(&0u32.to_le_bytes());
+        assert!(aux_chain(&empty, false).is_none());
+        let mut in_entries = table;
+        in_entries[16..20].copy_from_slice(&0u32.to_le_bytes());
+        assert!(aux_chain(&in_entries, false).is_none());
     }
 
     #[test]
