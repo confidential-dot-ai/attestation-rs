@@ -141,22 +141,47 @@ fn names_its_chip(report: &[u8]) -> bool {
         .is_some_and(|id| id.iter().any(|b| *b != 0))
 }
 
-/// The certificate chain for a TSM report. A verifier can fetch the VCEK of a
-/// chip the report names, and no other certificate, so a report with no
-/// certificate beside it that is VLEK-signed or masks its chip is evidence
-/// nobody can verify, and an error here.
+/// The certificate chain for a TSM report: the host's, when its certificate
+/// signed the report. Evidence nobody can verify is an error here.
 fn tsm_chain(report: &[u8], aux: &[u8]) -> Result<Option<SnpCertChain>> {
+    chain_that(report, aux, |report, cert| {
+        super::verify::verify_report_signature(report, cert).is_ok()
+    })
+}
+
+/// [`tsm_chain`] with `signed` deciding whether a certificate, in DER, signed
+/// the report.
+///
+/// A verifier checks a VCEK against the chip the report names and can fetch
+/// it by that name; it can fetch no VLEK. So a VCEK-signed report must name
+/// its chip, with or without a certificate beside it, and goes out without
+/// one the host got wrong; a VLEK-signed report needs the one that signed it.
+fn chain_that(
+    report: &[u8],
+    aux: &[u8],
+    signed: impl Fn(&[u8], &[u8]) -> bool,
+) -> Result<Option<SnpCertChain>> {
     let vlek = signed_by_vlek(report)?;
-    let chain = aux_chain(aux, vlek);
-    if vlek && chain.is_none() {
+    if !vlek && !names_its_chip(report) {
         return Err(AttestationError::HardwareAccessFailed(
-            "the SNP report is signed with a VLEK and the host supplied no VLEK certificate with it"
+            "the SNP report is VCEK-signed and masks its chip ID, which a verifier checks the VCEK against"
                 .to_string(),
         ));
     }
-    if !vlek && chain.is_none() && !names_its_chip(report) {
+    let chain = aux_chain(aux, vlek).filter(|chain| {
+        let usable = BASE64
+            .decode(&chain.vcek)
+            .is_ok_and(|cert| signed(report, &cert));
+        if !usable {
+            log::warn!(
+                "ignoring an SNP certificate table whose certificate did not sign the report"
+            );
+        }
+        usable
+    });
+    if vlek && chain.is_none() {
         return Err(AttestationError::HardwareAccessFailed(
-            "the SNP report masks its chip ID and the host supplied no VCEK certificate with it"
+            "the SNP report is signed with a VLEK and the host supplied no VLEK certificate that signed it"
                 .to_string(),
         ));
     }
@@ -248,6 +273,11 @@ mod tests {
         assert!(aux_chain(&wrapped, false).is_none());
     }
 
+    /// A signature check that accepts every certificate.
+    fn any(_: &[u8], _: &[u8]) -> bool {
+        true
+    }
+
     /// An SNP report whose key information word names `signing_key`.
     fn report_signed_by(signing_key: u32) -> Vec<u8> {
         let mut report = vec![0u8; 1184];
@@ -262,9 +292,13 @@ mod tests {
             cert_table(&[(GUID_VCEK, b"vcek"), (GUID_VLEK, b"vlek")]),
             cert_table(&[(GUID_VLEK, b"vlek"), (GUID_VCEK, b"vcek")]),
         ] {
-            let by_vcek = tsm_chain(&report_signed_by(0), &table).unwrap().unwrap();
+            let by_vcek = chain_that(&report_signed_by(0), &table, any)
+                .unwrap()
+                .unwrap();
             assert_eq!(by_vcek.vcek, BASE64.encode("vcek"));
-            let by_vlek = tsm_chain(&report_signed_by(1), &table).unwrap().unwrap();
+            let by_vlek = chain_that(&report_signed_by(1), &table, any)
+                .unwrap()
+                .unwrap();
             assert_eq!(by_vlek.vcek, BASE64.encode("vlek"));
         }
     }
@@ -272,16 +306,33 @@ mod tests {
     #[test]
     fn a_vlek_report_without_its_certificate_is_an_error() {
         let vcek_only = cert_table(&[(GUID_VCEK, b"vcek")]);
-        assert!(tsm_chain(&report_signed_by(1), &[]).is_err());
-        assert!(tsm_chain(&report_signed_by(1), &vcek_only).is_err());
+        assert!(chain_that(&report_signed_by(1), &[], any).is_err());
+        assert!(chain_that(&report_signed_by(1), &vcek_only, any).is_err());
         // A VCEK-signed report leaves the chain to the verifier.
-        assert!(tsm_chain(&report_signed_by(0), &[]).unwrap().is_none());
-        assert!(tsm_chain(&[0; 16], &[]).is_err());
+        assert!(chain_that(&report_signed_by(0), &[], any)
+            .unwrap()
+            .is_none());
+        assert!(chain_that(&[0; 16], &[], any).is_err());
         // Unless it masks the chip the verifier would ask about.
         let mut masked = report_signed_by(0);
         masked[0x1a0] = 0;
-        assert!(tsm_chain(&masked, &[]).is_err());
-        assert!(tsm_chain(&masked, &vcek_only).unwrap().is_some());
+        assert!(chain_that(&masked, &[], any).is_err());
+        assert!(chain_that(&masked, &vcek_only, any).is_err());
+    }
+
+    #[test]
+    fn a_certificate_that_did_not_sign_the_report_is_left_out() {
+        let none = |_: &[u8], _: &[u8]| false;
+        let table = cert_table(&[(GUID_VCEK, b"vcek"), (GUID_VLEK, b"vlek")]);
+        // The verifier fetches the right VCEK by the chip the report names.
+        assert!(chain_that(&report_signed_by(0), &table, none)
+            .unwrap()
+            .is_none());
+        assert!(chain_that(&report_signed_by(1), &table, none).is_err());
+        let only_vlek = |_: &[u8], cert: &[u8]| cert == b"vlek";
+        assert!(chain_that(&report_signed_by(1), &table, only_vlek)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
