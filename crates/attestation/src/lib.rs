@@ -640,6 +640,96 @@ impl Default for Verifier {
     }
 }
 
+/// Verify a bare-metal TDX quote using the caller's selected Intel responses
+/// and authenticated Unix time. The caller must establish the current selection
+/// and time anew for each call. The four Intel objects must be current at that time,
+/// strictly before nextUpdate. Both the caller's policy and the UpToDate grade apply.
+#[cfg(feature = "tdx")]
+pub async fn verify_selected_tdx(
+    evidence_json: &[u8],
+    policies: &Policies,
+    responses: impl IntoIterator<Item = HeldResponse>,
+    now: i64,
+) -> Result<Verified> {
+    let envelope = parse_envelope(evidence_json)?;
+    if envelope.platform != PlatformType::Tdx {
+        return Err(AttestationError::PlatformNotAllowed(
+            envelope.platform.to_string(),
+        ));
+    }
+    if envelope.nvidia_gpu.is_some() {
+        return Err(AttestationError::PlatformNotAllowed("nvidia-gpu".into()));
+    }
+    #[cfg(feature = "nvidia-gpu")]
+    if policies.gpu.is_some() {
+        return Err(AttestationError::PlatformNotAllowed("nvidia-gpu".into()));
+    }
+    if !envelope.collateral.is_empty() {
+        return Err(AttestationError::InvalidParams(
+            "evidence must omit attached collateral when the caller selects Intel collateral"
+                .into(),
+        ));
+    }
+    let params = policies
+        .tdx
+        .as_ref()
+        .ok_or_else(|| AttestationError::PlatformNotAllowed("tdx".into()))?;
+    if params.allow_debug
+        || policies
+            .floors
+            .lowers(&collateral::VersionFloors::default())
+    {
+        return Err(AttestationError::InvalidParams(
+            "selected TDX requires production mode and the shipped version floors".into(),
+        ));
+    }
+    let responses: Vec<_> = responses.into_iter().collect();
+    if responses.len() != 4 {
+        return Err(AttestationError::InvalidParams(
+            "expected four selected Intel responses".into(),
+        ));
+    }
+    let ctx = Context::held(responses).at(now)?;
+    let store = ctx.store().view(Vec::new(), &policies.floors, false);
+    let (mut result, collateral) = run::<Tdx>(envelope.evidence, Some(params), &store, now)
+        .await
+        .map_err(|e| {
+            if e.is_retryable() {
+                AttestationError::CertChainError(
+                    "selected Intel responses do not cover this quote".into(),
+                )
+            } else {
+                e
+            }
+        })?;
+    let status = result.tcb_status.as_ref().ok_or_else(|| {
+        AttestationError::CertChainError("selected TDX verification requires a DCAP status".into())
+    })?;
+    result.tcb_status_accepted = Some(
+        result.tcb_status_accepted == Some(true)
+            && status.tcb_status == TdxTcbStatus::UpToDate
+            && status.qe_tcb_status == Some(TdxTcbStatus::UpToDate)
+            && status
+                .module_tcb_status
+                .is_none_or(|s| s == TdxTcbStatus::UpToDate),
+    );
+    if let Some(piece) = collateral
+        .iter()
+        .find(|piece| !piece.current || piece.next_update.is_none_or(|end| now >= end))
+    {
+        return Err(AttestationError::CertChainError(format!(
+            "{} is outside its validity at the selected verification time",
+            piece.name
+        )));
+    }
+    Ok(Verified {
+        platform: PlatformResult::Tdx(result),
+        collateral,
+        #[cfg(feature = "nvidia-gpu")]
+        gpu: None,
+    })
+}
+
 /// Verify attestation evidence from a self-describing JSON envelope.
 ///
 /// Collateral comes from one store shared by every call in the process,
@@ -685,6 +775,126 @@ mod tests {
 
     fn verifier() -> Verifier {
         Verifier::new(crate::testing::context(crate::testing::intel()))
+    }
+
+    fn selected() -> Vec<HeldResponse> {
+        crate::testing::intel()
+            .into_iter()
+            .filter(|(url, _, _)| {
+                (!url.contains("fmspc=") || url.ends_with("00a06d080000"))
+                    && !url.ends_with("ca=processor")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn selected_tdx_checks_the_signed_quote_and_all_four_pieces_at_site_time() {
+        let now = crate::testing::NOW;
+        let policy = tdx_policies(TdxParams::default());
+        let proof = tdx_envelope();
+        let result = verify_selected_tdx(&proof, &policy, selected(), now)
+            .await
+            .unwrap();
+        #[allow(irrefutable_let_patterns)] // This build can enable only TDX.
+        let PlatformResult::Tdx(tdx) = &result.platform
+        else {
+            panic!("wrong platform")
+        };
+        let grade = tdx.tcb_status.as_ref().unwrap();
+        assert_eq!(grade.module_tcb_status, Some(TdxTcbStatus::UpToDate));
+        assert_eq!(grade.qe_tcb_status, Some(TdxTcbStatus::UpToDate));
+        assert_eq!(grade.tcb_status, TdxTcbStatus::UpToDate);
+        assert!(result.passed());
+        assert_eq!(result.collateral.len(), 4);
+        assert!(result
+            .collateral
+            .iter()
+            .all(|c| c.from == collateral::Source::Held));
+        let next = result
+            .collateral
+            .iter()
+            .filter_map(|c| c.next_update)
+            .min()
+            .unwrap();
+        for time in [next, next + 1, 1_700_000_000] {
+            assert!(verify_selected_tdx(&proof, &policy, selected(), time)
+                .await
+                .is_err());
+        }
+        let mut changed = selected();
+        let signature = br#""signature":""#;
+        let tcb = &mut changed[0].1;
+        let start = tcb
+            .windows(signature.len())
+            .position(|part| part == signature)
+            .unwrap()
+            + signature.len();
+        tcb[start] = if tcb[start] == b'0' { b'1' } else { b'0' };
+        assert!(verify_selected_tdx(&proof, &policy, changed, now)
+            .await
+            .is_err());
+        let mut missing = selected();
+        missing.pop();
+        assert!(verify_selected_tdx(&proof, &policy, missing, now)
+            .await
+            .is_err());
+        let mut wrong = selected();
+        wrong[0].0 += "00";
+        let err = verify_selected_tdx(&proof, &policy, wrong, now)
+            .await
+            .unwrap_err();
+        assert!(!err.is_retryable(), "{err}");
+        let mismatched = policy.with_report_data(b"wrong nonce");
+        assert!(!verify_selected_tdx(&proof, &mismatched, selected(), now)
+            .await
+            .unwrap()
+            .passed());
+    }
+
+    #[tokio::test]
+    async fn selected_tdx_requires_both_the_request_and_the_site_to_accept_the_grade() {
+        let proof = tdx_envelope();
+        let only = |statuses| {
+            tdx_policies(TdxParams {
+                accepted_tcb_statuses: statuses,
+                ..Default::default()
+            })
+        };
+        let result = verify_selected_tdx(
+            &proof,
+            &only(vec![TdxTcbStatus::OutOfDate]),
+            selected(),
+            crate::testing::NOW,
+        )
+        .await
+        .unwrap();
+        assert!(!result.passed());
+        let empty = verify_selected_tdx(&proof, &only(vec![]), selected(), crate::testing::NOW)
+            .await
+            .unwrap_err();
+        assert!(matches!(empty, AttestationError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn selected_tdx_rejects_attached_responses_and_unqualified_gpu_evidence() {
+        let policies = tdx_policies(TdxParams::default());
+        let mut envelope: serde_json::Value = serde_json::from_slice(&tdx_envelope()).unwrap();
+        for (key, value) in [
+            (
+                "collateral",
+                serde_json::json!([{"url":"https://example.test", "body":""}]),
+            ),
+            ("nvidia_gpu", serde_json::json!({"devices":[]})),
+        ] {
+            envelope[key] = value;
+            let proof = serde_json::to_vec(&envelope).unwrap();
+            assert!(
+                verify_selected_tdx(&proof, &policies, selected(), crate::testing::NOW)
+                    .await
+                    .is_err()
+            );
+            envelope.as_object_mut().unwrap().remove(key);
+        }
     }
 
     /// Warm, 8 threads: a byte changed in the body, quote signature, key, QE report
