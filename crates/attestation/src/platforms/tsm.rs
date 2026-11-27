@@ -132,6 +132,7 @@ pub fn mount_configfs() -> std::io::Result<bool> {
 
 /// Whether the mount table `mounts`, in `/proc/self/mounts` form, has a
 /// filesystem mounted at `target`.
+#[cfg(any(target_os = "linux", test))]
 fn is_mount_point(mounts: &str, target: &str) -> bool {
     mounts
         .lines()

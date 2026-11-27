@@ -142,15 +142,16 @@ fn names_its_chip(report: &[u8]) -> bool {
 }
 
 /// The certificate chain for a TSM report: the host's, when its certificate
-/// signed the report and is within its validity period, as a verifier
-/// requires. Evidence nobody can verify is an error here.
+/// passes what a verifier holds an inline one to with no collateral. A report
+/// no verifier supports, and evidence nobody can verify, are errors here.
 fn tsm_chain(report: &[u8], aux: &[u8]) -> Result<Option<SnpCertChain>> {
+    let (parsed, gen) = super::verify::supported_report(report)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64);
     chain_that(report, aux, |report, cert| {
         super::verify::verify_report_signature(report, cert).is_ok()
-            && super::verify::verify_vek_validity_period(cert, now).is_ok()
+            && super::verify::verify_vek_endorsement(&parsed, cert, gen, now).is_ok()
     })
 }
 
@@ -179,7 +180,7 @@ fn chain_that(
             .is_ok_and(|cert| signed(report, &cert));
         if !usable {
             log::warn!(
-                "ignoring an SNP certificate table whose certificate did not sign the report or is outside its validity period"
+                "ignoring an SNP certificate table whose certificate a verifier would not accept for the report"
             );
         }
         usable
@@ -323,6 +324,14 @@ mod tests {
         masked[0x1a0] = 0;
         assert!(chain_that(&masked, &[], any).is_err());
         assert!(chain_that(&masked, &vcek_only, any).is_err());
+    }
+
+    #[test]
+    fn a_report_version_no_verifier_supports_is_an_error() {
+        // A version 2 report that names its chip and is VCEK-signed.
+        let v2 = include_bytes!("../../../test_data/snp/test-report.bin");
+        assert!(chain_that(v2, &[], any).unwrap().is_none());
+        assert!(tsm_chain(v2, &[]).is_err());
     }
 
     #[test]
