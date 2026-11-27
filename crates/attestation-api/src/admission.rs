@@ -12,6 +12,7 @@ use crate::error::ApiError;
 
 pub struct Admission {
     workers: Arc<Semaphore>,
+    site_helpers: Semaphore,
     places: Arc<Semaphore>,
     queue_deadline: Duration,
     fetches: Arc<Semaphore>,
@@ -26,11 +27,24 @@ impl Admission {
         let workers = config.workers();
         Self {
             workers: Arc::new(Semaphore::new(workers)),
+            site_helpers: Semaphore::new(workers),
             places: Arc::new(Semaphore::new(workers * (1 + config.queue_per_worker))),
             queue_deadline: Duration::from_millis(config.queue_deadline_ms),
             fetches: Arc::new(Semaphore::new(FETCHES)),
             fetch_deadline: Duration::from_millis(config.fetch_deadline_ms),
         }
+    }
+
+    /// Bound concurrent site helper processes separately from CPU verification workers.
+    pub(crate) async fn selected_tdx(
+        &self,
+        source: &crate::selected_tdx::SelectedTdx,
+    ) -> Result<Vec<u8>, ApiError> {
+        let _permit = self
+            .site_helpers
+            .try_acquire()
+            .map_err(|_| ApiError::Overloaded)?;
+        Ok(source.read(self.fetch_deadline).await?)
     }
 
     /// Run `job` on a worker, else 503 (queue full, or the queue deadline).
@@ -103,6 +117,25 @@ mod tests {
         tokio::spawn(async move { held.run(move || wait.recv()).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         (admission, hold)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_busy_cpu_worker_does_not_block_the_bounded_site_helper() {
+        let (admission, _hold) = busy(0).await;
+        let source = crate::selected_tdx::SelectedTdx {
+            helper: "/bin/false".into(),
+            profile: "/profile".into(),
+        };
+        assert!(matches!(
+            admission.selected_tdx(&source).await,
+            Err(ApiError::Verification(_))
+        ));
+        let _helper = admission.site_helpers.try_acquire().unwrap();
+        assert!(matches!(
+            admission.selected_tdx(&source).await,
+            Err(ApiError::Overloaded)
+        ));
     }
 
     #[tokio::test]

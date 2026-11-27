@@ -58,11 +58,18 @@ pub async fn handler(
             None => Vec::new(),
         };
 
-        let platform = resolve_platform(&req.platform)?;
+        let selected = state.config.verify.selected_tdx.is_some();
+        let platform = resolve_platform(&req.platform, selected)?;
         ensure_platform_allowed(&state.config.attestation.platforms, platform)?;
+        if selected && (req.nvidia_gpu || platform != attestation::PlatformType::Tdx) {
+            return Err(attestation::AttestationError::PlatformNotAllowed(
+                "selected TDX accepts CPU-only bare-metal TDX".into(),
+            )
+            .into());
+        }
         let options = state.config.attestation.attest_options();
 
-        let evidence_bytes = if req.nvidia_gpu {
+        let mut evidence_bytes = if req.nvidia_gpu {
             #[cfg(feature = "nvidia-gpu-attest")]
             {
                 attestation::attest_with_nvidia_gpu(platform, &report_data, &options).await?
@@ -79,17 +86,16 @@ pub async fn handler(
             attestation::attest(platform, &report_data, &options).await?
         };
 
-        let evidence_bytes = match state
-            .verifier
-            .attach_collateral(&evidence_bytes, &report_data)
-            .await
-        {
-            Ok(with_collateral) => with_collateral,
-            Err(e) => {
-                tracing::warn!(%e, "collateral not attached");
-                evidence_bytes
+        if !selected {
+            match state
+                .verifier
+                .attach_collateral(&evidence_bytes, &report_data)
+                .await
+            {
+                Ok(with_collateral) => evidence_bytes = with_collateral,
+                Err(e) => tracing::warn!(%e, "collateral not attached"),
             }
-        };
+        }
 
         let mut envelope: Value = serde_json::from_slice(&evidence_bytes)
             .map_err(|e| ApiError::Internal(format!("failed to parse evidence: {e}")))?;
@@ -120,9 +126,9 @@ pub async fn handler(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_platform(name: &str) -> Result<attestation::PlatformType, ApiError> {
+fn resolve_platform(name: &str, selected_tdx: bool) -> Result<attestation::PlatformType, ApiError> {
     match name {
-        "auto" => super::detect_platform(),
+        "auto" => super::detect_platform(selected_tdx),
         "snp" => Ok(attestation::PlatformType::Snp),
         "tdx" => Ok(attestation::PlatformType::Tdx),
         "az-snp" => Ok(attestation::PlatformType::AzSnp),

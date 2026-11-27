@@ -23,7 +23,9 @@ pub async fn handler(State(state): State<AppState>) -> Json<HealthResponse> {
     let platform = {
         #[cfg(target_os = "linux")]
         {
-            super::detect_platform().ok().map(|p| format!("{p}"))
+            super::detect_platform(state.config.verify.selected_tdx.is_some())
+                .ok()
+                .map(|p| format!("{p}"))
         }
         #[cfg(not(target_os = "linux"))]
         {
