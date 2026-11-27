@@ -178,10 +178,11 @@ fn generate_quote_tsm(report_data: &[u8; 64]) -> Result<Vec<u8>> {
     // typically because PCK provisioning collateral is unavailable.
     crate::platforms::tsm::report(tsm_path, "tdx_guest", report_data)
         .map(|report| report.report)
-        .map_err(|e| {
-            AttestationError::HardwareAccessFailed(format!(
-                "{e} (an empty report means GetQuote failed; check QGS/PCK provisioning)"
-            ))
+        .map_err(|e| match e.to_string() {
+            empty if empty.contains("empty report") => AttestationError::HardwareAccessFailed(
+                format!("{empty} (GetQuote failed; check QGS/PCK provisioning)"),
+            ),
+            _ => e,
         })
 }
 

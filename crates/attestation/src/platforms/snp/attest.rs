@@ -130,7 +130,13 @@ fn signed_by_vlek(report: &[u8]) -> Result<bool> {
                 report.len()
             ))
         })?;
-    Ok((u32::from_le_bytes(word) >> 2) & 0b111 == 1)
+    match (u32::from_le_bytes(word) >> 2) & 0b111 {
+        0 => Ok(false),
+        1 => Ok(true),
+        key => Err(AttestationError::HardwareAccessFailed(format!(
+            "the SNP report names signing key {key}, which is neither a VCEK nor a VLEK"
+        ))),
+    }
 }
 
 /// Whether `report` names its chip: CHIP_ID, the 64 bytes at offset 0x1a0,
@@ -319,6 +325,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(chain_that(&[0; 16], &[], any).is_err());
+        assert!(chain_that(&report_signed_by(7), &[], any).is_err());
         // Unless it masks the chip the verifier would ask about.
         let mut masked = report_signed_by(0);
         masked[0x1a0] = 0;
