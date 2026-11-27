@@ -715,6 +715,7 @@ pub(crate) fn check_collateral(
         ));
     }
     for signer in [&collateral.tcb_info.signer, &collateral.qe_identity.signer] {
+        super::dcap::verify_cert_validity_period(signer, super::dcap::TCB_SIGNING, now)?;
         if super::dcap::cert_revoked_from_der(
             std::slice::from_ref(signer),
             &collateral.root_crl.der,
@@ -724,23 +725,39 @@ pub(crate) fn check_collateral(
             ));
         }
     }
+    // A CA name alone cannot bind a CRL to the issuing key in this quote's PCK chain.
+    if collateral.pck_crl.signer != pck.der[1] {
+        return Err(AttestationError::CertChainError(
+            "PCK CRL signer differs from quote's PCK issuer".into(),
+        ));
+    }
     let pck_revoked = super::dcap::cert_revoked_from_der(&pck.der, &collateral.pck_crl.der)?
         || super::dcap::intermediate_ca_revoked_from_der(&pck.der, &collateral.root_crl.der)?;
 
     let body_end = super::dcap::compute_body_end(quote_bytes, quote.quote_version)?;
     let auth = super::dcap::parse_auth_data(quote_bytes, body_end)?;
-    let mut status = super::dcap::evaluate_tcb_status(
-        &collateral.tcb_info.json,
-        &quote.body.tee_tcb_svn,
-        &pck.der,
-        now,
-    )?;
+    let info = super::dcap::TcbInfoJson::parse(&collateral.tcb_info.json)?;
+    info.check_module_identity(&quote.body)?;
+    let mut status = info.status(&quote.body.tee_tcb_svn, &pck.der, now)?;
     let qe_status =
         super::dcap::check_qe_report(auth.qe_report_body, &collateral.qe_identity.identity)?;
     status.tcb_status = super::dcap::combine_tcb_status(status.tcb_status, qe_status);
     status.qe_tcb_status = Some(qe_status);
+    // Intel evaluates the current platform separately. The launch vector identifies the TD's module.
+    if let Some(current) = &quote.body.tee_tcb_svn2 {
+        let current = info.status(current, &pck.der, now)?;
+        status.current_tcb_status = Some(super::dcap::combine_tcb_status(
+            current.tcb_status,
+            qe_status,
+        ));
+    }
 
-    result.tcb_status_accepted = Some(params.accepted_tcb_statuses.contains(&status.tcb_status));
+    let current_supported = status.current_tcb_status != Some(TdxTcbStatus::NoMatchingLevel)
+        || params
+            .accepted_tcb_statuses
+            .contains(&TdxTcbStatus::NoMatchingLevel);
+    result.tcb_status_accepted =
+        Some(current_supported && params.accepted_tcb_statuses.contains(&status.tcb_status));
     result.tcb_status = Some(status);
     result.crl_ok = Some(!pck_revoked);
     Ok(())
@@ -749,6 +766,48 @@ pub(crate) fn check_collateral(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_tdx15_report_grades_the_current_platform_separately() {
+        let bytes = include_bytes!("../../../test_data/tdx_quote_5.dat");
+        let mut quote = parse_tdx_quote(bytes).unwrap();
+        let ctx = crate::testing::context(crate::testing::intel());
+        let now = crate::testing::NOW;
+        let (set, _) = TdxCollateralSet::gather(bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
+        let check = |quote: &TdxQuote| {
+            let mut result = quote_rules(quote, &TdxParams::default());
+            check_collateral(&mut result, bytes, quote, &TdxParams::default(), &set, now)?;
+            Ok::<_, AttestationError>(result.tcb_status.unwrap())
+        };
+        let grade = check(&quote).unwrap();
+        assert!(grade.current_tcb_status.is_some());
+        assert_eq!(
+            grade.current_tcb_status,
+            Some(grade.tcb_status),
+            "the recorded vectors are equal"
+        );
+        quote.body.tee_tcb_svn2 = None;
+        let launch_only = check(&quote).unwrap();
+        assert_eq!(launch_only.tcb_status, grade.tcb_status);
+        assert!(launch_only.current_tcb_status.is_none());
+
+        // Exercise two distinct signed levels with the same valid launch and PCK chain.
+        let bytes = include_bytes!("../../../test_data/tdx_quote_00a06d080000.dat");
+        let mut quote = parse_tdx_quote(bytes).unwrap();
+        let (set, _) = TdxCollateralSet::gather(bytes, &quote, ctx.store(), now)
+            .await
+            .unwrap();
+        let mut current = quote.body.tee_tcb_svn;
+        current[0] = 3;
+        quote.body.tee_tcb_svn2 = Some(current);
+        let mut result = quote_rules(&quote, &TdxParams::default());
+        check_collateral(&mut result, bytes, &quote, &TdxParams::default(), &set, now).unwrap();
+        let grade = result.tcb_status.unwrap();
+        assert_eq!(grade.tcb_status, TdxTcbStatus::UpToDate);
+        assert_eq!(grade.current_tcb_status, Some(TdxTcbStatus::OutOfDate));
+    }
 
     #[tokio::test]
     async fn collateral_signed_by_a_revoked_tcb_signing_certificate_is_refused() {
@@ -773,6 +832,9 @@ mod tests {
             )
         };
         assert!(check(&set).is_ok());
+        let signer = std::mem::take(&mut set.pck_crl.signer);
+        assert!(check(&set).is_err());
+        set.pck_crl.signer = signer;
 
         let (_, signer) =
             <x509_parser::prelude::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(
