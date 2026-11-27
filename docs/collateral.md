@@ -54,6 +54,12 @@ caller-supplied responses; see [WASM](../crates/attestation-wasm/README.md).
 `Context::at(unix_seconds)?` fixes evaluation time for reproducible checks.
 It is not a substitute for a trusted current clock in a live verifier.
 
+For a site-selected CPU TDX quote, `verify_selected_tdx` takes exactly the
+FMSPC's TCB Info, TD QE Identity, the quote issuer's PCK CRL and the Intel
+Root CA CRL. Supply a freshly authenticated site time and bare evidence.
+Every signed object must be current and strictly before its `nextUpdate`.
+A passing verdict requires both the caller's pins and UpToDate grades.
+
 ## Freshness and version floors
 
 Each result lists used collateral with `name`, `from`, `version`,
