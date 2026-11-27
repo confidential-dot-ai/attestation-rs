@@ -177,3 +177,21 @@ unexpected Intel URLs are rejected even if the helper exits successfully.
 Selected mode disables vendor warming and cache discovery. `/attest` emits
 bare CPU TDX evidence. `/verify` requires `issue_token=false` and returns
 its verdict directly. Requests for GPU verification are refused.
+
+The helper also returns the active snapshot's nonzero `generation` and its
+lowercase hex SHA-256 digest in `sha256`. Before listening, the service
+authenticates all four Intel objects, their signing certificates and CRLs,
+and their signed validity and version floors at site time.
+
+On Unix, send SIGHUP to the service process to repeat this collateral check in
+the background. The helper and vendor checks share
+`verify.fetch_deadline_ms`. A timeout reports `unavailable`, and the service
+finishes any running vendor check before processing another signal. Unix
+may coalesce multiple pending SIGHUP signals. Wait for each completion
+record before triggering a new check. The `selected_tdx` tracing target
+emits a JSON record with `event=selected_tdx_recheck`, `scope=intel_collateral`,
+`trigger=startup|sighup`, and `outcome=valid|invalid|unavailable`. The record
+includes `generation`, `sha256`, and `siteTime` when the helper returned an
+authenticated selection, and an `error` on failure. Each verification request
+still authenticates the current selection and checks its own quote, nonce,
+PCK chain, measurements and TCB grades.

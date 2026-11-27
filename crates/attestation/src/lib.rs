@@ -93,7 +93,7 @@ pub use platforms::snp::{Snp, SnpParams, SnpResult};
 #[cfg(all(feature = "attest", feature = "tdx", target_os = "linux"))]
 pub use platforms::tdx::attest::TdxQuoteMethod;
 #[cfg(feature = "tdx")]
-pub use platforms::tdx::{Tdx, TdxParams, TdxResult};
+pub use platforms::tdx::{verify::check_selected_tdx_collateral, Tdx, TdxParams, TdxResult};
 pub use types::*;
 
 /// Detect the current TEE platform.
@@ -785,6 +785,36 @@ mod tests {
                     && !url.ends_with("ca=processor")
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn selected_tdx_preflight_checks_all_four_vendor_signatures_without_a_quote() {
+        let check = |responses| {
+            check_selected_tdx_collateral(
+                [0x00, 0xa0, 0x6d, 0x08, 0x00, 0x00],
+                collateral::PckCa::Platform,
+                responses,
+                crate::testing::NOW,
+            )
+        };
+        assert!(check(selected()).await.is_ok());
+        for i in 0..4 {
+            let mut pieces = selected();
+            let (url, body, _) = &mut pieces[i];
+            if url.contains("/tcb?") || url.ends_with("/identity") {
+                let prefix = br#""signature":""#;
+                let at = body
+                    .windows(prefix.len())
+                    .position(|part| part == prefix)
+                    .unwrap()
+                    + prefix.len();
+                body[at] = if body[at] == b'1' { b'2' } else { b'1' };
+            } else {
+                // Flip a CRL signature bit while keeping the DER object parseable.
+                *body.last_mut().unwrap() ^= 1;
+            }
+            assert!(check(pieces).await.is_err());
+        }
     }
 
     #[tokio::test]

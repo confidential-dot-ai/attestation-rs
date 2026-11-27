@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use attestation::collateral::{Collateral, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
+use attestation::collateral::{Collateral, Fmspc, PckCa, PckCrl, QeIdentity, RootCrl, TcbInfo};
 use attestation::{AttachedCollateral, AttestationError, HeldResponse};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -22,13 +23,19 @@ pub struct SelectedTdx {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Selection {
+    generation: u64,
+    sha256: String,
     time: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     objects: [AttachedCollateral; 4],
 }
 
 pub(crate) struct Snapshot {
-    pub time: i64,
+    pub time: DateTime<Utc>,
+    generation: u64,
+    sha256: String,
+    fmspc: Fmspc,
+    ca: PckCa,
     pub responses: Vec<HeldResponse>,
 }
 
@@ -48,13 +55,79 @@ fn unavailable(reason: &str) -> AttestationError {
 pub async fn check_startup(config: &crate::config::VerifyConfig) -> attestation::Result<()> {
     if let Some(source) = &config.selected_tdx {
         source
-            .open(Duration::from_millis(config.fetch_deadline_ms))
+            .recheck("startup", Duration::from_millis(config.fetch_deadline_ms))
             .await?;
     }
     Ok(())
 }
 
 impl SelectedTdx {
+    async fn recheck(&self, trigger: &str, deadline: Duration) -> attestation::Result<()> {
+        let end = tokio::time::Instant::now() + deadline;
+        let mut record = json!({
+            "event":"selected_tdx_recheck", "trigger":trigger, "scope":"intel_collateral",
+            "generation":null, "sha256":null, "siteTime":null
+        });
+        let mut late_worker = None;
+        let result = async {
+            let snapshot = self.open(deadline).await?;
+            record["generation"] = snapshot.generation.into();
+            record["sha256"] = snapshot.sha256.into();
+            record["siteTime"] = json!(snapshot.time);
+            let runtime = tokio::runtime::Handle::current();
+            let mut validation = tokio::task::spawn_blocking(move || {
+                runtime.block_on(attestation::check_selected_tdx_collateral(
+                    snapshot.fmspc,
+                    snapshot.ca,
+                    snapshot.responses,
+                    snapshot.time.timestamp(),
+                ))
+            });
+            match tokio::time::timeout_at(end, &mut validation).await {
+                Ok(joined) => joined.map_err(|_| unavailable("vendor validation worker failed"))?,
+                Err(_) => {
+                    late_worker = Some(validation);
+                    Err(unavailable("vendor validation exceeded deadline"))
+                }
+            }
+        }
+        .await;
+        match &result {
+            Ok(()) => {
+                record["outcome"] = "valid".into();
+                tracing::info!(target: "selected_tdx", "{}", record);
+            }
+            Err(error) => {
+                record["outcome"] = if error.is_retryable() {
+                    "unavailable"
+                } else {
+                    "invalid"
+                }
+                .into();
+                record["error"] = error.to_string().into();
+                tracing::warn!(target: "selected_tdx", "{}", record);
+            }
+        }
+        if let Some(worker) = late_worker {
+            // Report the deadline immediately, then drain this check before accepting another signal.
+            let _ = worker.await;
+        }
+        result
+    }
+
+    /// Recheck the active source once per SIGHUP, serially, for the life of the service.
+    #[cfg(unix)]
+    pub async fn on_hangup(
+        &self,
+        mut signals: tokio::signal::unix::Signal,
+        deadline: Duration,
+    ) -> anyhow::Result<()> {
+        while signals.recv().await.is_some() {
+            let _ = self.recheck("sighup", deadline).await;
+        }
+        anyhow::bail!("selected TDX refresh signal stream closed")
+    }
+
     pub(crate) async fn open(&self, deadline: Duration) -> attestation::Result<Snapshot> {
         Snapshot::parse(&self.read(deadline).await?)
     }
@@ -106,16 +179,32 @@ impl Snapshot {
     pub(crate) fn parse(bytes: &[u8]) -> attestation::Result<Self> {
         let selection: Selection =
             serde_json::from_slice(bytes).map_err(|_| invalid("malformed helper output"))?;
+        if selection.generation == 0
+            || selection.sha256.len() != 64
+            || !selection
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(invalid("missing or invalid active selection identity"));
+        }
         if selection.time >= selection.expires_at {
             return Err(invalid("expired at authenticated site time"));
         }
+        let mut fmspc = None;
+        let mut ca = None;
         let mut kinds = std::collections::HashSet::new();
         let mut responses = Vec::with_capacity(4);
         for object in selection.objects {
             let (kind, url) =
                 intel_url(&object.url).ok_or_else(|| invalid("unexpected Intel URL"))?;
-            if !kinds.insert(kind) {
+            if !kinds.insert(std::mem::discriminant(&kind)) {
                 return Err(invalid("duplicate Intel collateral type"));
+            }
+            match kind {
+                IntelObject::TcbInfo(id) => fmspc = Some(id),
+                IntelObject::PckCrl(issuer) => ca = Some(issuer),
+                _ => {}
             }
             let valid_chain = match kind {
                 IntelObject::RootCrl => object.issuer_chain.is_none(),
@@ -130,17 +219,21 @@ impl Snapshot {
             responses.push((url, object.body, object.issuer_chain));
         }
         Ok(Self {
-            time: selection.time.timestamp(),
+            time: selection.time,
+            generation: selection.generation,
+            sha256: selection.sha256,
+            fmspc: fmspc.ok_or_else(|| invalid("missing TCB Info"))?,
+            ca: ca.ok_or_else(|| invalid("missing PCK CRL"))?,
             responses,
         })
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy)]
 enum IntelObject {
-    TcbInfo,
+    TcbInfo(Fmspc),
     QeIdentity,
-    PckCrl,
+    PckCrl(PckCa),
     RootCrl,
 }
 
@@ -150,7 +243,7 @@ fn intel_url(url: &str) -> Option<(IntelObject, String)> {
     if let Some((_, id)) = url.rsplit_once("?fmspc=") {
         let id = hex::decode(id).ok()?.try_into().ok()?;
         let expected = TcbInfo::url(&id);
-        return (url == expected).then_some((IntelObject::TcbInfo, expected));
+        return (url == expected).then_some((IntelObject::TcbInfo(id), expected));
     }
     if url == QeIdentity::url(&()) {
         return Some((IntelObject::QeIdentity, url.to_string()));
@@ -158,7 +251,7 @@ fn intel_url(url: &str) -> Option<(IntelObject, String)> {
     for ca in [PckCa::Platform, PckCa::Processor] {
         let expected = PckCrl::url(&ca);
         if url.strip_suffix("&encoding=der") == Some(&expected) {
-            return Some((IntelObject::PckCrl, expected));
+            return Some((IntelObject::PckCrl(ca), expected));
         }
     }
     (url == RootCrl::url(&())).then(|| (IntelObject::RootCrl, url.to_string()))

@@ -139,7 +139,7 @@ pub async fn handler(
                         &evidence_json,
                         &req.policies,
                         snapshot.responses,
-                        snapshot.time,
+                        snapshot.time.timestamp(),
                     )
                     .await?;
                     Ok(Json(VerifyResponse {
