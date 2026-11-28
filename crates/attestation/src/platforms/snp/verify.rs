@@ -330,7 +330,16 @@ fn parse_evidence(
     let report_bytes = BASE64
         .decode(&evidence.attestation_report)
         .map_err(|e| AttestationError::EvidenceDeserialize(format!("base64 decode: {e}")))?;
-    let report = parse_report(&report_bytes)?;
+    let (report, gen) = supported_report(&report_bytes)?;
+    Ok((report_bytes, report, gen))
+}
+
+/// Parse a report, check its version, and find its generation: what a report
+/// must pass before anything else about it is verified.
+pub(crate) fn supported_report(
+    report_bytes: &[u8],
+) -> Result<(AttestationReport, ProcessorGeneration)> {
+    let report = parse_report(report_bytes)?;
     if report.version < MIN_REPORT_VERSION || report.version > MAX_REPORT_VERSION {
         return Err(AttestationError::UnsupportedReportVersion {
             version: report.version,
@@ -349,7 +358,7 @@ fn parse_evidence(
             "unknown processor: family=0x{family:02X}, model=0x{model:02X}"
         ))
     })?;
-    Ok((report_bytes, report, gen))
+    Ok((report, gen))
 }
 
 /// The report, its generation and the VEK it carries (if any), once the

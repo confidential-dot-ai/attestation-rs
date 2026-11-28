@@ -83,6 +83,14 @@ async fn main() -> anyhow::Result<()> {
     // Warm attestation::detect()'s process-lifetime cache before serving, so the
     // first /health/attest/platform request hits the memoized value instead of
     // racing to open the vTPM context.
+    // A container has no configfs mount of its own, and the kernel hands out
+    // reports there when the runtime passed no device node.
+    #[cfg(target_os = "linux")]
+    match attestation::platforms::tsm::mount_configfs() {
+        Ok(true) => tracing::info!("mounted configfs for TSM reports"),
+        Ok(false) => {}
+        Err(e) => tracing::debug!(error = %e, "configfs not mounted; device nodes only"),
+    }
     #[cfg(target_os = "linux")]
     let _ = attestation::detect();
 

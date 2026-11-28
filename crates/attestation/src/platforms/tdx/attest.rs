@@ -165,7 +165,8 @@ fn generate_quote_auto(report_data: &[u8; 64]) -> Result<Vec<u8>> {
     }
 }
 
-/// Generate quote via Linux ConfigFS TSM reports.
+/// Generate quote via Linux ConfigFS TSM reports. The report directory is
+/// removed on every path, a refused provider included.
 fn generate_quote_tsm(report_data: &[u8; 64]) -> Result<Vec<u8>> {
     let tsm_path = Path::new(TSM_REPORT_PATH);
     if !tsm_path.exists() {
@@ -173,72 +174,16 @@ fn generate_quote_tsm(report_data: &[u8; 64]) -> Result<Vec<u8>> {
             "ConfigFS TSM not available".to_string(),
         ));
     }
-
-    let temp_dir = tempfile::tempdir_in(tsm_path).map_err(|e| {
-        AttestationError::HardwareAccessFailed(format!("create TSM report dir: {}", e))
-    })?;
-
-    let report_path = temp_dir.path();
-
-    let provider = fs::read_to_string(report_path.join("provider"))
-        .map_err(|e| AttestationError::HardwareAccessFailed(format!("read TSM provider: {}", e)))?;
-
-    if !provider.trim().contains("tdx_guest") {
-        // Clean up and leave the temp dir (will be cleaned by Drop)
-        return Err(AttestationError::HardwareAccessFailed(format!(
-            "TSM provider is '{}', not tdx_guest",
-            provider.trim()
-        )));
-    }
-
-    // Write report_data to inblob
-    fs::write(report_path.join("inblob"), report_data)
-        .map_err(|e| AttestationError::HardwareAccessFailed(format!("write inblob: {}", e)))?;
-
-    // Read quote from outblob
-    let quote = fs::read(report_path.join("outblob"))
-        .map_err(|e| AttestationError::HardwareAccessFailed(format!("read outblob: {}", e)))?;
-
-    // An empty outblob means the underlying GetQuote (QGS/TDQE) failed to produce
-    // a quote — typically because PCK provisioning collateral is unavailable. The
-    // kernel surfaces this as a zero-length read rather than an error, so guard
-    // here; otherwise we would emit "successful" evidence carrying no quote, which
-    // the verifier then rejects with a confusing "quote header too short" error.
-    if quote.is_empty() {
-        return Err(AttestationError::HardwareAccessFailed(
-            "ConfigFS TSM returned an empty quote (GetQuote failed; check QGS/PCK provisioning)"
-                .to_string(),
-        ));
-    }
-
-    // Check generation counter for race detection
-    let gen_str = fs::read_to_string(report_path.join("generation"))
-        .map_err(|e| AttestationError::HardwareAccessFailed(format!("read generation: {}", e)))?;
-
-    let generation: u32 = gen_str
-        .trim()
-        .parse()
-        .map_err(|e| AttestationError::HardwareAccessFailed(format!("parse generation: {}", e)))?;
-
-    if generation > 1 {
-        return Err(AttestationError::HardwareAccessFailed(format!(
-            "inblob write race detected: generation={}",
-            generation
-        )));
-    }
-
-    // The temp dir is cleaned up by the Drop impl of tempfile
-    // But ConfigFS dirs need rmdir, not recursive delete
-    let path = temp_dir.keep();
-    if let Err(e) = std::fs::remove_dir(&path) {
-        log::warn!(
-            "failed to clean up ConfigFS TSM report dir {:?}: {}",
-            path,
-            e
-        );
-    }
-
-    Ok(quote)
+    // The kernel reports a failed GetQuote (QGS/TDQE) as an empty report,
+    // typically because PCK provisioning collateral is unavailable.
+    crate::platforms::tsm::report(tsm_path, "tdx_guest", report_data)
+        .map(|report| report.report)
+        .map_err(|e| match e.to_string() {
+            empty if empty.contains("empty report") => AttestationError::HardwareAccessFailed(
+                format!("{empty} (GetQuote failed; check QGS/PCK provisioning)"),
+            ),
+            _ => e,
+        })
 }
 
 /// Generate a TDREPORT via /dev/tdx_guest ioctl.
